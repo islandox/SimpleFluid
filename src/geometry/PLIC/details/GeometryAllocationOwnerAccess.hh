@@ -8,8 +8,20 @@
 #include <cstdint>
 #include <functional>
 
+namespace SimpleFluid::geometry_detail
+{
+class NativeAllocationEnvelope;
+class NativeConstructorStorage;
+class NativeConstructionAdmission;
+struct NativeAllocationState;
+} // namespace SimpleFluid::geometry_detail
 namespace SimpleFluid::PLIC::details
 {
+class NativePaidOwnerAuthority;
+class NativeGeometryAccounting;
+class GeometryOwnerGraphEditor;
+class NativePaidExtentCharge;
+class NativeWeakOwnerObservation;
 /** Restricts a fresh ledger's bookkeeping independently of its payload cap.
  * The existing retain calls still check complete payload size and ownership.
  * Borrowed identities remain valid while the ledger pins the allocations. */
@@ -56,11 +68,10 @@ public:
     static void observe_work(Work, std::size_t count = 1) noexcept;
     /** A failed owner-graph mutation cannot resume admission through its ledger. */
     static void poison(GeometryAllocationLedger&) noexcept;
-    /** Exact per-ledger own-index credit. Imported index storage is already
-     * bookkeeping-paid; constructor receipts prepay exclusive/control bytes. */
+    /** Retain observed own-index metadata through the full import checks. */
     static void retain_manifest_metadata(GeometryAllocationLedger&, std::uint8_t channel,
         const std::shared_ptr<const void>&, std::size_t payload, std::size_t admitted, std::size_t& used,
-        std::size_t limit, bool prepaid = false);
+        std::size_t limit);
     /** Explicit diagnostic census, never called by ordinary cache queries. */
     [[nodiscard]] static bool imported_metadata_seeded(const GeometryAllocationLedger&) noexcept;
     static void visit_metadata_credits(
@@ -70,6 +81,16 @@ public:
     static void admit_graph_owner(GeometryAllocationLedger&, std::uint8_t channel, std::uint8_t kind,
         const std::shared_ptr<const void>&, std::size_t bytes, std::size_t& used, std::size_t limit,
         bool prepaid = false);
+    static void retain_weak_observation(GeometryAllocationLedger&, std::uint8_t channel,
+        const NativeWeakOwnerObservation&, std::size_t& used, std::size_t limit);
+    [[nodiscard]] static NativePaidExtentCharge paid_charge(const GeometryAllocationLedger&, std::uint8_t channel,
+        std::uint8_t kind, const std::shared_ptr<const void>&, std::size_t bytes);
+    [[nodiscard]] static std::shared_ptr<const geometry_detail::NativeAllocationState> native_state(
+        const GeometryAllocationLedger&) noexcept;
+    static void require_native_paid(const GeometryAllocationLedger&, std::uint8_t channel, std::uint8_t kind,
+        const std::shared_ptr<const void>&, std::size_t);
+    static void begin_native_bookkeeping(GeometryAllocationLedger&, const geometry_detail::NativeConstructionAdmission&,
+        std::size_t& separate_logical_cursor, std::size_t logical_limit);
     static void begin(GeometryAllocationLedger&, std::size_t& cumulative, std::size_t bookkeeping_limit);
     /** Capture a fully prepaid payload graph under the caller's finite budget.
      * Own-index exclusive/control credits are prepaid as well. Every newly
@@ -87,13 +108,35 @@ public:
         std::size_t exclusive_bytes, std::size_t& used, std::size_t limit);
 
 private:
+    friend class GeometryOwnerGraphEditor;
+    /** Owner-created callback for index storage whose constructor already
+     * reserved its allowance against the same operation cursor. */
+    static void retain_created_metadata(GeometryAllocationLedger&, std::uint8_t channel,
+        const std::shared_ptr<const void>&, std::size_t payload, std::size_t admitted, std::size_t& used,
+        std::size_t limit);
+    static void register_native_metadata(
+        GeometryAllocationLedger&, std::uint8_t channel, const std::shared_ptr<const void>&, std::size_t);
+    static void authorize_native_fixed(
+        GeometryAllocationLedger&, const std::shared_ptr<const geometry_detail::NativeAllocationEnvelope>&);
+    static void authorize_native_storage(GeometryAllocationLedger&,
+        const std::shared_ptr<geometry_detail::NativeConstructorStorage>&,
+        const std::shared_ptr<const geometry_detail::NativeAllocationEnvelope>&);
+    static void authorize_native_semantic(GeometryAllocationLedger&, std::uint8_t, std::uint8_t,
+        const std::shared_ptr<const void>&, const std::shared_ptr<const geometry_detail::NativeAllocationEnvelope>&);
+    static void authorize_native_identity(GeometryAllocationLedger&, std::uint8_t, const GeometryIdentityBackingPtr&);
+    static void authorize_native_state(
+        GeometryAllocationLedger&, const std::shared_ptr<const geometry_detail::NativeAllocationState>&);
+    friend class NativeGeometryAccounting;
+    static void begin_native_capture(GeometryAllocationLedger&, const geometry_detail::NativeConstructionAdmission&,
+        NativePaidOwnerAuthority&, std::size_t& cursor, std::size_t limit, std::uint8_t channel = 0);
     friend class GeometryOwnerUnion;
     friend class GeometryOwnerAdmissionPair;
     static GeometryAllocationLedger* paired_peer(const GeometryAllocationLedger&) noexcept;
     static void retain_verified_metadata(GeometryAllocationLedger&, std::uint8_t, const std::shared_ptr<const void>&,
         std::size_t, std::size_t, std::size_t&, std::size_t);
+    enum class MetadataRole { Created, Verified, Retained };
     static void retain_metadata_impl(GeometryAllocationLedger&, std::uint8_t, const std::shared_ptr<const void>&,
-        std::size_t, std::size_t, std::size_t&, std::size_t, bool prepaid, bool verified);
+        std::size_t, std::size_t, std::size_t&, std::size_t, MetadataRole);
     friend class SimpleFluid::PLIC::GeometryAllocationLedger;
     friend class GeometryOwnerImportAccess;
     static void seed_imported_metadata(GeometryAllocationLedger&, std::size_t& used, std::size_t limit);

@@ -3,8 +3,10 @@
  */
 #pragma once
 #include "geometry/PLIC/details/GeometryDemandPages.hh"
+#include "geometry/details/NativeAllocationGraph.hh"
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -27,6 +29,146 @@ inline void Admission::charge(std::size_t count, std::size_t width) const
         throw GeometryError(GeometryErrorCode::ResourceLimit, "Geometry demand admission is invalid.");
     retain_bytes(context, count * width);
 }
+inline ReceiptEdits::ReceiptEdits(Admission admission)
+    : admission_(std::move(admission)), overflow_(admission_.allocator<NativeOwnerReceipts::Edit>())
+{
+}
+inline void ReceiptEdits::append(const NativePaidExtentCharge& charge, NativeOwnerReceipts::Action action)
+{
+    if (overflow_.empty() && size_ < inline_.size())
+    {
+        inline_[size_++] = {charge, action};
+        return;
+    }
+    if (overflow_.size() == overflow_.capacity())
+    {
+        const auto current = std::max(inline_.size(), overflow_.capacity());
+        const auto next = checked_sum(current, current);
+        admission_.charge(next, sizeof(NativeOwnerReceipts::Edit));
+        overflow_.reserve(next);
+        if (overflow_.capacity() != next)
+            throw GeometryError(GeometryErrorCode::ResourceLimit, "Paid receipt edit capacity is unqualified.");
+    }
+    if (size_)
+    {
+        for (auto& edit : std::span(inline_).first(size_))
+        {
+            overflow_.push_back(std::move(edit));
+            edit = {};
+        }
+        size_ = 0;
+    }
+    overflow_.push_back({charge, action});
+}
+inline std::span<NativeOwnerReceipts::Edit> ReceiptEdits::rows() noexcept
+{
+    if (!overflow_.empty()) return overflow_;
+    return std::span(inline_).first(size_);
+}
+inline void ReceiptEdits::clear() noexcept
+{
+    overflow_.clear();
+    for (auto& edit : std::span(inline_).first(size_)) edit = {};
+    size_ = 0;
+}
+inline void visit_native_state(
+    const std::shared_ptr<const geometry_detail::NativeAllocationState>& state, MetadataSink sink)
+{
+    if (sink.project_native_state(state))
+        return;
+    const auto counter_bytes = geometry_detail::NativeAllocationGraphAccess::validate_state(state);
+    sink.paid(NativePaidExtentCharge::state(state));
+    if (!sink.native_owner(state, state->allocation_admission_bytes))
+        return;
+    sink.paid(NativePaidExtentCharge::counter(state));
+    const bool first_counter = sink.native_owner(state->counter_owner, counter_bytes);
+    const bool last_counter = sink.native_owner(state->counter_owner, counter_bytes);
+    if (!state->mirror.owner)
+        return;
+    sink.paid(NativePaidExtentCharge::mirror(state));
+    for (unsigned edge = 0; edge != (first_counter || last_counter ? 4u : 2u); ++edge)
+        sink.native_owner(state->mirror.owner, state->mirror.owner_proof.bytes());
+}
+namespace native_page_detail
+{
+/** Captures actual rebound shared-control size into its admitted heap target.
+ * Deallocation never dereferences the target after its destruction. */
+template<class T, class Owner> class ControlAllocator
+{
+    template<class, class> friend class ControlAllocator;
+
+public:
+    using value_type = T;
+    ControlAllocator(geometry_detail::NativeConstructionAllocator<T> allocator, Owner* owner)
+        : allocator_(std::move(allocator)), owner_(owner)
+    {
+    }
+    template<class U>
+    ControlAllocator(const ControlAllocator<U, Owner>& other) noexcept
+        : allocator_(other.allocator_), owner_(other.owner_)
+    {
+    }
+    T* allocate(std::size_t count)
+    {
+        auto* value = allocator_.allocate(count);
+        const auto bytes = count * sizeof(T);
+        std::memcpy(static_cast<void*>(owner_), &bytes, sizeof(bytes));
+        return value;
+    }
+    void deallocate(T* address, std::size_t count) noexcept { allocator_.deallocate(address, count); }
+    template<class U> bool operator==(const ControlAllocator<U, Owner>& other) const noexcept
+    {
+        return allocator_ == other.allocator_ && owner_ == other.owner_;
+    }
+
+private:
+    geometry_detail::NativeConstructionAllocator<T> allocator_;
+    Owner* owner_;
+};
+} // namespace native_page_detail
+template<class T, class... Args> std::shared_ptr<T> Admission::shared(Args&&... args) const
+{
+    if (!native)
+        return std::make_shared<T>(std::forward<Args>(args)...);
+#if !defined(__cpp_rtti)
+    throw GeometryError(GeometryErrorCode::InvalidInput, "Native metadata requires authenticated shared-control RTTI.");
+#endif
+    static_assert(sizeof(T) >= sizeof(std::size_t));
+    auto memory = geometry_detail::NativeConstructionAllocator<T>(native);
+    auto* value = memory.allocate(1);
+    NativeMetadataDelete deleter{native, value, 0, false,
+        [](const void* raw, std::size_t control) noexcept
+        {
+            const auto& object = *static_cast<const T*>(raw);
+            if constexpr (requires { object.bytes; })
+                return object.bytes;
+            else
+                return sizeof(T) + control;
+        },
+        [](void* raw, const std::shared_ptr<const geometry_detail::NativeAllocationState>& state,
+            bool constructed) noexcept
+        {
+            auto* object = static_cast<T*>(raw);
+            std::size_t buffers = 0;
+            if (constructed)
+            {
+                if constexpr (requires { object->native_buffer_bytes(); })
+                    buffers = object->native_buffer_bytes();
+                std::destroy_at(object);
+            }
+            if (buffers)
+                state->retire(buffers);
+            geometry_detail::NativeConstructionAllocator<T>(state).deallocate(object, 1);
+        }};
+    // Capture into the unconstructed heap target, never a retained stack slot.
+    // The control allocator never reads this target during deallocation.
+    std::shared_ptr<T> owner(value, std::move(deleter), native_page_detail::ControlAllocator<T, T>(memory, value));
+    auto* proof = std::get_deleter<NativeMetadataDelete>(owner);
+    std::memcpy(&proof->control_bytes, static_cast<const void*>(value), sizeof(proof->control_bytes));
+    std::construct_at(value, std::forward<Args>(args)...);
+    proof->constructed = true;
+    return owner;
+}
 template<class Row, class Less> class OrderedPages
 {
 public:
@@ -38,9 +180,27 @@ public:
         std::size_t bytes = 0, payload_bytes = 0;
         std::vector<Row> rows;
         std::vector<Ptr> children;
+        [[nodiscard]] std::size_t native_buffer_bytes() const noexcept
+        {
+            return rows.capacity() * sizeof(Row) + children.capacity() * sizeof(Ptr);
+        }
         const Row* maximum = nullptr;
         std::size_t size = 0, subtree_bytes = 0, subtree_payload_bytes = 0, subtree_owner_bytes = 0, logical_size = 0,
                     subtree_owned_admission_bytes = 0;
+        [[nodiscard]] bool has_native_administration() const noexcept
+        {
+            if constexpr (native_flag_in_owned_admission<Row>)
+                return subtree_owned_admission_bytes & 1;
+            else
+                return true;
+        }
+        [[nodiscard]] std::size_t owned_admission_bytes() const noexcept
+        {
+            if constexpr (native_flag_in_owned_admission<Row>)
+                return subtree_owned_admission_bytes & ~std::size_t{1};
+            else
+                return subtree_owned_admission_bytes;
+        }
         [[nodiscard]] bool leaf() const noexcept { return children.empty(); }
         [[nodiscard]] std::size_t occupancy() const noexcept { return leaf() ? rows.size() : children.size(); }
     };
@@ -55,7 +215,7 @@ public:
             if (!Less{}(sorted[slot - 1], sorted[slot]))
                 throw GeometryError(
                     GeometryErrorCode::InvalidInput, "Ordered metadata index contains duplicate selectors.");
-        std::vector<Ptr> pages;
+        geometry_detail::NativeAdministrationVector<Ptr> pages(admission_.allocator<Ptr>());
         const auto groups = ceiling(sorted.size(), leaf_capacity);
         reserve(pages, groups);
         std::size_t offset = 0;
@@ -67,7 +227,7 @@ public:
         }
         while (pages.size() > 1)
         {
-            std::vector<Ptr> parents;
+            geometry_detail::NativeAdministrationVector<Ptr> parents(admission_.allocator<Ptr>());
             const auto count = ceiling(pages.size(), branch_capacity);
             reserve(parents, count);
             offset = 0;
@@ -78,7 +238,7 @@ public:
                 offset += width;
             }
             pages.swap(parents);
-            std::vector<Ptr>().swap(parents);
+            geometry_detail::NativeAdministrationVector<Ptr>().swap(parents);
         }
         return std::move(pages.front());
     }
@@ -295,12 +455,67 @@ public:
     {
         if (!root || !metadata(root, root->payload_bytes, root->bytes))
             return;
+        const auto state = metadata_state(root);
+        if (state)
+        {
+            // Two vector allocators plus object deleter and shared-control
+            // allocator each hold one State, even for empty vector buffers.
+            for (unsigned edge = 0; edge != 2; ++edge)
+                visit_native_state(state, metadata);
+        }
         if (root->leaf())
             for (const auto& row : root->rows)
                 row_visit(row);
         else
             for (const auto& child : root->children)
                 visit_dependencies(child, metadata, row_visit);
+    }
+
+    /** Prune exact shared page controls before descending either frontier.
+     * Native ownership flags also skip every wholly default subtree. */
+    static void visit_native_administration_delta(
+        const Ptr& previous, const Ptr& next, NativeAdministrationSink sink, PageWork* work = nullptr)
+    {
+        visit_native_administration_delta(previous, next, sink, work, false, [](const Row&, bool) {});
+    }
+    template<class RowVisit>
+    static void visit_native_administration_delta(const Ptr& previous, const Ptr& next,
+        NativeAdministrationSink sink, PageWork* work, bool include_default, const RowVisit& row_visit)
+    {
+        const auto shared = [&](const Ptr& candidate, const Ptr& other)
+        {
+            auto node = other;
+            while (node)
+            {
+                if (work)
+                    ++work->visited_pages;
+                if (node.get() == candidate.get() && !node.owner_before(candidate) && !candidate.owner_before(node))
+                    return true;
+                if (node->leaf() || Less{}(*node->maximum, *candidate->maximum))
+                    return false;
+                const auto at = std::lower_bound(node->children.begin(), node->children.end(), *candidate->maximum,
+                    [](const Ptr& child, const Row& key) { return Less{}(*child->maximum, key); });
+                if (at == node->children.end())
+                    return false;
+                node = *at;
+            }
+            return false;
+        };
+        const auto visit = [&](const auto& self, const Ptr& candidate, const Ptr& other, bool retain) -> void
+        {
+            if (!candidate || (!include_default && !candidate->has_native_administration()) || shared(candidate, other))
+                return;
+            if (work)
+                ++work->visited_pages;
+            sink.owner(candidate, retain);
+            sink(metadata_state(candidate), 2, retain);
+            if (candidate->leaf())
+                for (const auto& row : candidate->rows) row_visit(row, retain);
+            for (const auto& child : candidate->children)
+                self(self, child, other, retain);
+        };
+        visit(visit, next, previous, true);
+        visit(visit, previous, next, false);
     }
 
     template<class RowVisit>
@@ -337,12 +552,40 @@ private:
     {
         return count / groups + (group < count % groups);
     }
-    template<class Value> void reserve(std::vector<Value>& values, std::size_t count) const
+    template<class Value>
+    void reserve(geometry_detail::NativeAdministrationVector<Value>& values, std::size_t count) const
     {
         admission_.charge(count, sizeof(Value));
         values.reserve(count);
         if (values.capacity() != count)
             throw GeometryError(GeometryErrorCode::ResourceLimit, "Geometry demand page capacity is unqualified.");
+    }
+    template<class Value> void reserve(std::vector<Value>& values, std::size_t count) const
+    {
+        admission_.charge(count, sizeof(Value));
+        const auto bytes = count * sizeof(Value);
+        if (admission_.native)
+        {
+            geometry_detail::NativeConstructorStorage::require_profile();
+            admission_.native->add(bytes);
+        }
+        try
+        {
+            values.reserve(count);
+        }
+        catch (...)
+        {
+            if (admission_.native)
+                admission_.native->retire(bytes);
+            throw;
+        }
+        if (values.capacity() != count)
+        {
+            std::vector<Value>().swap(values);
+            if (admission_.native)
+                admission_.native->retire(bytes);
+            throw GeometryError(GeometryErrorCode::ResourceLimit, "Geometry native concrete capacity is unqualified.");
+        }
     }
     void retire(const Node&) const
     {
@@ -362,10 +605,14 @@ private:
     }
     [[nodiscard]] std::shared_ptr<Node> allocate() const
     {
+        if (admission_.native)
+            geometry_detail::NativeConstructorStorage::require_profile();
         admission_.charge(1, sizeof(Node) + control_bytes);
-        auto node = std::make_shared<Node>();
-        node->bytes = sizeof(Node) + control_bytes;
+        auto node = admission_.shared<Node>();
+        node->bytes = sizeof(Node) + metadata_control_bytes(node);
         node->payload_bytes = sizeof(Node);
+        if constexpr (native_flag_in_owned_admission<Row>)
+            node->subtree_owned_admission_bytes = bool(admission_.native);
         return node;
     }
     [[nodiscard]] Ptr leaf(std::span<const Row> values) const
@@ -383,13 +630,19 @@ private:
             else
                 node->logical_size = checked_sum(node->logical_size, 1);
             if constexpr (requires { row.exclusive_admission_bytes(); })
+            {
+                if constexpr (native_flag_in_owned_admission<Row>)
+                    if (row.exclusive_admission_bytes() & 1)
+                        throw GeometryError(
+                            GeometryErrorCode::InvalidInput, "Packed native-control row has an odd control extent.");
                 node->subtree_owned_admission_bytes =
                     checked_sum(node->subtree_owned_admission_bytes, row.exclusive_admission_bytes());
+            }
         }
         if constexpr (requires(const Row& row) { row.exclusive_payload_bytes(); })
             for (const auto& row : node->rows)
                 node->subtree_owner_bytes = checked_sum(node->subtree_owner_bytes, row.exclusive_payload_bytes());
-        node->payload_bytes = node->bytes - control_bytes;
+        node->payload_bytes = node->bytes - (admission_.native ? 0 : control_bytes);
         node->subtree_bytes = node->bytes;
         node->subtree_payload_bytes = node->payload_bytes;
         record(node);
@@ -401,15 +654,17 @@ private:
         reserve(node->children, branch_capacity);
         node->bytes = checked_sum(node->bytes, branch_capacity * sizeof(Ptr));
         node->children.assign(values.begin(), values.end());
-        node->payload_bytes = node->bytes - control_bytes;
+        node->payload_bytes = node->bytes - (admission_.native ? 0 : control_bytes);
         node->subtree_bytes = node->bytes;
         node->subtree_payload_bytes = node->payload_bytes;
         for (const auto& child : values)
         {
+            if constexpr (native_flag_in_owned_admission<Row>)
+                node->subtree_owned_admission_bytes |= child->subtree_owned_admission_bytes & 1;
             node->size = checked_sum(node->size, child->size);
             node->logical_size = checked_sum(node->logical_size, child->logical_size);
             node->subtree_owned_admission_bytes =
-                checked_sum(node->subtree_owned_admission_bytes, child->subtree_owned_admission_bytes);
+                checked_sum(node->subtree_owned_admission_bytes, child->owned_admission_bytes());
             node->subtree_bytes = checked_sum(node->subtree_bytes, child->subtree_bytes);
             node->subtree_payload_bytes = checked_sum(node->subtree_payload_bytes, child->subtree_payload_bytes);
             node->subtree_owner_bytes = checked_sum(node->subtree_owner_bytes, child->subtree_owner_bytes);
@@ -509,9 +764,9 @@ private:
         end = std::copy(std::next(at), node.children.end(), end);
         return pack_branches(rebalance(std::span(children.begin(), end)));
     }
-    std::vector<Ptr> pack_many_branches(std::span<const Ptr> children) const
+    geometry_detail::NativeAdministrationVector<Ptr> pack_many_branches(std::span<const Ptr> children) const
     {
-        std::vector<Ptr> result;
+        geometry_detail::NativeAdministrationVector<Ptr> result(admission_.allocator<Ptr>());
         if (children.empty())
             return result;
         const auto groups = ceiling(children.size(), branch_capacity);
@@ -526,7 +781,7 @@ private:
         return result;
     }
     template<class Keep>
-    std::vector<Ptr> patch_rewrite(
+    geometry_detail::NativeAdministrationVector<Ptr> patch_rewrite(
         const Ptr& old, std::span<const Row> changes, const Keep& keep, bool root = false) const
     {
         if (work_)
@@ -540,7 +795,7 @@ private:
             std::conditional_t<stack_safe_default<Row>, std::array<Row, leaf_capacity>, std::array<std::byte, 0>>
                 inline_rows{};
             std::array<unsigned char, leaf_capacity> disposition{};
-            std::vector<Row> heap_rows;
+            geometry_detail::NativeAdministrationVector<Row> heap_rows(admission_.allocator<Row>());
             std::span<const Row> rows;
             const auto merge = [&](const auto& keep_row, const auto& append)
             {
@@ -605,7 +860,7 @@ private:
             }
             if (old)
                 retire(*old);
-            std::vector<Ptr> result;
+            geometry_detail::NativeAdministrationVector<Ptr> result(admission_.allocator<Ptr>());
             const auto groups = ceiling(rows.size(), leaf_capacity);
             reserve(result, groups);
             std::size_t offset = 0;
@@ -617,7 +872,7 @@ private:
             }
             return result;
         }
-        std::vector<Ptr> children;
+        geometry_detail::NativeAdministrationVector<Ptr> children(admission_.allocator<Ptr>());
         reserve(children, checked_sum(old->children.size(), changes.size()));
         std::size_t cursor = 0;
         for (std::size_t index = 0; index < old->children.size(); ++index)

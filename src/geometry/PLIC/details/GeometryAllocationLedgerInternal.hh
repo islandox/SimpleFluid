@@ -6,9 +6,13 @@
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
+#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/PLIC/details/GeometryOwnerManifest.hh"
 #include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
+#include "geometry/PLIC/details/NativeIdentityOwnerAccess.hh"
 #include "geometry/PLIC/details/OriginalSupportAuthority.hh"
+#include "geometry/details/NativeAllocationGraph.hh"
+#include "geometry/details/NativeObjectOwnerAccess.hh"
 #include <algorithm>
 #include <cstddef>
 #include <functional>
@@ -120,19 +124,31 @@ void visit_geometry_owner(
     using namespace details;
     const auto add_bytes = [](std::size_t& bytes, std::size_t count, std::size_t size)
     { bytes = add(bytes, product(count, size)); };
+    const auto admit_typed = [&]<class T>(const std::shared_ptr<T>& owner, std::size_t bytes)
+    {
+        using Object = std::remove_const_t<T>;
+        const auto* receipt = geometry_detail::NativeObjectOwnerAccess<Object>::receipt(owner);
+        if (!receipt)
+            return admit_owner(item, bytes, used, limit);
+        adapter.native_typed_receipt(item.kind, owner, receipt->envelope, receipt->destroy.storage, used, limit);
+        const bool transition = admit_owner(item, 0, used, limit);
+        if (transition)
+            adapter.native_object_children(receipt->envelope, receipt->destroy.storage, used, limit);
+        return transition;
+    };
     switch (item.kind)
     {
         case Kind::TypedWrapper: {
             const auto geometry = std::static_pointer_cast<const ConvexCellGeometry<Mode>>(item.owner);
             require_mode(geometry->arithmetic_mode(), Mode);
-            if (admit_owner(item, sizeof(ConvexCellGeometry<Mode>), used, limit))
+            if (admit_typed(geometry, sizeof(ConvexCellGeometry<Mode>)))
                 adapter.push(Kind::DynamicWrapper, geometry->dynamic_geometry(), used, limit);
             break;
         }
         case Kind::DynamicWrapper: {
             const auto geometry = std::static_pointer_cast<const DynamicConvexGeometry>(item.owner);
             require_mode(geometry->arithmetic_mode(), Mode);
-            if (admit_owner(item, sizeof(DynamicConvexGeometry), used, limit))
+            if (admit_typed(geometry, sizeof(DynamicConvexGeometry)))
                 adapter.push(Kind::Geometry, DynamicGeometryAccess::implementation(*geometry), used, limit);
             break;
         }
@@ -141,7 +157,7 @@ void visit_geometry_owner(
             const auto geometry = checked_geometry_storage<Mode>(base);
             std::size_t bytes = sizeof(GeometryStorage<Mode>);
             add_bytes(bytes, geometry->vertices.owned_capacity(), sizeof(FrozenVertex<Mode>));
-            if (!admit_owner(item, bytes, used, limit))
+            if (!admit_typed(geometry, bytes))
                 break;
             adapter.push(Kind::Topology, geometry->topology, used, limit);
             if (const auto* owner =
@@ -168,7 +184,7 @@ void visit_geometry_owner(
             const auto body = std::static_pointer_cast<const NativeGeometryBody>(item.owner);
             auto bytes = sizeof(NativeGeometryBody);
             add_bytes(bytes, body->vertices.capacity(), sizeof(FrozenVertex<ArithmeticMode::Ordinary>));
-            if (admit_owner(item, bytes, used, limit))
+            if (admit_typed(body, bytes))
             {
                 adapter.push(Kind::Topology, body->topology, used, limit);
                 adapter.push(Kind::PointSnapshot, body->point_context, used, limit);
@@ -180,7 +196,7 @@ void visit_geometry_owner(
         }
         case Kind::Topology: {
             const auto topology = std::static_pointer_cast<const FrozenTopology<Mode>>(item.owner);
-            if (admit_owner(item, topology->bytes(), used, limit))
+            if (admit_typed(topology, topology->bytes()))
                 for (const auto& plane : topology->planes)
                     adapter.push(Kind::Plane, plane, used, limit);
             break;
@@ -190,7 +206,7 @@ void visit_geometry_owner(
             auto bytes = sizeof(PointExportCache);
             add_bytes(bytes, cache->vertex_provenance.capacity(), sizeof(DynamicStoredPointRef));
             // Fixed weak slots and roots never retain their publication owners.
-            (void) admit_owner(item, bytes, used, limit);
+            (void) admit_typed(cache, bytes);
             break;
         }
         case Kind::DynamicPointExport: {
@@ -198,7 +214,7 @@ void visit_geometry_owner(
             require_mode(payload->mode, Mode);
             auto bytes = sizeof(DynamicPointExportPayload);
             add_bytes(bytes, payload->points.capacity(), sizeof(DynamicPoint));
-            if (admit_owner(item, bytes, used, limit))
+            if (admit_typed(payload, bytes))
                 adapter.push(Kind::PointSnapshot, payload->point_context, used, limit);
             break;
         }
@@ -206,7 +222,7 @@ void visit_geometry_owner(
             const auto payload = std::static_pointer_cast<const PointExportPayload<Mode>>(item.owner);
             auto bytes = sizeof(PointExportPayload<Mode>);
             add_bytes(bytes, payload->points.capacity(), sizeof(Point<Mode>));
-            if (admit_owner(item, bytes, used, limit))
+            if (admit_typed(payload, bytes))
                 adapter.push(Kind::PointSnapshot,
                     std::shared_ptr<const PointSnapshotContextBase>(payload->point_context), used, limit);
             break;
@@ -215,7 +231,7 @@ void visit_geometry_owner(
             const auto payload = std::static_pointer_cast<const PointSnapshotPayload<Mode>>(item.owner);
             std::size_t bytes = sizeof(PointSnapshotPayload<Mode>) + 2 * sizeof(void*);
             add_bytes(bytes, payload->refs.capacity(), sizeof(StoredPointRef<Mode>));
-            if (admit_owner(item, bytes, used, limit))
+            if (admit_typed(payload, bytes))
                 adapter.push(Kind::PointSnapshot, std::shared_ptr<const PointSnapshotContextBase>(payload->context),
                     used, limit);
             break;
@@ -225,7 +241,7 @@ void visit_geometry_owner(
             auto bytes = sizeof(StoredPlane<Mode>);
             add_bytes(bytes, plane->source_vertices.capacity(), sizeof(StoredPointRef<Mode>));
             // Weak source references do not retain or pin their pointees.
-            if (admit_owner(item, bytes, used, limit))
+            if (admit_typed(plane, bytes))
             {
                 if (plane->point_context)
                     adapter.push(Kind::PointSnapshot, plane->point_context->shared_from_this(), used, limit);
@@ -240,7 +256,7 @@ void visit_geometry_owner(
             require_mode(base->mode, Mode);
             const auto context = std::static_pointer_cast<const PointSnapshotContext<Mode>>(base);
             const auto bytes = context->exclusive_storage_bytes();
-            if (admit_owner(item, bytes, used, limit))
+            if (admit_typed(context, bytes))
             {
                 adapter.retain_authorities(context->authority_table, used, limit);
                 for (const auto& parent : context->dependencies)
@@ -255,15 +271,17 @@ void visit_geometry_owner(
             std::size_t bytes = sizeof(NativePointFactBlock<Mode>) + 2 * sizeof(void*);
             add_bytes(bytes, block->points.capacity(), sizeof(PointCoordinates<Mode>));
             add_bytes(bytes, block->witnesses.capacity(), sizeof(PointErrorWitness));
-            (void) admit_owner(item, bytes, used, limit);
+            (void) admit_typed(block, bytes);
             break;
         }
-        case Kind::Moment:
-            (void) admit_owner(item, sizeof(StoredMomentCache<Mode>), used, limit);
+        case Kind::Moment: {
+            const auto moments = std::static_pointer_cast<const StoredMomentCache<Mode>>(item.owner);
+            (void) admit_typed(moments, sizeof(StoredMomentCache<Mode>));
             break;
+        }
         case Kind::Ancestry: {
             const auto ancestry = std::static_pointer_cast<const Ancestry>(item.owner);
-            if (admit_owner(item, sizeof(Ancestry), used, limit))
+            if (admit_typed(ancestry, sizeof(Ancestry)))
             {
                 adapter.push(Kind::Ancestry, ancestry->parent, used, limit);
                 adapter.push(Kind::Split, ancestry->split, used, limit);
@@ -272,7 +290,7 @@ void visit_geometry_owner(
         }
         case Kind::Split: {
             const auto split = std::static_pointer_cast<const Split>(item.owner);
-            if (admit_owner(item, sizeof(Split), used, limit))
+            if (admit_typed(split, sizeof(Split)))
                 adapter.push(Kind::Ancestry, split->parent, used, limit);
             break;
         }
@@ -280,7 +298,7 @@ void visit_geometry_owner(
             const auto certificate = std::static_pointer_cast<const PartitionCertificate>(item.owner);
             auto bytes = sizeof(PartitionCertificate);
             add_bytes(bytes, certificate->members.capacity(), sizeof(std::weak_ptr<const Ancestry>));
-            if (admit_owner(item, bytes, used, limit))
+            if (admit_typed(certificate, bytes))
                 adapter.push(Kind::Ancestry, certificate->parent, used, limit);
             break;
         }
@@ -291,7 +309,7 @@ void visit_geometry_owner(
                 add_bytes(bytes, 1, sizeof(GeometryConstruction::Rebase));
             if (recipe->kind() == GeometryConstruction::Kind::Source && recipe->source().native())
                 add_bytes(bytes, 1, sizeof(NativeGeometryConstruction));
-            if (admit_owner(item, bytes, used, limit))
+            if (admit_typed(recipe, bytes))
             {
                 if (recipe->kind() == GeometryConstruction::Kind::Source)
                 {
@@ -343,7 +361,7 @@ void visit_geometry_owner(
             require_mode(clip->mode, Mode);
             auto bytes = sizeof(GeometryClipConstruction);
             add_bytes(bytes, clip->retained_points.capacity(), sizeof(DynamicStoredPointRef));
-            if (admit_owner(item, bytes, used, limit))
+            if (admit_typed(clip, bytes))
             {
                 adapter.push(Kind::Recipe, clip->parent, used, limit);
                 adapter.push(Kind::Recipe, clip->native_plane_source, used, limit);
@@ -356,6 +374,79 @@ void visit_geometry_owner(
 }
 } // namespace SIMPLEFLUID_LOCAL allocation_detail
 
+/** Actual ledger administration allocations. The receipt header belongs to the
+ * same admitted request as its aligned container storage; it is neither a
+ * second allocation nor an unmeasured control. The keeper outlives all nodes. */
+struct NativeLedgerAllocationTracker
+{
+    struct Allocation
+    {
+        Allocation* previous = nullptr;
+        Allocation* next = nullptr;
+        std::size_t bytes = 0;
+    };
+    std::shared_ptr<const geometry_detail::NativeAllocationState> state;
+    Allocation* allocations = nullptr;
+    std::size_t allocation_bytes = 0;
+    explicit NativeLedgerAllocationTracker(std::shared_ptr<const geometry_detail::NativeAllocationState> value = {})
+        : state(std::move(value)) {}
+    ~NativeLedgerAllocationTracker()
+    {
+        if (allocations || allocation_bytes) std::terminate();
+    }
+};
+template<class T> class NativeLedgerAllocator
+{
+public:
+    using value_type = T;
+    using propagate_on_container_move_assignment = std::true_type;
+    using propagate_on_container_swap = std::true_type;
+    using is_always_equal = std::false_type;
+    NativeLedgerAllocator() noexcept = default;
+    explicit NativeLedgerAllocator(NativeLedgerAllocationTracker* value) noexcept : tracker_(value) {}
+    template<class U> NativeLedgerAllocator(const NativeLedgerAllocator<U>& other) noexcept : tracker_(other.tracker_) {}
+    [[nodiscard]] std::shared_ptr<const geometry_detail::NativeAllocationState> state() const noexcept
+    { return tracker_ ? tracker_->state : nullptr; }
+    [[nodiscard]] T* allocate(std::size_t count)
+    {
+        if (!tracker_ || !tracker_->state) return std::allocator<T>{}.allocate(count);
+        constexpr auto alignment = std::max(alignof(T), alignof(NativeLedgerAllocationTracker::Allocation));
+        constexpr auto prefix = (sizeof(NativeLedgerAllocationTracker::Allocation) + alignment - 1) / alignment * alignment;
+        const auto bytes = allocation_detail::add(prefix, allocation_detail::product(count, sizeof(T)));
+        tracker_->state->add(bytes);
+        void* memory = nullptr;
+        try { memory = ::operator new(bytes, std::align_val_t(alignment)); }
+        catch (...) { tracker_->state->retire(bytes); throw; }
+        auto* receipt = ::new (memory) NativeLedgerAllocationTracker::Allocation{nullptr, tracker_->allocations, bytes};
+        if (receipt->next) receipt->next->previous = receipt;
+        tracker_->allocations = receipt;
+        tracker_->allocation_bytes += bytes;
+        return reinterpret_cast<T*>(static_cast<unsigned char*>(memory) + prefix);
+    }
+    void deallocate(T* pointer, std::size_t count) noexcept
+    {
+        if (!tracker_ || !tracker_->state) { std::allocator<T>{}.deallocate(pointer, count); return; }
+        constexpr auto alignment = std::max(alignof(T), alignof(NativeLedgerAllocationTracker::Allocation));
+        constexpr auto prefix = (sizeof(NativeLedgerAllocationTracker::Allocation) + alignment - 1) / alignment * alignment;
+        auto* receipt = reinterpret_cast<NativeLedgerAllocationTracker::Allocation*>(
+            reinterpret_cast<unsigned char*>(pointer) - prefix);
+        const auto bytes = receipt->bytes;
+        if (bytes != prefix + count * sizeof(T) || bytes > tracker_->allocation_bytes) std::terminate();
+        if (receipt->previous) receipt->previous->next = receipt->next;
+        else tracker_->allocations = receipt->next;
+        if (receipt->next) receipt->next->previous = receipt->previous;
+        tracker_->allocation_bytes -= bytes;
+        std::destroy_at(receipt);
+        ::operator delete(receipt, std::align_val_t(alignment));
+        tracker_->state->retire(bytes);
+    }
+    template<class U> bool operator==(const NativeLedgerAllocator<U>& other) const noexcept
+    { return tracker_ == other.tracker_; }
+private:
+    template<class> friend class NativeLedgerAllocator;
+    NativeLedgerAllocationTracker* tracker_ = nullptr;
+};
+
 struct GeometryAllocationLedger::Impl
 {
     struct Entry
@@ -363,17 +454,66 @@ struct GeometryAllocationLedger::Impl
         std::shared_ptr<const void> pin;
         std::size_t payload_bytes = 0;
     };
-    std::map<allocation_detail::Key, Entry, allocation_detail::Less> owners;
+    struct NativeContext : NativeLedgerAllocationTracker
+    {
+        details::NativePaidOwnerAuthority* paid = nullptr;
+        std::weak_ptr<const void> lifetime;
+        const std::size_t* cursor = nullptr;
+        std::size_t logical_limit = 0;
+        details::geometry_demand::GeometryOwnerManifest administration_grant;
+        NativeContext(std::shared_ptr<const geometry_detail::NativeAllocationState> value = {},
+            details::NativePaidOwnerAuthority* authority = nullptr)
+            : NativeLedgerAllocationTracker(std::move(value)), paid(authority)
+        {
+        }
+    };
+    struct NativeContextDelete
+    {
+        void operator()(NativeContext*) const noexcept;
+    };
+    std::unique_ptr<NativeContext, NativeContextDelete> native;
+    [[nodiscard]] static std::unique_ptr<NativeContext, NativeContextDelete> make_context(
+        const std::shared_ptr<const geometry_detail::NativeAllocationState>&, details::NativePaidOwnerAuthority*);
+    [[nodiscard]] details::NativePaidOwnerAuthority* native_paid() const noexcept
+    {
+        return native ? native->paid : nullptr;
+    }
+    [[nodiscard]] const std::size_t* native_cursor() const noexcept { return native ? native->cursor : nullptr; }
+    [[nodiscard]] const details::geometry_demand::GeometryOwnerManifest& native_grant() const noexcept
+    {
+        static const details::geometry_demand::GeometryOwnerManifest empty;
+        return native ? native->administration_grant : empty;
+    }
+    void set_native_grant(const details::geometry_demand::GeometryOwnerManifest&, std::size_t&, std::size_t);
+    std::map<allocation_detail::Key, Entry, allocation_detail::Less,
+        NativeLedgerAllocator<std::pair<const allocation_detail::Key, Entry>>> owners;
     struct MetadataCredit
     {
         std::shared_ptr<const void> owner;
         std::size_t payload = 0, admitted = 0;
         bool imported_bookkeeping = false;
     };
-    std::map<allocation_detail::Key, MetadataCredit, allocation_detail::Less> metadata_credits;
+    std::map<allocation_detail::Key, MetadataCredit, allocation_detail::Less,
+        NativeLedgerAllocator<std::pair<const allocation_detail::Key, MetadataCredit>>> metadata_credits;
     bool imported_metadata_seeded = false;
 
-    std::vector<allocation_detail::Item> pending;
+    std::vector<allocation_detail::Item, NativeLedgerAllocator<allocation_detail::Item>> pending;
+    [[nodiscard]] details::NativePaidOwnerAuthority* native_authority() const;
+    explicit Impl(std::shared_ptr<const geometry_detail::NativeAllocationState> state = {},
+        details::NativePaidOwnerAuthority* paid = nullptr)
+        : native(state ? make_context(state, paid) : nullptr),
+          owners(allocation_detail::Less{},
+              NativeLedgerAllocator<std::pair<const allocation_detail::Key, Entry>>(native.get())),
+          metadata_credits(allocation_detail::Less{},
+              NativeLedgerAllocator<std::pair<const allocation_detail::Key, MetadataCredit>>(native.get())),
+          pending(NativeLedgerAllocator<allocation_detail::Item>(native.get())),
+          additional_subsets(NativeLedgerAllocator<SubsetCertificate>(native.get()))
+    {
+    }
+    [[nodiscard]] std::shared_ptr<const geometry_detail::NativeAllocationState> native_state() const noexcept
+    {
+        return owners.get_allocator().state();
+    }
     GeometryAllocationLedger* peer = nullptr;
     std::size_t shared_payload_credit = 0;
     details::GeometryIndexControls control_grant;
@@ -393,7 +533,7 @@ struct GeometryAllocationLedger::Impl
     // certificate. Keep that common case inline without reserving eleven
     // unused slots in every unrelated payload ledger.
     std::array<SubsetCertificate, 1> subsets;
-    std::vector<SubsetCertificate> additional_subsets;
+    std::vector<SubsetCertificate, NativeLedgerAllocator<SubsetCertificate>> additional_subsets;
     std::size_t next_subset = 0;
     [[nodiscard]] static constexpr std::size_t subset_overflow_bytes() noexcept
     {
@@ -447,6 +587,9 @@ struct GeometryAllocationLedger::Impl
         }
         if (bytes > limit - std::min(used, limit))
             exhausted("Geometry allocation ledger byte budget is exhausted.");
+        if (metadata)
+            if (const auto state = native_state())
+                state->record_ledger_work(bytes);
         used += bytes;
         if (metadata)
             bookkeeping = add(bookkeeping, bytes);
@@ -509,6 +652,13 @@ struct GeometryAllocationLedger::Impl
                 throw GeometryError(GeometryErrorCode::InvalidInput, "Paired imported owner changes immutable size.");
             return true;
         }
+        if (item.kind == allocation_detail::Kind::ExternalOwner &&
+            other.native_grant().references(0, static_cast<std::uint8_t>(item.kind), item.owner))
+        {
+            if (!other.native_grant().admits(0, static_cast<std::uint8_t>(item.kind), item.owner, bytes))
+                throw GeometryError(GeometryErrorCode::InvalidInput, "Paired native administration size changed.");
+            return true;
+        }
         if (item.kind == allocation_detail::Kind::ExternalOwner)
             if (const auto found = other.metadata_credits.find(key); found != other.metadata_credits.end())
             {
@@ -520,8 +670,31 @@ struct GeometryAllocationLedger::Impl
             }
         return false;
     }
+    [[nodiscard]] bool native_import_authorized(const geometry_demand::GeometryOwnerManifest&) const;
+    [[nodiscard]] bool native_paid_admits(std::uint8_t, const allocation_detail::Item&, std::size_t) const;
     bool admit(const allocation_detail::Item& item, std::size_t bytes, std::size_t& used, std::size_t limit,
         bool prepaid = false)
+    {
+        return admit_impl(item, bytes, used, limit, prepaid, nullptr);
+    }
+    bool admit_created_metadata(const allocation_detail::Item& item,
+        const details::geometry_demand::NativeMetadataDelete& receipt, std::size_t bytes, std::size_t& used,
+        std::size_t limit)
+    {
+        const auto state = native_state();
+        if (item.kind != allocation_detail::Kind::ExternalOwner ||
+            std::get_deleter<details::geometry_demand::NativeMetadataDelete>(item.owner) != &receipt ||
+            !receipt.constructed || receipt.object != item.owner.get() || !receipt.extent_bytes || !state ||
+            receipt.state.get() != state.get() || receipt.state.owner_before(state) || state.owner_before(receipt.state) ||
+            receipt.extent_bytes(receipt.object, receipt.control_bytes) != bytes || bytes > used)
+            throw GeometryError(GeometryErrorCode::InvalidInput,
+                "Created native index changes its actual allocation, State, or reserved extent.");
+        return admit_impl(item, bytes, used, limit, false, &receipt);
+    }
+
+private:
+    bool admit_impl(const allocation_detail::Item& item, std::size_t bytes, std::size_t& used, std::size_t limit,
+        bool prepaid, const details::geometry_demand::NativeMetadataDelete* created)
     {
         details::GeometryAllocationOwnerAccess::observe_work(details::GeometryAllocationOwnerAccess::Work::Admit);
         using namespace allocation_detail;
@@ -533,6 +706,25 @@ struct GeometryAllocationLedger::Impl
             if (!imported->admits(imported_channel, static_cast<std::uint8_t>(item.kind), item.owner, bytes))
                 throw GeometryError(GeometryErrorCode::InvalidInput, "Immutable imported allocation size changed.");
             return false;
+        }
+        if (native_paid())
+        {
+            // No boolean can assert physical admission in a native ledger.
+            if (!mode)
+                throw GeometryError(GeometryErrorCode::InvalidInput, "Native payload has no arithmetic channel.");
+            const auto channel = *mode == ArithmeticMode::BoundedCertification ? 1 : 0;
+            if (!native_paid_admits(channel, item, bytes))
+                throw GeometryError(
+                    GeometryErrorCode::InvalidInput, "Native payload lacks an exact paid owner receipt.");
+            prepaid = true;
+        }
+        const bool granted_administration = item.kind == Kind::ExternalOwner &&
+            native_grant().references(0, static_cast<std::uint8_t>(item.kind), item.owner);
+        if (granted_administration)
+        {
+            if (!native_grant().admits(0, static_cast<std::uint8_t>(item.kind), item.owner, bytes))
+                throw GeometryError(
+                    GeometryErrorCode::InvalidInput, "Native administration credit changes owner size.");
         }
         const Key key{item.kind, item.owner.get()};
         if (item.kind == Kind::ExternalOwner)
@@ -552,10 +744,13 @@ struct GeometryAllocationLedger::Impl
                 throw GeometryError(GeometryErrorCode::InvalidInput, "Immutable allocation ownership or size changed.");
             return false;
         }
+        if (prepaid && native && native->state && !native_paid())
+            throw GeometryError(
+                GeometryErrorCode::InvalidInput, "Native bookkeeping cannot issue prepaid payload authority.");
         // Charge before publishing the seen identity. A failed call cannot
         // make an uncharged allocation disappear from a later admission.
-        const bool paired = !prepaid && peer_owns(item, bytes, used);
-        if (prepaid || paired)
+        const bool paired = !prepaid && !created && !granted_administration && peer_owns(item, bytes, used);
+        if (prepaid || created || granted_administration || paired)
         {
             payload = add(payload, bytes);
             if (paired)
@@ -572,18 +767,127 @@ struct GeometryAllocationLedger::Impl
         return true;
     }
 
+public:
     // A flat external allocation credit does not certify its child closure.
     [[nodiscard]] static bool source_base_children(bool) noexcept { return true; }
 
+    void authorize_native_fixed_receipt(const std::shared_ptr<const geometry_detail::NativeAllocationEnvelope>&);
+    void authorize_native_identity_receipt(const details::GeometryIdentityBackingPtr&);
+    void authorize_native_state_receipt(const std::shared_ptr<const geometry_detail::NativeAllocationState>&);
+    void native_fixed(const std::shared_ptr<const geometry_detail::NativeAllocationEnvelope>& owner, std::size_t& used,
+        std::size_t limit)
+    {
+        struct Context
+        {
+            Impl& ledger;
+            std::size_t& used;
+            std::size_t limit;
+        } context{*this, used, limit};
+        if (native_paid())
+            authorize_native_fixed_receipt(owner);
+        geometry_detail::NativeAllocationGraphAccess::fixed(owner,
+            {&context,
+                [](void* raw, const std::shared_ptr<const void>& child, std::size_t bytes, bool paid)
+                {
+                    auto& value = *static_cast<Context*>(raw);
+                    value.ledger.admit(
+                        {allocation_detail::Kind::ExternalOwner, child}, bytes, value.used, value.limit, paid);
+                    // Full retention is the independent census oracle. A flat
+                    // owner credit alone never asserts native child closure.
+                    return true;
+                },
+                &used},
+            false);
+    }
+    void native_typed_receipt(allocation_detail::Kind, const std::shared_ptr<const void>&,
+        const std::shared_ptr<const geometry_detail::NativeAllocationEnvelope>&,
+        const geometry_detail::NativeConstructorStorageOwner&, std::size_t&, std::size_t);
+    void native_object_children(const std::shared_ptr<const geometry_detail::NativeAllocationEnvelope>& envelope,
+        const geometry_detail::NativeConstructorStorageOwner& storage, std::size_t& used, std::size_t limit)
+    {
+        native_fixed(envelope, used, limit);
+        if (!storage.owner) return;
+        native_fixed(storage.envelope, used, limit);
+        const bool prepaid = storage.owner->admission().state()->used_counter == &used;
+        admit({allocation_detail::Kind::ExternalOwner, storage.owner}, storage.owner->exclusive_bytes(), used, limit,
+            prepaid);
+        native_state(storage.owner->admission().state(), used, limit);
+    }
+    void native_state(const std::shared_ptr<const geometry_detail::NativeAllocationState>& owner, std::size_t& used,
+        std::size_t limit)
+    {
+        struct Context
+        {
+            Impl& ledger;
+            std::size_t& used;
+            std::size_t limit;
+        } context{*this, used, limit};
+        if (native_paid())
+            authorize_native_state_receipt(owner);
+        geometry_detail::NativeAllocationGraphAccess::state(owner,
+            {&context,
+                [](void* raw, const std::shared_ptr<const void>& child, std::size_t bytes, bool paid)
+                {
+                    auto& value = *static_cast<Context*>(raw);
+                    value.ledger.admit(
+                        {allocation_detail::Kind::ExternalOwner, child}, bytes, value.used, value.limit, paid);
+                    return true;
+                },
+                &used},
+            false);
+    }
     template<GeometryIdentityKind Kind, ArithmeticMode Mode>
     void retain_identity(const GeometryIdentity<Kind, Mode>& identity, std::size_t& used, std::size_t limit)
     {
-        visit_identity_allocations(identity,
-            [&](const GeometryIdentityAllocation& allocation)
+        if constexpr (GeometryIdentity<Kind, Mode>::shared_storage)
+            for (auto owner = details::GeometryIdentityAccess::backing(identity); owner;
+                owner = details::geometry_identity_parent(owner))
             {
-                return admit({allocation_detail::Kind::IdentityPayload, allocation.owner}, allocation.payload_bytes,
-                    used, limit);
-            });
+                const bool native = details::NativeIdentityOwnerAccess::admitted(owner);
+                if (native && native_paid())
+                    authorize_native_identity_receipt(owner);
+                const bool first = admit({allocation_detail::Kind::IdentityPayload, owner},
+                    native ? 0 : details::geometry_identity_payload_bytes(owner), used, limit);
+                if (!native && !first)
+                    break;
+                if (native)
+                {
+                    struct Context
+                    {
+                        Impl& ledger;
+                        std::size_t& used;
+                        std::size_t limit;
+                    } context{*this, used, limit};
+                    geometry_detail::NativeConstructorOwnerSink sink;
+                    sink.context = &context;
+                    sink.owner_edge = [](void* raw, const std::shared_ptr<const void>& child,
+                                          geometry_detail::NativeConstructorOwnerKind kind, std::size_t bytes)
+                    {
+                        auto& value = *static_cast<Context*>(raw);
+                        bool paid = false;
+                        if (kind == geometry_detail::NativeConstructorOwnerKind::Storage)
+                        {
+                            const auto storage =
+                                std::static_pointer_cast<const geometry_detail::NativeConstructorStorage>(child);
+                            paid = storage->admission().state()->used_counter == &value.used;
+                        }
+                        value.ledger.admit(
+                            {allocation_detail::Kind::ExternalOwner, child}, bytes, value.used, value.limit, paid);
+                        return true;
+                    };
+                    sink.fixed_edge = [](void* raw, const auto& fixed)
+                    {
+                        auto& value = *static_cast<Context*>(raw);
+                        value.ledger.native_fixed(fixed, value.used, value.limit);
+                    };
+                    sink.state_edge = [](void* raw, const auto& state)
+                    {
+                        auto& value = *static_cast<Context*>(raw);
+                        value.ledger.native_state(state, value.used, value.limit);
+                    };
+                    details::NativeIdentityOwnerAccess::visit_children(owner, sink, [](void*, const auto&) {});
+                }
+            }
     }
 
     void retain_authorities(const std::vector<PlaneAuthority>& authorities, std::size_t& used, std::size_t limit)

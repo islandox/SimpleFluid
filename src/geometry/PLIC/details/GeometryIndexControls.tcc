@@ -55,11 +55,11 @@ struct GeometryIndexControls::State
 };
 std::size_t GeometryIndexControls::control_bytes() const noexcept
 {
-    return state_ && state_->root ? state_->root->subtree_owned_admission_bytes : 0;
+    return state_ && state_->root ? state_->root->owned_admission_bytes() : 0;
 }
 std::size_t GeometryIndexControls::index_admission_bytes() const noexcept
 {
-    return state_ ? sizeof(State) + geometry_demand::control_bytes + state_->root->subtree_bytes : 0;
+    return state_ ? sizeof(State) + geometry_demand::metadata_control_bytes(state_) + state_->root->subtree_bytes : 0;
 }
 std::shared_ptr<const void> GeometryIndexControls::root_control() const noexcept
 {
@@ -93,6 +93,22 @@ std::size_t GeometryIndexControls::edit_admission_bound(std::size_t changes, std
     // (one slot per constructed page) as well as root packing buffers.
     bytes = add(bytes, product(product(product(changes, bound.height), branch_capacity + 1), sizeof(Pages::Ptr)));
     return add(bytes, product(pages, sizeof(Pages::Ptr)));
+}
+bool GeometryIndexControls::holds(const std::shared_ptr<const void>& owner, std::size_t payload) const
+{
+    using namespace index_control_detail;
+    if (!state_)
+        return false;
+    const IndexControlRecord key{owner, payload, 0};
+    geometry_demand::PageWork work;
+    const auto* row = Pages::lower_bound(state_->root, [&](const auto& value) { return Less{}(value, key); }, &work);
+    GeometryAllocationOwnerAccess::observe_work(
+        GeometryAllocationOwnerAccess::Work::IndexControlLookupPage, work.visited_pages);
+    if (!row || Less{}(key, *row))
+        return false;
+    if (!same(row->owner, owner) || row->payload != payload)
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Index admin role changes owner or payload.");
+    return row->native || row->control;
 }
 bool GeometryIndexControls::contains(
     const std::shared_ptr<const void>& owner, std::size_t payload, std::size_t control) const
@@ -133,22 +149,57 @@ GeometryIndexControls GeometryIndexControls::edited(std::span<const IndexControl
                 throw GeometryError(GeometryErrorCode::InvalidInput, "Index control changes immutable storage.");
         }
     }
-    const auto root =
-        Pages(admission, work)
-            .patched(state_ ? state_->root : nullptr, changes, [](const auto& row) { return row.control != 0; });
+    const auto root = Pages(admission, work)
+                          .patched(state_ ? state_->root : nullptr, changes,
+                              [](const auto& row) { return row.native || row.control != 0; });
     if (!root)
         return {};
     admission.charge(1, sizeof(State) + geometry_demand::control_bytes);
-    auto next = std::make_shared<const State>(root);
-    admission.created(next, sizeof(State), sizeof(State) + geometry_demand::control_bytes);
+    auto next = admission.shared<State>(root);
+
+    const auto bytes = sizeof(State) + (admission.native ? geometry_demand::metadata_control_bytes(next) : 0);
+    admission.created(next, bytes, bytes + (admission.native ? 0 : geometry_demand::control_bytes));
     GeometryIndexControls result;
     result.state_ = std::move(next);
     return result;
 }
 void GeometryIndexControls::visit_metadata(geometry_demand::MetadataSink metadata) const
 {
-    if (state_ && metadata(state_, sizeof(State), sizeof(State) + geometry_demand::control_bytes))
+    if (!state_)
+        return;
+    const auto bytes =
+        sizeof(State) + (geometry_demand::metadata_state(state_) ? geometry_demand::metadata_control_bytes(state_) : 0);
+    if (metadata(state_, bytes, bytes + (geometry_demand::metadata_state(state_) ? 0 : geometry_demand::control_bytes)))
+    {
+        if (geometry_demand::metadata_state(state_))
+            for (unsigned edge = 0; edge != 2; ++edge)
+                geometry_demand::visit_native_state(geometry_demand::metadata_state(state_), metadata);
         index_control_detail::Pages::visit_dependencies(state_->root, metadata, [](const auto&) {});
+    }
+}
+bool GeometryIndexControls::has_native_administration() const noexcept
+{
+    return state_ &&
+           (geometry_demand::metadata_state(state_) || (state_->root && state_->root->has_native_administration()));
+}
+void GeometryIndexControls::visit_native_administration_delta(const GeometryIndexControls& previous,
+    geometry_demand::NativeAdministrationSink sink, geometry_demand::PageWork* work) const
+{
+    if (state_.get() == previous.state_.get() && !state_.owner_before(previous.state_) &&
+        !previous.state_.owner_before(state_))
+        return;
+    if (state_)
+    {
+        sink.owner(state_, true);
+        sink(geometry_demand::metadata_state(state_), 2, true);
+    }
+    if (previous.state_)
+    {
+        sink.owner(previous.state_, false);
+        sink(geometry_demand::metadata_state(previous.state_), 2, false);
+    }
+    index_control_detail::Pages::visit_native_administration_delta(
+        previous.state_ ? previous.state_->root : nullptr, state_ ? state_->root : nullptr, sink, work);
 }
 void GeometryIndexControls::visit_records(RecordSink sink) const
 {

@@ -15,6 +15,7 @@ class GeometryAllocationOwnerAccess;
 class GeometryOwnerImportAccess;
 class GeometryOwnerUnion;
 class GeometryOwnerAdmissionPair;
+class NativeGeometryAccounting;
 } // namespace details
 /** Counts immutable owners and their exclusively owned buffers once. Strong
  * pins prevent allocator address reuse from hiding later allocations. Rejected
@@ -91,7 +92,13 @@ private:
     friend class details::GeometryOwnerUnion;
     friend class details::GeometryOwnerAdmissionPair;
     void begin_admission(std::size_t&, std::size_t, bool allocate_state = true);
-    std::unique_ptr<Impl> impl_;
+    struct ImplDelete
+    {
+        // Type erasure keeps the private native allocator out of the public ABI.
+        std::shared_ptr<const void> native_state;
+        void operator()(Impl*) const noexcept;
+    };
+    std::unique_ptr<Impl, ImplDelete> impl_;
     bool failed_ = false;
 };
 namespace details

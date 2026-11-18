@@ -44,17 +44,21 @@ public:
             if (state->mirror.owner)
                 for (unsigned edge = 0; edge != 2; ++edge)
                     sink.edge(sink.context, state->mirror.owner, state->mirror.owner_proof.bytes(), paid);
-            if (sink.edge(sink.context, state->counter_owner, bytes, paid) && state->mirror.owner)
+            // The Counter has two actual incoming fields. Retention reaches
+            // first on the first call; retirement reaches last on the second.
+            // Either transition owns the one set of Counter child fields.
+            const bool first = sink.edge(sink.context, state->counter_owner, bytes, paid);
+            const bool second = sink.edge(sink.context, state->counter_owner, bytes, paid);
+            if ((first || second) && state->mirror.owner)
                 for (unsigned edge = 0; edge != 2; ++edge)
                     sink.edge(sink.context, state->mirror.owner, state->mirror.owner_proof.bytes(), paid);
-            sink.edge(sink.context, state->counter_owner, bytes, paid);
         }
     }
-    static void fixed(const std::shared_ptr<const NativeAllocationEnvelope>& owner,
+    static bool fixed(const std::shared_ptr<const NativeAllocationEnvelope>& owner,
         const NativeAllocationGraphSink& sink, bool prepaid)
     {
         if (!owner)
-            return;
+            return false;
         if (!owner->authentic_owner(owner))
             throw std::invalid_argument("Native fixed envelope has a foreign shared-control owner.");
         const auto& domain = owner->state();
@@ -63,9 +67,11 @@ public:
         if (!sink.edge)
             throw std::invalid_argument("Native graph lacks its synchronous edge visitor.");
         const bool paid = prepaid || sink.operation_used == domain->used_counter;
-        if (sink.edge(sink.context, owner, bytes, paid))
+        const bool transition = sink.edge(sink.context, owner, bytes, paid);
+        if (transition)
             for (unsigned edge = 0; edge != 5; ++edge)
                 state(domain, sink, paid);
+        return transition;
     }
 };
 } // namespace SimpleFluid::geometry_detail

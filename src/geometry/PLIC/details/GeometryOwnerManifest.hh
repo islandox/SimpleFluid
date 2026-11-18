@@ -25,9 +25,17 @@ struct OwnerRecord
     [[nodiscard]] std::size_t exclusive_payload_bytes() const noexcept { return bytes; }
     [[nodiscard]] std::size_t logical_size() const noexcept { return references; }
 };
+/** Incoming typed edges are a sparse subset of the real owner references.
+ * The matching physical row owns and authenticates the shared control. */
+struct TypedOwnerReference
+{
+    const void* address = nullptr;
+    std::size_t references = 0;
+};
 // OwnerRecord defaults only zero scalars and an empty shared_ptr; it performs
 // no allocation and cannot throw. Its copies also preserve shared controls.
 template<> inline constexpr bool stack_safe_default<OwnerRecord> = true;
+template<> inline constexpr bool native_flag_in_owned_admission<OwnerRecord> = true;
 
 /** Contains only immutable physical owner pins and shared index pages.
  * A caller constructing an accepted snapshot controls when the returned root
@@ -51,6 +59,9 @@ public:
         void operator()(const OwnerRecord& value) const { visit(context, value); }
     };
     void visit_dependencies(MetadataSink, RecordSink) const;
+    [[nodiscard]] bool has_native_administration() const noexcept;
+    void visit_native_administration_delta(
+        const GeometryOwnerManifest&, NativeAdministrationSink, PageWork* = nullptr) const;
     void visit_records(RecordSink) const;
     /** Pruned unique-owner delta; exact shared B+ controls stop traversal. */
     void visit_added(const GeometryOwnerManifest&, RecordSink, PageWork* = nullptr) const;
@@ -92,19 +103,23 @@ public:
     [[nodiscard]] std::size_t metadata_admission_bytes() const noexcept;
     [[nodiscard]] std::size_t metadata_payload_bytes() const noexcept;
     [[nodiscard]] std::size_t owner_count() const noexcept;
+    [[nodiscard]] std::size_t typed_owner_count() const noexcept;
     /** Cached physical pointer-slot count, separate from unique owners. */
     [[nodiscard]] std::size_t physical_edge_count() const noexcept;
     /** Retained State/page count for any valid index of at most rows keys.
      * Includes a possible indexed singleton from individual retained/retired edits. */
-    [[nodiscard]] static std::size_t metadata_owner_count_bound(std::size_t rows);
+    [[nodiscard]] static std::size_t metadata_owner_count_bound(std::size_t rows, std::size_t typed_rows = 0);
+    [[nodiscard]] std::size_t metadata_owner_count_bound() const;
     /** Ratio bounding all height-linear batch costs after possible growth.
-     * Walks one accepted path; does not enumerate records or metadata. */
-    [[nodiscard]] std::size_t edit_height_scale_bound(std::size_t anticipated_additions) const;
+     * An engaged typed growth bound includes the sparse typed path. */
+    [[nodiscard]] std::size_t edit_height_scale_bound(std::size_t anticipated_additions,
+        std::optional<std::size_t> anticipated_typed_additions = {}) const;
     /** Conservative allocation envelope for one sorted batch of changed keys. */
-    [[nodiscard]] std::size_t batch_edit_byte_bound(std::size_t changed_keys) const;
+    [[nodiscard]] std::size_t batch_edit_byte_bound(std::size_t changed_keys, std::size_t typed_keys = 0) const;
     /** New index allocations: changed search/rebalance paths, root State and
      * the possible inline-to-index promotion page. */
-    [[nodiscard]] std::size_t batch_edit_metadata_owner_bound(std::size_t changed_keys) const;
+    [[nodiscard]] std::size_t batch_edit_metadata_owner_bound(
+        std::size_t changed_keys, std::size_t typed_keys = 0) const;
 
     /** Explicit diagnostic export. Source/cache mutation uses typed deltas. */
     void visit(const std::function<void(const OwnerRecord&)>&) const;
@@ -113,6 +128,10 @@ public:
     void visit_payload(const std::function<void(const void*, std::size_t)>&) const;
 
 private:
+    friend class SimpleFluid::PLIC::details::GeometryOwnerGraphEditor;
+    [[nodiscard]] std::size_t typed_references(const void* address, PageWork* = nullptr) const;
+    [[nodiscard]] GeometryOwnerManifest edited_typed(std::span<const OwnerRecord>, std::span<const TypedOwnerReference>,
+        Admission, PageWork*, PageWork*) const;
     struct State;
     std::shared_ptr<const State> state_;
 };

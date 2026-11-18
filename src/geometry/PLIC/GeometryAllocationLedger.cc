@@ -14,6 +14,7 @@
 #include "geometry/PLIC/details/GeometryOwnerUnion.hh"
 #include "geometry/PLIC/details/GeometryOwnerUnion.tcc"
 #include "geometry/PLIC/details/GeometryRetentionCensus.tcc"
+#include "geometry/PLIC/details/NativeGeometryAccounting.hh"
 #include <type_traits>
 
 namespace SimpleFluid::PLIC
@@ -113,6 +114,12 @@ details::GeometryOwnerAdmissionPair::GeometryOwnerAdmissionPair(
     GeometryAllocationLedger& first, GeometryAllocationLedger& second)
     : first_(&first), second_(&second), previous_(active_)
 {
+    const auto first_native = GeometryAllocationOwnerAccess::native_state(first);
+    const auto second_native = GeometryAllocationOwnerAccess::native_state(second);
+    if (bool(first_native) != bool(second_native) ||
+        (first_native && (first_native.get() != second_native.get() || first_native.owner_before(second_native) ||
+                             second_native.owner_before(first_native))))
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Paired ledgers require one native allocation domain.");
     active_ = this;
     if (first.impl_)
         first.impl_->peer = GeometryAllocationOwnerAccess::paired_peer(first);
@@ -134,6 +141,20 @@ std::size_t details::identity_ledger_bookkeeping_bound(std::size_t owners)
             owners, sizeof(typename decltype(GeometryAllocationLedger::Impl::owners)::value_type) + 4 * sizeof(void*)));
 }
 
+void GeometryAllocationLedger::ImplDelete::operator()(Impl* value) const noexcept
+{
+    if (!value)
+        return;
+    if (!native_state)
+    {
+        delete value;
+        return;
+    }
+    geometry_detail::NativeConstructionAllocator<Impl> allocator(
+        std::static_pointer_cast<const geometry_detail::NativeAllocationState>(native_state));
+    std::destroy_at(value);
+    allocator.deallocate(value, 1);
+}
 GeometryAllocationLedger::GeometryAllocationLedger() noexcept = default;
 GeometryAllocationLedger::~GeometryAllocationLedger() = default;
 GeometryAllocationLedger::GeometryAllocationLedger(GeometryAllocationLedger&&) noexcept = default;
@@ -157,6 +178,13 @@ void GeometryAllocationLedger::begin_admission(std::size_t& used, std::size_t li
 {
     if (failed_)
         allocation_detail::exhausted("Geometry allocation ledger cannot resume rejected admission.");
+    if (impl_ && impl_->native && impl_->native->state)
+    {
+        if (impl_->native_paid())
+            (void) impl_->native_authority();
+        if (impl_->native->cursor != &used || limit != impl_->native->logical_limit)
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Native ledger changed its monotone cursor or cap.");
+    }
     if (impl_ && used < impl_->last_counter)
         allocation_detail::exhausted("Geometry allocation cumulative byte count decreased.");
     if (used > limit)
@@ -166,7 +194,7 @@ void GeometryAllocationLedger::begin_admission(std::size_t& used, std::size_t li
         if (sizeof(Impl) > limit - used)
             allocation_detail::exhausted("Geometry allocation ledger byte budget is exhausted.");
         used += sizeof(Impl);
-        impl_ = std::make_unique<Impl>();
+        impl_ = decltype(impl_)(new Impl(), ImplDelete{});
         impl_->bookkeeping = sizeof(Impl);
         impl_->last_counter = used;
     }
@@ -223,6 +251,8 @@ void details::GeometryAllocationOwnerAccess::admit_prepaid(GeometryAllocationLed
 void details::GeometryAllocationOwnerAccess::poison(GeometryAllocationLedger& ledger) noexcept
 {
     ledger.failed_ = true;
+    if (ledger.impl_ && ledger.impl_->native_paid() && ledger.impl_->peer)
+        ledger.impl_->peer->failed_ = true;
 }
 
 void details::GeometryAllocationOwnerAccess::seed_imported_metadata(
@@ -269,25 +299,36 @@ void details::GeometryAllocationOwnerAccess::seed_imported_metadata(
 }
 void details::GeometryAllocationOwnerAccess::retain_manifest_metadata(GeometryAllocationLedger& ledger,
     std::uint8_t channel, const std::shared_ptr<const void>& owner, std::size_t payload, std::size_t admitted,
-    std::size_t& used, std::size_t limit, bool prepaid)
+    std::size_t& used, std::size_t limit)
 {
-    retain_metadata_impl(ledger, channel, owner, payload, admitted, used, limit, prepaid, false);
+    retain_metadata_impl(ledger, channel, owner, payload, admitted, used, limit, MetadataRole::Retained);
+}
+void details::GeometryAllocationOwnerAccess::retain_created_metadata(GeometryAllocationLedger& ledger,
+    std::uint8_t channel, const std::shared_ptr<const void>& owner, std::size_t payload, std::size_t admitted,
+    std::size_t& used, std::size_t limit)
+{
+    retain_metadata_impl(ledger, channel, owner, payload, admitted, used, limit, MetadataRole::Created);
 }
 void details::GeometryAllocationOwnerAccess::retain_verified_metadata(GeometryAllocationLedger& ledger,
     std::uint8_t channel, const std::shared_ptr<const void>& owner, std::size_t payload, std::size_t admitted,
     std::size_t& used, std::size_t limit)
 {
-    retain_metadata_impl(ledger, channel, owner, payload, admitted, used, limit, false, true);
+    retain_metadata_impl(ledger, channel, owner, payload, admitted, used, limit, MetadataRole::Verified);
 }
 void details::GeometryAllocationOwnerAccess::retain_metadata_impl(GeometryAllocationLedger& ledger,
     std::uint8_t channel, const std::shared_ptr<const void>& owner, std::size_t payload, std::size_t admitted,
-    std::size_t& used, std::size_t limit, bool prepaid, bool verified)
+    std::size_t& used, std::size_t limit, MetadataRole role)
 {
     observe_work(Work::MetadataCreditQuery);
     try
     {
         const std::shared_ptr<const void> empty;
-        if (channel > 1 || !owner || admitted < payload || admitted - payload != geometry_demand::control_bytes ||
+        const auto* native_receipt = std::get_deleter<geometry_demand::NativeMetadataDelete>(owner);
+        const bool actual_native = native_receipt && native_receipt->state && native_receipt->object == owner.get() &&
+            native_receipt->extent_bytes &&
+            native_receipt->extent_bytes(owner.get(), native_receipt->control_bytes) == payload;
+        if (channel > 1 || !owner || admitted < payload ||
+            (admitted - payload != geometry_demand::control_bytes && !(actual_native && admitted == payload)) ||
             (!owner.owner_before(empty) && !empty.owner_before(owner)))
             throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid own-index metadata receipt.");
         ledger.begin_admission(used, limit);
@@ -296,9 +337,8 @@ void details::GeometryAllocationOwnerAccess::retain_metadata_impl(GeometryAlloca
             details::require_mode(*ledger.impl_->mode, mode);
         else
             ledger.impl_->mode = mode;
-        // An actual new allocation cannot alias still-pinned imported index
-        // storage. Its trusted constructor receipt needs no old-root census.
-        if (!prepaid && !verified)
+        const bool created = role == MetadataRole::Created;
+        if (role == MetadataRole::Retained)
             seed_imported_metadata(ledger, used, limit);
         const allocation_detail::Key key{allocation_detail::Kind::ExternalOwner, owner.get()};
         auto& credits = ledger.impl_->metadata_credits;
@@ -310,7 +350,15 @@ void details::GeometryAllocationOwnerAccess::retain_metadata_impl(GeometryAlloca
             ledger.impl_->last_counter = used;
             return;
         }
-        (void) ledger.impl_->admit({allocation_detail::Kind::ExternalOwner, owner}, payload, used, limit, prepaid);
+        const allocation_detail::Item item{allocation_detail::Kind::ExternalOwner, owner};
+        if (created && ledger.impl_->native_state())
+        {
+            if (!actual_native || admitted != payload)
+                throw GeometryError(GeometryErrorCode::InvalidInput, "Created native index has no exact allocation receipt.");
+            ledger.impl_->admit_created_metadata(item, *native_receipt, payload, used, limit);
+        }
+        else
+            ledger.impl_->admit(item, payload, used, limit, created);
         const auto control = admitted - payload;
         const bool granted = ledger.impl_->control_grant.contains(owner, payload, control) ||
                              (ledger.impl_->peer && ledger.impl_->peer->impl_ &&
@@ -320,7 +368,7 @@ void details::GeometryAllocationOwnerAccess::retain_metadata_impl(GeometryAlloca
             ledger.impl_->last_counter = used;
             return;
         }
-        if (prepaid || ledger.impl_->prepaid_payload)
+        if (created || ledger.impl_->prepaid_payload)
             ledger.impl_->bookkeeping = allocation_detail::add(ledger.impl_->bookkeeping, control);
         else
             ledger.impl_->account(control, true, used, limit);
@@ -382,6 +430,44 @@ void details::GeometryAllocationOwnerAccess::visit(
     if (ledger.impl_)
         for (const auto& [key, entry] : ledger.impl_->owners)
             visitor(static_cast<std::uint8_t>(key.kind), entry.pin.get(), entry.payload_bytes);
+}
+
+void details::GeometryAllocationOwnerAccess::retain_weak_observation(GeometryAllocationLedger& ledger,
+    std::uint8_t channel, const NativeWeakOwnerObservation& observation, std::size_t& used, std::size_t limit)
+{
+    try
+    {
+        if (channel > 1)
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid weak owner arithmetic channel.");
+        if (!observation) return;
+        ledger.begin_admission(used, limit);
+        const auto mode = channel ? ArithmeticMode::BoundedCertification : ArithmeticMode::Ordinary;
+        if (ledger.impl_->mode)
+            details::require_mode(*ledger.impl_->mode, mode);
+        else
+            ledger.impl_->mode = mode;
+        if (const auto* envelope = observation.native_envelope())
+            ledger.impl_->native_fixed(*envelope, used, limit);
+        else if (const auto* state = observation.native_state())
+            ledger.impl_->native_state(*state, used, limit);
+        else if (const auto* scalar = observation.detached_scalar())
+        {
+            if (ledger.impl_->admit({allocation_detail::Kind::ExternalOwner, scalar->owner}, scalar->bytes, used, limit) &&
+                scalar->keeper)
+                ledger.impl_->admit({allocation_detail::Kind::ExternalOwner, scalar->keeper}, scalar->keeper_bytes,
+                    used, limit);
+        }
+        else if (const auto* group = observation.contact_control_group())
+            if (ledger.impl_->admit({allocation_detail::Kind::ExternalOwner, group->owner}, group->bytes, used, limit))
+                ledger.impl_->admit({allocation_detail::Kind::ExternalOwner, group->keeper}, group->keeper_bytes,
+                    used, limit);
+        ledger.impl_->last_counter = used;
+    }
+    catch (...)
+    {
+        ledger.failed_ = true;
+        throw;
+    }
 }
 
 void GeometryAllocationLedger::retain_external_owner(
@@ -813,6 +899,9 @@ std::size_t details::GeometryOwnerImportAccess::import(GeometryAllocationLedger&
         }
         if (ledger.impl_->owners.empty() && !ledger.impl_->imported)
         {
+            if (ledger.impl_->native_paid() && !ledger.impl_->native_import_authorized(owners))
+                throw GeometryError(
+                    GeometryErrorCode::InvalidInput, "Native manifest import lacks sealed prefix authority.");
             // Capture shares an already admitted manifest index. Its retained
             // total remains complete while only new ledger storage is charged.
             if (ledger.impl_->prepaid_payload)
@@ -1050,6 +1139,9 @@ std::size_t details::GeometryOwnerImportAccess::import_pair(GeometryAllocationLe
             if (pair.owners[1].owner_count())
             {
                 bounded.begin_admission(used, limit);
+                if (bounded.impl_->native_paid() && !bounded.impl_->native_import_authorized(pair.owners[1]))
+                    throw GeometryError(
+                        GeometryErrorCode::InvalidInput, "Native bounded import lacks sealed prefix authority.");
                 const auto channel = pair.owners[1].uniform_channel();
                 if (channel != 1 || overlap > pair.owners[1].payload_bytes())
                     throw GeometryError(
@@ -1114,6 +1206,11 @@ geometry_demand::GeometryOwnerManifest details::GeometryOwnerImportAccess::expor
     using geometry_demand::OwnerRecord;
     if (ledger.failed_)
         allocation_detail::exhausted("Cannot export a rejected geometry owner census.");
+    if (const auto native = GeometryAllocationOwnerAccess::native_state(ledger);
+        native &&
+        (native != admission.native || native.owner_before(admission.native) || admission.native.owner_before(native)))
+        throw GeometryError(
+            GeometryErrorCode::InvalidInput, "Native owner export requires the same admitted administration State.");
     if (!ledger.impl_)
         return {};
     if (channel > 1 || (ledger.impl_->mode && *ledger.impl_->mode != (channel ? ArithmeticMode::BoundedCertification
@@ -1123,7 +1220,7 @@ geometry_demand::GeometryOwnerManifest details::GeometryOwnerImportAccess::expor
     // persistent pages. Admit all of it before the first heap allocation.
     const auto count = ledger.owner_count();
     admission.charge(count, sizeof(OwnerRecord));
-    std::vector<OwnerRecord> rows;
+    geometry_detail::NativeAdministrationVector<OwnerRecord> rows(admission.allocator<OwnerRecord>());
     rows.reserve(count);
     if (rows.capacity() != count)
         allocation_detail::exhausted("Geometry owner export row capacity is unqualified.");

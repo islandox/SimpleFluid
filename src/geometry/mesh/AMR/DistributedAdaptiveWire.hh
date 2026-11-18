@@ -58,6 +58,7 @@ struct Budget
 {
     std::size_t limit, used = 0, peak = 0, cumulative = 0;
     geometry_detail::NativeCounterAllocationEnvelope native_allocation;
+    std::size_t publication_mirror_live = 0;
     void add(std::size_t bytes)
     {
         if (bytes > limit - used)

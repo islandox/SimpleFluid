@@ -6,7 +6,11 @@
 #include "geometry/PLIC/details/GeometryIdentityRetention.hh"
 #include "geometry/PLIC/details/GeometryRetentionCensus.hh"
 #include "geometry/PLIC/details/GeometryRetentionCensusAccess.hh"
+#include "geometry/PLIC/details/NativeIdentityOwnerAccess.hh"
+#include "geometry/PLIC/details/NativePlanarOwnerAccess.hh"
+#include "geometry/details/NativeObjectOwnerAccess.hh"
 #include "geometry/PLIC/details/PointSnapshot.hh"
+#include "geometry/details/NativeAllocationGraph.hh"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -107,7 +111,7 @@ class Census
 public:
     Census(Report& r, ProbeScratch& s, ProbeLimits l)
         : report(r), limits(l), nodes(&s), work(&s), records(&s), contexts(&s), external_sizes(&s), owner_edges(&s),
-          point_edges(&s), colors(&s), depths(&s), frames(&s)
+          point_edges(&s), colors(&s), depths(&s), frames(&s), native_objects(&s)
     {
     }
     Report& report;
@@ -127,6 +131,65 @@ public:
     std::pmr::vector<unsigned char> colors;
     std::pmr::vector<std::size_t> depths;
     std::pmr::vector<Frame> frames;
+    struct NativeObject
+    {
+        std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> allocation;
+        geometry_detail::NativeConstructorStorageOwner storage;
+    };
+    std::pmr::map<CensusKey, NativeObject> native_objects;
+    template<class T> void native_object(K kind, const std::shared_ptr<const void>& owner, ArithmeticMode mode)
+    {
+        if (const auto* receipt = geometry_detail::NativeObjectOwnerAccess<T>::receipt(owner))
+            native_objects.try_emplace(CensusKey{static_cast<unsigned>(kind), owner.get(), mode},
+                NativeObject{receipt->envelope, receipt->destroy.storage});
+    }
+    template<ArithmeticMode M> void register_native(K kind, const std::shared_ptr<const void>& owner)
+    {
+        switch (kind)
+        {
+            case K::TypedWrapper: native_object<ConvexCellGeometry<M>>(kind, owner, M); break;
+            case K::DynamicWrapper: native_object<DynamicConvexGeometry>(kind, owner, M); break;
+            case K::Geometry: native_object<GeometryStorage<M>>(kind, owner, M); break;
+            case K::NativeSourceBody: native_object<NativeGeometryBody>(kind, owner, M); break;
+            case K::Topology: native_object<FrozenTopology<M>>(kind, owner, M); break;
+            case K::ExportCache: native_object<PointExportCache>(kind, owner, M); break;
+            case K::DynamicPointExport: native_object<DynamicPointExportPayload>(kind, owner, M); break;
+            case K::TypedPointExport: native_object<PointExportPayload<M>>(kind, owner, M); break;
+            case K::CompactPointBatch: native_object<PointSnapshotPayload<M>>(kind, owner, M); break;
+            case K::Plane: native_object<StoredPlane<M>>(kind, owner, M); break;
+            case K::PointSnapshot: native_object<PointSnapshotContext<M>>(kind, owner, M); break;
+            case K::NativeFactBlock: native_object<NativePointFactBlock<M>>(kind, owner, M); break;
+            case K::Moment: native_object<StoredMomentCache<M>>(kind, owner, M); break;
+            case K::Ancestry: native_object<Ancestry>(kind, owner, M); break;
+            case K::Split: native_object<Split>(kind, owner, M); break;
+            case K::Certificate: native_object<PartitionCertificate>(kind, owner, M); break;
+            case K::Recipe: native_object<GeometryConstruction>(kind, owner, M); break;
+            case K::Clip: native_object<GeometryClipConstruction>(kind, owner, M); break;
+            case K::PlanarWrapper: {
+                const auto face = std::static_pointer_cast<const PlanarFace<ArithmeticMode::Ordinary>>(owner);
+                if (NativePlanarOwnerAccess::admitted(face))
+                {
+                    native_objects.try_emplace(CensusKey{planar_wrapper, face.get(), ArithmeticMode::Ordinary},
+                        NativeObject{NativePlanarOwnerAccess::wrapper_envelope(face), {}});
+                    native_objects.try_emplace(CensusKey{planar_payload, face->storage_identity(), ArithmeticMode::Ordinary},
+                        NativeObject{NativePlanarOwnerAccess::payload_envelope(face), NativePlanarOwnerAccess::storage(face)});
+                }
+                break;
+            }
+            default: break;
+        }
+    }
+    void register_native(K kind, const std::shared_ptr<const void>& owner, ArithmeticMode mode)
+    {
+        if (mode == ArithmeticMode::Ordinary) register_native<ArithmeticMode::Ordinary>(kind, owner);
+        else if (mode == ArithmeticMode::BoundedCertification) register_native<ArithmeticMode::BoundedCertification>(kind, owner);
+    }
+    template<class T> void push(K kind, const std::shared_ptr<T>& owner, const CensusWork& work)
+    {
+        if (!owner) return;
+        register_native(kind, owner, work.key.mode);
+        push(kind, owner.get(), work);
+    }
     static constexpr auto no_parent = std::numeric_limits<std::size_t>::max();
     std::size_t owner_parent = no_parent, point_parent = no_parent;
     CensusNode& ensure_node(CensusKey key)
@@ -150,7 +213,12 @@ public:
     {
         if (!p)
             return;
-        if (k == static_cast<unsigned>(K::PointSnapshot))
+        // Opaque C++ allocations have one physical identity independent of
+        // the arithmetic ledger that reached them. Native admission State and
+        // fixed envelopes may be shared by ordinary and bounded roots.
+        if (k == static_cast<unsigned>(K::ExternalOwner))
+            m = ArithmeticMode::Ordinary;
+        else if (k == static_cast<unsigned>(K::PointSnapshot))
             m = static_cast<const PointSnapshotContextBase*>(p)->mode;
         else if (k == static_cast<unsigned>(K::Geometry))
             m = static_cast<const DynamicConvexGeometry::Impl*>(p)->limits.arithmetic_mode;
@@ -331,6 +399,110 @@ public:
         row.unused_capacity_bytes = unused;
         row.bytes = census_add(metadata, census_add(populated, unused));
     }
+    std::size_t native_external(const std::shared_ptr<const void>& owner, std::size_t bytes, const CensusWork& work)
+    {
+        if (!owner)
+            throw InvalidGraph{};
+        const std::array<std::size_t, 3> size{bytes, 0, 0};
+        const auto [found, inserted] = external_sizes.emplace(owner.get(), size);
+        if (!inserted && found->second != size)
+            throw InvalidGraph{};
+        push(K::ExternalOwner, owner.get(), work);
+        return ensure_node({static_cast<unsigned>(K::ExternalOwner), owner.get(), ArithmeticMode::Ordinary}).id;
+    }
+    void native_state(
+        const std::shared_ptr<const geometry_detail::NativeAllocationState>& state, const CensusWork& work)
+    {
+        const auto bytes = geometry_detail::NativeAllocationGraphAccess::validate_state(state);
+        const auto saved_parent = owner_parent;
+        owner_parent = native_external(state, state->allocation_admission_bytes, work);
+        if (state->mirror.owner)
+            native_external(state->mirror.owner, state->mirror.owner_proof.bytes(), work);
+        owner_parent = native_external(state->counter_owner, bytes, work);
+        if (state->mirror.owner)
+            native_external(state->mirror.owner, state->mirror.owner_proof.bytes(), work);
+        owner_parent = saved_parent;
+    }
+    void native_fixed(
+        const std::shared_ptr<const geometry_detail::NativeAllocationEnvelope>& owner, const CensusWork& work)
+    {
+        if (!owner || !owner->authentic_owner(owner))
+            throw InvalidGraph{};
+        const auto saved_parent = owner_parent;
+        owner_parent = native_external(owner, owner->fixed_allocation_bytes(), work);
+        native_state(owner->state(), work);
+        owner_parent = saved_parent;
+    }
+    void native_weak_observation(const NativeWeakOwnerObservation& value, const CensusWork& work)
+    {
+        if (const auto* envelope = value.native_envelope())
+            native_fixed(*envelope, work);
+        else if (const auto* state = value.native_state())
+            native_state(*state, work);
+        else if (const auto* scalar = value.detached_scalar())
+        {
+            const auto saved_parent = owner_parent;
+            owner_parent = native_external(scalar->owner, scalar->bytes, work);
+            if (scalar->keeper) native_external(scalar->keeper, scalar->keeper_bytes, work);
+            owner_parent = saved_parent;
+        }
+        else if (const auto* group = value.contact_control_group())
+        {
+            const auto saved_parent = owner_parent;
+            owner_parent = native_external(group->owner, group->bytes, work);
+            native_external(group->keeper, group->keeper_bytes, work);
+            owner_parent = saved_parent;
+        }
+    }
+    void native_storage(const geometry_detail::NativeConstructorStorageOwner& storage, const CensusWork& work)
+    {
+        if (!storage.owner || !storage.envelope || !storage.envelope->matches(storage.owner))
+            throw InvalidGraph{};
+        native_fixed(storage.envelope, work);
+        const auto saved_parent = owner_parent;
+        owner_parent = native_external(storage.owner, storage.owner->exclusive_bytes(), work);
+        native_state(storage.owner->admission().state(), work);
+        owner_parent = saved_parent;
+    }
+    void native_financial(const NativePaidExtentCharge& value, const CensusWork& work)
+    {
+        const auto saved_parent = owner_parent;
+        native_weak_observation(value.physical_observation(), work);
+        native_weak_observation(value.financial_observation(), work);
+        struct Context { Census& census; const CensusWork& work; bool first = true; } context{*this, work};
+        const NativeFinancialInspectionSink sink{&context,
+            [](void* raw, std::uint8_t kind, const auto& owner, std::size_t bytes)
+            {
+                auto& context = *static_cast<Context*>(raw);
+                if (kind != std::uint8_t(K::ExternalOwner)) throw InvalidGraph{};
+                const auto id = context.census.native_external(owner, bytes, context.work);
+                if (context.first) { context.census.owner_parent = id; context.first = false; }
+            },
+            [](void* raw, const auto& fixed)
+            { auto& context = *static_cast<Context*>(raw); context.census.native_fixed(fixed, context.work); },
+            [](void* raw, const auto& storage)
+            { auto& context = *static_cast<Context*>(raw); context.census.native_storage(storage, context.work); },
+            [](void* raw, const auto& state)
+            { auto& context = *static_cast<Context*>(raw); context.census.native_state(state, context.work); },
+            [](void* raw, const BorrowedRoot& root)
+            { auto& context = *static_cast<Context*>(raw); context.census.root_one(root, context.work.groups,
+                context.work.required, context.work.ledger); },
+            [](void* raw, const NativeWeakOwnerObservation& observation)
+            { auto& context = *static_cast<Context*>(raw); context.census.native_weak_observation(observation, context.work); }};
+        value.inspect_financial(sink);
+        owner_parent = saved_parent;
+    }
+    void native_receipts(const NativeOwnerReceipts& receipts, const CensusWork& work)
+    {
+        struct Context { Census& census; const CensusWork& work; } context{*this, work};
+        receipts.visit_administration({&context,
+            [](void* raw, const auto& owner, std::size_t payload, std::size_t)
+            { auto& context = *static_cast<Context*>(raw); context.census.native_external(owner, payload, context.work); return true; },
+            [](void* raw, const auto& owner, std::size_t bytes)
+            { auto& context = *static_cast<Context*>(raw); context.census.native_external(owner, bytes, context.work); return true; },
+            nullptr, [](void* raw, const NativePaidExtentCharge& charge)
+            { auto& context = *static_cast<Context*>(raw); context.census.native_financial(charge, context.work); }});
+    }
     template<class T> void table(const std::vector<T>& values, std::size_t& populated, std::size_t& unused)
     {
         populated = census_add(populated, census_mul(values.size(), sizeof(T)));
@@ -373,13 +545,13 @@ public:
                 case K::TypedWrapper: {
                     const auto& g = *static_cast<const ConvexCellGeometry<M>*>(p);
                     metadata = sizeof(g);
-                    push(K::DynamicWrapper, g.dynamic_geometry().get(), w);
+                    push(K::DynamicWrapper, g.dynamic_geometry(), w);
                     break;
                 }
                 case K::DynamicWrapper: {
                     const auto& g = *static_cast<const DynamicConvexGeometry*>(p);
                     metadata = sizeof(g);
-                    push(K::Geometry, DynamicGeometryAccess::implementation(g).get(), w);
+                    push(K::Geometry, DynamicGeometryAccess::implementation(g), w);
                     break;
                 }
                 case K::Geometry: {
@@ -390,19 +562,19 @@ public:
                         table(g.vertices, populated, unused);
                     if (const auto* owner =
                             std::get_if<std::shared_ptr<const DynamicConvexGeometry::Impl>>(&g.vertex_owner))
-                        push(K::Geometry, owner->get(), w);
+                        push(K::Geometry, *owner, w);
                     else if (const auto* owner =
                                  std::get_if<std::shared_ptr<const NativeGeometryBody>>(&g.vertex_owner))
-                        push(K::NativeSourceBody, owner->get(), w);
-                    push(K::Topology, g.topology.get(), w);
-                    push(K::PointSnapshot, g.point_context.get(), w);
-                    push(K::ExportCache, g.point_export_cache.get(), w);
-                    push(K::Geometry, g.export_source.get(), w);
-                    push(K::Recipe, g.native_export_source.get(), w);
-                    push(K::Moment, g.moment_cache.get(), w);
-                    push(K::Ancestry, g.ancestry.get(), w);
-                    push(K::Certificate, g.partition_certificate.get(), w);
-                    push(K::Recipe, g.construction.get(), w);
+                        push(K::NativeSourceBody, *owner, w);
+                    push(K::Topology, g.topology, w);
+                    push(K::PointSnapshot, g.point_context, w);
+                    push(K::ExportCache, g.point_export_cache, w);
+                    push(K::Geometry, g.export_source, w);
+                    push(K::Recipe, g.native_export_source, w);
+                    push(K::Moment, g.moment_cache, w);
+                    push(K::Ancestry, g.ancestry, w);
+                    push(K::Certificate, g.partition_certificate, w);
+                    push(K::Recipe, g.construction, w);
                     if (w.required)
                         for (const auto& vertex : g.vertices)
                         {
@@ -422,10 +594,10 @@ public:
                     const auto& body = *static_cast<const NativeGeometryBody*>(p);
                     metadata = sizeof(body);
                     table(body.vertices, populated, unused);
-                    push(K::Topology, body.topology.get(), w);
-                    push(K::PointSnapshot, body.point_context.get(), w);
-                    push(K::ExportCache, body.export_cache.get(), w);
-                    push(K::Ancestry, body.ancestry.get(), w);
+                    push(K::Topology, body.topology, w);
+                    push(K::PointSnapshot, body.point_context, w);
+                    push(K::ExportCache, body.export_cache, w);
+                    push(K::Ancestry, body.ancestry, w);
                     if (w.required)
                         for (const auto& vertex : body.vertices)
                         {
@@ -450,7 +622,7 @@ public:
                         },
                         t.arrays);
                     for (const auto& plane : t.planes)
-                        push(K::Plane, plane.get(), w);
+                        push(K::Plane, plane, w);
                     break;
                 }
                 case K::ExportCache: {
@@ -463,7 +635,7 @@ public:
                     const auto& payload = *static_cast<const DynamicPointExportPayload*>(p);
                     metadata = sizeof(payload);
                     table(payload.points, populated, unused);
-                    push(K::PointSnapshot, payload.point_context.get(), w);
+                    push(K::PointSnapshot, payload.point_context, w);
                     for (const auto& value : payload.points)
                         point(RetentionAccess::provenance(value), w.groups, w.ledger, w.required);
                     break;
@@ -472,7 +644,7 @@ public:
                     const auto& payload = *static_cast<const PointExportPayload<M>*>(p);
                     metadata = sizeof(payload);
                     table(payload.points, populated, unused);
-                    push(K::PointSnapshot, payload.point_context.get(), w);
+                    push(K::PointSnapshot, payload.point_context, w);
                     for (const auto& value : payload.points)
                         point(RetentionAccess::provenance(value), w.groups, w.ledger, w.required);
                     break;
@@ -481,7 +653,7 @@ public:
                     const auto& payload = *static_cast<const PointSnapshotPayload<M>*>(p);
                     metadata = sizeof(payload);
                     table(payload.refs, populated, unused);
-                    push(K::PointSnapshot, payload.context.get(), w);
+                    push(K::PointSnapshot, payload.context, w);
                     if (w.required)
                         for (const auto ref : payload.refs)
                             point(resolve_point(payload.context.get(), ref), 0, false, true);
@@ -527,9 +699,9 @@ public:
                     if (!w.required)
                     {
                         for (const auto& dependency : context.dependencies)
-                            push(K::PointSnapshot, dependency.get(), w);
+                            push(K::PointSnapshot, dependency, w);
                         for (const auto& block : context.native_fact_blocks)
-                            push(K::NativeFactBlock, block.get(), w);
+                            push(K::NativeFactBlock, block, w);
                         for (const auto& a : context.authority_table)
                             authority(a, w);
                     }
@@ -549,21 +721,21 @@ public:
                     const auto& a = *static_cast<const Ancestry*>(p);
                     metadata = sizeof(a);
                     report.owners.at(n.id).depth = a.depth;
-                    push(K::Ancestry, a.parent.get(), w);
-                    push(K::Split, a.split.get(), w);
+                    push(K::Ancestry, a.parent, w);
+                    push(K::Split, a.split, w);
                     break;
                 }
                 case K::Split: {
                     const auto& s = *static_cast<const Split*>(p);
                     metadata = sizeof(s);
-                    push(K::Ancestry, s.parent.get(), w);
+                    push(K::Ancestry, s.parent, w);
                     break;
                 }
                 case K::Certificate: {
                     const auto& c = *static_cast<const PartitionCertificate*>(p);
                     metadata = sizeof(c);
                     table(c.members, populated, unused);
-                    push(K::Ancestry, c.parent.get(), w);
+                    push(K::Ancestry, c.parent, w);
                     break;
                 }
                 case K::Recipe: {
@@ -581,19 +753,19 @@ public:
                         if (const auto* native = r.source().native())
                         {
                             metadata = census_add(metadata, sizeof(NativeGeometryConstruction));
-                            push(K::CartesianSource, native->source.get(), child);
-                            push(K::NativeSourceBody, native->body.get(), child);
-                            push(K::Moment, native->moments.get(), child);
+                            push(K::CartesianSource, native->source, child);
+                            push(K::NativeSourceBody, native->body, child);
+                            push(K::Moment, native->moments, child);
                         }
                         else
-                            push(K::Geometry, r.source().geometry().get(), child);
+                            push(K::Geometry, r.source().geometry(), child);
                     }
                     else if (r.kind() == GeometryConstruction::Kind::Clip)
-                        push(K::Clip, r.clip().clip.get(), child);
+                        push(K::Clip, r.clip().clip, child);
                     else
                     {
                         metadata = census_add(metadata, sizeof(GeometryConstruction::Rebase));
-                        push(K::Recipe, r.rebase().parent.get(), child);
+                        push(K::Recipe, r.rebase().parent, child);
                     }
                     break;
                 }
@@ -601,10 +773,10 @@ public:
                     const auto& c = *static_cast<const GeometryClipConstruction*>(p);
                     metadata = sizeof(c);
                     table(c.retained_points, populated, unused);
-                    push(K::Recipe, c.parent.get(), w);
-                    push(K::Recipe, c.native_plane_source.get(), w);
-                    push(K::Plane, c.plane.get(), w);
-                    push(K::PointSnapshot, c.point_context.get(), w);
+                    push(K::Recipe, c.parent, w);
+                    push(K::Recipe, c.native_plane_source, w);
+                    push(K::Plane, c.plane, w);
+                    push(K::PointSnapshot, c.point_context, w);
                     if (w.required)
                         for (const auto ref : c.retained_points)
                             point(resolve_point(c.point_context.get(), ref), 0, false, true);
@@ -612,9 +784,16 @@ public:
                 }
                 case K::IdentityPayload: {
                     const auto& identity = *static_cast<const GeometryIdentityBacking*>(p);
-                    metadata = sizeof(identity);
-                    if (identity.native)
+                    const auto* admitted = NativeIdentityOwnerAccess::backing(identity);
+                    if (admitted)
                     {
+                        metadata = 0; // canonical semantic IdentityPayload anchor
+                        native_fixed(admitted->envelope(), w);
+                        native_storage(admitted->storage(), w);
+                    }
+                    else if (identity.native)
+                    {
+                        metadata = sizeof(identity);
                         const auto native =
                             identity.native->native_kind() == GeometryIdentityNativeKind::OrdinarySupport
                                 ? ordinary_identity_retention_bytes(*identity.native)
@@ -627,6 +806,8 @@ public:
                         populated = native.populated;
                         unused = native.unused;
                     }
+                    else
+                        metadata = sizeof(identity);
                     report.maximum_identity_depth = std::max(report.maximum_identity_depth, identity.depth);
                     report.owners.at(n.id).depth = identity.depth;
                     push(K::IdentityPayload, identity.parent.get(), w);
@@ -688,9 +869,9 @@ public:
                     table(RetentionAccess::catalog_sources(catalog), populated, unused);
                     if constexpr (M == ArithmeticMode::Ordinary)
                         for (const auto& source : RetentionAccess::catalog_sources(catalog))
-                            push(K::CartesianSource, source.get(), w);
+                            push(K::CartesianSource, source, w);
                     for (const auto& page : RetentionAccess::catalog_pages(catalog))
-                        push(K::CellShellPage, page.get(), w);
+                        push(K::CellShellPage, page, w);
                     break;
                 }
                 case K::CellShellPage: {
@@ -698,7 +879,7 @@ public:
                     metadata = sizeof(page);
                     table(page.cells, populated, unused);
                     for (const auto& geometry : page.cells)
-                        push(K::TypedWrapper, geometry.get(), w);
+                        push(K::TypedWrapper, geometry, w);
                     break;
                 }
                 case K::CartesianSource: {
@@ -724,6 +905,14 @@ public:
                 case K::PlanarPayload:
                     throw InvalidGraph{}; // Opaque planar owners use the normalizing branches above.
             }
+        if (const auto native = native_objects.find(w.key); native != native_objects.end())
+        {
+            // A zero-byte semantic anchor retains all semantic children. Its
+            // actual object/control/buffers are separate physical owners.
+            metadata = populated = unused = 0;
+            native_fixed(native->second.allocation, w);
+            if (native->second.storage.owner) native_storage(native->second.storage, w);
+        }
         account(n, metadata, populated, unused);
     }
     std::pmr::map<const void*, const PlanarFace<ArithmeticMode::Ordinary>*, std::less<const void*>> planar_faces{
@@ -882,13 +1071,27 @@ public:
         root_one(r, mask, false);
         logical_roots.push_back(r);
     }
-    void root_one(const BorrowedRoot& r, std::uint64_t mask, bool required)
+    void root_one(const BorrowedRoot& r, std::uint64_t mask, bool required, bool ledger = false)
     {
         if (!r.object)
             return;
-        CensusWork w{{0, r.object, r.mode}, mask, false, required};
+        CensusWork w{{0, r.object, r.mode}, mask, ledger, required};
+        if (r.borrow_owner)
+        {
+            const auto owner = r.borrow_owner(r.owner_slot);
+            if (owner.get() != r.object) throw InvalidGraph{};
+            if (r.kind == RootKind::TypedGeometry) register_native(K::TypedWrapper, owner, r.mode);
+            else if (r.kind == RootKind::DynamicGeometry) register_native(K::DynamicWrapper, owner, r.mode);
+            else if (r.kind == RootKind::OrdinaryPlanarFace) register_native(K::PlanarWrapper, owner, r.mode);
+        }
         switch (r.kind)
         {
+            case RootKind::NativeReceipts:
+                native_receipts(*static_cast<const NativeOwnerReceipts*>(r.object), w);
+                break;
+            case RootKind::NativeWeakObservation:
+                native_weak_observation(*static_cast<const NativeWeakOwnerObservation*>(r.object), w);
+                break;
             case RootKind::TypedGeometry:
                 push(K::TypedWrapper, r.object, w);
                 break;
@@ -896,16 +1099,16 @@ public:
                 push(K::DynamicWrapper, r.object, w);
                 break;
             case RootKind::DynamicPoint:
-                point(RetentionAccess::provenance(*static_cast<const DynamicPoint*>(r.object)), mask, false, required);
+                point(RetentionAccess::provenance(*static_cast<const DynamicPoint*>(r.object)), mask, ledger, required);
                 break;
             case RootKind::TypedPoint:
                 if (r.mode == ArithmeticMode::Ordinary)
                     point(RetentionAccess::provenance(*static_cast<const Point<ArithmeticMode::Ordinary>*>(r.object)),
-                        mask, false, required);
+                        mask, ledger, required);
                 else if (r.mode == ArithmeticMode::BoundedCertification)
                     point(RetentionAccess::provenance(
                               *static_cast<const Point<ArithmeticMode::BoundedCertification>*>(r.object)),
-                        mask, false, required);
+                        mask, ledger, required);
                 else
                     throw InvalidGraph{};
                 break;
@@ -964,7 +1167,7 @@ public:
                 break;
             }
             case RootKind::OrdinaryPlanarFace:
-                push(planar_wrapper, r.object, ArithmeticMode::Ordinary, mask, false, required);
+                push(planar_wrapper, r.object, ArithmeticMode::Ordinary, mask, ledger, required);
                 break;
             case RootKind::IdentityBacking:
                 push(K::IdentityPayload, r.object, w);
@@ -1074,7 +1277,17 @@ Report inspect_retention(std::span<const BorrowedRoot> roots, std::span<const Ge
                 continue;
             report.ledger_payload_admission = census_add(report.ledger_payload_admission, impl->payload);
             report.ledger_bookkeeping_admission = census_add(report.ledger_bookkeeping_admission, impl->bookkeeping);
-            auto tracking =
+            std::size_t tracking = 0;
+            if (impl->native && impl->native->state)
+            {
+                tracking = census_add(sizeof(*impl), sizeof(GeometryAllocationLedger::Impl::NativeContext));
+                tracking = census_add(tracking, impl->native->allocation_bytes);
+                CensusWork holder{{static_cast<unsigned>(K::ExternalOwner), impl, ArithmeticMode::Ordinary}, 0, true, false};
+                census.native_state(impl->native->state, holder);
+            }
+            else
+            {
+                tracking =
                 census_add(sizeof(*impl), census_mul(impl->pending.capacity(), sizeof(allocation_detail::Item)));
             tracking = census_add(tracking, census_mul(impl->additional_subsets.capacity(),
                                                 sizeof(GeometryAllocationLedger::Impl::SubsetCertificate)));
@@ -1084,6 +1297,9 @@ Report inspect_retention(std::span<const BorrowedRoot> roots, std::span<const Ge
             tracking = census_add(
                 tracking, census_mul(impl->metadata_credits.size(),
                               sizeof(typename decltype(impl->metadata_credits)::value_type) + 4 * sizeof(void*)));
+                if (impl->native)
+                    tracking = census_add(tracking, sizeof(GeometryAllocationLedger::Impl::NativeContext));
+            }
             report.ledger_tracking_bytes = census_add(report.ledger_tracking_bytes, tracking);
             const auto mode = impl->mode.value_or(ArithmeticMode::Ordinary);
             for (const auto& [key, value] : impl->owners)
@@ -1096,6 +1312,7 @@ Report inspect_retention(std::span<const BorrowedRoot> roots, std::span<const Ge
                 if (key.kind == K::ExternalOwner)
                     census.external_sizes.emplace(
                         value.pin.get(), std::array<std::size_t, 3>{value.payload_bytes, 0, 0});
+                census.register_native(key.kind, value.pin, mode);
                 census.push(static_cast<unsigned>(key.kind), value.pin.get(), mode, 0, true, false);
             }
             if (impl->imported)
@@ -1109,6 +1326,8 @@ Report inspect_retention(std::span<const BorrowedRoot> roots, std::span<const Ge
                         if (imported_kind == static_cast<unsigned>(K::ExternalOwner))
                             census.external_sizes.emplace(row.owner.get(),
                                 std::array<std::size_t, 3>{row.exclusive_payload_bytes(), 0, 0});
+                        if (row.key.kind == std::uint8_t(K::PlanarPayload)) return;
+                        census.register_native(static_cast<K>(row.key.kind), row.owner, mode);
                         census.push(imported_kind, row.owner.get(), mode, 0, true, false);
                     });
             }

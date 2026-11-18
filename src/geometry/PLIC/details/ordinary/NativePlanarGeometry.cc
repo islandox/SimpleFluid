@@ -5,6 +5,7 @@
 #include "geometry/PLIC/details/NativePlanarCodecAccess.hh"
 #include "geometry/PLIC/details/NativePlanarOwnerAccess.hh"
 #include "geometry/details/NativeObjectOwnerAccess.hh"
+#include "geometry/PLIC/details/NativeGeometryAccounting.hh"
 #include "geometry/PLIC/details/NativeGeometryByteWriter.hh"
 #include "geometry/PLIC/details/GeometryPacketHeader.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
@@ -99,9 +100,24 @@ void GeometryAllocationLedger::retain_planar_face(const OrdinaryFacePtr& face, s
             details::require_mode(*impl_->mode, ArithmeticMode::Ordinary);
         else
             impl_->mode = ArithmeticMode::Ordinary;
-        impl_->admit({allocation_detail::Kind::PlanarWrapper, face}, sizeof(OrdinaryFace), used, limit);
-        impl_->admit(
-            {allocation_detail::Kind::PlanarPayload, face->impl_}, face->exclusive_storage_bytes(), used, limit);
+        const bool native = details::NativePlanarOwnerAccess::admitted(face);
+        if (native)
+        {
+            impl_->native_typed_receipt(allocation_detail::Kind::PlanarWrapper, face,
+                details::NativePlanarOwnerAccess::wrapper_envelope(face), {}, used, limit);
+            impl_->native_typed_receipt(allocation_detail::Kind::PlanarPayload, face->impl_,
+                details::NativePlanarOwnerAccess::payload_envelope(face),
+                details::NativePlanarOwnerAccess::storage(face), used, limit);
+        }
+        impl_->admit({allocation_detail::Kind::PlanarWrapper, face}, native ? 0 : sizeof(OrdinaryFace), used, limit);
+        impl_->admit({allocation_detail::Kind::PlanarPayload, face->impl_},
+            native ? 0 : face->exclusive_storage_bytes(), used, limit);
+        if (native)
+        {
+            impl_->native_object_children(details::NativePlanarOwnerAccess::wrapper_envelope(face), {}, used, limit);
+            impl_->native_object_children(details::NativePlanarOwnerAccess::payload_envelope(face),
+                details::NativePlanarOwnerAccess::storage(face), used, limit);
+        }
         if (face->impl_->support)
             impl_->retain_identity(*face->impl_->support, used, limit);
         impl_->last_counter = used;
@@ -1045,7 +1061,54 @@ OrdinaryFacePtr OrdinaryFace::decode(std::span<const char> bytes, std::size_t by
         throw std::invalid_argument("Noncanonical planar face packet.");
     return result;
 }
-
+details::NativePlanarOwnerAccess::Pointer details::NativePlanarOwnerAccess::decode(
+    std::span<const char> bytes, std::size_t byte_budget, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    const auto envelope = decode_geometry_packet(bytes, ArithmeticMode::Ordinary, byte_budget);
+    if (envelope.kind != GeometryPacketKind::PlanarFace && envelope.kind != GeometryPacketKind::PlanarFaceIncidence)
+        throw std::invalid_argument("Foreign planar face packet kind.");
+    on::Reader reader{envelope.body, 0, true};
+    if (reader.tag() != GeometryTag::OrdinaryPlanarFace)
+        on::reject("foreign native planar packet mode.");
+    const auto encoded_support = reader.packet();
+    auto shape = reader;
+    (void) shape.point();
+    const auto points = shape.count(vertex_cap);
+    if (points > (shape.bytes.size() - shape.cursor) / 48)
+        on::reject("planar point count exceeds the remaining encoded coordinates.");
+    std::size_t native_used = sizeof(OrdinaryFace) + sizeof(Face::Impl);
+    if (native_used > byte_budget || points > (byte_budget - native_used) / sizeof(Face::WidePoint))
+        on::reject("planar polygon exceeds the native record budget.");
+    native_used += points * sizeof(Face::WidePoint);
+    if (encoded_support.size() > byte_budget - native_used)
+        on::reject("planar support exceeds the remaining native record budget.");
+    auto support = IdentityAccess::decode_support_admitted(encoded_support, byte_budget - native_used, admission);
+    // Keep the legacy numerical ledger's logical payload/metadata gate on a
+    // separate monotone cursor; its actual administration uses the same domain.
+    GeometryAllocationLedger allocations;
+    details::GeometryAllocationOwnerAccess::begin_native_bookkeeping(allocations, admission, native_used, byte_budget);
+    allocations.retain(support, native_used, byte_budget);
+    const auto normal = reader.point();
+    const auto count = reader.count(vertex_cap);
+    if (count > (reader.bytes.size() - reader.cursor) / 48)
+        on::reject("planar point count exceeds the remaining encoded coordinates.");
+    const auto scratch = geometry_detail::native_constructor_storage(admission);
+    Polygon polygon;
+    scratch.owner->reserve(polygon, count);
+    for (std::size_t i = 0; i < count; ++i)
+        polygon.push_back(reader.point());
+    reader.finish();
+    auto result = retained(polygon, normal, std::move(support), admission);
+    const auto actual = sizeof(OrdinaryFace) + result->exclusive_storage_bytes();
+    const auto reserved = sizeof(OrdinaryFace) + sizeof(Face::Impl) + points * sizeof(Face::WidePoint);
+    if (actual > reserved && actual - reserved > byte_budget - native_used)
+        on::reject("planar polygon capacity exceeds the native record budget.");
+    const auto canonical = details::NativePlanarCodecAccess::encode(
+        *result, envelope.kind == GeometryPacketKind::PlanarFaceIncidence, scratch);
+    if (canonical.size() != bytes.size() || !std::equal(canonical.begin(), canonical.end(), bytes.begin()))
+        throw std::invalid_argument("Noncanonical planar face packet.");
+    return result;
+}
 template<> OrdinarySupport planar_support<ArithmeticMode::Ordinary>(const OrdinaryFace& face)
 {
     return *face.impl_->support;

@@ -6,6 +6,7 @@
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/SupportClassification.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
+#include "geometry/PLIC/details/NativePaidExtent.hh"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -30,7 +31,9 @@ enum class RootKind : std::uint8_t
     OrdinaryBoundary,
     CartesianSource,
     CellCatalog,
-    ExternalOwner
+    ExternalOwner,
+    NativeReceipts,
+    NativeWeakObservation
 };
 struct BorrowedRoot
 {
@@ -39,7 +42,15 @@ struct BorrowedRoot
     ArithmeticMode mode = ArithmeticMode::Ordinary;
     std::uint32_t group = 0;
     std::size_t exclusive_bytes = 0;
+    // Optional borrow of an actual shared owner slot. No pin is stored in a
+    // report; callers keep this slot and its target stable during inspection.
+    const void* owner_slot = nullptr;
+    std::shared_ptr<const void> (*borrow_owner)(const void*) = nullptr;
 };
+inline BorrowedRoot root(const NativeOwnerReceipts& receipts, std::uint32_t group = 0)
+{ return {RootKind::NativeReceipts, &receipts, ArithmeticMode::Ordinary, group}; }
+inline BorrowedRoot root(const NativeWeakOwnerObservation& observation, std::uint32_t group = 0)
+{ return {RootKind::NativeWeakObservation, &observation, ArithmeticMode::Ordinary, group}; }
 inline BorrowedRoot external_root(const void* owner, std::size_t bytes, std::uint32_t group = 0)
 { return {RootKind::ExternalOwner, owner, ArithmeticMode::Ordinary, group, bytes}; }
 template<ArithmeticMode M> BorrowedRoot root(const CellGeometryCatalog<M>& catalog, std::uint32_t group = 0)
@@ -94,6 +105,15 @@ inline BorrowedRoot root(const OrdinaryBoundary& p, std::uint32_t g = 0)
 inline BorrowedRoot root(const PlanarFace<ArithmeticMode::Ordinary>& p, std::uint32_t g = 0)
 {
     return {RootKind::OrdinaryPlanarFace, &p, ArithmeticMode::Ordinary, g};
+}
+template<class T> BorrowedRoot root(const std::shared_ptr<T>& owner, std::uint32_t group = 0)
+{
+    if (!owner) return {};
+    auto result = root(*owner, group);
+    result.owner_slot = &owner;
+    result.borrow_owner = [](const void* slot) -> std::shared_ptr<const void>
+    { return *static_cast<const std::shared_ptr<T>*>(slot); };
+    return result;
 }
 /** Caller keeps roots alive and quiescent only during inspection. Scratch must
  * outlive the report; reset() is valid only after report destruction. */

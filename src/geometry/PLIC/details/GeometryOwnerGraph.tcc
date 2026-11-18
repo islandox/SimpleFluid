@@ -3,14 +3,27 @@
  */
 #pragma once
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
+#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/PLIC/details/GeometryOwnerGraph.hh"
 #include "geometry/PLIC/details/GeometryOwnerImportAccess.hh"
 #include "geometry/PLIC/details/GeometryRetentionCensusAccess.hh"
+#include "geometry/PLIC/details/NativeIdentityOwnerAccess.hh"
+#include "geometry/PLIC/details/NativePlanarOwnerAccess.hh"
+#include "geometry/details/NativeAllocationGraph.hh"
 #include <algorithm>
 #include <exception>
+#include <tuple>
 
 namespace SimpleFluid::PLIC::details
 {
+bool geometry_demand::MetadataSink::project_native_state(
+    const std::shared_ptr<const geometry_detail::NativeAllocationState>& state) const
+{
+    if (!financial_graph)
+        return false;
+    financial_graph->native_state(state, financial_retain);
+    return true;
+}
 bool GeometryOwnerGraphEditor::Impl::KeyLess::operator()(
     const geometry_demand::OwnerKey& a, const geometry_demand::OwnerKey& b) const noexcept
 {
@@ -50,15 +63,40 @@ geometry_demand::Admission GeometryOwnerGraphEditor::Impl::admission()
             auto& self = *static_cast<Impl*>(raw);
             if (self.used > self.limit || bytes > self.limit - self.used)
                 allocation_detail::exhausted("Geometry owner graph index budget is exhausted.");
+            if (self.native_administration)
+                self.native_administration->record_ledger_work(bytes);
             self.used += bytes;
         },
         [](void* raw, const std::shared_ptr<const void>& owner, std::size_t payload, std::size_t admitted)
         {
             auto& self = *static_cast<Impl*>(raw);
             if (self.ledger)
-                GeometryAllocationOwnerAccess::retain_manifest_metadata(
-                    *self.ledger, self.channel, owner, payload, admitted, self.used, self.limit, true);
+                GeometryAllocationOwnerAccess::retain_created_metadata(
+                    *self.ledger, self.channel, owner, payload, admitted, self.used, self.limit);
+        },
+        native_administration,
+        [](void* raw, const std::shared_ptr<const void>& owner, std::size_t bytes)
+        {
+            auto& self = *static_cast<Impl*>(raw);
+            if (self.ledger)
+                GeometryAllocationOwnerAccess::register_native_metadata(*self.ledger, self.channel, owner, bytes);
         }};
+}
+void GeometryOwnerGraphEditor::Impl::edit_paid(const NativePaidExtentCharge& charge, NativeOwnerReceipts::Action action)
+{
+    using Action = NativeOwnerReceipts::Action;
+    const bool adding = action == Action::Record || action == Action::Retain;
+    if (adding && !charge.valid())
+    {
+        if (charge.has_financial_pin())
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Native financial receipt does not authenticate funding.");
+        return;
+    }
+    if (action == Action::Record && !paid_reference_edits && paid.contains(charge))
+        return;
+    if (!paid_edits) paid_edits.emplace(admission());
+    paid_edits->append(charge, action);
+    paid_reference_edits |= action != Action::Record;
 }
 template<class Kind>
 std::size_t GeometryOwnerGraphEditor::Impl::references(
@@ -88,13 +126,13 @@ std::size_t GeometryOwnerGraphEditor::Impl::references(
     return count;
 }
 template<class Kind>
-bool GeometryOwnerGraphEditor::Impl::edge(
-    Kind kind, const std::shared_ptr<const void>& owner, std::size_t bytes, bool retain, bool prepaid)
+bool GeometryOwnerGraphEditor::Impl::edge(Kind kind, const std::shared_ptr<const void>& owner, std::size_t bytes,
+    bool retain, bool prepaid, std::size_t references)
 {
-    if (!owner)
+    if (!owner || !references)
         return false;
     if (work)
-        ++work->edge_visits;
+        work->edge_visits = allocation_detail::add(work->edge_visits, references);
     const auto key = static_cast<std::uint8_t>(kind);
     const geometry_demand::OwnerKey owner_key{channel, key, owner.get()};
     geometry_demand::OwnerRecord* record_pointer = nullptr;
@@ -133,21 +171,27 @@ bool GeometryOwnerGraphEditor::Impl::edge(
     if (retain)
     {
         transition = record.references == 0;
-        record.references = allocation_detail::add(record.references, 1);
+        record.references = allocation_detail::add(record.references, references);
         if (transition)
         {
             if (work)
                 ++work->first_transitions;
             if (ledger)
+            {
                 GeometryAllocationOwnerAccess::admit_graph_owner(
                     *ledger, channel, key, owner, bytes, used, limit, prepaid);
+                edit_paid(GeometryAllocationOwnerAccess::paid_charge(*ledger, channel, key, owner, bytes));
+            }
         }
     }
     else
     {
-        if (!record.references)
+        if (references > record.references)
             throw GeometryError(GeometryErrorCode::InvalidInput, "Retired geometry graph owner is absent.");
-        transition = --record.references == 0;
+        record.references -= references;
+        if (key == external_kind() && record.references < typed_references(owner.get()))
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Flat graph retirement consumes a typed owner.");
+        transition = record.references == 0;
         if (transition && work)
             ++work->last_transitions;
     }
@@ -163,6 +207,37 @@ bool GeometryOwnerGraphEditor::Impl::edge(
         }
     }
     return transition;
+}
+std::size_t GeometryOwnerGraphEditor::Impl::typed_references(const void* address) const
+{
+    for (const auto& row : std::span(inline_typed).first(typed_size))
+        if (row.address == address) return row.references;
+    if (const auto found = typed_overlay.find(address); found != typed_overlay.end()) return found->second;
+    return result.typed_references(address, work ? &work->lookup : nullptr);
+}
+GeometryOwnerGraphEditor::Impl::TypedTransition GeometryOwnerGraphEditor::Impl::typed_edge(
+    const std::shared_ptr<const void>& owner, std::size_t bytes, bool retain, bool prepaid, std::size_t references)
+{
+    const auto address = owner.get();
+    const auto previous = typed_references(address);
+    if (!retain && references > previous)
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Retired typed geometry edge is absent.");
+    const auto next = retain ? allocation_detail::add(previous, references) : previous - references;
+    auto rows = std::span(inline_typed).first(typed_size);
+    const auto local = std::find_if(rows.begin(), rows.end(), [address](const auto& row) { return row.address == address; });
+    if (local != rows.end())
+        local->references = next;
+    else if (const auto old = typed_overlay.find(address); old != typed_overlay.end())
+        old->second = next;
+    else if (typed_size < inline_typed.size())
+        inline_typed[typed_size++] = {address, next};
+    else
+    {
+        admission().charge(1, sizeof(decltype(typed_overlay)::value_type) + 4 * sizeof(void*));
+        typed_overlay.emplace(address, next);
+    }
+    return {edge(allocation_detail::Kind::ExternalOwner, owner, bytes, retain, prepaid, references),
+        retain ? previous == 0 : next == 0};
 }
 template<class Kind, class T>
 void GeometryOwnerGraphEditor::Impl::push(Kind kind, const std::shared_ptr<const T>& owner, std::size_t&, std::size_t)
@@ -184,12 +259,157 @@ void GeometryOwnerGraphEditor::Impl::push(Kind kind, const std::shared_ptr<const
     }
     pending.push_back({static_cast<std::uint8_t>(kind), owner});
 }
+bool GeometryOwnerGraphEditor::Impl::native_state(
+    const std::shared_ptr<const geometry_detail::NativeAllocationState>& owner, bool retain, bool prepaid,
+    std::size_t references)
+{
+    if (!references)
+        return false;
+    const auto counter_bytes = geometry_detail::NativeAllocationGraphAccess::validate_state(owner);
+    if (retain)
+    {
+        edit_paid(NativePaidExtentCharge::state(owner));
+        edit_paid(NativePaidExtentCharge::counter(owner));
+        edit_paid(NativePaidExtentCharge::mirror(owner));
+        if (ledger)
+            GeometryAllocationOwnerAccess::authorize_native_state(*ledger, owner);
+    }
+    const bool paid = prepaid || owner->used_counter == &used;
+    const auto transition = typed_edge(owner, owner->allocation_admission_bytes, retain, paid, references);
+    if (transition.children)
+    {
+        const auto keeper_bytes = owner->mirror.owner_proof.bytes();
+        if (owner->mirror.owner)
+            edge(allocation_detail::Kind::ExternalOwner, owner->mirror.owner, keeper_bytes, retain, paid, 2);
+        if (typed_edge(owner->counter_owner, counter_bytes, retain, paid, 2).children && owner->mirror.owner)
+            edge(allocation_detail::Kind::ExternalOwner, owner->mirror.owner, keeper_bytes, retain, paid, 2);
+    }
+    return transition.owner;
+}
+void GeometryOwnerGraphEditor::Impl::native_typed_receipt(allocation_detail::Kind kind,
+    const std::shared_ptr<const void>& owner,
+    const std::shared_ptr<const geometry_detail::NativeAllocationEnvelope>& envelope,
+    const geometry_detail::NativeConstructorStorageOwner& storage, std::size_t&, std::size_t)
+{
+    if (!adding) return;
+    if (storage.owner)
+        edit_paid(NativePaidExtentCharge::storage(storage));
+    if (ledger)
+    {
+        GeometryAllocationOwnerAccess::authorize_native_semantic(*ledger, channel, std::uint8_t(kind), owner, envelope);
+        if (storage.owner)
+            GeometryAllocationOwnerAccess::authorize_native_storage(*ledger, storage.owner, storage.envelope);
+    }
+}
+void GeometryOwnerGraphEditor::Impl::native_object_children(
+    const std::shared_ptr<const geometry_detail::NativeAllocationEnvelope>& envelope,
+    const geometry_detail::NativeConstructorStorageOwner& storage, std::size_t&, std::size_t)
+{
+    native_fixed(envelope, adding, false);
+    if (!storage.owner) return;
+    native_fixed(storage.envelope, adding, false);
+    const bool prepaid = storage.owner->admission().state()->used_counter == &used;
+    if (edge(allocation_detail::Kind::ExternalOwner, storage.owner, storage.owner->exclusive_bytes(), adding, prepaid))
+        native_state(storage.owner->admission().state(), adding, false);
+}
+bool GeometryOwnerGraphEditor::Impl::native_fixed(
+    const std::shared_ptr<const geometry_detail::NativeAllocationEnvelope>& owner, bool retain, bool prepaid)
+{
+    if (retain)
+        edit_paid(NativePaidExtentCharge::fixed(owner));
+    if (!owner)
+        return false;
+    if (!owner->authentic_owner(owner))
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Native fixed envelope has a foreign shared control.");
+    if (ledger && retain)
+        GeometryAllocationOwnerAccess::authorize_native_fixed(*ledger, owner);
+    const auto& state = owner->state();
+    (void) geometry_detail::NativeAllocationGraphAccess::validate_state(state);
+    const bool paid = prepaid || state->used_counter == &used;
+    const auto transition = typed_edge(owner, owner->fixed_allocation_bytes(), retain, paid);
+    if (transition.children)
+        native_state(state, retain, paid, 5);
+    return transition.owner;
+}
+bool GeometryOwnerGraphEditor::Impl::weak_observation(const NativeWeakOwnerObservation& value, bool retain)
+{
+    if (const auto* native = value.native_envelope())
+        return native_fixed(*native, retain, false);
+    if (const auto* state = value.native_state())
+        return native_state(*state, retain, false);
+    const auto kind = allocation_detail::Kind::ExternalOwner;
+    if (const auto* scalar = value.detached_scalar())
+    {
+        if (!scalar->keeper)
+            return edge(kind, scalar->owner, scalar->bytes, retain);
+        const auto transition = typed_edge(scalar->owner, scalar->bytes, retain, false);
+        // The witness owns its own keeper. The Counter control owns two
+        // additional keeper edges through its installed allocator and deleter.
+        edge(kind, scalar->keeper, scalar->keeper_bytes, retain, false, transition.children ? 3 : 1);
+        return transition.owner;
+    }
+    if (const auto* contact = value.contact_control_group())
+    {
+        if (retain)
+            edit_paid(NativePaidExtentCharge::contact_fixed(value));
+        const auto transition = typed_edge(contact->owner, contact->bytes, retain, false);
+        // The witness and the actual installed group each hold a keeper.
+        edge(kind, contact->keeper, contact->keeper_bytes, retain, false, transition.children ? 2 : 1);
+        return transition.owner;
+    }
+    return false;
+}
 template<GeometryIdentityKind Kind, ArithmeticMode Mode>
 void GeometryOwnerGraphEditor::Impl::retain_identity(
     const GeometryIdentity<Kind, Mode>& identity, std::size_t&, std::size_t)
 {
-    visit_identity_allocations(identity, [&](const GeometryIdentityAllocation& value)
-        { return edge(allocation_detail::Kind::IdentityPayload, value.owner, value.payload_bytes, adding); });
+    if constexpr (GeometryIdentity<Kind, Mode>::shared_storage)
+        for (auto owner = GeometryIdentityAccess::backing(identity); owner; owner = geometry_identity_parent(owner))
+        {
+            const auto* admitted = NativeIdentityOwnerAccess::backing(owner);
+            const auto bytes = admitted ? 0 : geometry_identity_payload_bytes(owner);
+            if (admitted && adding)
+                edit_paid(NativePaidExtentCharge::storage(admitted->storage()));
+            if (admitted && adding && ledger)
+            {
+                GeometryAllocationOwnerAccess::authorize_native_identity(*ledger, channel, owner);
+                GeometryAllocationOwnerAccess::authorize_native_storage(
+                    *ledger, admitted->storage().owner, admitted->storage().envelope);
+            }
+            if (!edge(allocation_detail::Kind::IdentityPayload, owner, bytes, adding))
+                break;
+            if (admitted)
+            {
+                geometry_detail::NativeConstructorOwnerSink sink;
+                sink.context = this;
+                sink.owner_edge = [](void* raw, const std::shared_ptr<const void>& child,
+                                      geometry_detail::NativeConstructorOwnerKind kind, std::size_t count)
+                {
+                    auto& self = *static_cast<Impl*>(raw);
+                    bool paid = false;
+                    if (kind == geometry_detail::NativeConstructorOwnerKind::Storage)
+                    {
+                        const auto storage =
+                            std::static_pointer_cast<const geometry_detail::NativeConstructorStorage>(child);
+                        paid = storage->admission().state()->used_counter == &self.used;
+                    }
+                    return self.edge(allocation_detail::Kind::ExternalOwner, child, count, self.adding, paid);
+                };
+                sink.fixed_edge = [](void* raw, const auto& fixed)
+                {
+                    auto& self = *static_cast<Impl*>(raw);
+                    self.native_fixed(fixed, self.adding, false);
+                };
+                sink.state_edge = [](void* raw, const auto& state)
+                {
+                    auto& self = *static_cast<Impl*>(raw);
+                    self.native_state(state, self.adding, false);
+                };
+                // The outer loop edits the parent edge exactly once, retaining
+                // iterative ancestry and first/last pruning for every mode.
+                NativeIdentityOwnerAccess::visit_children(owner, sink, [](void*, const auto&) {});
+            }
+        }
 }
 void GeometryOwnerGraphEditor::Impl::retain_authorities(
     const std::vector<PlaneAuthority>& values, std::size_t& count, std::size_t cap)
@@ -225,11 +445,21 @@ template<ArithmeticMode Mode> void GeometryOwnerGraphEditor::Impl::drain(bool re
 
 GeometryOwnerGraphEditor::GeometryOwnerGraphEditor(geometry_demand::GeometryOwnerManifest accepted,
     std::uint8_t channel, std::size_t& used, std::size_t limit, GeometryAllocationLedger* ledger,
-    GeometryOwnerGraphWork* work)
-    : state_{std::move(accepted), channel, used, limit, ledger, work, rows_, pending_}
+    GeometryOwnerGraphWork* work, std::shared_ptr<const geometry_detail::NativeAllocationState> native_administration,
+    const NativeOwnerReceipts* previous_paid)
+    : state_{std::move(accepted), channel, used, limit, ledger, work,
+          ledger ? GeometryAllocationOwnerAccess::native_state(*ledger) : std::move(native_administration),
+          previous_paid ? *previous_paid : NativeOwnerReceipts{}, rows_, pending_}
 {
     try
     {
+        const auto native = impl_->native_administration;
+        impl_->pending = decltype(impl_->pending)(geometry_detail::NativeAdministrationAllocator<PendingOwner>(native));
+        impl_->overlay = decltype(impl_->overlay)(
+            Impl::KeyLess{}, geometry_detail::NativeAdministrationAllocator<
+                                 std::pair<const geometry_demand::OwnerKey, geometry_demand::OwnerRecord>>(native));
+        impl_->typed_overlay = decltype(impl_->typed_overlay)(std::less<const void*>{},
+            geometry_detail::NativeAdministrationAllocator<decltype(impl_->typed_overlay)::value_type>(native));
         if (channel > 1 || used > limit)
             throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid geometry owner graph arithmetic channel.");
         if (const auto existing = impl_->result.uniform_channel(work ? &work->lookup : nullptr);
@@ -274,8 +504,13 @@ std::uint8_t GeometryOwnerGraphEditor::external_kind() noexcept
 {
     return static_cast<std::uint8_t>(allocation_detail::Kind::ExternalOwner);
 }
+std::uint8_t GeometryOwnerGraphEditor::identity_payload_kind() noexcept
+{
+    return static_cast<std::uint8_t>(allocation_detail::Kind::IdentityPayload);
+}
 std::size_t GeometryOwnerGraphEditor::edit_byte_bound(
-    const geometry_demand::GeometryOwnerManifest& accepted, std::size_t edges, std::size_t changed_keys)
+    const geometry_demand::GeometryOwnerManifest& accepted, std::size_t edges, std::size_t changed_keys,
+    std::size_t typed_keys)
 {
     using namespace allocation_detail;
     const auto excess = edges > geometry_demand::leaf_capacity ? edges - geometry_demand::leaf_capacity : 0;
@@ -296,13 +531,21 @@ std::size_t GeometryOwnerGraphEditor::edit_byte_bound(
         pending_slots = add(pending_slots, capacity);
     }
     bytes = add(bytes, product(pending_slots, sizeof(PendingOwner)));
-    bytes = add(bytes, accepted.batch_edit_byte_bound(changed_keys));
+    constexpr auto inline_roles = std::tuple_size_v<decltype(Impl::inline_typed)>;
+    if (typed_keys > inline_roles)
+    {
+        const auto entry = sizeof(decltype(Impl::typed_overlay)::value_type) + 4 * sizeof(void*);
+        bytes = add(bytes, product(typed_keys - inline_roles, entry));
+        bytes = add(bytes, product(typed_keys, sizeof(geometry_demand::TypedOwnerReference)));
+    }
+    bytes = add(bytes, accepted.batch_edit_byte_bound(changed_keys, typed_keys));
     // Each newly allocated index node/State produces at most one payload map
     // row and one metadata-credit registry row. Both are charged before insert.
     const auto bookkeeping_per_owner =
         sizeof(typename decltype(GeometryAllocationLedger::Impl::owners)::value_type) + 4 * sizeof(void*) +
         sizeof(typename decltype(GeometryAllocationLedger::Impl::metadata_credits)::value_type) + 4 * sizeof(void*);
-    bytes = add(bytes, product(accepted.batch_edit_metadata_owner_bound(changed_keys), bookkeeping_per_owner));
+    bytes = add(bytes,
+        product(accepted.batch_edit_metadata_owner_bound(changed_keys, typed_keys), bookkeeping_per_owner));
     // A second distinct graph certificate materializes the ledger's bounded
     // overflow buffer. Reserve it before optional graph mutation can begin.
     return add(bytes, GeometryAllocationLedger::Impl::subset_overflow_bytes());
@@ -411,29 +654,204 @@ void GeometryOwnerGraphEditor::planar(const PlanarFacePtr<ArithmeticMode::Ordina
         return;
     require_mode(
         ArithmeticMode::Ordinary, impl_->channel ? ArithmeticMode::BoundedCertification : ArithmeticMode::Ordinary);
-    if (!impl_->edge(allocation_detail::Kind::PlanarWrapper, owner, sizeof(*owner), retain))
+    impl_->adding = retain;
+    const bool native = NativePlanarOwnerAccess::admitted(owner);
+    if (native)
+        impl_->native_typed_receipt(allocation_detail::Kind::PlanarWrapper, owner,
+            NativePlanarOwnerAccess::wrapper_envelope(owner), {}, impl_->used, impl_->limit);
+    if (!impl_->edge(allocation_detail::Kind::PlanarWrapper, owner, native ? 0 : sizeof(*owner), retain))
         return;
-    if (impl_->edge(allocation_detail::Kind::PlanarPayload, RetentionAccess::planar_payload_owner(*owner),
-            owner->exclusive_storage_bytes(), retain))
+    if (native)
+        impl_->native_object_children(NativePlanarOwnerAccess::wrapper_envelope(owner), {}, impl_->used, impl_->limit);
+    const auto payload = RetentionAccess::planar_payload_owner(*owner);
+    if (native)
+        impl_->native_typed_receipt(allocation_detail::Kind::PlanarPayload, payload,
+            NativePlanarOwnerAccess::payload_envelope(owner), NativePlanarOwnerAccess::storage(owner),
+            impl_->used, impl_->limit);
+    if (impl_->edge(allocation_detail::Kind::PlanarPayload, payload, native ? 0 : owner->exclusive_storage_bytes(), retain))
+    {
+        if (native)
+            impl_->native_object_children(NativePlanarOwnerAccess::payload_envelope(owner),
+                NativePlanarOwnerAccess::storage(owner), impl_->used, impl_->limit);
         if (const auto* support = RetentionAccess::planar_support_borrowed(*owner))
-        {
-            impl_->adding = retain;
             impl_->retain_identity(*support, impl_->used, impl_->limit);
-        }
+    }
+}
+void GeometryOwnerGraphEditor::identity(const PlaneSupportIdentity<ArithmeticMode::Ordinary>& identity, bool retain)
+{
+    const Impl::Call call(*impl_);
+    impl_->adding = retain;
+    impl_->retain_identity(identity, impl_->used, impl_->limit);
+}
+void GeometryOwnerGraphEditor::point_identity(const PointIdentity<ArithmeticMode::Ordinary>& value, bool retain)
+{
+    const Impl::Call call(*impl_);
+    require_mode(
+        ArithmeticMode::Ordinary, impl_->channel ? ArithmeticMode::BoundedCertification : ArithmeticMode::Ordinary);
+    impl_->adding = retain;
+    impl_->retain_identity(value, impl_->used, impl_->limit);
+}
+void GeometryOwnerGraphEditor::displacement_identity(
+    const DisplacementIdentity<ArithmeticMode::Ordinary>& value, bool retain)
+{
+    const Impl::Call call(*impl_);
+    require_mode(
+        ArithmeticMode::Ordinary, impl_->channel ? ArithmeticMode::BoundedCertification : ArithmeticMode::Ordinary);
+    impl_->adding = retain;
+    impl_->retain_identity(value, impl_->used, impl_->limit);
+}
+void GeometryOwnerGraphEditor::native_fixed(
+    const std::shared_ptr<const geometry_detail::NativeAllocationEnvelope>& owner, bool retain, bool prepaid)
+{
+    const Impl::Call call(*impl_);
+    impl_->native_fixed(owner, retain, prepaid);
+}
+bool GeometryOwnerGraphEditor::weak_observation(const NativeWeakOwnerObservation& value, bool retain)
+{
+    const Impl::Call call(*impl_);
+    return impl_->weak_observation(value, retain);
+}
+void GeometryOwnerGraphEditor::native_state(
+    const std::shared_ptr<const geometry_detail::NativeAllocationState>& owner, bool retain, bool prepaid)
+{
+    const Impl::Call call(*impl_);
+    impl_->native_state(owner, retain, prepaid);
+}
+void GeometryOwnerGraphEditor::native_state_edges(
+    const std::shared_ptr<const geometry_detail::NativeAllocationState>& owner, std::size_t references, bool retain)
+{
+    const Impl::Call call(*impl_);
+    impl_->native_state(owner, retain, false, references);
+}
+void GeometryOwnerGraphEditor::record_paid_extent(const NativePaidExtentCharge& charge)
+{
+    const Impl::Call call(*impl_);
+    impl_->edit_paid(impl_->financial_projection_depth ? charge.as_borrowed_financial() : charge);
+}
+void GeometryOwnerGraphEditor::financial_pin(const NativePaidExtentCharge& charge, bool retain)
+{
+    const Impl::Call call(*impl_);
+    impl_->weak_observation(charge.physical_observation(), retain);
+    impl_->weak_observation(charge.financial_observation(), retain);
+    if (!charge.has_financial_pin())
+        return;
+    impl_->adding = retain;
+    ++impl_->financial_projection_depth;
+    struct Restore { Impl& value; ~Restore() { --value.financial_projection_depth; } } restore{*impl_};
+    geometry_detail::NativeConstructorOwnerSink sink;
+    sink.context = impl_;
+    sink.financial_graph = this;
+    sink.financial_retain = retain;
+    sink.owner_edge = [](void* raw, const auto& owner, geometry_detail::NativeConstructorOwnerKind, std::size_t bytes)
+    { auto& self = *static_cast<Impl*>(raw); return self.edge(allocation_detail::Kind::ExternalOwner, owner, bytes, self.adding); };
+    sink.fixed_edge = [](void* raw, const auto& owner)
+    { auto& self = *static_cast<Impl*>(raw); self.native_fixed(owner, self.adding, false); };
+    sink.state_edge = [](void* raw, const auto& owner)
+    { auto& self = *static_cast<Impl*>(raw); self.native_state(owner, self.adding, false); };
+    sink.semantic_receipt = [](void* raw, const auto& owner, const auto& envelope)
+    {
+        auto& self = *static_cast<Impl*>(raw);
+        self.native_typed_receipt(allocation_detail::Kind::ExternalOwner, owner, envelope, {}, self.used, self.limit);
+    };
+    sink.storage_receipt = [](void* raw, const auto& storage)
+    {
+        auto& self = *static_cast<Impl*>(raw);
+        if (!self.adding) return;
+        self.edit_paid(NativePaidExtentCharge::storage(storage));
+        if (self.ledger)
+            GeometryAllocationOwnerAccess::authorize_native_storage(*self.ledger, storage.owner, storage.envelope);
+    };
+    charge.project_financial(sink);
+}
+void GeometryOwnerGraphEditor::native_storage(const geometry_detail::NativeConstructorStorageOwner& value)
+{
+    record_paid_extent(NativePaidExtentCharge::storage(value));
+    if (impl_->ledger)
+        GeometryAllocationOwnerAccess::authorize_native_storage(*impl_->ledger, value.owner, value.envelope);
+}
+const NativeOwnerReceipts& GeometryOwnerGraphEditor::paid_receipts() const
+{
+    if (!impl_->finished)
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry graph receipts require a finished edit.");
+    return impl_->paid;
+}
+void GeometryOwnerGraphEditor::forget_paid_extent(const NativePaidExtentCharge& charge)
+{
+    const Impl::Call call(*impl_);
+    if (charge.financial_address())
+        impl_->edit_paid(charge, NativeOwnerReceipts::Action::RetireIfRecorded);
+}
+void GeometryOwnerGraphEditor::record_profile_charge(std::uint8_t kind, const std::shared_ptr<const void>& owner,
+    std::size_t bytes, const std::shared_ptr<const void>& arena, const std::shared_ptr<const void>& lease,
+    std::size_t snapshot, std::uint64_t revision, NativePaidExtentCharge::FinancialProjector projector,
+    NativePaidExtentCharge::FinancialInspector inspector, NativePaidExtentCharge::FinancialValidator validator,
+    const NativeWeakOwnerObservation& physical, const NativeWeakOwnerObservation& financial)
+{
+    record_paid_extent(NativePaidExtentCharge::source_profile(kind, owner, bytes, arena, lease, snapshot, revision,
+        projector, inspector, validator).with_weak_observations(physical, financial));
+}
+void GeometryOwnerGraphEditor::record_subset_charge(std::uint8_t kind, const std::shared_ptr<const void>& owner,
+    std::size_t bytes, const std::shared_ptr<const void>& arena, const std::shared_ptr<const void>& lease,
+    std::size_t snapshot, std::uint64_t revision, NativePaidExtentCharge::FinancialProjector projector,
+    NativePaidExtentCharge::FinancialInspector inspector, NativePaidExtentCharge::FinancialValidator validator,
+    bool retain, const NativeWeakOwnerObservation& physical, const NativeWeakOwnerObservation& financial)
+{
+    const Impl::Call call(*impl_);
+    auto charge = NativePaidExtentCharge::detached_subset(kind, owner, bytes, arena, lease, snapshot, revision,
+        projector, inspector, validator).with_weak_observations(physical, financial);
+    if (impl_->financial_projection_depth) charge = charge.as_borrowed_financial();
+    impl_->edit_paid(charge, retain ? NativeOwnerReceipts::Action::Retain : NativeOwnerReceipts::Action::Retire);
 }
 geometry_demand::GeometryOwnerManifest GeometryOwnerGraphEditor::finish()
 {
     const Impl::Call call(*impl_);
-    const auto changed = [&](const geometry_demand::OwnerRecord& row)
+    const auto accepted_references = [&](const geometry_demand::OwnerRecord& row)
     {
         return impl_->result.references(row.key.channel, row.key.kind, row.owner,
-                   impl_->work ? &impl_->work->lookup : nullptr) != row.references;
-    };
-    const auto less = [](const auto& first, const auto& second) { return Impl::KeyLess{}(first.key, second.key); };
-    const auto publish = [&](std::span<const geometry_demand::OwnerRecord> changes)
-    {
-        impl_->result = impl_->result.edited(changes, impl_->admission(), impl_->work ? &impl_->work->index : nullptr,
             impl_->work ? &impl_->work->lookup : nullptr);
+    };
+    const auto changed = [&](const auto& row) { return !row.references || accepted_references(row) != row.references; };
+    const auto less = [](const auto& first, const auto& second) { return Impl::KeyLess{}(first.key, second.key); };
+    const auto publish = [&](std::span<geometry_demand::OwnerRecord> changes)
+    {
+        const auto admission = impl_->admission();
+        auto receipts = impl_->paid_edits ? impl_->paid_edits->rows() : std::span<NativeOwnerReceipts::Edit>{};
+        impl_->paid = impl_->paid.edited(receipts, admission, changes);
+        impl_->paid_edits.reset();
+        // A body that both entered and left this edit has no accepted row to
+        // delete, but it could have staged receipts to forget.
+        const auto end = std::remove_if(changes.begin(), changes.end(),
+            [&](const auto& row) { return !row.references && !accepted_references(row); });
+        const auto update = [&](std::span<geometry_demand::TypedOwnerReference> roles)
+        {
+            const auto last = std::remove_if(roles.begin(), roles.end(), [&](const auto& role)
+                {
+                    return impl_->result.typed_references(role.address, impl_->work ? &impl_->work->lookup : nullptr) ==
+                           role.references;
+                });
+            roles = roles.first(last - roles.begin());
+            std::sort(roles.begin(), roles.end(), [](const auto& a, const auto& b)
+                { return std::less<const void*>{}(a.address, b.address); });
+            impl_->result = impl_->result.edited_typed(changes.first(end - changes.begin()), roles, admission,
+                impl_->work ? &impl_->work->index : nullptr, impl_->work ? &impl_->work->lookup : nullptr);
+        };
+        auto local_roles = std::span(impl_->inline_typed).first(impl_->typed_size);
+        if (impl_->typed_overlay.empty())
+            update(local_roles);
+        else
+        {
+            const auto count = allocation_detail::add(local_roles.size(), impl_->typed_overlay.size());
+            using Row = geometry_demand::TypedOwnerReference;
+            geometry_detail::NativeAdministrationVector<Row> roles(admission.allocator<Row>());
+            admission.charge(count, sizeof(Row));
+            roles.reserve(count);
+            if (roles.capacity() != count)
+                allocation_detail::exhausted("Typed geometry reference scratch capacity is unqualified.");
+            roles.insert(roles.end(), local_roles.begin(), local_roles.end());
+            for (const auto& [address, references] : impl_->typed_overlay)
+                roles.push_back({address, references});
+            update(roles);
+        }
     };
     if (impl_->overlay.empty())
     {
@@ -455,7 +873,8 @@ geometry_demand::GeometryOwnerManifest GeometryOwnerGraphEditor::finish()
     {
         const auto total = allocation_detail::add(impl_->row_count, impl_->overlay.size());
         impl_->admission().charge(total, sizeof(geometry_demand::OwnerRecord));
-        std::vector<geometry_demand::OwnerRecord> changes;
+        geometry_detail::NativeAdministrationVector<geometry_demand::OwnerRecord> changes(
+            impl_->admission().allocator<geometry_demand::OwnerRecord>());
         changes.reserve(total);
         if (changes.capacity() != total)
             allocation_detail::exhausted("Geometry graph final row capacity is unqualified.");
@@ -472,6 +891,8 @@ geometry_demand::GeometryOwnerManifest GeometryOwnerGraphEditor::finish()
         row = {};
     impl_->row_count = 0;
     impl_->overlay.clear();
+    impl_->typed_size = 0;
+    impl_->typed_overlay.clear();
     if (impl_->ledger && impl_->credited_predecessor && impl_->result.owner_count())
         GeometryOwnerImportAccess::certify_constructed(*impl_->ledger, impl_->result, impl_->used, impl_->limit);
     impl_->finished = true;

@@ -1,5 +1,6 @@
 #include "geometry/details/NativeObjectOwnerAccess.hh"
 #include "geometry/PLIC/details/NativeCellCodecAccess.hh"
+#include "geometry/PLIC/details/NativePlanarOwnerAccess.hh"
 #include "native_constructor_allocation_operators.inc"
 #include <gtest/gtest.h>
 #include <array>
@@ -30,6 +31,37 @@ struct Domain
     {
     }
 };
+TEST(NativePublicationCodecs, RetainedPlanarDecodeTranslationAndWeakControlMatchRawCppLifetimes)
+{
+    const std::array<P::GeometryPoint, 4> points{{{0, 0, 0}, {2, 0, 0}, {2, 3, 0}, {0, 3, 0}}};
+    auto original = P::PlanarFace<Mode::Ordinary>::make(points);
+    for (unsigned i = 0; i < 73; ++i)
+        original = original->translated(P::displacement<Mode::Ordinary>({0, 0, 0}, {0, 0, 1}));
+    const auto packet = original->encode_incidence();
+    Domain domain;
+    const auto prefix = domain.counter.owner()->used;
+    native_constructor_test::Capture capture(domain.counter.owner()->used);
+    auto decoded = P::details::NativePlanarOwnerAccess::decode(packet, 64 * 1024 * 1024, domain.admission);
+    auto reversed = P::details::NativePlanarOwnerAccess::reversed(*decoded, domain.admission);
+    auto translated = P::details::NativePlanarOwnerAccess::translated(
+        *reversed, P::displacement<Mode::Ordinary>({0, 0, 0}, {1, 2, 3}), domain.admission);
+    const auto live = domain.counter.owner()->used - prefix;
+    const auto trace = capture.finish();
+    EXPECT_EQ(native_constructor_test::uncovered, 0u);
+    EXPECT_FALSE(pipeline_trace::overflow.load());
+    EXPECT_EQ(live, trace.all_live);
+    EXPECT_TRUE(P::details::NativePlanarOwnerAccess::admitted(decoded));
+    EXPECT_EQ(decoded->encode_incidence(), packet);
+    EXPECT_TRUE(decoded->equivalent(*original));
+    std::weak_ptr<const P::PlanarFace<Mode::Ordinary>> weak = decoded;
+    translated.reset();
+    reversed.reset();
+    decoded.reset();
+    EXPECT_TRUE(weak.expired());
+    EXPECT_GT(domain.counter.owner()->used, prefix);
+    weak.reset();
+    EXPECT_EQ(domain.counter.owner()->used, prefix);
+}
 TEST(NativePublicationCodecs, RetainedCellDecodeCopiesActualOwnersAndPreservesCertificateAndMetrics)
 {
     auto original = P::ConvexCellGeometry<Mode::Ordinary>::box({-3, 5, 7}, {11, 13, 17});
