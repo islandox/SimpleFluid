@@ -81,50 +81,8 @@ and focused regression commands.
 Collective construction aligns ownership with field maps; retaining the actual polygonal
 geometry preserves conservative interfaces.
 
-### Compact region composition
 
-`MultiRegionMesh` is a compact serial/MPI backend of `MeshHandle`. Preserve its
-canonical seam-face identity and owner-oriented flux across every field and
-operator path. Native region providers retain geometry without copying it;
-child identity/layout/revision checks must run through the existing epoch
-cache seam. Do not treat an unchanged maximum child epoch as an unchanged
-composite. Topology region identity is separate from material membership and
-MPI ownership. Distributed composites replicate only compact axis/base/interface
-descriptions and construct rank-local field maps. Global explicit constituents
-are rejected. Coarse/fine seams keep canonical fine faces; coarse cells traverse
-all covering subfaces, and integrated flux restriction uses signs without
-multiplying by area fractions again. Periodic geometry must use incident-cell
-image vectors in both reconstruction and Rhie--Chow stabilization.
-These identities and signed restrictions prevent duplicated or misweighted interface
-flux. Compact provider metadata preserves distributed scaling, while incident-cell image
-vectors give reconstruction the correct local displacement.
-
-Composite `PlanarALEMeshMotion` changes a common affine Z map while child
-providers stay frozen. Keep its existing lease, epoch, GCL, numeric-cache refresh
-and rollback contract. Reject buffered/nonaxial composite deformation and a
-changing axial periodic length rather than relaxing conservation checks.
-This limits moving-mesh support to the implemented conservative transformation.
-
-Normal `MeshHandle::faces()` queries return independent sized/indexable ranges.
-Do not reintroduce implicit cell-face CSR while building fields, graphs, or
-solvers. `materialize_cell_faces()` is an explicit compatibility operation.
-Serial IDs are arithmetic. Decomposed orthogonal and XY/Z geometry lookup uses
-compact local topology; algebraic lookup reuses required Tpetra maps.
-`indexer()` remains an opt-in compatibility allocation. Arbitrary native
-reordering is explicit and retains its permutation; composite reordering is
-currently rejected. See [region contracts and storage categories](docs/guides/region_meshes.md).
-These choices keep ordinary queries compact and reserve extra connectivity or indexing
-storage for explicit compatibility use.
-
-Conservative `MeshToMeshTransfer` supports a native cylindrical endpoint paired
-with a composite containing native XY/Z, `ExtrudedRegion`, and `SweptRZRegion`
-providers. A transfer captures both geometry epochs and maps; rebuild it after
-motion or rollback. Preserve explicit partial-coverage accounting and the
-intensive/extensive quantity distinction. This spatial utility does not own
-phase occupancy or the coupling schedule. See
-[transfer contracts and limitations](docs/guides/mesh_to_mesh_transfer.md).
-This prevents stale spatial maps and leaves physical occupancy and time scheduling with
-their coupling owners.
+For detailed architecture and region composition contracts, see [Compact Region Composition](docs/architecture/compact_region_composition.md).
 
 ### Liquid-mass inventory transactions
 
@@ -156,109 +114,8 @@ Do not weaken that guard or silently reset the steam ledger; add a conservative
 transfer/disposition policy first.
 This protects the phase inventory until it has an explicit conservative disposition.
 
-### Geometry epochs and motion transactions
 
-`PlanarALEMeshMotion` is the sole geometry mutator for the constrained
-solver-integrated `planarALE` path. It supports fixed-topology Cartesian X/Y/Z
-and cylindrical or `SemiStructuredXY_Z` axial motion in serial/MPI. Use its
-`begin_trial()` and exactly one of `accept_trial()` or
-`rollback_trial()`; never update structured edge arrays directly after fields
-or caches exist. The exclusive controller lease and geometry epoch belong to
-the shared concrete mesh, so every alias `MeshHandle` observes the same
-revision. The solver's mutable constructor is an opt-in ownership seam for the
-same native handle; it does not authorize arbitrary geometry mutation or
-weaken const access for equations and fields.
-The transaction makes geometry changes visible to every consumer instead of bypassing
-invalidation.
-
-The geometry epoch is the authoritative numeric-cache revision. After a trial
-changes coordinates, refresh or invalidate all of these before assembly or
-output:
-
-- cell-gradient and transport-geometry caches;
-- Rhie--Chow face-flux geometry and boundary workspaces;
-- momentum and temperature transport coefficients and their reusable linear
-  solver/preconditioner state;
-- pressure-projection matrices, boundary data, predictor state, and linear
-  solver/preconditioner state;
-- coupled pressure--velocity numeric blocks, Schur products, and block
-  preconditioner state;
-- model-owned transport geometry used by the liquid inventory, reacting gas,
-  or another enabled extensive equation; and
-- geometry-derived output state, including VTU point coordinates.
-
-Together these refreshes keep reconstruction, numerical operators, models, and output on
-the same geometry.
-
-Topology-stable graphs, maps, entity IDs, and boundary membership may survive
-motion; geometry-dependent numeric values may not. A surviving cache must
-capture the concrete geometry identity and epoch, reject stale access, and
-provide an explicit refresh/invalidation path. Raw mutation through
-`MeshHandle::visit_mutable()` does not publish an epoch and is unsupported
-after field/cache construction.
-
-`SolidSubdomain` forwards its parent's periodic-image displacement, geometry
-epoch, and execution protection. A moving parent invalidates existing solid
-geometry caches; this does not make fixed-grid solid conduction ALE-capable.
-
-`TransportGeometryCache::refresh()` retains a geometry snapshot when its mesh
-identity and epoch still match. The overload taking `shared_geometry_type`
-allows equations on that exact mesh and epoch to share immutable geometry;
-foreign or stale snapshots are rejected. Keep the no-argument `refresh()` and
-equation/model `refresh_geometry()` overloads as real exported entry points.
-Replacing them with a defaulted argument changes the mangled symbols and
-breaks existing consumers; the export tests check both signatures.
-
-Treat one ALE step as an accepted-state transaction:
-
-1. Snapshot every mutable field, model ledger, diagnostic/history cursor, and
-   time state that the trial can touch.
-2. Start one geometry trial and keep its accepted-old volumes, trial-new
-   volumes, exact owner-oriented mesh flux, identity, and epochs alive through
-   all assemblies.
-3. Refresh all geometry consumers, derive a separate mesh-relative flux, and
-   rerun each nonlinear corrector from the same accepted snapshot. Preview
-   liquid, gas, level/headspace, and volume-source changes; do not publish them.
-   `free_surface_ale_maximum_correctors` independently caps the outer Picard
-   trials and the strict pressure-only continuity refinements within each
-   trial.
-4. Accept only after mesh quality, GCL, outer level/source plus material/gas
-   state convergence, actual mesh/pool equality, generalized continuity,
-   liquid/gas inventory, energy, and volume closure gates pass collectively.
-5. Commit geometry, fields, ledgers, diagnostics, time, and one history record
-   exactly once. On any exception, roll back the active geometry trial, restore
-   all snapshots, refresh the accepted-epoch caches, and leave no output or
-   history record for the rejected attempt.
-
-Complete snapshots prevent partial rollback and cumulative corrector drift. One shared
-trial description and collective closure gates keep all equations consistent; single
-publication prevents double counting and rejected-trial leakage.
-
-For ALE temperature transport, the extensive sensible energy is
-$V_c m_{l,c}^*c_{p,c}T_c$. Use accepted-old and trial-new
-`liquidMassInventory` densities in the corresponding old/new control volumes.
-Do not substitute `rhoLiquid` or void-reduced mixture density over the
-bubble-displaced pool volume; `rhoLiquid` converts liquid mass to material
-volume and has a different ownership role.
-
-The volume-source ledger removes the exact implicit material face transport:
-trial-new liquid mass divided by pure density uses the carrier upwind, while
-each post-transport/pre-kinetics bubble fraction uses the combined
-carrier-plus-slip upwind from its population equation. Do not reconstruct this
-term from accepted-old aggregate occupancy or from post-kinetics bubbles.
-This keeps the volume source on the exact transport state and upwind rule that produced
-it.
-
-`PlanarALEBoundary` marks the moving patch's trial velocity cache as `Slip`, so
-face reconstruction retains the owner-cell tangential velocity while momentum
-diffusion adds no boundary constraint. The fixed-flux pressure boundary
-independently enforces
-$\phi_{\mathrm{abs},f}=\phi_{m,f}$, leaving zero normal carrier flux relative to the
-mesh. Accepted `PlanarALEStepDiagnostics` retain the
-per-outer level, target, continuity, material-state, and gas-state histories, and
-each accepted free-surface history record copies that diagnostic snapshot.
-Rejected trials do not publish a new history record.
-This makes every diagnostic attributable to the accepted transaction.
+For detailed geometry epoch and motion transaction contracts, see [Geometry Epochs and Motion Transactions](docs/guides/geometry_epochs_and_motion.md).
 
 `FluidSolver::maximum_courant_number()` uses the accepted transport flux:
 absolute projected flux on a fixed mesh and mesh-relative flux for planar ALE.
