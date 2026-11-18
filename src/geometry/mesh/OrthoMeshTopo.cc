@@ -55,6 +55,21 @@ OrthoMeshTopo::OrthoMeshTopo(Ordinal ni, Ordinal nj, Ordinal nk,
     initialize_cell_adjacency();
 }
 
+OrthoMeshTopo::OrthoMeshTopo(AdmittedStorageTag, const Indexer& indexer, BoundaryNames names,
+    geometry_detail::NativeConstructorStorageOwner storage)
+    : d_storage(std::move(storage)), d_indexer(indexer), d_boundary_names(std::move(names))
+{
+    if (!d_storage.owner)
+        throw std::invalid_argument("Admitted orthogonal topology requires its storage receipts.");
+    for (std::size_t axis = 0; axis < 3; ++axis)
+    {
+        d_storage.owner->reserve(d_face_cells_per_dim[axis], d_indexer.num_nodes_per_dim[axis]);
+        d_storage.owner->reserve(d_neighbors_per_dim[axis], d_indexer.num_cells_per_dim[axis]);
+    }
+    initialize_face_adjacency();
+    initialize_cell_adjacency();
+}
+
 /**
  * @brief Return the owner cell on the lower-coordinate side of a face.
  * @param id Structured face identifier.

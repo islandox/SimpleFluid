@@ -19,9 +19,15 @@
 
 namespace SimpleFluid::Meshes
 {
+namespace details
+{
+class NativeCartesianAccess;
+}
 /** @brief Procedural HEX_8 topology backed by a shared immutable orthogonal template. */
 class RectilinearTopology : public GeometryExecutionGuard
 {
+    friend class details::NativeCartesianAccess;
+
 public:
     using index_type_pack = UnstructuredMeshIndexTypes;
     using ID = uint64_t;
@@ -41,6 +47,7 @@ public:
     const void* storage_identity() const { return d_topology.get(); }
     MeshStorageReport storage_report() const;
 private:
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> d_allocation_envelope;
     std::shared_ptr<const OrthoMeshTopo> d_topology;
 };
 
@@ -53,9 +60,21 @@ private:
  */
 class RectilinearGeometry
 {
+    friend class details::NativeCartesianAccess;
+    class AdmittedStorageTag
+    {
+        friend class details::NativeCartesianAccess;
+        AdmittedStorageTag() = default;
+
+    public:
+        AdmittedStorageTag(const AdmittedStorageTag&) = default;
+        AdmittedStorageTag(AdmittedStorageTag&&) = default;
+    };
+
 public:
     using Vec3 = MeshUtils::Vec3;
     explicit RectilinearGeometry(Vec3D<ArrReal> edges);
+    RectilinearGeometry(AdmittedStorageTag, Vec3D<ArrReal>, geometry_detail::NativeConstructorStorageOwner);
     const Vec3D<ArrReal>& cell_edges() const noexcept { return d_edges; }
     RegionLayout layout() const;
     real_t cell_volume(size_t c) const;
@@ -70,6 +89,9 @@ public:
     RectilinearGeometry& operator=(const RectilinearGeometry&) = delete;
     RectilinearGeometry& operator=(RectilinearGeometry&&) = delete;
 private:
+    void initialize();
+    geometry_detail::NativeConstructorStorageOwner d_storage;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> d_allocation_envelope;
     Vec3D<ArrReal> d_edges;
     OrthogonalIndexer d_indexer;
 };

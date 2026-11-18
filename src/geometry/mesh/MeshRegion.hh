@@ -21,8 +21,14 @@
 #include <type_traits>
 #include <utility>
 
+namespace SimpleFluid::geometry_detail
+{
+class NativeAllocationEnvelope;
+}
 namespace SimpleFluid::Meshes
 {
+namespace details { class NativeLegacyCartesianAccess; }
+class NativeFragmentAccess;
 class OrthogonalCartesian3D;
 class OrthogonalCylindrial3D;
 class SemiStructuredXY_Z;
@@ -58,8 +64,7 @@ struct MeshStorageReport
  * The four built-in native meshes are instantiated in MeshRegion.cc. Other
  * native types can include MeshRegion.tcc in their own instantiation unit.
  */
-template<class Native>
-class NativeRegionProvider : public GeometryExecutionGuard
+template<class Native> class NativeRegionProvider : public GeometryExecutionGuard
 {
 public:
     using index_type_pack = UnstructuredMeshIndexTypes;
@@ -86,8 +91,12 @@ public:
     const Native& native() const { return *d_mesh; }
     const void* storage_identity() const { return d_mesh.get(); }
     MeshStorageReport storage_report() const;
+
 private:
+    friend class NativeFragmentAccess;
+    friend class details::NativeLegacyCartesianAccess;
     std::shared_ptr<const Native> d_mesh;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> d_native_allocation;
 };
 
 /**
@@ -98,8 +107,7 @@ private:
  * rectilinear providers validate all indexing extents. The object retains both
  * const providers and checks exact layout and revision before static use.
  */
-template<TopologyProvider T, GeometryProvider G>
-class IsoRegion
+template<TopologyProvider T, GeometryProvider G> class IsoRegion
 {
 public:
     IsoRegion(std::string name, std::shared_ptr<const T> topology, std::shared_ptr<const G> geometry);
@@ -108,7 +116,10 @@ public:
     const G& geometry() const { return *d_geometry; }
     const RegionLayout& layout() const { return d_layout; }
     void validate_static() const;
+
 private:
+    friend class NativeFragmentAccess;
+    friend class details::NativeLegacyCartesianAccess;
     std::string d_name;
     std::shared_ptr<const T> d_topology;
     std::shared_ptr<const G> d_geometry;
@@ -119,8 +130,7 @@ private:
 };
 
 /** @brief Retain one native object with two const, zero-copy provider observations. */
-template<class Native>
-auto native_region(std::string name, std::shared_ptr<Native> mesh);
+template<class Native> auto native_region(std::string name, std::shared_ptr<Native> mesh);
 
 template<class Native> using NativeIsoRegion = IsoRegion<NativeRegionProvider<Native>, NativeRegionProvider<Native>>;
 

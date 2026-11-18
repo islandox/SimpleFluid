@@ -65,6 +65,18 @@ MeshStorageReport RectilinearTopology::storage_report() const { return {.topolog
 
 RectilinearGeometry::RectilinearGeometry(Vec3D<ArrReal> edges) : d_edges(std::move(edges))
 {
+    initialize();
+}
+RectilinearGeometry::RectilinearGeometry(
+    AdmittedStorageTag, Vec3D<ArrReal> edges, geometry_detail::NativeConstructorStorageOwner storage)
+    : d_storage(std::move(storage)), d_edges(std::move(edges))
+{
+    if (!d_storage.owner)
+        throw std::invalid_argument("Admitted rectilinear geometry requires its storage receipts.");
+    initialize();
+}
+void RectilinearGeometry::initialize()
+{
     size_t product = 1;
     for (size_t a = 0; a < 3; ++a)
     {

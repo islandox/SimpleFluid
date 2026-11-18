@@ -12,6 +12,7 @@
 #pragma once
 
 #include "geometry/GeometryExecutionGuard.hh"
+#include "geometry/details/NativeConstructorStorage.hh"
 
 #include "geometry/mesh/OrthogonalIndexer.hh"
 #include "geometry/mesh/StructuredBatchView.hh"
@@ -22,6 +23,11 @@
 
 namespace SimpleFluid::Meshes
 {
+namespace details
+{
+class NativeCartesianAccess;
+class NativeLegacyCartesianAccess;
+}
 
 /**
  * @brief Connectivity and boundary batches for an orthogonal 3D mesh.
@@ -36,6 +42,19 @@ namespace SimpleFluid::Meshes
  */
 class OrthoMeshTopo : public GeometryExecutionGuard
 {
+    class AdmittedStorageTag
+    {
+        friend class details::NativeCartesianAccess;
+        friend class details::NativeLegacyCartesianAccess;
+        AdmittedStorageTag() = default;
+
+    public:
+        AdmittedStorageTag(const AdmittedStorageTag&) = default;
+        AdmittedStorageTag(AdmittedStorageTag&&) = default;
+    };
+    friend class details::NativeCartesianAccess;
+    friend class details::NativeLegacyCartesianAccess;
+
 public:
     using Indexer = OrthogonalIndexer;
     using Ordinal = Indexer::Ordinal;
@@ -58,6 +77,7 @@ public:
         constexpr bool operator==(const NeighborCells&) const = default;
     };
 
+    OrthoMeshTopo(AdmittedStorageTag, const Indexer&, BoundaryNames, geometry_detail::NativeConstructorStorageOwner);
     OrthoMeshTopo() = default;
     OrthoMeshTopo(const Indexer& indexer, BoundaryNames boundary_names);
     OrthoMeshTopo(Ordinal ni, Ordinal nj, Ordinal nk,
@@ -220,6 +240,8 @@ private:
     void initialize_cell_adjacency();
     void validate_boundary_batch(int batch_id) const;
 
+    geometry_detail::NativeConstructorStorageOwner d_storage;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> d_allocation_envelope;
     Indexer d_indexer;
     BoundaryNames d_boundary_names{};
     Vec3D<Arr<FaceCells>> d_face_cells_per_dim;

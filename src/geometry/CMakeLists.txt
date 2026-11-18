@@ -164,6 +164,15 @@ set_source_files_properties(mesh/PredicateSigns2D.cc PROPERTIES
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(mesh/PredicateSigns2D.cc PROPERTIES
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto")
+    # Authenticated native construction/proofs use the original strict arithmetic contract.
+    set_source_files_properties(
+        mesh/RegionProviders.cc
+        mesh/OrthogonalCartesian3D.cc
+        PROPERTIES
+        INTERPROCEDURAL_OPTIMIZATION OFF
+        COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-frounding-math;-fno-lto"
+        SKIP_UNITY_BUILD_INCLUSION TRUE
+        SKIP_PRECOMPILE_HEADERS TRUE)
     # Closure retains the strict arithmetic policy for transported long-double spans.
     set_source_files_properties(mesh/AMR/DistributedAdaptiveClosure.cc
         mesh/AMR/ContactPairSet.cc

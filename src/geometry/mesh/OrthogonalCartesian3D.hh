@@ -26,6 +26,10 @@ namespace SimpleFluid::Meshes
 {
 
 class PlanarALEGeometryAccess;
+namespace details
+{
+class NativeLegacyCartesianAccess;
+}
 
 /**
  * @brief Serial orthogonal Cartesian mesh defined by edge coordinates.
@@ -34,10 +38,28 @@ class PlanarALEGeometryAccess;
  * cell on the lower-coordinate side and the face normal points from owner to
  * neighbor. On exterior faces the normal points out of the domain.
  */
-class OrthogonalCartesian3D
-    : public GeometryExecutionGuard, public MeshBase<OrthogonalCartesian3D, OrthogonalMeshIndexTypes>
+class OrthogonalCartesian3D : public GeometryExecutionGuard,
+                              public MeshBase<OrthogonalCartesian3D, OrthogonalMeshIndexTypes>
 {
+    class AdmittedStorageTag
+    {
+        friend class details::NativeLegacyCartesianAccess;
+        AdmittedStorageTag() = default;
+
+    public:
+        AdmittedStorageTag(const AdmittedStorageTag&) = default;
+        AdmittedStorageTag(AdmittedStorageTag&&) = default;
+    };
+    struct AdmittedStorage
+    {
+        geometry_detail::NativeConstructorStorageOwner receipt;
+        Vec3D<Arr<real_t>> edges, centroids, widths;
+        OrthogonalIndexer indexer;
+        OrthoMeshTopo topology;
+    };
+
 public:
+    OrthogonalCartesian3D(AdmittedStorageTag, AdmittedStorage&&);
     using Indexer = OrthogonalIndexer;
     using CellID = Indexer::CellID;
     using FaceID = Indexer::FaceID;
@@ -76,8 +98,7 @@ public:
      *         non-increasing edges.
      * @throws std::overflow_error If entity counts exceed supported ID ranges.
      */
-    explicit OrthogonalCartesian3D(
-        const Vec3D<Arr<real_t>>& cell_edges);
+    explicit OrthogonalCartesian3D(const Vec3D<Arr<real_t>>& cell_edges);
 
     /** Connect opposite coordinate faces; each periodic axis needs >=2 cells. */
     OrthogonalCartesian3D(const Vec3D<Arr<real_t>>& cell_edges, Vec3D<bool> periodic_dimensions);
@@ -86,16 +107,9 @@ public:
     real_t cell_to_face_distance(face_id_t face, cell_id_t cell) const;
     real_t face_cell_center_distance(face_id_t face) const;
 
+    const Vec3D<unsigned>& num_cells_per_dimension() const noexcept { return d_indexer.num_cells_per_dim; }
 
-    const Vec3D<unsigned>& num_cells_per_dimension() const noexcept
-    {
-        return d_indexer.num_cells_per_dim;
-    }
-
-    const Vec3D<Arr<real_t>>& cell_edges() const noexcept
-    {
-        return d_cell_edges;
-    }
+    const Vec3D<Arr<real_t>>& cell_edges() const noexcept { return d_cell_edges; }
 
     const Indexer& indexer() const { return d_indexer; }
     const OrthoMeshTopo& topology() const noexcept { return d_topology; }
@@ -105,7 +119,8 @@ public:
     {
         size_t bytes = 0;
         for (size_t a = 0; a < 3; ++a)
-            bytes += (d_cell_edges[a].capacity() + d_cell_widths[a].capacity() + d_cell_centroids[a].capacity()) * sizeof(real_t);
+            bytes += (d_cell_edges[a].capacity() + d_cell_widths[a].capacity() + d_cell_centroids[a].capacity()) *
+                     sizeof(real_t);
         return bytes;
     }
 
@@ -115,6 +130,7 @@ public:
 private:
     friend Base;
     friend class PlanarALEGeometryAccess;
+    friend class details::NativeLegacyCartesianAccess;
 
     void replace_axis_edges_fixed_topology(size_t axis, Arr<real_t> edges);
 
@@ -144,6 +160,9 @@ private:
     auto boundary_batch_ids_impl() const;
     int num_boundary_batches_impl() const noexcept;
 
+    // Last destroyed: all concrete metric buffers retire before their receipts.
+    geometry_detail::NativeConstructorStorageOwner d_storage;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> d_allocation_envelope;
     Vec3D<Arr<real_t>> d_cell_edges;
     Vec3D<Arr<real_t>> d_cell_centroids;
     Vec3D<Arr<real_t>> d_cell_widths;
@@ -154,6 +173,6 @@ private:
     OrthoMeshTopo d_topology;
 };
 
-} // namespace SimpleFluid
+} // namespace SimpleFluid::Meshes
 
 #include "geometry/mesh/OrthogonalCartesian3D.ipp"
