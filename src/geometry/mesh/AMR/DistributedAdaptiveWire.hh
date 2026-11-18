@@ -77,7 +77,7 @@ struct Budget
     }
     /** Admit vector reallocation while its previous allocation is still live.
      * Release the old charge only after reserve has destroyed that allocation. */
-    template<class T> void append_capacity(std::vector<T>& values)
+    template<class T, class Allocator> void append_capacity(std::vector<T, Allocator>& values)
     {
         if (values.size() < values.capacity())
             return;

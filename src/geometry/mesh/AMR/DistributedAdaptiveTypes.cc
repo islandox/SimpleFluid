@@ -2,6 +2,15 @@
  * @brief Versioned bounded lossless ancestry and owner-record encoding.
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
+#include "geometry/mesh/AMR/NativeAdaptiveKeyCodec.hh"
+#include "geometry/mesh/AMR/NativeAdaptiveLeafCodec.hh"
+#include "geometry/PLIC/details/NativeCellCodecAccess.hh"
+#include "geometry/PLIC/details/NativePlanarCodecAccess.hh"
+#include "geometry/PLIC/details/NativePlanarOwnerAccess.hh"
+#include "geometry/PLIC/details/NativeGeometryByteWriter.hh"
+#include "geometry/PLIC/details/GeometryPacketHeader.hh"
+#include "geometry/mesh/NativeDescriptorCodecAccess.hh"
+
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/VoFWireProtocol.hh"
@@ -68,10 +77,11 @@ struct SizeWriter
             word(n);
     }
 };
-struct Reader
+struct AdaptiveRecordReader
 {
     std::span<const char> data;
     std::size_t position = 0;
+    const geometry_detail::NativeConstructorStorageOwner* native_storage = nullptr;
     uint8_t byte()
     {
         if (position == data.size())
@@ -85,6 +95,15 @@ struct Reader
         std::uint64_t result = 0;
         for (unsigned i = 0; i < 8; ++i)
             result |= std::uint64_t(static_cast<unsigned char>(data[position++])) << (8 * i);
+        return result;
+    }
+    std::span<const char> bytes_view()
+    {
+        const auto count = word();
+        if (count > data.size() - position)
+            throw std::invalid_argument("Adaptive packet length exceeds payload.");
+        const auto result = data.subspan(position, static_cast<std::size_t>(count));
+        position += static_cast<std::size_t>(count);
         return result;
     }
     AdaptiveBytes bytes()
@@ -102,7 +121,10 @@ struct Reader
         if (n > (data.size() - position) / 8)
             throw std::invalid_argument("Invalid adaptive ancestry depth.");
         std::vector<std::uint64_t> result;
-        result.reserve(static_cast<std::size_t>(n));
+        if (native_storage)
+            native_storage->owner->reserve(result, static_cast<std::size_t>(n));
+        else
+            result.reserve(static_cast<std::size_t>(n));
         for (std::uint64_t i = 0; i < n; ++i)
             result.push_back(word());
         return result;
@@ -119,7 +141,7 @@ template<class PacketWriter> void base(PacketWriter& w, const BaseCellKey& key)
     w.word(key.root_template);
     w.path(key.path);
 }
-BaseCellKey base(Reader& r)
+BaseCellKey base(AdaptiveRecordReader& r)
 {
     BaseCellKey key;
     key.root = r.word();
@@ -132,7 +154,7 @@ template<class PacketWriter> void axial(PacketWriter& w, const AxialIntervalKey&
     w.word(key.root);
     w.path(key.path);
 }
-AxialIntervalKey axial(Reader& r)
+AxialIntervalKey axial(AdaptiveRecordReader& r)
 {
     AxialIntervalKey key;
     key.root = r.word();
@@ -148,7 +170,7 @@ template<class PacketWriter> void canonical_key_header(PacketWriter& w)
     w.word(1);
     w.word(0);
 }
-void canonical_key_header(Reader& r)
+void canonical_key_header(AdaptiveRecordReader& r)
 {
     if (r.word() != canonical_ancestry_prefix || r.word() != 1 || r.word() != 0)
         throw std::invalid_argument("Invalid canonical adaptive key version/type.");
@@ -225,9 +247,10 @@ AdaptiveBytes encode_adaptive_key(const AdaptiveCellKey& key)
     return std::move(w.data);
 }
 
-AdaptiveCellKey decode_adaptive_key(std::span<const char> packet)
+namespace
 {
-    Reader r{packet};
+AdaptiveCellKey read_adaptive_key(AdaptiveRecordReader& r)
+{
     canonical_key_header(r);
     AdaptiveCellKey key;
     key.region = r.word();
@@ -269,6 +292,89 @@ AdaptiveCellKey decode_adaptive_key(std::span<const char> packet)
     r.done();
     return key;
 }
+} // namespace
+AdaptiveCellKey decode_adaptive_key(std::span<const char> packet)
+{
+    AdaptiveRecordReader r{packet};
+    return read_adaptive_key(r);
+}
+void adaptive_detail::NativeAdaptiveKeyCodec::write(adaptive_detail::Writer& output, const AdaptiveCellKey& key)
+{
+    const auto size = encoded_adaptive_key_size(key);
+    if (output.data.capacity() - output.data.size() < 8 || size > output.data.capacity() - output.data.size() - 8)
+        throw std::invalid_argument("Native framed key destination was not preadmitted.");
+    output.word(size);
+    write_payload(output, key);
+}
+void adaptive_detail::NativeAdaptiveKeyCodec::write_payload(adaptive_detail::Writer& output, const AdaptiveCellKey& key)
+{
+    const auto size = encoded_adaptive_key_size(key);
+    if (size > output.data.capacity() - output.data.size())
+        throw std::invalid_argument("Native key packet destination was not preadmitted.");
+    struct DirectWriter
+    {
+        adaptive_detail::Writer& output;
+        void word(std::uint64_t value) { output.word(value); }
+        void path(const std::vector<std::uint64_t>& values)
+        {
+            word(values.size());
+            for (const auto value : values)
+                word(value);
+        }
+    };
+    DirectWriter writer{output};
+    emit_adaptive_key(writer, key);
+}
+AdaptiveBytes adaptive_detail::NativeAdaptiveKeyCodec::encode(
+    const AdaptiveCellKey& key, const geometry_detail::NativeConstructorStorageOwner& storage)
+{
+    if (!storage.owner)
+        throw std::invalid_argument("Native key encoding requires its concrete storage owner.");
+    adaptive_detail::Writer writer;
+    storage.owner->reserve(writer.data, encoded_adaptive_key_size(key));
+    write_payload(writer, key);
+    return std::move(writer.data);
+}
+AdaptiveCellKey adaptive_detail::NativeAdaptiveKeyCodec::copy(
+    const AdaptiveCellKey& key, const geometry_detail::NativeConstructorStorageOwner& storage)
+{
+    if (!storage.owner)
+        throw std::invalid_argument("Native key copy requires its real storage owner.");
+    AdaptiveCellKey result;
+    result.region = key.region;
+    std::visit(
+        [&](const auto& source)
+        {
+            using T = std::decay_t<decltype(source)>;
+            T value;
+            if constexpr (std::is_same_v<T, ConvexCellAncestry>)
+            {
+                value.root = source.root;
+                storage.owner->copy(value.path, std::span(source.path));
+            }
+            else if constexpr (std::is_same_v<T, ProductCellAncestry>)
+            {
+                value.base.root = source.base.root;
+                value.base.root_template = source.base.root_template;
+                value.axial.root = source.axial.root;
+                storage.owner->copy(value.base.path, std::span(source.base.path));
+                storage.owner->copy(value.axial.path, std::span(source.axial.path));
+            }
+            else
+                value = source;
+            result.ancestry = std::move(value);
+        },
+        key.ancestry);
+    return result;
+}
+AdaptiveCellKey adaptive_detail::NativeAdaptiveKeyCodec::decode(
+    std::span<const char> packet, const geometry_detail::NativeConstructorStorageOwner& storage)
+{
+    if (!storage.owner)
+        throw std::invalid_argument("Native key decode requires its real storage owner.");
+    AdaptiveRecordReader reader{packet, 0, &storage};
+    return read_adaptive_key(reader); // Same tag/range/trailing-byte validation as the public decoder.
+}
 std::uint64_t adaptive_route_hash(std::span<const char> bytes) noexcept
 {
     std::uint64_t result = 14695981039346656037ULL;
@@ -296,6 +402,68 @@ double AdaptiveWork::total() const
 }
 namespace
 {
+struct NativeLeafSizeWriter : SizeWriter
+{
+    const geometry_detail::NativeConstructionAdmission& admission;
+    explicit NativeLeafSizeWriter(const geometry_detail::NativeConstructionAdmission& value) : admission(value) {}
+    void key(const AdaptiveCellKey& value) { sized_bytes(encoded_adaptive_key_size(value)); }
+    void cell(const PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>& value)
+    {
+        sized_bytes(value ? PLIC::details::NativeCellCodecAccess::size(*value, admission) : 0);
+    }
+    void face(const PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>& value, bool incidence)
+    {
+        sized_bytes(PLIC::details::NativePlanarCodecAccess::size(*value, incidence, admission));
+    }
+    void identity(const PLIC::DisplacementIdentity<ArithmeticMode::Ordinary>& value)
+    {
+        sized_bytes(PLIC::encoded_identity_size(value));
+    }
+    void descriptor(const std::shared_ptr<const NativeFragmentDescriptor>& value)
+    {
+        sized_bytes(value ? encoded_native_fragment_descriptor_size(*value) : 0);
+    }
+};
+struct NativeLeafWriter
+{
+    adaptive_detail::Writer& output;
+    const geometry_detail::NativeConstructionAdmission& admission;
+    void byte(std::uint8_t value) { output.byte(value); }
+    void word(std::uint64_t value) { output.word(value); }
+    void bytes(std::span<const char> value) { output.bytes(value); }
+    void key(const AdaptiveCellKey& value) { adaptive_detail::NativeAdaptiveKeyCodec::write(output, value); }
+    void cell(const PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>& value)
+    {
+        if (!value)
+        {
+            word(0);
+            return;
+        }
+        word(PLIC::details::NativeCellCodecAccess::size(*value, admission));
+        PLIC::details::NativeCellCodecAccess::append(output.data, *value, admission);
+    }
+    void face(const PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>& value, bool incidence)
+    {
+        word(PLIC::details::NativePlanarCodecAccess::size(*value, incidence, admission));
+        PLIC::details::NativePlanarCodecAccess::append(output.data, *value, incidence, admission);
+    }
+    void identity(const PLIC::DisplacementIdentity<ArithmeticMode::Ordinary>& value)
+    {
+        const auto size = PLIC::encoded_identity_size(value);
+        word(size);
+        const auto header = PLIC::details::geometry_packet_header(PLIC::GeometryPacketKind::DisplacementIdentity,
+            ArithmeticMode::Ordinary, size - PLIC::geometry_packet_header_bytes);
+        output.data.insert(output.data.end(), header.begin(), header.end());
+        PLIC::details::NativeGeometryByteWriter destination{&output.data, &admission};
+        destination.native_identity(value);
+    }
+    void descriptor(const std::shared_ptr<const NativeFragmentDescriptor>& value)
+    {
+        word(value ? encoded_native_fragment_descriptor_size(*value) : 0);
+        if (value)
+            NativeDescriptorCodecAccess::append(output.data, *value);
+    }
+};
 template<class PacketWriter>
 void emit_adaptive_leaf(PacketWriter& w, const AdaptiveLeaf& leaf, std::size_t scratch_budget)
 {
@@ -306,7 +474,9 @@ void emit_adaptive_leaf(PacketWriter& w, const AdaptiveLeaf& leaf, std::size_t s
         throw std::invalid_argument("Incomplete adaptive leaf representation.");
     (void) leaf.work.total();
     packet_codec::write_header(w, packet_codec::Family::AdaptiveRecords, record_version, RecordKind::Leaf);
-    if constexpr (std::is_same_v<PacketWriter, Writer>)
+    if constexpr (requires { w.key(leaf.key); })
+        w.key(leaf.key);
+    else if constexpr (std::is_same_v<PacketWriter, Writer>)
         w.bytes(encode_adaptive_key(leaf.key));
     else
     {
@@ -318,7 +488,9 @@ void emit_adaptive_leaf(PacketWriter& w, const AdaptiveLeaf& leaf, std::size_t s
     w.word(leaf.material);
     w.word(leaf.revision);
     w.word(std::uint64_t(leaf.provider));
-    if constexpr (std::is_same_v<PacketWriter, Writer>)
+    if constexpr (requires { w.cell(leaf.geometry); })
+        w.cell(leaf.geometry);
+    else if constexpr (std::is_same_v<PacketWriter, Writer>)
         w.bytes(leaf.geometry ? leaf.geometry->encode_certificate() : AdaptiveBytes{});
     else
         w.sized_bytes(leaf.geometry ? leaf.geometry->encoded_certificate_size(scratch_budget) : 0);
@@ -329,7 +501,9 @@ void emit_adaptive_leaf(PacketWriter& w, const AdaptiveLeaf& leaf, std::size_t s
             (!s.exterior && !s.boundary.empty()) || (s.require_native_whole_tile && !s.native_whole_geometry))
             throw std::invalid_argument("Invalid adaptive surface.");
         w.bytes(s.key);
-        if constexpr (std::is_same_v<PacketWriter, Writer>)
+        if constexpr (requires { w.face(s.geometry, false); })
+            w.face(s.geometry, false);
+        else if constexpr (std::is_same_v<PacketWriter, Writer>)
             w.bytes(s.geometry->encode());
         else
             w.sized_bytes(s.geometry->encoded_size(scratch_budget));
@@ -337,7 +511,9 @@ void emit_adaptive_leaf(PacketWriter& w, const AdaptiveLeaf& leaf, std::size_t s
         w.word(s.exterior);
         w.bytes(std::span(s.boundary));
         w.word(s.native_face);
-        if constexpr (std::is_same_v<PacketWriter, Writer>)
+        if constexpr (requires { w.identity(s.authority_image); })
+            w.identity(s.authority_image);
+        else if constexpr (std::is_same_v<PacketWriter, Writer>)
             w.bytes(PLIC::encode_identity(s.authority_image));
         else
             w.sized_bytes(PLIC::encoded_identity_size(s.authority_image));
@@ -345,13 +521,17 @@ void emit_adaptive_leaf(PacketWriter& w, const AdaptiveLeaf& leaf, std::size_t s
         w.word(bool(s.native_whole_geometry));
         if (s.native_whole_geometry)
         {
-            if constexpr (std::is_same_v<PacketWriter, Writer>)
+            if constexpr (requires { w.face(s.native_whole_geometry, true); })
+                w.face(s.native_whole_geometry, true);
+            else if constexpr (std::is_same_v<PacketWriter, Writer>)
                 w.bytes(s.native_whole_geometry->encode_incidence());
             else
                 w.sized_bytes(s.native_whole_geometry->encoded_incidence_size());
         }
     }
-    if constexpr (std::is_same_v<PacketWriter, Writer>)
+    if constexpr (requires { w.descriptor(leaf.native_recipe); })
+        w.descriptor(leaf.native_recipe);
+    else if constexpr (std::is_same_v<PacketWriter, Writer>)
         w.bytes(leaf.native_recipe ? encode_native_fragment_descriptor(*leaf.native_recipe) : AdaptiveBytes{});
     else
         w.sized_bytes(leaf.native_recipe ? encoded_native_fragment_descriptor_size(*leaf.native_recipe) : 0);
@@ -372,6 +552,158 @@ void emit_adaptive_leaf(PacketWriter& w, const AdaptiveLeaf& leaf, std::size_t s
         w.word(std::bit_cast<std::uint64_t>(n));
 }
 } // namespace
+std::size_t adaptive_detail::NativeAdaptiveLeafCodec::size(
+    const AdaptiveLeaf& leaf, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    NativeLeafSizeWriter writer(admission);
+    emit_adaptive_leaf(writer, leaf, PLIC::geometry_packet_default_budget);
+    return writer.size;
+}
+void adaptive_detail::NativeAdaptiveLeafCodec::write(adaptive_detail::Writer& output, const AdaptiveLeaf& leaf,
+    const geometry_detail::NativeConstructionAdmission& admission)
+{
+    const auto extent = size(leaf, admission);
+    if (output.data.capacity() - output.data.size() < 8 || extent > output.data.capacity() - output.data.size() - 8)
+        throw std::invalid_argument("Native framed leaf destination was not preadmitted.");
+    output.word(extent);
+    write_payload(output, leaf, admission);
+}
+void adaptive_detail::NativeAdaptiveLeafCodec::write_payload(adaptive_detail::Writer& output, const AdaptiveLeaf& leaf,
+    const geometry_detail::NativeConstructionAdmission& admission)
+{
+    const auto extent = size(leaf, admission);
+    if (extent > output.data.capacity() - output.data.size())
+        throw std::invalid_argument("Native leaf destination was not preadmitted.");
+    NativeLeafWriter writer{output, admission};
+    const auto initial = output.data.size();
+    emit_adaptive_leaf(writer, leaf, PLIC::geometry_packet_default_budget);
+    if (output.data.size() - initial != extent)
+        throw std::invalid_argument("Native leaf length differs from its admitted count.");
+    record_pipeline_work(PipelineWork::WireEncodedLeaves);
+}
+adaptive_detail::NativeDecodedLeaf adaptive_detail::NativeAdaptiveLeafCodec::decode(std::span<const char> packet,
+    const geometry_detail::NativeConstructionAdmission& admission, const AdaptiveLeaf* retained_parts)
+{
+    constexpr auto M = ArithmeticMode::Ordinary;
+    using namespace adaptive_detail;
+    namespace O = geometry_detail;
+    NativeDecodedLeaf result{O::native_constructor_storage(admission), {}};
+    auto& leaf = result.value;
+    AdaptiveRecordReader reader{packet};
+    packet_codec::read_header(reader, packet_codec::Family::AdaptiveRecords, record_version, RecordKind::Leaf);
+    leaf.key = NativeAdaptiveKeyCodec::decode(reader.bytes_view(), result.storage);
+    result.storage.owner->copy(leaf.domain, reader.bytes_view());
+    leaf.material = reader.word();
+    leaf.revision = reader.word();
+    const auto kind = reader.word();
+    if (kind > 3)
+        throw std::invalid_argument("Invalid adaptive provider kind.");
+    leaf.provider = AdaptiveProviderKind(kind);
+    const auto geometry = reader.bytes_view();
+    if (!geometry.empty())
+    {
+        record_pipeline_work(PipelineWork::PhysicalShellReconstruction);
+        leaf.geometry =
+            PLIC::details::NativeCellCodecAccess::decode(geometry, PLIC::geometry_packet_default_budget, admission);
+    }
+    const auto count = reader.word();
+    if (!adaptive_surface_count_valid(leaf.geometry, count) || count > (packet.size() - reader.position) / 32 ||
+        count > PLIC::geometry_packet_default_budget / sizeof(AdaptiveSurface))
+        throw std::invalid_argument("Invalid adaptive surface count.");
+    result.storage.owner->reserve(leaf.surfaces, count);
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        AdaptiveSurface surface;
+        result.storage.owner->copy(surface.key, reader.bytes_view());
+        surface.geometry = PLIC::details::NativePlanarOwnerAccess::decode(
+            reader.bytes_view(), PLIC::geometry_packet_default_budget, admission);
+        const auto orientation = reader.word(), exterior = reader.word();
+        if (orientation > 1 || exterior > 1)
+            throw std::invalid_argument("Invalid adaptive incidence.");
+        surface.orientation = orientation ? 1 : -1;
+        surface.exterior = exterior;
+        const auto name = reader.bytes_view();
+        result.storage.owner->string(surface.boundary, std::string_view(name.data(), name.size()));
+        surface.native_face = reader.word();
+        surface.authority_image = PLIC::decode_identity<PLIC::DisplacementIdentity<M>>(reader.bytes_view());
+        const auto whole = reader.word(), proof = reader.word();
+        if (whole > 1 || proof > 1)
+            throw std::invalid_argument("Invalid native face nesting proof flags.");
+        surface.require_native_whole_tile = whole;
+        if (proof)
+            surface.native_whole_geometry = PLIC::details::NativePlanarOwnerAccess::decode(
+                reader.bytes_view(), PLIC::geometry_packet_default_budget, admission);
+        if (whole && !surface.native_whole_geometry)
+            throw std::invalid_argument("Missing original native face nesting proof.");
+        leaf.surfaces.push_back(std::move(surface));
+    }
+    const auto descriptor = reader.bytes_view();
+    if (!descriptor.empty())
+        leaf.native_recipe = NativeDescriptorCodecAccess::decode(
+            descriptor, admission, retained_parts ? retained_parts->native_recipe : nullptr);
+    leaf.native_cell = reader.word();
+    const auto copy_bytes =
+        [&](std::span<const char> input,
+            const std::shared_ptr<const AdaptiveBytes>& previous) -> std::shared_ptr<const AdaptiveBytes>
+    {
+        if (input.empty())
+            return {};
+        if (previous && previous->size() == input.size() && std::equal(input.begin(), input.end(), previous->begin()))
+            return previous; // Physical immutable part reuse only; never source authority.
+        auto output = O::NativeObjectOwnerAccess<AdaptiveBytes>::make(admission);
+        O::NativeObjectOwnerAccess<AdaptiveBytes>::storage(output.owner).owner->copy(*output.owner, input);
+        return std::move(output.owner);
+    };
+    std::array<std::span<const char>, 3> factors;
+    for (auto& factor : factors)
+        factor = reader.bytes_view();
+    if (!factors[0].empty() || !factors[1].empty() || !factors[2].empty())
+    {
+        auto factor = O::NativeObjectOwnerAccess<AdaptiveFactorRecipe>::make_without_buffers(admission);
+        const auto previous = retained_parts ? retained_parts->factor_recipe : nullptr;
+        factor.owner->root = copy_bytes(factors[0], previous ? previous->root : nullptr);
+        factor.owner->base = copy_bytes(factors[1], previous ? previous->base : nullptr);
+        factor.owner->axis = copy_bytes(factors[2], previous ? previous->axis : nullptr);
+        leaf.factor_recipe = std::move(factor.owner);
+    }
+    leaf.join_recipe = copy_bytes(reader.bytes_view(), retained_parts ? retained_parts->join_recipe : nullptr);
+    result.storage.owner->copy(leaf.parent_family, reader.bytes_view());
+    leaf.work = {std::bit_cast<double>(reader.word()), std::bit_cast<double>(reader.word()),
+        std::bit_cast<double>(reader.word()), std::bit_cast<double>(reader.word())};
+    reader.done();
+    {
+        const auto scratch = O::native_constructor_storage(admission);
+        adaptive_detail::Writer canonical;
+        scratch.owner->reserve(canonical.data, size(leaf, admission));
+        write_payload(canonical, leaf, admission);
+        if (canonical.data.size() != packet.size() ||
+            !std::equal(canonical.data.begin(), canonical.data.end(), packet.begin()))
+            throw std::invalid_argument("Noncanonical adaptive leaf.");
+    }
+    if (leaf.geometry)
+    {
+        O::NativeConstructorVector<SupportFace> faces(admission.allocator<SupportFace>()),
+            wholes(admission.allocator<SupportFace>());
+        faces.reserve(leaf.surfaces.size());
+        bool has_whole = false;
+        for (const auto& surface : leaf.surfaces)
+            has_whole |= surface.require_native_whole_tile;
+        if (has_whole)
+            wholes.reserve(leaf.surfaces.size());
+        for (const auto& surface : leaf.surfaces)
+        {
+            if (!surface.geometry || (surface.require_native_whole_tile && !surface.native_whole_geometry))
+                throw std::invalid_argument("Missing adaptive surface or whole-face certificate.");
+            faces.push_back(surface.geometry);
+            if (has_whole)
+                wholes.push_back(surface.require_native_whole_tile ? surface.native_whole_geometry : nullptr);
+        }
+        certify_adaptive_physical_boundary_native(
+            leaf.geometry, faces, PLIC::geometry_packet_default_budget, admission, wholes);
+    }
+    record_pipeline_work(PipelineWork::WireDecodedLeaves);
+    return result;
+}
 AdaptiveBytes encode_adaptive_leaf(const AdaptiveLeaf& leaf)
 {
     const adaptive_detail::PipelinePhaseScope phase(adaptive_detail::PipelinePhase::Transport);
@@ -451,7 +783,7 @@ AdaptiveLeaf decode_adaptive_leaf(std::span<const char> packet)
 {
     const adaptive_detail::PipelinePhaseScope phase(adaptive_detail::PipelinePhase::Transport);
     adaptive_detail::record_pipeline_work(adaptive_detail::PipelineWork::WireDecodedLeaves);
-    Reader r{packet};
+    AdaptiveRecordReader r{packet};
     packet_codec::read_header(r, packet_codec::Family::AdaptiveRecords, record_version, RecordKind::Leaf);
     AdaptiveLeaf leaf;
     leaf.key = decode_adaptive_key(r.bytes());
@@ -551,7 +883,7 @@ AdaptiveFamily decode_adaptive_family(std::span<const char> packet)
 {
     const adaptive_detail::PipelinePhaseScope phase(adaptive_detail::PipelinePhase::Transport);
     adaptive_detail::record_pipeline_work(adaptive_detail::PipelineWork::WireDecodedFamilies);
-    Reader r{packet};
+    AdaptiveRecordReader r{packet};
     packet_codec::read_header(r, packet_codec::Family::AdaptiveRecords, record_version, RecordKind::Family);
     AdaptiveFamily family;
     family.key = r.bytes();

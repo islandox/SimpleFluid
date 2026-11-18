@@ -1,7 +1,9 @@
 #include "geometry/mesh/AMR/AdaptiveBoundaryProof.hh"
-#include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
+#include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
+#include "geometry/PLIC/details/NativePlanarOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <algorithm>
 #include <limits>
 #include <set>
@@ -23,7 +25,7 @@ struct ConstructionLease
     }
     ~ConstructionLease() { budget.used -= bytes; }
 };
-template<class T> void reserve(std::vector<T>& values, std::size_t count, Budget& budget)
+template<class T, class Allocator> void reserve(std::vector<T, Allocator>& values, std::size_t count, Budget& budget)
 {
     if (count > values.max_size() || count > budget.limit / sizeof(T))
         throw std::invalid_argument("Physical boundary proof capacity exceeds its budget.");
@@ -33,13 +35,16 @@ template<class T> void reserve(std::vector<T>& values, std::size_t count, Budget
         throw std::invalid_argument("Physical boundary proof capacity differs from admission.");
 }
 } // namespace
-void certify_adaptive_physical_boundary(const PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>& source,
-    std::span<const SupportFace> pieces, std::size_t byte_budget, AdaptiveBoundaryProofStatistics* statistics,
-    std::span<const SupportFace> whole_faces)
+static void certify_boundary_impl(const PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>& source,
+    std::span<const SupportFace> certified_source_faces, std::span<const SupportFace> pieces, std::size_t byte_budget,
+    AdaptiveBoundaryProofStatistics* statistics, std::span<const SupportFace> whole_faces,
+    const geometry_detail::NativeConstructionAdmission* admission = nullptr)
 {
+    const auto state = admission ? admission->state() : std::shared_ptr<const geometry_detail::NativeAllocationState>{};
     const PLIC::GeometryLimits limits;
-    if (!source || !byte_budget || pieces.size() < 4 || pieces.size() > limits.maximum_faces ||
-        source->num_faces() > limits.maximum_faces ||
+    const auto source_count = source ? source->num_faces() : certified_source_faces.size();
+    if ((!source && certified_source_faces.empty()) || !byte_budget || pieces.size() < 4 ||
+        pieces.size() > limits.maximum_faces || source_count > limits.maximum_faces ||
         (!whole_faces.empty() && whole_faces.size() != pieces.size()) ||
         std::any_of(pieces.begin(), pieces.end(), [](const auto& face) { return !face; }))
         throw std::invalid_argument("Incomplete or excessive physical boundary proof.");
@@ -77,14 +82,17 @@ void certify_adaptive_physical_boundary(const PLIC::ConvexGeometryPtr<Arithmetic
         }
     } observation{budget, statistics, work};
     if (statistics)
-        *statistics = {source->num_faces(), pieces.size(), 0};
+        *statistics = {source_count, pieces.size(), 0};
     PLIC::GeometryAllocationLedger owners;
     std::size_t retained = 0;
+    if (admission)
+        PLIC::details::GeometryAllocationOwnerAccess::begin_native_bookkeeping(
+            owners, *admission, retained, byte_budget);
     const auto retain = [&](const auto& value)
     {
         const auto available = budget.limit - budget.used;
         const auto maximum = std::numeric_limits<std::size_t>::max();
-        const auto limit = available > maximum - retained ? maximum : retained + available;
+        const auto limit = admission ? byte_budget : available > maximum - retained ? maximum : retained + available;
         const auto before = retained;
         try
         {
@@ -100,7 +108,8 @@ void certify_adaptive_physical_boundary(const PLIC::ConvexGeometryPtr<Arithmetic
         }
         budget.add(retained - before);
     };
-    retain(source);
+    if (source)
+        retain(source);
 
     for (const auto& piece : pieces)
         retain(piece);
@@ -108,7 +117,8 @@ void certify_adaptive_physical_boundary(const PLIC::ConvexGeometryPtr<Arithmetic
         if (whole)
             retain(whole);
     ConstructionLease vertex_memory(budget, 0);
-    std::set<WidePoint> all_vertices;
+    std::set<WidePoint, std::less<WidePoint>, geometry_detail::NativeAdministrationAllocator<WidePoint>> all_vertices(
+        std::less<WidePoint>{}, geometry_detail::NativeAdministrationAllocator<WidePoint>(state));
     for (const auto& piece : pieces)
         for (const auto& point : piece->points())
             if (!all_vertices.contains(point))
@@ -118,18 +128,33 @@ void certify_adaptive_physical_boundary(const PLIC::ConvexGeometryPtr<Arithmetic
                 vertex_memory.add(sizeof(WidePoint) + 4 * sizeof(void*));
                 all_vertices.insert(point);
             }
-    std::vector<SupportFace> source_faces;
-    reserve(source_faces, source->num_faces(), budget);
-    std::vector<std::vector<SupportFace>> coverage;
-    reserve(coverage, source->num_faces(), budget);
-    coverage.resize(source->num_faces());
-    for (std::size_t face = 0; face < source->num_faces(); ++face)
+    geometry_detail::NativeAdministrationVector<SupportFace> source_faces{
+        geometry_detail::NativeAdministrationAllocator<SupportFace>(state)};
+    reserve(source_faces, source_count, budget);
+    using Row = geometry_detail::NativeAdministrationVector<SupportFace>;
+    geometry_detail::NativeAdministrationVector<Row> coverage{
+        geometry_detail::NativeAdministrationAllocator<Row>(state)};
+    reserve(coverage, source_count, budget);
+    for (std::size_t i = 0; i < source_count; ++i)
+        coverage.emplace_back(geometry_detail::NativeAdministrationAllocator<SupportFace>(state));
+    for (std::size_t face = 0; face < source_count; ++face)
     {
-        ConstructionLease construction(budget,
-            PLIC::PlanarFace<ArithmeticMode::Ordinary>::construction_capacity_bound(source->faces()[face].size()));
-        auto original = source->face_geometry(face);
-        retain(original);
-        source_faces.push_back(std::move(original));
+        if (source)
+        {
+            ConstructionLease construction(budget,
+                PLIC::PlanarFace<ArithmeticMode::Ordinary>::construction_capacity_bound(source->faces()[face].size()));
+            auto original = admission ? PLIC::details::NativePlanarOwnerAccess::cell_face(*source, face, *admission)
+                                      : source->face_geometry(face);
+            retain(original);
+            source_faces.push_back(std::move(original));
+        }
+        else
+        {
+            if (!certified_source_faces[face])
+                throw std::invalid_argument("Null authenticated native source face.");
+            retain(certified_source_faces[face]);
+            source_faces.push_back(certified_source_faces[face]);
+        }
     }
     for (std::size_t piece_index = 0; piece_index < pieces.size(); ++piece_index)
     {
@@ -137,9 +162,8 @@ void certify_adaptive_physical_boundary(const PLIC::ConvexGeometryPtr<Arithmetic
         auto matched = source_faces.size();
         for (std::size_t face = 0; face < source_faces.size(); ++face)
         {
-            ConstructionLease construction(budget,
-                support_construction_capacity_bound(
-                    SupportConstructionKind::Pair, source_faces[face], std::span<const SupportFace>(&piece, 1)));
+            ConstructionLease construction(budget, support_construction_capacity_bound(SupportConstructionKind::Pair,
+                                                       source_faces[face], std::span<const SupportFace>(&piece, 1)));
             // Equal support identities do not independently prove physical
             // coplanarity of received coordinates. Check each actual vertex.
             product_work(2 * (source_faces[face]->points().size() + 1), piece->points().size());
@@ -159,17 +183,13 @@ void certify_adaptive_physical_boundary(const PLIC::ConvexGeometryPtr<Arithmetic
         {
             const auto& whole = whole_faces[piece_index];
             const auto& original = source_faces[matched];
-            ConstructionLease construction(budget,
-                support_construction_capacity_bound(
-                    SupportConstructionKind::Pair, original, std::span<const SupportFace>(&whole, 1)));
+            ConstructionLease construction(budget, support_construction_capacity_bound(SupportConstructionKind::Pair,
+                                                       original, std::span<const SupportFace>(&whole, 1)));
             const auto contains_vertices = [&](const SupportFace& target, const SupportFace& candidate)
             {
                 product_work(2 * (target->points().size() + 1), candidate->points().size());
-                return std::all_of(candidate->points().begin(), candidate->points().end(),
-                    [&](const auto& point)
-                    {
-                        return target->contains_point(PLIC::details::GeometryIdentityAccess::point(point));
-                    });
+                return std::all_of(candidate->points().begin(), candidate->points().end(), [&](const auto& point)
+                    { return target->contains_point(PLIC::details::GeometryIdentityAccess::point(point)); });
             };
             if (!contains_vertices(original, whole) || !contains_vertices(whole, original))
                 throw std::invalid_argument("Native whole-face certificate differs from the original source face.");
@@ -183,7 +203,8 @@ void certify_adaptive_physical_boundary(const PLIC::ConvexGeometryPtr<Arithmetic
         const auto source_points = source_faces[face]->points().size();
         std::size_t edge_count = source_points;
         ConstructionLease row_memory(budget, 0);
-        std::set<WidePoint> vertices;
+        std::set<WidePoint, std::less<WidePoint>, geometry_detail::NativeAdministrationAllocator<WidePoint>> vertices(
+            std::less<WidePoint>{}, geometry_detail::NativeAdministrationAllocator<WidePoint>(state));
         const auto insert_points = [&](const auto& points)
         {
             for (const auto& point : points)
@@ -205,9 +226,35 @@ void certify_adaptive_physical_boundary(const PLIC::ConvexGeometryPtr<Arithmetic
         const auto pairs = row.empty() ? 0 : row.size() * (row.size() - 1) / 2;
         use_work(pairs);
         product_work(edge_count, vertices.size());
-        ConstructionLease construction(budget,
-            support_construction_capacity_bound(SupportConstructionKind::Partition, source_faces[face], row));
-        source_faces[face]->certify_partition(row);
+        ConstructionLease construction(
+            budget, support_construction_capacity_bound(SupportConstructionKind::Partition, source_faces[face], row));
+        if (admission)
+            PLIC::details::NativePlanarOwnerAccess::certify_partition(*source_faces[face], row, *admission);
+        else
+            source_faces[face]->certify_partition(row);
     }
+}
+void certify_adaptive_physical_boundary(const PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>& source,
+    std::span<const SupportFace> pieces, std::size_t byte_budget, AdaptiveBoundaryProofStatistics* statistics,
+    std::span<const SupportFace> whole_faces)
+{
+    certify_boundary_impl(source, {}, pieces, byte_budget, statistics, whole_faces);
+}
+void certify_adaptive_physical_boundary_faces(std::span<const SupportFace> source, std::span<const SupportFace> pieces,
+    std::size_t byte_budget, AdaptiveBoundaryProofStatistics* statistics)
+{
+    certify_boundary_impl({}, source, pieces, byte_budget, statistics, {});
+}
+void certify_adaptive_physical_boundary_native(const PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>& source,
+    std::span<const SupportFace> pieces, std::size_t byte_budget,
+    const geometry_detail::NativeConstructionAdmission& admission, std::span<const SupportFace> whole_faces)
+{
+    certify_boundary_impl(source, {}, pieces, byte_budget, nullptr, whole_faces, &admission);
+}
+void certify_adaptive_physical_boundary_faces_native(std::span<const SupportFace> source,
+    std::span<const SupportFace> pieces, std::size_t byte_budget,
+    const geometry_detail::NativeConstructionAdmission& admission)
+{
+    certify_boundary_impl({}, source, pieces, byte_budget, nullptr, {}, &admission);
 }
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

@@ -2,6 +2,7 @@
  * @brief Owner-directed exact registration and lookup without global catalogs.
  */
 #include "geometry/mesh/AMR/DistributedAncestryDirectory.hh"
+#include "geometry/mesh/AMR/NativeDirectoryAccess.hh"
 #include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include "geometry/mesh/AMR/DirectoryFactPages.hh"
 #include "geometry/mesh/AMR/DirectoryRegistrationAccess.hh"
@@ -445,6 +446,116 @@ std::optional<DistributedAncestryDirectory::Value> DistributedAncestryDirectory:
     if (const auto row = storage_->facts.find(key))
         return Value{row->owner, row->revision, row->address};
     return {};
+}
+NativeDirectoryLookup NativeDirectoryAccess::lookup(const DistributedAncestryDirectory& directory,
+    std::span<const AdaptiveBytes> keys, const geometry_detail::NativeConstructionAdmission& admission,
+    bool require_all)
+{
+    const PipelinePhaseScope audit(PipelinePhase::Transport);
+    record_pipeline_work(PipelineWork::RequiredWireRecord, keys.size());
+    const auto& comm = directory.comm_;
+    std::optional<NativeDirectoryLookup> result;
+    geometry_detail::NativeConstructorVector<unsigned char> seen(admission.allocator<unsigned char>());
+    collective(*comm,
+        [&]
+        {
+            if (admission.counters().limit != directory.budget_)
+                throw std::invalid_argument(
+                    "Native directory lookup must use the complete hierarchy operation domain.");
+            result.emplace(admission);
+            result->owners.resize(keys.size());
+            seen.resize(keys.size(), 0);
+        });
+    NativeOwnerExchange incoming;
+    {
+        geometry_detail::NativeConstructorStorageOwner storage;
+        std::vector<OwnerPacket> requests;
+        collective(*comm,
+            [&]
+            {
+                storage = geometry_detail::native_constructor_storage(admission);
+                storage.owner->reserve(requests, keys.size());
+                for (std::size_t index = 0; index < keys.size(); ++index)
+                {
+                    const auto& key = keys[index];
+                    if (key.empty())
+                        throw std::invalid_argument("Empty native directory owner key.");
+                    if (key.size() > SIZE_MAX - 16)
+                        throw std::invalid_argument("Native directory request size overflows.");
+                    auto& packet = requests.emplace_back();
+                    packet.peer = authority(key, comm->getSize());
+                    storage.owner->reserve(packet.bytes, 16 + key.size());
+                    packet.bytes.resize(16 + key.size());
+                    std::size_t offset = 0;
+                    directory_word(packet.bytes, offset, index);
+                    directory_key(packet.bytes, offset, key);
+                }
+            });
+        incoming = exchange_adaptive_packets(requests, comm, admission);
+    } // Request arrays and payloads die before response allocations.
+    NativeOwnerExchange answers;
+    {
+        geometry_detail::NativeConstructorStorageOwner storage;
+        std::vector<OwnerPacket> replies;
+        collective(*comm,
+            [&]
+            {
+                storage = geometry_detail::native_constructor_storage(admission);
+                storage.owner->reserve(replies, incoming.packets.size());
+                for (const auto& packet : incoming.packets)
+                {
+                    Reader reader{packet.bytes};
+                    const auto index = reader.word();
+                    const auto key = directory_key_view(reader);
+                    reader.done();
+                    if (key.empty() || authority(key, comm->getSize()) != comm->getRank())
+                        throw std::invalid_argument("Misrouted native directory lookup.");
+                    const auto found = directory.find(key); // Transparent immutable borrowed lookup.
+                    if (key.size() > SIZE_MAX - 40)
+                        throw std::invalid_argument("Native directory reply size overflows.");
+                    auto& reply = replies.emplace_back();
+                    reply.peer = packet.peer;
+                    storage.owner->reserve(reply.bytes, 40 + key.size());
+                    reply.bytes.resize(40 + key.size());
+                    std::size_t offset = 0;
+                    directory_word(reply.bytes, offset, index);
+                    directory_key(reply.bytes, offset, key);
+                    directory_word(reply.bytes, offset, !found ? 0 : std::uint64_t(found->owner) + 1);
+                    directory_word(reply.bytes, offset, !found ? 0 : found->revision);
+                    directory_word(
+                        reply.bytes, offset, !found ? std::numeric_limits<std::uint64_t>::max() : found->address);
+                }
+            });
+        incoming = {}; // Actual decoded request owners/receipts retire before the next transport.
+        answers = exchange_adaptive_packets(replies, comm, admission);
+    } // Reply arrays/payloads die before final result key copies.
+    collective(*comm,
+        [&]
+        {
+            for (const auto& packet : answers.packets)
+            {
+                Reader reader{packet.bytes};
+                const auto index = reader.word();
+                const auto key = directory_key_view(reader);
+                const auto owner = reader.word(), revision = reader.word(), address = reader.word();
+                reader.done();
+                if (index >= keys.size() || seen[index] || key.size() != keys[index].size() ||
+                    !std::equal(key.begin(), key.end(), keys[index].begin()) ||
+                    packet.peer != authority(key, comm->getSize()) || owner > std::uint64_t(comm->getSize()))
+                    throw std::invalid_argument("Invalid native directory owner reply.");
+                if (require_all && !owner)
+                    throw std::invalid_argument("Missing native directory owner.");
+                auto& value = result->owners[index];
+                result->storage.owner->copy(value.key, key);
+                value.owner = owner ? int(owner - 1) : -1;
+                value.revision = revision;
+                value.address = address;
+                seen[index] = 1;
+            }
+            if (std::find(seen.begin(), seen.end(), 0) != seen.end())
+                throw std::invalid_argument("Missing native directory reply.");
+        });
+    return std::move(*result);
 }
 std::vector<AdaptiveOwner> DistributedAncestryDirectory::lookup(
     std::span<const AdaptiveBytes> keys, bool require_all, std::optional<std::size_t> transient_cap) const

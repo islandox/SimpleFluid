@@ -19,6 +19,7 @@ class DistributedAdaptiveHierarchy;
 namespace adaptive_detail
 {
 class DirectoryRegistrationAccess;
+class NativeDirectoryAccess;
 class DirectorySourceCredit;
 class FamilyDirectoryProjection;
 } // namespace adaptive_detail
@@ -50,6 +51,7 @@ public:
 
 private:
     friend class adaptive_detail::DirectoryRegistrationAccess;
+    friend class adaptive_detail::NativeDirectoryAccess;
     friend class adaptive_detail::DirectorySourceCredit;
     struct Storage;
     struct SmallShard;

@@ -17,6 +17,7 @@
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
+class NativeImmutableSequenceAccess;
 /** Snapshot a vector builder into an independent immutable owner, including
  * rvalue builders: old mutable element aliases cannot modify the snapshot.
  * Copies share that owner; modifications require a separate vector builder and
@@ -24,6 +25,7 @@ namespace SimpleFluid::Meshes::AMR::adaptive_detail
  * authority nor proves incidence; storage identity denotes only an allocation. */
 template<class T> class ImmutableSequence
 {
+    friend class NativeImmutableSequenceAccess;
     std::shared_ptr<const std::vector<T>> storage_;
     std::uint32_t offset_ = 0, count_ = 0;
     static std::uint32_t narrow_size(std::size_t count)

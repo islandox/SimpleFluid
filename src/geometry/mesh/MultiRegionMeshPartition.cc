@@ -5,6 +5,7 @@
 #include "geometry/mesh/ExplicitRegionProvider.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "geometry/mesh/NativeFragmentRecipe.hh"
+#include "geometry/mesh/NativeDescriptorCodecAccess.hh"
 #include "geometry/mesh/NativePartitionWire.hh"
 #include "geometry/VoFWireProtocol.hh"
 #include <cstring>
@@ -761,6 +762,26 @@ NativeFragmentDescriptor::Kind checked_native_fragment_kind(NativeFragmentDescri
     }
     throw std::invalid_argument("Unknown native fragment recipe kind.");
 }
+struct BorrowedDescriptorWriter
+{
+    std::vector<char>& data;
+    void byte(uint8_t value) { this->value(value); }
+    template<class T> void value(const T& value)
+    {
+        static_assert(std::is_trivially_copyable_v<T>);
+        const auto* first = reinterpret_cast<const char*>(&value);
+        if (sizeof(T) > data.capacity() - data.size())
+            throw std::invalid_argument("Native descriptor destination was not preadmitted.");
+        data.insert(data.end(), first, first + sizeof(T));
+    }
+    void array(std::span<const char> values)
+    {
+        value(std::uint64_t(values.size()));
+        if (values.size() > data.capacity() - data.size())
+            throw std::invalid_argument("Native descriptor part exceeds its admission.");
+        data.insert(data.end(), values.begin(), values.end());
+    }
+};
 struct DescriptorSizeWriter
 {
     std::size_t size = 0;
@@ -792,6 +813,14 @@ template<class PacketWriter> void emit_native_descriptor(PacketWriter& w, const 
     w.array(descriptor.view);
 }
 } // namespace
+void NativeDescriptorCodecAccess::append(std::vector<char>& destination, const NativeFragmentDescriptor& descriptor)
+{
+    const auto size = encoded_native_fragment_descriptor_size(descriptor);
+    if (size > destination.capacity() - destination.size())
+        throw std::invalid_argument("Native descriptor destination was not preadmitted.");
+    BorrowedDescriptorWriter writer{destination};
+    emit_native_descriptor(writer, descriptor);
+}
 NativeFragmentBytes encode_native_fragment_descriptor(const NativeFragmentDescriptor& descriptor)
 {
     Writer w;
@@ -805,6 +834,70 @@ std::size_t encoded_native_fragment_descriptor_size(const NativeFragmentDescript
     return w.size;
 }
 
+std::shared_ptr<const NativeFragmentDescriptor> NativeDescriptorCodecAccess::decode(std::span<const char> bytes,
+    const geometry_detail::NativeConstructionAdmission& admission,
+    const std::shared_ptr<const NativeFragmentDescriptor>& retained_parts)
+{
+    Reader reader{bytes};
+    const auto kind = packet_codec::read_header(reader, packet_codec::Family::NativeFragment, native_fragment_version,
+        {NativeFragmentDescriptor::Kind::Cartesian, NativeFragmentDescriptor::Kind::ConstructedProduct,
+            NativeFragmentDescriptor::Kind::LegacyProcedural});
+    const auto parts = reader.count(sizeof(std::uint64_t));
+    auto descriptor = geometry_detail::NativeObjectOwnerAccess<NativeFragmentDescriptor>::make(admission);
+    descriptor.owner->kind = kind;
+    const auto& storage = geometry_detail::NativeObjectOwnerAccess<NativeFragmentDescriptor>::storage(descriptor.owner);
+    storage.owner->reserve(descriptor.owner->parts, parts);
+    const auto field = [&]()
+    {
+        const auto count = reader.count(sizeof(char));
+        const auto result = reader.data.first(count);
+        reader.data = reader.data.subspan(count);
+        return result;
+    };
+    struct SpanLess
+    {
+        bool operator()(std::span<const char> a, std::span<const char> b) const
+        {
+            return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end());
+        }
+    };
+    geometry_detail::NativeConstructorMap<std::span<const char>, std::shared_ptr<const NativeFragmentBytes>, SpanLess>
+        interned(SpanLess{},
+            admission.allocator<std::pair<const std::span<const char>, std::shared_ptr<const NativeFragmentBytes>>>());
+    for (std::size_t i = 0; i < parts; ++i)
+    {
+        const auto input = field();
+        if (const auto previous = interned.find(input); previous != interned.end())
+        {
+            descriptor.owner->parts.push_back(previous->second);
+            continue;
+        }
+        std::shared_ptr<const NativeFragmentBytes> reused;
+        if (retained_parts)
+            for (const auto& part : retained_parts->parts)
+                if (part && part->size() == input.size() && std::equal(input.begin(), input.end(), part->begin()))
+                {
+                    reused = part;
+                    break;
+                }
+        if (reused)
+        {
+            interned.emplace(input, reused);
+            descriptor.owner->parts.push_back(std::move(reused));
+            continue;
+        }
+        auto part = geometry_detail::NativeObjectOwnerAccess<NativeFragmentBytes>::make(admission);
+        geometry_detail::NativeObjectOwnerAccess<NativeFragmentBytes>::storage(part.owner)
+            .owner->copy(*part.owner, input);
+        interned.emplace(input, part.owner);
+        descriptor.owner->parts.push_back(std::move(part.owner));
+    }
+    storage.owner->copy(descriptor.owner->view, field());
+    if (!reader.data.empty())
+        throw std::invalid_argument("Trailing native fragment recipe bytes.");
+    // Native allocation provenance grants no Origin/Record or geometry proof.
+    return std::move(descriptor.owner);
+}
 std::shared_ptr<const NativeFragmentDescriptor> decode_native_fragment_descriptor(
     std::span<const char> bytes, NativeFragmentCache& cache)
 {

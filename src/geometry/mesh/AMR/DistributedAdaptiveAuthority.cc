@@ -1,3 +1,9 @@
+#include "geometry/mesh/AMR/NativeAdaptiveTileCodec.hh"
+#include "geometry/mesh/AMR/NativeImmutableSequenceAccess.hh"
+#include "geometry/PLIC/details/NativePlanarCodecAccess.hh"
+#include "geometry/PLIC/details/NativePlanarOwnerAccess.hh"
+#include "geometry/PLIC/details/NativeGeometryByteWriter.hh"
+#include "geometry/PLIC/details/GeometryPacketHeader.hh"
 /** @file DistributedAdaptiveAuthority.cc
  * @brief Complete support authority overlays and canonical edge-point routing.
  */
@@ -217,6 +223,155 @@ AdaptiveTile decode_tile(std::span<const char> bytes, std::size_t byte_budget, B
     return tile;
 }
 } // namespace
+namespace
+{
+struct NativeTileSize : TileEncodedSize
+{
+    const geometry_detail::NativeConstructionAdmission& admission;
+    explicit NativeTileSize(const geometry_detail::NativeConstructionAdmission& value) : admission(value) {}
+    void field(std::size_t size)
+    {
+        word(size);
+        add(size);
+    }
+    void geometry(const SupportFace& face)
+    {
+        field(PLIC::details::NativePlanarCodecAccess::size(*face, true, admission));
+    }
+    void displacement(const DisplacementIdentity& value) { field(PLIC::encoded_identity_size(value)); }
+    void key(const AdaptiveCellKey& value) { field(encoded_adaptive_key_size(value)); }
+};
+struct NativeTileWriter
+{
+    Writer& writer;
+    const geometry_detail::NativeConstructionAdmission& admission;
+    void byte(std::uint8_t value) { writer.byte(value); }
+    void word(std::uint64_t value) { writer.word(value); }
+    void bytes(std::span<const char> value) { writer.bytes(value); }
+    void geometry(const SupportFace& face)
+    {
+        word(PLIC::details::NativePlanarCodecAccess::size(*face, true, admission));
+        PLIC::details::NativePlanarCodecAccess::append(writer.data, *face, true, admission);
+    }
+    void displacement(const DisplacementIdentity& value)
+    {
+        const auto size = PLIC::encoded_identity_size(value);
+        word(size);
+        const auto header = PLIC::details::geometry_packet_header(PLIC::GeometryPacketKind::DisplacementIdentity,
+            ArithmeticMode::Ordinary, size - PLIC::geometry_packet_header_bytes);
+        writer.data.insert(writer.data.end(), header.begin(), header.end());
+        PLIC::details::NativeGeometryByteWriter output{&writer.data, &admission};
+        output.native_identity(value);
+    }
+    void key(const AdaptiveCellKey& value) { NativeAdaptiveKeyCodec::write(writer, value); }
+};
+template<class Output> void emit_native_tile(Output& writer, const AdaptiveTile& tile)
+{
+    if (!tile.geometry)
+        throw std::invalid_argument("Native tile packet requires full physical geometry.");
+    writer.word(tile.face_gid);
+    write_geometry_record_header(writer, GeometryRecordKind::Tile);
+    writer.bytes(tile.surface);
+    writer.bytes(tile.domain);
+    writer.bytes(tile.identity);
+    writer.geometry(tile.geometry);
+    writer.displacement(tile.second_image_identity);
+    writer.key(tile.first);
+    writer.word(tile.second.has_value());
+    if (tile.second)
+        writer.key(*tile.second);
+    writer.word(tile.first_owner);
+    writer.word(tile.second_owner + 1);
+    writer.word(tile.first_native_face);
+    writer.word(tile.second_native_face);
+    writer.word(tile.exterior);
+    writer.bytes(std::span(tile.boundary));
+    for (const auto* incidence : {&tile.node_gids, &tile.second_node_gids})
+    {
+        writer.word(incidence->size());
+        for (const auto node : *incidence)
+            writer.word(node);
+    }
+}
+} // namespace
+std::size_t NativeAdaptiveTileCodec::size(
+    const AdaptiveTile& tile, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    NativeTileSize output(admission);
+    emit_native_tile(output, tile);
+    return output.total;
+}
+void NativeAdaptiveTileCodec::write_payload(
+    Writer& output, const AdaptiveTile& tile, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    const auto extent = size(tile, admission);
+    if (extent > output.data.capacity() - output.data.size())
+        throw std::invalid_argument("Native tile destination was not preadmitted.");
+    const auto initial = output.data.size();
+    NativeTileWriter writer{output, admission};
+    emit_native_tile(writer, tile);
+    if (output.data.size() - initial != extent)
+        throw std::invalid_argument("Native tile encoded length differs.");
+}
+void NativeAdaptiveTileCodec::write(
+    Writer& output, const AdaptiveTile& tile, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    const auto extent = size(tile, admission);
+    if (output.data.capacity() - output.data.size() < 8 || extent > output.data.capacity() - output.data.size() - 8)
+        throw std::invalid_argument("Native framed tile destination was not preadmitted.");
+    output.word(extent);
+    write_payload(output, tile, admission);
+}
+AdaptiveTile NativeAdaptiveTileCodec::decode(std::span<const char> packet, std::size_t byte_budget,
+    const geometry_detail::NativeConstructorStorageOwner& storage)
+{
+    if (!storage.owner || packet.size() > byte_budget)
+        throw std::invalid_argument("Native tile packet exceeds its actual operation/storage budget.");
+    const auto& admission = storage.owner->admission();
+    Reader reader{packet};
+    AdaptiveTile tile;
+    tile.face_gid = reader.word();
+    read_geometry_record_header(reader, GeometryRecordKind::Tile);
+    tile.surface = NativeImmutableSequenceAccess::snapshot<char>(reader.bytes_view(), admission);
+    tile.domain = NativeImmutableSequenceAccess::snapshot<char>(reader.bytes_view(), admission);
+    storage.owner->copy(tile.identity, reader.bytes_view());
+    tile.geometry = PLIC::details::NativePlanarOwnerAccess::decode(reader.bytes_view(), byte_budget, admission);
+    tile.second_image_identity = PLIC::decode_identity<DisplacementIdentity>(reader.bytes_view(), byte_budget);
+    tile.second_image = PLIC::displacement_display<ArithmeticMode::Ordinary>(tile.second_image_identity);
+    tile.first = NativeAdaptiveKeyCodec::decode(reader.bytes_view(), storage);
+    const auto second = reader.word();
+    if (second > 1)
+        throw std::invalid_argument("Invalid authority incidence.");
+    if (second)
+        tile.second = NativeAdaptiveKeyCodec::decode(reader.bytes_view(), storage);
+    tile.first_owner = reader.word();
+    tile.second_owner = int(reader.word()) - 1;
+    tile.first_native_face = reader.word();
+    tile.second_native_face = reader.word();
+    tile.exterior = reader.word();
+    const auto name = reader.bytes_view();
+    storage.owner->string(tile.boundary, std::string_view(name.data(), name.size()));
+    for (auto* incidence : {&tile.node_gids, &tile.second_node_gids})
+    {
+        const auto count = reader.word();
+        if (count > (reader.data.size() - reader.offset) / 8)
+            throw std::invalid_argument("Truncated adaptive face incidence.");
+        geometry_detail::NativeConstructorVector<std::uint64_t> nodes(admission.allocator<std::uint64_t>());
+        nodes.reserve(count);
+        for (std::size_t i = 0; i < count; ++i)
+            nodes.push_back(reader.word());
+        *incidence = NativeImmutableSequenceAccess::snapshot<std::uint64_t>(nodes, admission);
+    }
+    reader.done();
+    const auto scratch = geometry_detail::native_constructor_storage(admission);
+    Writer canonical;
+    scratch.owner->reserve(canonical.data, size(tile, admission));
+    write_payload(canonical, tile, admission);
+    if (canonical.data.size() != packet.size() ||
+        !std::equal(canonical.data.begin(), canonical.data.end(), packet.begin()))
+        throw std::invalid_argument("Noncanonical native adaptive tile.");
+    return tile;
+}
 AdaptiveBytes encode_adaptive_tile(const AdaptiveTile& tile, std::size_t byte_budget)
 {
     return encode_tile(tile, byte_budget);
