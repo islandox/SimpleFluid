@@ -1,4 +1,5 @@
 set(SIMPLEFLUID_MESH_SOURCES
+    mesh/AMR/NativePublicationOwnerGraph.cc
     mesh/AMR/NativeSourceOwnerStore.cc
     PLIC/details/NativeGeometryAccounting.cc
     PLIC/details/NativePaidExtent.cc
@@ -171,6 +172,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto")
     # Authenticated native construction/proofs use the original strict arithmetic contract.
     set_source_files_properties(
+        "${PROJECT_SOURCE_DIR}/src/parallel/details/NativeTpetraMapAdmission.cc"
+        mesh/AMR/NativePublicationOwnerGraph.cc
         mesh/AMR/NativeSourceOwnerStore.cc
         PLIC/details/NativeGeometryAccounting.cc
         PLIC/details/NativePaidExtent.cc
@@ -283,6 +286,8 @@ endif()
 # alternate-path objects are compiled with ordinary LTO optimization in USE
 # builds instead of silently applying profile-use without matching data.
 set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
+    "${PROJECT_SOURCE_DIR}/src/parallel/details/NativeTpetraMapAdmission.cc"
+    mesh/AMR/NativePublicationOwnerGraph.cc
     mesh/AMR/NativeSourceOwnerStore.cc
     PLIC/details/NativeGeometryAccounting.cc
     PLIC/details/NativePaidExtent.cc
