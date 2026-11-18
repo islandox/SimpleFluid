@@ -1,4 +1,5 @@
 #include "CertifiedIncidenceViews.hh"
+#include "NativeContactFunding.hh"
 #include <algorithm>
 #include <array>
 #include <cfenv>
@@ -47,28 +48,9 @@ bool same_slot(const ContactSourcePointSnapshot& saved, std::size_t slot, const 
 }
 /** The typed token survives body destruction in its custom shared deleter,
  * including the final weak-control tail. No callbacks or arena ownership. */
-struct ControlCredit
-{
-    Budget* budget = nullptr;
-    std::shared_ptr<Budget> keeper;
-    std::size_t charge = 0;
-    ~ControlCredit()
-    {
-        if (budget)
-            budget->used -= charge;
-    }
-};
-constexpr std::size_t control_bytes = sizeof(ControlCredit) + 2 * 128;
-std::shared_ptr<ControlCredit> make_control(Budget& budget, const std::shared_ptr<Budget>& keeper)
-{
-    Allocation memory(budget);
-    memory.retain(control_bytes);
-    auto result = std::make_shared<ControlCredit>();
-    result->budget = &budget;
-    result->keeper = keeper;
-    result->charge = std::exchange(memory.bytes, 0);
-    return result;
-}
+using contact_funding_detail::ControlCredit;
+using contact_funding_detail::make_controlled;
+constexpr auto control_bytes = ControlCredit::allowance();
 template<class T>
 void retain_owner(cartesian_detail::CreditConstruction& credits, const std::shared_ptr<T>& owner, const Budget* origin,
     std::size_t bytes, bool keeper, Credits& leases, Allocation& memory)
@@ -190,6 +172,12 @@ struct CertifiedIncidenceResultView::RemoteValue
             budget->used -= charge;
     }
     [[nodiscard]] std::size_t metadata_bytes() const noexcept { return charge + control_bytes; }
+    [[nodiscard]] NativeContactOwnerFunding native_funding(
+        const std::shared_ptr<const RemoteValue>& owner, std::size_t bytes) const
+    {
+        return NativeContactFundingAccess::split_named(owner, bytes, [](const RemoteValue& value) { return value.charge; },
+            [](const RemoteValue& value) { return value.control; });
+    }
     [[nodiscard]] std::pair<const void*, std::size_t> borrowed_control_payload() const noexcept
     {
         return {control, sizeof(ControlCredit)};
@@ -297,8 +285,7 @@ std::optional<CertifiedIncidenceResultView> CertifiedIncidenceResultView::certif
     }
     Allocation body(budget);
     body.retain(sizeof(RemoteValue));
-    auto control = make_control(budget, keeper);
-    auto result = std::shared_ptr<RemoteValue>(new RemoteValue, [control](RemoteValue* p) { delete p; });
+    auto [result, control] = make_controlled(budget, keeper, [] { return new RemoteValue; });
     result->control = control.get();
     result->snapshot = source;
     result->proof = proof;
@@ -460,6 +447,12 @@ struct CertifiedIncidenceResultParts::Storage
     std::shared_ptr<Budget> keeper;
     std::size_t charge = 0;
     const ControlCredit* control = nullptr;
+    [[nodiscard]] NativeContactOwnerFunding native_funding(
+        const std::shared_ptr<const Storage>& owner, std::size_t bytes) const
+    {
+        return NativeContactFundingAccess::split_named(owner, bytes, [](const Storage& value) { return value.charge; },
+            [](const Storage& value) { return value.control; });
+    }
     [[nodiscard]] std::pair<const void*, std::size_t> borrowed_control_payload() const noexcept
     {
         return {control, sizeof(ControlCredit)};
@@ -492,8 +485,7 @@ CertifiedIncidenceResultParts CertifiedIncidenceResultParts::create(std::span<co
         part.retain_dependencies(credits, leases, imported);
     Allocation body(budget);
     body.retain(sizeof(Storage));
-    auto control = make_control(budget, keeper);
-    auto result = std::shared_ptr<Storage>(new Storage, [control](Storage* p) { delete p; });
+    auto [result, control] = make_controlled(budget, keeper, [] { return new Storage; });
     result->control = control.get();
     body.reserve(result->parts, parts.size());
     result->parts.assign(parts.begin(), parts.end());
@@ -587,6 +579,12 @@ struct CertifiedIncidenceLoopView::Storage
             budget->used -= charge;
     }
     [[nodiscard]] std::size_t metadata_bytes() const noexcept { return charge + control_bytes; }
+    [[nodiscard]] NativeContactOwnerFunding native_funding(
+        const std::shared_ptr<const Storage>& owner, std::size_t bytes) const
+    {
+        return NativeContactFundingAccess::split_named(owner, bytes, [](const Storage& value) { return value.charge; },
+            [](const Storage& value) { return value.control; });
+    }
     [[nodiscard]] std::pair<const void*, std::size_t> borrowed_control_payload() const noexcept
     {
         return {control, sizeof(ControlCredit)};
@@ -623,8 +621,7 @@ CertifiedIncidenceLoopView CertifiedIncidenceLoopView::publish(
         parts->retain_dependencies(credits, leases, imported);
     Allocation body(budget);
     body.retain(sizeof(Storage));
-    auto control = make_control(budget, keeper);
-    auto result = std::shared_ptr<Storage>(new Storage, [control](Storage* p) { delete p; });
+    auto [result, control] = make_controlled(budget, keeper, [] { return new Storage; });
     result->control = control.get();
     result->snapshot = std::move(snapshot);
     result->quad = quad;

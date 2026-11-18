@@ -20,6 +20,7 @@ class PooledLineCompletionSnapshotAdmission;
 struct IncidencePools;
 class AdaptiveSubfaceSnapshot;
 class ContactPhysicalResidency;
+class ContactExternalResidencyLease;
 using IncidenceRowHandle = std::shared_ptr<const ContactIncidenceRow>;
 /** A transient delivery borrows source identity from the collective lookup.
  * The independently owning row is safe to retain after that borrow expires. */
@@ -68,6 +69,10 @@ public:
         std::span<const AdaptiveCellKey> inserted, ContactHaloContext next, const OwnedLeafLookup&, bool keep_identity = true);
     [[nodiscard]] const ContactHaloStatistics& statistics() const noexcept;
     [[nodiscard]] const std::shared_ptr<const AdaptiveSubfaceSnapshot>& subface_snapshot() const noexcept;
+    void complete_native_subface_rebind(ContactHaloContext);
+    void transfer_subface_inherited_scope(ContactExternalResidencyLease&);
+    [[nodiscard]] bool admits_inherited_point_scope(std::uint64_t scope, std::size_t bytes) const noexcept;
+    void disown_inherited_point_scope(std::uint64_t scope, std::size_t bytes) noexcept;
     /** Replaced inherited metadata remains charged while the accepted source
      * participates in candidate construction. End that operation explicitly;
      * escaped historical views retain their own physical owners and charges. */

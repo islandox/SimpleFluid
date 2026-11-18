@@ -6,6 +6,11 @@
 #include "IdentityPoolPayload.hh"
 #include "PersistentAppendSlots.hh"
 #include "PersistentPlaneOwnerIndex.hh"
+#include "geometry/PLIC/details/GeometryOwnerGraph.hh"
+#include "geometry/PLIC/details/GeometryRetentionCensus.hh"
+#include "geometry/PLIC/details/NativeGeometryByteWriter.hh"
+#include "geometry/PLIC/details/NativeIdentityOwnerAccess.hh"
+#include "geometry/mesh/AMR/NativeContactFunding.hh"
 #include "PhysicalOwnerIndex.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <algorithm>
@@ -62,7 +67,14 @@ private:
     private:
         friend class IdentityPool;
         friend class PageView;
+        friend class NativeContactFundingAccess;
         std::shared_ptr<Page> page;
+        std::weak_ptr<const PageCredit> self;
+        [[nodiscard]] NativeContactOwnerFunding native_funding(
+            const std::shared_ptr<const PageCredit>& actual, std::size_t extent) const
+        {
+            return IdentityPool::credit_funding(actual, extent);
+        }
 
     public:
         std::size_t bytes = 0;
@@ -73,10 +85,13 @@ private:
             : budget(&b), keeper(std::move(k)), page(std::move(p)), pool_scope(scope), persistent_owner(persistent)
         {
         }
+        PageCredit(const PageCredit&) = delete;
+        PageCredit& operator=(const PageCredit&) = delete;
         ~PageCredit()
         {
             page.reset();
-            budget->used -= bytes;
+            if (bytes < 128) std::terminate();
+            budget->used -= bytes - 128;
         }
         void admit(std::size_t n)
         {
@@ -85,16 +100,119 @@ private:
             budget->add(n);
             bytes += n;
         }
-        [[nodiscard]] std::shared_ptr<const void> body_owner() const noexcept { return page; }
+        [[nodiscard]] std::shared_ptr<const Page> body_owner() const noexcept { return page; }
         [[nodiscard]] const Budget* body_origin() const noexcept { return page->body_origin; }
         [[nodiscard]] std::uint64_t body_scope() const noexcept { return page->body_scope; }
         [[nodiscard]] std::size_t body_bytes() const noexcept { return bytes - sizeof(PageCredit) - 128; }
+        [[nodiscard]] static NativeContactOwnerFunding native_body_funding(const std::shared_ptr<const PageCredit>& actual)
+        {
+            return IdentityPool::page_funding(actual);
+        }
         void release(std::size_t n) noexcept
         {
             bytes -= n;
             budget->used -= n;
         }
     };
+    struct CreditControl
+    {
+        Budget* budget = nullptr;
+        std::shared_ptr<Budget> keeper;
+        std::size_t bytes = 0;
+        static constexpr std::size_t allowance() noexcept { return 128; }
+        ~CreditControl() { if (budget) budget->used -= bytes; }
+    };
+    struct DeleteCredit
+    {
+        std::shared_ptr<CreditControl> control;
+        void operator()(PageCredit* credit) const noexcept { delete credit; }
+    };
+    struct DeletePage
+    {
+        std::shared_ptr<CreditControl> control;
+        void operator()(Page* page) const noexcept { delete page; }
+    };
+    static std::shared_ptr<Page> make_page(const std::shared_ptr<PageCredit>& credit)
+    {
+        const auto* receipt = std::get_deleter<DeleteCredit>(credit);
+        if (!receipt || !receipt->control || receipt->control->budget != credit->budget)
+            throw std::invalid_argument("Identity page lacks its actual charged control keeper.");
+        return std::shared_ptr<Page>(new Page, DeletePage{receipt->control});
+    }
+    static NativeContactOwnerFunding credit_funding(
+        const std::shared_ptr<const PageCredit>& credit, std::size_t extent)
+    {
+        const auto* deleter = std::get_deleter<DeleteCredit>(credit);
+        const std::shared_ptr<const CreditControl> group = deleter ? deleter->control : nullptr;
+        return NativeContactFundingAccess::split(credit, extent, group, CreditControl::allowance(),
+            [](const PageCredit&) { return sizeof(PageCredit); },
+            [](const auto& owner, const auto& token)
+            {
+                const auto* actual = std::get_deleter<DeleteCredit>(owner);
+                return actual && actual->control == token && token->budget == owner->budget &&
+                    token->keeper == owner->keeper && token->bytes == CreditControl::allowance() &&
+                    owner->bytes >= sizeof(PageCredit) + CreditControl::allowance() &&
+                    !owner->self.owner_before(owner) && !owner.owner_before(owner->self);
+            });
+    }
+    static NativeContactOwnerFunding page_funding(const std::shared_ptr<const PageCredit>& credit)
+    {
+        if (!credit || !credit->page || !credit->keeper || !credit->page->frozen)
+            return {};
+        const std::shared_ptr<const Page> page = credit->page;
+        const auto* physical = std::get_deleter<DeletePage>(page);
+        const auto* financial = std::get_deleter<DeleteCredit>(credit);
+        if (!physical || !physical->control || !physical->control->keeper || !financial || !financial->control)
+            throw std::invalid_argument("Identity page body lacks its actual physical and financial controls.");
+        const auto legacy_bytes = credit->body_bytes();
+        if (legacy_bytes < sizeof(Page) + CreditControl::allowance())
+            throw std::logic_error("Identity page body charge omits its original fixed allowance.");
+        // The producer's single actual group already accounts for the two
+        // concrete control requests. The remaining legacy page allowance
+        // stays in contact admission and grants no second physical credit.
+        const auto body_extent = legacy_bytes - CreditControl::allowance();
+        return NativeContactFundingAccess::borrow_body(page, legacy_bytes, body_extent, credit, credit->keeper,
+            NativeContactFundingAccess::observe_control(page, physical->control),
+            NativeContactFundingAccess::observe_control(credit, financial->control),
+            [](const auto& financial, const auto& physical, const auto& arena, std::uint8_t kind,
+                std::size_t extent, std::size_t snapshot, std::uint64_t revision)
+            {
+                const auto credit = std::static_pointer_cast<const PageCredit>(financial);
+                return credit && credit->page && credit->page.get() == physical.get() && credit->page->frozen &&
+                    !credit->page.owner_before(physical) && !physical.owner_before(credit->page) &&
+                    !credit->self.owner_before(financial) && !financial.owner_before(credit->self) &&
+                    credit->keeper.get() == arena.get() && !credit->keeper.owner_before(arena) &&
+                    !arena.owner_before(credit->keeper) && extent == snapshot &&
+                    credit->body_bytes() == extent + CreditControl::allowance() && !revision &&
+                    kind == PLIC::details::GeometryOwnerGraphEditor::external_kind();
+            });
+    }
+    static void project_credit(const std::shared_ptr<const PageCredit>& credit,
+        PLIC::details::GeometryOwnerGraphEditor& graph, bool retain)
+    {
+        if (!credit) return;
+        constexpr auto credit_bytes = sizeof(PageCredit) + CreditControl::allowance();
+        const auto funding = NativeContactFundingAccess::capture(credit, credit_bytes, credit->budget);
+        if (!NativeContactFundingAccess::project(graph, credit, credit_bytes, funding, retain)) return;
+        const auto& page = credit->page;
+        if (!page || !NativeContactFundingAccess::project(graph, page, credit->body_bytes(), page_funding(credit), retain))
+            return;
+        if constexpr (owns_plane_backing)
+            if (std::ranges::any_of(page->plane_owners, [](const auto& owner) { return bool(owner); }))
+                throw std::invalid_argument("Native contact plane backing lacks an exact retained-owner finance proof.");
+        const auto values = [&]
+        {
+            if constexpr (std::is_same_v<T, PLIC::PlaneSupportIdentity<ArithmeticMode::Ordinary>>)
+                for (const auto& value : page->values) graph.identity(value, retain);
+            else if constexpr (std::is_same_v<T, PLIC::PointIdentity<ArithmeticMode::Ordinary>>)
+                for (const auto& value : page->values) graph.point_identity(value, retain);
+            else if constexpr (std::is_same_v<T, PLIC::DisplacementIdentity<ArithmeticMode::Ordinary>>)
+                for (const auto& value : page->values) graph.displacement_identity(value, retain);
+        };
+        if (retain) values();
+        if (!retain) values();
+    }
+
     struct PageEntry
     {
         std::shared_ptr<PageCredit> credit;
@@ -475,6 +593,8 @@ public:
         persistent_->foreign_page_bytes -= bytes;
         charged_ -= bytes;
     }
+    [[nodiscard]] std::size_t inherited_page_admission() const noexcept
+    { return persistent_ ? persistent_->foreign_page_bytes : 0; }
     /** A whole directory replacement still overlaps its accepted source. */
     [[nodiscard]] std::size_t take_replaced_overlap() noexcept
     {
@@ -610,18 +730,8 @@ public:
             if (!credit)
             {
                 constexpr auto overhead = sizeof(PageCredit) + 128;
-                budget_->add(overhead);
-                try
-                {
-                    credit = std::make_shared<PageCredit>(*budget_, keeper_, source_credit->page);
-                }
-                catch (...)
-                {
-                    budget_->used -= overhead;
-                    throw;
-                }
-                credit->bytes = overhead;
-                credit->admit(source_credit->bytes - overhead);
+                credit = IdentityPool::make_credit_in(*budget_, keeper_, source_credit->page,
+                    source_credit->bytes - overhead, 0, false);
             }
             const auto i = directory_.size();
             if (i > (std::numeric_limits<std::uint64_t>::max() - offset) / records_per_page)
@@ -686,12 +796,29 @@ public:
         [[nodiscard]] std::size_t page_count() const noexcept { return directory_.size(); }
         [[nodiscard]] std::size_t page_capacity() const noexcept { return directory_.capacity(); }
         [[nodiscard]] std::size_t capture_index_nodes() const noexcept { return index_.size(); }
-        [[nodiscard]] std::size_t metadata_bytes() const noexcept { return charged_; }
+        [[nodiscard]] std::size_t metadata_bytes() const noexcept { return charged_ + view_control_bytes; }
         [[nodiscard]] bool frozen() const noexcept { return frozen_; }
         [[nodiscard]] const Budget* origin_arena() const noexcept { return budget_; }
         /** A borrowed directory also retains its originating credit objects.
          * A different arena accounts these objects separately from the page
          * bodies already admitted by that arena's independently forked pool. */
+        /** Direct PageView -> credit -> page -> typed identity/credit owners.
+         * Every real directory slot is an edge; no unique-owner census is used. */
+        static void project(const std::shared_ptr<const PageView>& view,
+            PLIC::details::GeometryOwnerGraphEditor& graph, bool retain)
+        {
+            if (!view) return;
+            const auto bytes = view->metadata_bytes();
+            if (!NativeContactFundingAccess::project(graph, view, bytes, view->native_funding(view, bytes), retain))
+                return;
+            for (const auto& credit : view->directory_) IdentityPool::project_credit(credit, graph, retain);
+        }
+        static void project_reimported(const std::shared_ptr<const PageView>& view,
+            PLIC::details::GeometryOwnerGraphEditor& graph, bool retain)
+        {
+            if (view) NativeContactFundingAccess::project_reimported(
+                graph, view, view->native_funding(view, view->metadata_bytes()), retain);
+        }
         template<class Visitor> void visit_credit_owners(Visitor&& visitor) const
         {
             for (const auto& credit : directory_)
@@ -700,9 +827,18 @@ public:
 
     private:
         friend class IdentityPool;
+        friend class NativeContactFundingAccess;
+        static constexpr auto view_control_bytes = 128;
         static constexpr auto index_node_bytes =
             sizeof(std::pair<const PageCredit* const, std::size_t>) + 4 * sizeof(void*);
         PageView(Budget& budget, std::shared_ptr<Budget> keeper) : budget_(&budget), keeper_(std::move(keeper)) {}
+        [[nodiscard]] NativeContactOwnerFunding native_funding(
+            const std::shared_ptr<const PageView>& view, std::size_t bytes) const
+        {
+            return NativeContactFundingAccess::split_named<view_control_bytes>(view, bytes,
+                [](const PageView& value) { return value.charged_; },
+                [](const PageView& value) -> const auto& { return value.keeper_; });
+        }
         void admit(std::size_t bytes)
         {
             if (bytes > std::numeric_limits<std::size_t>::max() - charged_)
@@ -722,15 +858,26 @@ public:
         std::vector<std::shared_ptr<PageCredit>> directory_;
         std::map<const PageCredit*, std::size_t> index_;
     };
+    void bind_native_plane_admission(const std::shared_ptr<const geometry_detail::NativeAllocationState>& state)
+        requires(owns_plane_backing)
+    {
+        if (!state) return;
+        const auto& arena = state->mirror.owner;
+        if (!persistent_ || persistent_->plane.bytes || !keeper_ || arena.get() != keeper_.get() ||
+            arena.owner_before(keeper_) || keeper_.owner_before(arena))
+            throw std::invalid_argument("Native contact plane admission has a foreign arena or legacy backing pool.");
+        native_plane_state_ = state;
+    }
     [[nodiscard]] std::shared_ptr<PageView> page_view()
     {
         if (!keeper_)
             throw std::invalid_argument("Escaping identity pages require a shared budget keeper.");
-        constexpr auto bytes = sizeof(PageView) + 128;
+        constexpr auto bytes = sizeof(PageView);
         budget_->add(bytes);
         try
         {
-            auto result = std::shared_ptr<PageView>(new PageView(*budget_, keeper_));
+            auto result = contact_funding_detail::make_controlled<PageView::view_control_bytes>(
+                *budget_, keeper_, [&] { return new PageView(*budget_, keeper_); }).first;
             result->charged_ = bytes;
             return result;
         }
@@ -811,6 +958,27 @@ private:
     {
         return node ? node->subtree_bytes - (node->charge.arena == keeper_ ? node->same_arena_bytes : 0) : 0;
     }
+    [[nodiscard]] T admit_native_plane(const T& plane) const requires(owns_plane_backing)
+    {
+        using Access = PLIC::details::GeometryIdentityAccess;
+        const auto& backing = Access::backing(plane);
+        if (const auto* admitted = PLIC::details::NativeIdentityOwnerAccess::backing(backing))
+        {
+            const auto& origin = admitted->envelope()->state()->mirror.owner;
+            if (origin.get() == keeper_.get() && !origin.owner_before(keeper_) && !keeper_.owner_before(origin))
+                return plane;
+        }
+        const auto admission = geometry_detail::NativeConstructionAdmission::from_state(native_plane_state_);
+        auto scratch = geometry_detail::native_constructor_storage(admission);
+        std::vector<char> bytes;
+        scratch.owner->reserve(bytes, PLIC::canonical_key_size(plane));
+        PLIC::details::NativeGeometryByteWriter writer{&bytes, &admission};
+        writer.native_identity(plane);
+        auto retained = Access::decode_support_admitted(bytes, admission.counters().limit, admission);
+        if (retained != plane)
+            throw std::invalid_argument("Native contact plane detachment changed its complete identity.");
+        return retained;
+    }
     template<class U> [[nodiscard]] Slot intern_persistent(U&& value)
     {
         auto& current = *persistent_;
@@ -829,17 +997,21 @@ private:
         {
             auto body = sizeof(Page) + 128 + product(records_per_page, sizeof(T));
             if constexpr (owns_plane_backing)
-                body = checked_sum(body, product(records_per_page, sizeof(PlaneOwner)));
+                if (!native_plane_state_)
+                    body = checked_sum(body, product(records_per_page, sizeof(PlaneOwner)));
             next.body_bytes = checked_sum(next.body_bytes, body);
             credit = make_credit({}, body);
-            auto page = std::make_shared<Page>();
+            auto page = make_page(credit);
             page->body_origin = budget_;
             page->body_scope = scope_id_;
             if constexpr (owns_plane_backing)
             {
-                page->plane_owners.reserve(records_per_page);
-                if (page->plane_owners.capacity() != records_per_page)
-                    throw std::invalid_argument("Identity page owner capacity differs from admission.");
+                if (!native_plane_state_)
+                {
+                    page->plane_owners.reserve(records_per_page);
+                    if (page->plane_owners.capacity() != records_per_page)
+                        throw std::invalid_argument("Identity page owner capacity differs from admission.");
+                }
             }
             page->values.reserve(records_per_page);
             if (page->values.capacity() != records_per_page)
@@ -858,16 +1030,24 @@ private:
         const auto old_size = values.size();
         try
         {
-            values.push_back(std::forward<U>(value));
+            if constexpr (owns_plane_backing)
+            {
+                if (native_plane_state_) values.push_back(admit_native_plane(value));
+                else values.push_back(std::forward<U>(value));
+            }
+            else values.push_back(std::forward<U>(value));
             if (payload_(values.back()) > payload)
                 throw std::invalid_argument("Identity owner payload exceeds its admission.");
             PlaneOwner plane_owner;
             if constexpr (owns_plane_backing)
             {
-                auto retained = PersistentPlaneOwnerIndex(keeper_).retain(next.plane.index, values.back());
-                next.plane.index = std::move(retained.index);
-                next.plane.bytes = checked_sum(next.plane.bytes, retained.new_payload);
-                plane_owner = std::move(retained.owner);
+                if (!native_plane_state_)
+                {
+                    auto retained = PersistentPlaneOwnerIndex(keeper_).retain(next.plane.index, values.back());
+                    next.plane.index = std::move(retained.index);
+                    next.plane.bytes = checked_sum(next.plane.bytes, retained.new_payload);
+                    plane_owner = std::move(retained.owner);
+                }
             }
             const ValueSelector selector{hash, &values.back(), slot};
             next.values = ValueIndex(keeper_).edit(next.values, selector, &selector, false);
@@ -885,7 +1065,7 @@ private:
             else
                 release(retired);
             if constexpr (owns_plane_backing)
-                credit->page->plane_owners.push_back(std::move(plane_owner));
+                if (!native_plane_state_) credit->page->plane_owners.push_back(std::move(plane_owner));
             current = std::move(next);
         }
         catch (...)
@@ -925,25 +1105,43 @@ private:
                 }
             });
     }
-    [[nodiscard]] std::shared_ptr<PageCredit> make_credit(std::shared_ptr<Page> page, std::size_t bytes)
+    [[nodiscard]] static std::shared_ptr<PageCredit> make_credit_in(Budget& budget,
+        const std::shared_ptr<Budget>& keeper, std::shared_ptr<Page> page, std::size_t bytes,
+        std::uint64_t scope, bool persistent)
     {
-        // Admit the control object before constructing it. Its destructor owns
-        // exactly this arena's credit, independently of shared page bodies.
         constexpr auto overhead = sizeof(PageCredit) + 128;
-        budget_->add(overhead);
-        std::shared_ptr<PageCredit> result;
-        try
+#if defined(__GLIBCXX__)
+        static_assert(sizeof(std::_Sp_counted_ptr_inplace<CreditControl, std::allocator<void>,
+                          __gnu_cxx::__default_lock_policy>) +
+            sizeof(std::_Sp_counted_deleter<PageCredit*, DeleteCredit, std::allocator<void>,
+                __gnu_cxx::__default_lock_policy>) +
+            sizeof(std::_Sp_counted_deleter<Page*, DeletePage, std::allocator<void>,
+                __gnu_cxx::__default_lock_policy>) <= 128,
+            "Identity credit controls exceed the unchanged 128-byte allowance.");
+#endif
+        budget.add(overhead);
+        struct Rollback
         {
-            result = std::make_shared<PageCredit>(*budget_, keeper_, std::move(page), scope_id_, bool(persistent_));
-        }
-        catch (...)
-        {
-            budget_->used -= overhead;
-            throw;
-        }
-        result->bytes = overhead;
+            Budget& budget;
+            std::size_t bytes;
+            ~Rollback() { budget.used -= bytes; }
+        } rollback{budget, overhead};
+        auto control = std::make_shared<CreditControl>();
+        control->budget = &budget;
+        control->keeper = keeper;
+        control->bytes = 128;
+        rollback.bytes -= 128;
+        auto* raw = new PageCredit(budget, keeper, std::move(page), scope, persistent);
+        raw->bytes = overhead;
+        rollback.bytes -= sizeof(PageCredit);
+        auto result = std::shared_ptr<PageCredit>(raw, DeleteCredit{std::move(control)});
+        result->self = result;
         result->admit(bytes);
         return result;
+    }
+    [[nodiscard]] std::shared_ptr<PageCredit> make_credit(std::shared_ptr<Page> page, std::size_t bytes)
+    {
+        return make_credit_in(*budget_, keeper_, std::move(page), bytes, scope_id_, bool(persistent_));
     }
     template<class U> [[nodiscard]] Slot intern_value(U&& value)
     {
@@ -969,7 +1167,7 @@ private:
             // per page. Values have no individual control blocks or owners.
             const auto bytes = sizeof(Page) + 128 + product(records_per_page, sizeof(T));
             auto credit = make_credit({}, bytes);
-            auto page = std::make_shared<Page>();
+            auto page = make_page(credit);
             page->body_origin = budget_;
             page->body_scope = scope_id_;
             page->values.reserve(records_per_page);
@@ -1118,5 +1316,7 @@ private:
     std::vector<PageEntry> pages_;
     PhysicalOwnerIndex<Slot> page_index_;
     std::unique_ptr<PersistentStorage> persistent_;
+    [[no_unique_address]] std::conditional_t<owns_plane_backing,
+        std::shared_ptr<const geometry_detail::NativeAllocationState>, Empty> native_plane_state_;
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

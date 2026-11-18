@@ -10,6 +10,7 @@
 #include "IncidencePools.hh"
 #include "IncidencePhysicalOwners.hh"
 #include "IncidenceTileDelivery.hh"
+#include "NativeSourceOwnerStore.hh"
 #include "OwnedSupportMembership.hh"
 #include "PooledLineExchange.hh"
 #include "PooledSupportRegistry.hh"
@@ -393,6 +394,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
     TileMap tiles;
     std::shared_ptr<const AdaptiveSubfaceSnapshot> subfaces;
     std::size_t subface_foreign_bytes = 0, tile_index_foreign_bytes = 0;
+    bool subface_floor_transferred = false;
     std::size_t retired_inherited_metadata_bytes = 0;
     PersistentSlotValues<std::size_t> authority_tile_counts;
     PersistentSlotValues<std::uint64_t> resident_generations;
@@ -421,6 +423,13 @@ struct DistributedAdaptiveIncidenceSession::Impl
     std::shared_ptr<CartesianAuthorityArena> make_point_arena()
     {
         auto arena = CartesianGroupAuthority::make_arena(*budget, keeper);
+        if (keeper && physical_residency && physical_residency->maintains_legacy_scope())
+        {
+            const geometry_detail::NativeConstructionAdmission domain(
+                geometry_detail::NativeConstructionCounterAccess::create<Budget>(
+                    budget->limit, 0, NativeSourceOwnerStore::mirror(keeper)));
+            arena->native_index = domain.state();
+        }
         IncidencePhysicalOwners::bind_policy(arena, physical_residency);
         return arena;
     }
@@ -477,6 +486,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
     {
         lease.add(sizeof(Impl));
         bind_physical_pool_scopes();
+        if (point_arena) pools.planes.bind_native_plane_admission(point_arena->native_index);
         if (physical_residency && source_overlap && source.physical_residency)
         {
                 const auto point = source.physical_residency->scoped_point_credit_bytes();
@@ -2561,11 +2571,12 @@ struct DistributedAdaptiveIncidenceSession::Impl
         if (!keeper)
             return;
         const auto controls = geometry_construction_controls();
+        const auto native_index = physical_residency && physical_residency->maintains_legacy_scope();
         if (subfaces && dirty.empty())
         {
             publish_subfaces(AdaptiveSubfaceSnapshot::derive(
                 subfaces, context, controls, comm->getRank(), {}, *budget, keeper,
-                physical_residency.get(), point_arena.get()));
+                physical_residency.get(), point_arena.get(), native_index));
             return;
         }
         SubfacePieceBuilder builder(pools, keeper);
@@ -2591,7 +2602,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
             builder.freeze();
             publish_subfaces(AdaptiveSubfaceSnapshot::derive(
                 subfaces, context, controls, comm->getRank(), changes, *budget, keeper,
-                physical_residency.get(), point_arena.get()));
+                physical_residency.get(), point_arena.get(), native_index));
             return;
         }
         std::vector<CanonicalSubfaceView> views;
@@ -2610,7 +2621,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
         }
         builder.freeze();
         publish_subfaces(AdaptiveSubfaceSnapshot::seal(context, controls, comm->getRank(), views, *budget, keeper,
-            physical_residency.get(), point_arena.get()));
+            physical_residency.get(), point_arena.get(), native_index));
     }
     std::vector<IncidenceRowDelivery> finish_rows(ChangedTiles& changed, std::span<const IncidenceCellVersion> retired,
         std::span<const AdaptiveCellKey> inserted, const OwnedLeafLookup& lookup, unsigned old_last, Lease& scratch,
@@ -2792,6 +2803,11 @@ std::vector<IncidenceRowDelivery> DistributedAdaptiveIncidenceSession::bootstrap
             (void) state.tile_bodies.reap();
             state.owner_rows.begin_delta();
             const auto grid = trusted_cartesian_incidence_grid(*state.kernel);
+            if (!grid && state.physical_residency && state.physical_residency->maintains_legacy_scope())
+            {
+                state.point_arena = state.make_point_arena();
+                state.pools.planes.bind_native_plane_admission(state.point_arena->native_index);
+            }
             if (grid && !leaves.empty() && state.keeper)
             {
                 const auto& domain = leaves.front().domain;
@@ -2848,6 +2864,7 @@ std::vector<IncidenceRowDelivery> DistributedAdaptiveIncidenceSession::bootstrap
                     throw std::invalid_argument("Native source closure lost its trusted provider capability.");
                 if (!state.point_arena)
                     state.point_arena = state.make_point_arena();
+                state.pools.planes.bind_native_plane_admission(state.point_arena->native_index);
                 std::array<CartesianSourceInventory::CapturedSource, 1> captured{};
                 std::size_t count = 0;
                 if (state.owned.construction_source())
@@ -3165,6 +3182,48 @@ IncidenceDelta DistributedAdaptiveIncidenceSession::apply_delta(std::span<const 
 const std::shared_ptr<const AdaptiveSubfaceSnapshot>& DistributedAdaptiveIncidenceSession::subface_snapshot() const noexcept
 {
     return impl_->subfaces;
+}
+void DistributedAdaptiveIncidenceSession::complete_native_subface_rebind(ContactHaloContext context)
+{
+    auto& state = *impl_;
+    if (!state.ready || !state.subfaces || !state.keeper || state.subfaces->origin() == state.keeper.get() ||
+        state.context.epoch != context.epoch || state.context.topology != context.topology ||
+        state.context.partition != context.partition || !state.physical_residency ||
+        !state.physical_residency->maintains_legacy_scope())
+        throw std::invalid_argument("Native subface rebind differs from its completed unchanged incidence.");
+    auto rebound = AdaptiveSubfaceSnapshot::derive(state.subfaces, context, geometry_construction_controls(),
+        state.comm->getRank(), {}, *state.budget, state.keeper, state.physical_residency.get(), state.point_arena.get(),
+        true);
+    state.publish_subfaces(std::move(rebound));
+    state.context = context;
+}
+void DistributedAdaptiveIncidenceSession::transfer_subface_inherited_scope(ContactExternalResidencyLease& target)
+{
+    auto& state = *impl_;
+    const auto& origin = target.arena_identity();
+    if (!state.subfaces || !state.subfaces->has_native_index_admission() || state.subface_floor_transferred ||
+        state.inherited_overlap_active || origin.get() != state.keeper.get() || origin.owner_before(state.keeper) ||
+        state.keeper.owner_before(origin))
+        throw std::invalid_argument("Inherited incidence funding has no finalized same-arena subface lease.");
+    const auto amount = state.subfaces->inherited_legacy_owners().payload_bytes();
+    if (amount != state.subface_foreign_bytes || amount > state.lease.bytes)
+        throw std::logic_error("Inherited incidence allocations differ from their original precharge.");
+    target.adopt_precharged(amount);
+    state.lease.bytes -= amount;
+    state.subface_floor_transferred = true;
+}
+bool DistributedAdaptiveIncidenceSession::admits_inherited_point_scope(
+    std::uint64_t scope, std::size_t bytes) const noexcept
+{
+    const auto& state = *impl_;
+    const auto& pool = state.pools.points.physical_pool();
+    return !state.inherited_overlap_active && scope && pool.scope_id() == scope &&
+        pool.inherited_page_admission() >= bytes;
+}
+void DistributedAdaptiveIncidenceSession::disown_inherited_point_scope(std::uint64_t scope, std::size_t bytes) noexcept
+{
+    if (!admits_inherited_point_scope(scope, bytes)) std::terminate();
+    impl_->pools.points.physical_pool().transfer_inherited_page_bytes(bytes);
 }
 std::size_t DistributedAdaptiveIncidenceSession::inherited_overlap_metadata_bytes() const noexcept
 {

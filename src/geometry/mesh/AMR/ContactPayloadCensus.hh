@@ -221,6 +221,7 @@ enum class ContactPayloadRole : std::uint8_t
     SubfaceForeignKeys,
     SubfaceBoundaryNames,
     SubfaceBoundaryBytes,
+    SubfaceAuthorityKeyBytes,
     SubfaceShifts,
     SubfaceRingObject,
     SubfaceRingSlots,

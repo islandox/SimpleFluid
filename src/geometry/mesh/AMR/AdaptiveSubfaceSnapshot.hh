@@ -3,6 +3,9 @@
  */
 #pragma once
 #include "AdaptiveGeometrySnapshot.hh"
+#include "geometry/details/NativeConstructionAdmission.hh"
+#include "geometry/mesh/AMR/NativeContactFunding.hh"
+#include "geometry/PLIC/details/GeometryOwnerGraph.hh"
 #include "CartesianIncidenceSource.hh"
 #include "ContactHaloContext.hh"
 #include "DistributedAdaptiveTypes.hh"
@@ -17,6 +20,8 @@
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 class CertifiedIncidenceLoopView;
+class NativePublicationSession;
+class NativePublicationNumbering;
 class IdentityBudget;
 class TileBodyHandle;
 struct IncidencePools;
@@ -58,10 +63,16 @@ public:
     void visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>&) const;
     [[nodiscard]] const Budget* origin() const noexcept { return arena_.get(); }
     [[nodiscard]] std::size_t charged_bytes() const noexcept { return charge_; }
+    static void project_owners(const std::shared_ptr<const SharedSubfaceRing>&,
+        PLIC::details::GeometryOwnerGraphEditor&, bool retain);
 
 private:
+    friend class NativeContactFundingAccess;
+    [[nodiscard]] NativeContactOwnerFunding native_funding(
+        const std::shared_ptr<const SharedSubfaceRing>&, std::size_t) const;
     explicit SharedSubfaceRing(std::shared_ptr<Budget> arena) : arena_(std::move(arena)) {}
     std::shared_ptr<Budget> arena_;
+    std::weak_ptr<const SharedSubfaceRing> self_;
     std::vector<std::size_t> slots_;
     std::size_t charge_ = 0;
 };
@@ -93,6 +104,13 @@ struct MaterializedCanonicalSubface
     AdaptiveBytes identity;
 };
 
+/** Identity borrows the exact immutable piece page held by the calling view.
+ * Only the geometry owns newly admitted storage. */
+struct NativeMaterializedCanonicalSubface
+{
+    PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> geometry;
+    std::span<const char> identity;
+};
 /** Canonical first-cell physical loop, outward from first. The view pins
  * immutable point/provenance pages and is independent of the session. */
 class SIMPLEFLUID_LOCAL CanonicalSubfaceView
@@ -104,6 +122,7 @@ public:
     [[nodiscard]] std::optional<CanonicalSubfaceIncident> second() const;
     [[nodiscard]] int outward_sign() const noexcept { return side_ ? -1 : 1; }
     [[nodiscard]] std::span<const char> support() const;
+    [[nodiscard]] std::span<const char> identity() const;
     [[nodiscard]] std::span<const char> domain() const;
     [[nodiscard]] std::string_view boundary() const;
     [[nodiscard]] std::uint64_t generation() const;
@@ -114,10 +133,19 @@ public:
     /** Explicit operation. The identity is the original authority key before
      * edge enrichment. The returned physical geometry includes the final loop. */
     [[nodiscard]] MaterializedCanonicalSubface materialize(Budget&, IdentityBudget&) const;
+    /** Persistent output overrides can transfer exact support into their own admission domain. */
+    [[nodiscard]] NativeMaterializedCanonicalSubface materialize_native(Budget&, IdentityBudget&,
+        const geometry_detail::NativeConstructionAdmission&, bool detached_support = false) const;
     [[nodiscard]] const void* page_identity() const noexcept { return page_.get(); }
+    [[nodiscard]] PLIC::details::NativeWeakOwnerObservation weak_page_observation() const;
+    /** Typed physical closure of this actual piece page, never the enclosing
+     * snapshot/controller or all source contacts. */
+    void project_owners(PLIC::details::GeometryOwnerGraphEditor&, bool retain) const;
 
 private:
     friend class AdaptiveSubfaceSnapshot;
+    friend class NativePublicationNumbering;
+    friend class NativePublicationSession;
     friend class SubfacePieceBuilder;
     CanonicalSubfaceView(std::shared_ptr<const SubfacePiecePage> page, std::size_t slot)
         : page_(std::move(page)), slot_(slot)
@@ -149,16 +177,21 @@ public:
     AdaptiveSubfaceSnapshot& operator=(const AdaptiveSubfaceSnapshot&) = delete;
     [[nodiscard]] static std::shared_ptr<const AdaptiveSubfaceSnapshot> seal(ContactHaloContext,
         GeometryConstructionControls, int resident, std::span<const CanonicalSubfaceView>, Budget&,
-        std::shared_ptr<Budget>, ContactPhysicalResidency* = nullptr, cartesian_detail::ArenaCredits* = nullptr);
+        std::shared_ptr<Budget>, ContactPhysicalResidency* = nullptr, cartesian_detail::ArenaCredits* = nullptr,
+        bool native_index = false);
     [[nodiscard]] static std::shared_ptr<const AdaptiveSubfaceSnapshot> derive(
         const std::shared_ptr<const AdaptiveSubfaceSnapshot>&, ContactHaloContext, GeometryConstructionControls,
         int resident, std::span<const CanonicalSubfaceChange>, Budget&, std::shared_ptr<Budget>,
-        ContactPhysicalResidency* = nullptr, cartesian_detail::ArenaCredits* = nullptr);
+        ContactPhysicalResidency* = nullptr, cartesian_detail::ArenaCredits* = nullptr, bool native_index = false);
+    static void project_owners(const std::shared_ptr<const AdaptiveSubfaceSnapshot>&,
+        PLIC::details::GeometryOwnerGraphEditor&, bool retain);
+    [[nodiscard]] static PLIC::details::NativeWeakOwnerObservation weak_observation(
+        const std::shared_ptr<const AdaptiveSubfaceSnapshot>&);
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
     [[nodiscard]] const ContactHaloContext& context() const noexcept { return context_; }
     [[nodiscard]] const GeometryConstructionControls& controls() const noexcept { return controls_; }
     [[nodiscard]] const Budget* origin() const noexcept { return arena_.get(); }
-    [[nodiscard]] std::size_t charged_bytes() const noexcept { return charge_; }
+    [[nodiscard]] std::size_t charged_bytes() const noexcept;
     [[nodiscard]] std::size_t index_bytes() const noexcept { return index_bytes_; }
     [[nodiscard]] std::size_t foreign_index_bytes() const noexcept { return foreign_index_bytes_; }
     [[nodiscard]] std::size_t exclusive_payload_bytes() const noexcept { return exclusive_payload_bytes_; }
@@ -166,6 +199,8 @@ public:
     {
         return foreign_exclusive_payload_bytes_;
     }
+    [[nodiscard]] bool has_native_index_admission() const noexcept { return native_index_; }
+    [[nodiscard]] const auto& inherited_legacy_owners() const noexcept { return inherited_legacy_; }
     [[nodiscard]] const SubfaceIndexWork& index_work() const noexcept { return work_; }
     /** Foreign index pages are admitted as an aggregate. This visit is only
      * for remaining captures shared with other incidence structures. */
@@ -180,6 +215,12 @@ public:
     void visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>&) const;
 
 private:
+    friend class NativeContactFundingAccess;
+    [[nodiscard]] NativeContactOwnerFunding native_funding(
+        const std::shared_ptr<const AdaptiveSubfaceSnapshot>&, std::size_t) const;
+    void seal_legacy_scope(const AdaptiveSubfaceSnapshot* previous,
+        const std::shared_ptr<const geometry_detail::NativeAllocationState>&);
+    void project_legacy_scope(PLIC::details::GeometryOwnerGraphEditor&, bool retain, const Budget* foreign_to) const;
     AdaptiveSubfaceSnapshot(
         ContactHaloContext context, GeometryConstructionControls controls, int resident, std::shared_ptr<Budget> arena)
         : context_(context), controls_(controls), arena_(std::move(arena)), resident_(resident)
@@ -192,7 +233,9 @@ private:
     std::size_t exclusive_payload_bytes_ = 0, foreign_exclusive_payload_bytes_ = 0;
     SubfaceIndexWork work_;
     int resident_;
+    bool native_index_ = false;
     std::shared_ptr<const SubfaceIndexRoot> indexes_;
+    PLIC::details::geometry_demand::GeometryOwnerManifest legacy_, inherited_legacy_;
 };
 
 /** Receives only fully authenticated support groups and never retains a live

@@ -1,7 +1,11 @@
+#include "geometry/PLIC/details/NativeGeometryByteWriter.hh"
+#include "geometry/PLIC/details/NativePlanarCodecAccess.hh"
+#include "geometry/PLIC/details/NativePlanarOwnerAccess.hh"
 #include "AdaptiveSubfaceSnapshot.hh"
 #include "CertifiedIncidenceViews.hh"
 #include "ContactPointPageView.hh"
 #include "IncidencePhysicalOwners.hh"
+#include "NativePublicationOwnerGraph.hh"
 #include "IncidencePools.hh"
 #include "PersistentOrderedPages.hh"
 #include "TileBodyPages.hh"
@@ -27,6 +31,7 @@ using BytesView = IdentityPool<AdaptiveBytes>::PageView;
 using PlaneView = IdentityPool<IncidencePools::Plane>::PageView;
 using NormalView = IdentityPool<IncidencePools::Normal>::PageView;
 using ImageView = IdentityPool<IncidencePools::Image>::PageView;
+using contact_funding_detail::make_controlled;
 
 std::size_t checked_sum(std::size_t a, std::size_t b)
 {
@@ -104,6 +109,7 @@ struct Provenance
 {
     std::size_t group, first, second, shift;
     std::uint64_t emission;
+    AdaptiveBytes authority_identity;
 };
 } // namespace
 
@@ -124,6 +130,20 @@ struct SubfaceProvenancePage
           domains(pools.domains.page_view())
     {
     }
+    [[nodiscard]] std::size_t charged_bytes() const { return checked_sum(charge.bytes, control_bytes); }
+    [[nodiscard]] NativeContactOwnerFunding native_funding(
+        const std::shared_ptr<const SubfaceProvenancePage>& owner, std::size_t bytes) const
+    {
+        return NativeContactFundingAccess::split_named<control_bytes>(owner, bytes,
+            [](const SubfaceProvenancePage& value) { return value.charge.bytes; },
+            [](const SubfaceProvenancePage& value) -> const auto& { return value.charge.arena; });
+    }
+    static bool project_body(const std::shared_ptr<const SubfaceProvenancePage>& owner,
+        PLIC::details::GeometryOwnerGraphEditor& graph, bool retain)
+    {
+        return owner && NativeContactFundingAccess::project(graph, owner, owner->charged_bytes(),
+            owner->native_funding(owner, owner->charged_bytes()), retain);
+    }
     const AdaptiveCellKey& key(const Member& member) const
     {
         return member.copied ? foreign_keys.at(member.key) : keys->get({member.key});
@@ -136,7 +156,7 @@ struct SubfaceProvenancePage
     }
     [[nodiscard]] std::size_t exclusive_bytes() const
     {
-        return checked_sum(charge.bytes,
+        return checked_sum(charged_bytes(),
             checked_sum(keys->metadata_bytes(), checked_sum(supports->metadata_bytes(), domains->metadata_bytes())));
     }
     void observe_shared_owners(IncidencePhysicalOwners& owners) const
@@ -160,6 +180,9 @@ struct SubfaceProvenancePage
         contact_payload_buffer(visit, this, ContactPayloadRole::SubfaceForeignKeys, foreign_keys);
         contact_payload_buffer(visit, this, ContactPayloadRole::SubfaceBoundaryNames, boundaries);
         contact_payload_buffer(visit, this, ContactPayloadRole::SubfaceShifts, shifts);
+        for (const auto& record : records)
+            contact_payload_buffer(
+                visit, this, ContactPayloadRole::SubfaceAuthorityKeyBytes, record.authority_identity);
         for (const auto& key : foreign_keys)
             IdentityPoolBorrowedPayload<AdaptiveCellKey>::visit(key, visit);
         for (const auto& boundary : boundaries)
@@ -203,8 +226,9 @@ SubfaceProvenanceRef SubfaceProvenanceBuilder::append(const ReceivedTileRecipe& 
     {
         state.charge.append(state.pages);
         PageCharge memory(state.charge.arena);
-        memory.add(sizeof(SubfaceProvenancePage) + control_bytes);
-        auto page = std::make_shared<SubfaceProvenancePage>(state.pools, state.charge.arena);
+        memory.add(sizeof(SubfaceProvenancePage));
+        auto page = make_controlled<control_bytes>(*state.charge.arena, state.charge.arena,
+            [&] { return new SubfaceProvenancePage(state.pools, state.charge.arena); }).first;
         page->charge.bytes = std::exchange(memory.bytes, 0);
         state.pages.push_back(std::move(page));
     }
@@ -286,8 +310,29 @@ SubfaceProvenanceRef SubfaceProvenanceBuilder::append(const ReceivedTileRecipe& 
     const auto group =
         intern(page.groups, Group{page.supports->capture(state.pools.supports, *support).value,
                                 page.domains->capture(state.pools.domains, *domain).value, generation, boundary});
+    // Capture the original authority identity at the delivery seam while the
+    // already validated intrinsic face is available. Warm native numbering
+    // borrows these bytes and never reconstructs that face merely for its key.
+    PageCharge identity_scratch(state.charge.arena);
+    const auto encoded = recipe.face->encoded_incidence_size();
+    identity_scratch.add(checked_product(encoded, 6));
+    identity_scratch.add(recipe.face->encoding_scratch_bytes());
+    identity_scratch.add(
+        checked_product(PLIC::PlanarFace<ordinary>::construction_capacity_bound(recipe.face->points().size()), 2));
+    const auto authority = first_shift.is_zero() ? recipe.face : recipe.face->translated(first_shift);
+    const auto reverse = authority->reversed();
+    const auto forward_key = PLIC::canonical_face_key(*authority), reverse_key = PLIC::canonical_face_key(*reverse);
+    const auto& physical_key = std::min(forward_key, reverse_key);
+    const auto identity_bytes = checked_sum(16, checked_sum(recipe.support.size(), physical_key.size()));
+    page.charge.add(identity_bytes);
+    Writer identity;
+    identity.data.reserve(identity_bytes);
+    if (identity.data.capacity() != identity_bytes)
+        throw std::invalid_argument("Native authority key capacity differs from admission.");
+    identity.bytes(recipe.support);
+    identity.bytes(physical_key);
     page.charge.append(page.records);
-    page.records.push_back({group, first, second, shift, recipe.emission});
+    page.records.push_back({group, first, second, shift, recipe.emission, std::move(identity.data)});
     return {state.pages.back(), page.records.size() - 1};
 }
 void SubfaceProvenanceBuilder::freeze()
@@ -297,6 +342,28 @@ void SubfaceProvenanceBuilder::freeze()
     impl_->frozen = true;
 }
 
+namespace
+{
+struct SharedRingControlCredit
+{
+    std::shared_ptr<Budget> keeper;
+    std::size_t bytes = 0;
+    static constexpr std::size_t allowance() noexcept { return control_bytes; }
+    ~SharedRingControlCredit() { if (keeper) keeper->used -= bytes; }
+};
+struct SharedRingDelete
+{
+    std::shared_ptr<SharedRingControlCredit> control;
+    void operator()(SharedSubfaceRing* ring) const noexcept { delete ring; }
+};
+#if defined(__GLIBCXX__)
+static_assert(sizeof(std::_Sp_counted_ptr_inplace<SharedRingControlCredit, std::allocator<void>,
+                  __gnu_cxx::__default_lock_policy>) +
+    sizeof(std::_Sp_counted_deleter<SharedSubfaceRing*, SharedRingDelete, std::allocator<void>,
+        __gnu_cxx::__default_lock_policy>) <= control_bytes,
+    "Shared ring control requests exceed the existing unchanged control allowance.");
+#endif
+} // namespace
 std::shared_ptr<const SharedSubfaceRing> SharedSubfaceRing::transfer(
     std::vector<std::size_t>& slots, Budget& budget, std::shared_ptr<Budget> arena, std::size_t& former_charge)
 {
@@ -305,22 +372,56 @@ std::shared_ptr<const SharedSubfaceRing> SharedSubfaceRing::transfer(
         throw std::invalid_argument("Invalid subface ring ownership transfer.");
     PageCharge memory(arena);
     memory.add(sizeof(SharedSubfaceRing) + control_bytes);
-    auto result = std::shared_ptr<SharedSubfaceRing>(new SharedSubfaceRing(std::move(arena)));
+    auto control = std::make_shared<SharedRingControlCredit>();
+    control->keeper = arena;
+    control->bytes = control_bytes;
+    memory.bytes -= control_bytes; // Exact precharged weak-control obligation.
+    auto* raw = new SharedSubfaceRing(std::move(arena));
+    raw->charge_ = std::exchange(memory.bytes, 0) + control_bytes;
+    auto result = std::shared_ptr<SharedSubfaceRing>(raw, SharedRingDelete{std::move(control)});
+    result->self_ = result;
     result->slots_.swap(slots);
     former_charge -= bytes;
-    result->charge_ = std::exchange(memory.bytes, 0) + bytes;
+    result->charge_ += bytes;
     return result;
+}
+NativeContactOwnerFunding SharedSubfaceRing::native_funding(
+    const std::shared_ptr<const SharedSubfaceRing>& actual, std::size_t bytes) const
+{
+    const auto* deleter = std::get_deleter<SharedRingDelete>(actual);
+    const std::shared_ptr<const SharedRingControlCredit> group = deleter ? deleter->control : nullptr;
+    return NativeContactFundingAccess::split(actual, bytes, group, control_bytes,
+        [](const SharedSubfaceRing& ring) { return ring.charge_ - control_bytes; },
+        [](const auto& ring, const auto& token)
+        {
+            const auto* actual_deleter = std::get_deleter<SharedRingDelete>(ring);
+            return actual_deleter && actual_deleter->control == token && token->bytes == control_bytes &&
+                token->keeper == ring->arena_ && !ring->self_.owner_before(ring) &&
+                !ring.owner_before(ring->self_);
+        });
+}
+void SharedSubfaceRing::project_owners(const std::shared_ptr<const SharedSubfaceRing>& ring,
+    PLIC::details::GeometryOwnerGraphEditor& graph, bool retain)
+{
+    if (ring)
+        NativeContactFundingAccess::project(graph, ring, ring->charged_bytes(),
+            ring->native_funding(ring, ring->charged_bytes()), retain);
 }
 SharedSubfaceRing::~SharedSubfaceRing()
 {
     decltype(slots_){}.swap(slots_);
-    arena_->used -= charge_;
+    if (charge_ < control_bytes) std::terminate();
+    arena_->used -= charge_ - control_bytes;
 }
 
 void SharedSubfaceRing::visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>& visit) const
 {
     contact_payload_object(visit, this, ContactPayloadRole::SubfaceRingObject, sizeof(*this), true);
     contact_payload_buffer(visit, this, ContactPayloadRole::SubfaceRingSlots, slots_);
+    if (const auto actual = self_.lock())
+        if (const auto* deleter = std::get_deleter<SharedRingDelete>(actual); deleter && deleter->control)
+            contact_payload_object(visit, deleter->control.get(), ContactPayloadRole::CartesianControlCreditObject,
+                sizeof(SharedRingControlCredit), true);
 }
 
 namespace
@@ -353,6 +454,20 @@ struct SubfacePiecePage
           images(pools.images.page_view()), source(pools.points.source()),
           captured_environment(std::fegetenv(&environment) == 0)
     {
+    }
+    [[nodiscard]] std::size_t charged_bytes() const { return checked_sum(charge.bytes, control_bytes); }
+    [[nodiscard]] NativeContactOwnerFunding native_funding(
+        const std::shared_ptr<const SubfacePiecePage>& owner, std::size_t bytes) const
+    {
+        return NativeContactFundingAccess::split_named<control_bytes>(owner, bytes,
+            [](const SubfacePiecePage& value) { return value.charge.bytes; },
+            [](const SubfacePiecePage& value) -> const auto& { return value.charge.arena; });
+    }
+    static bool project_body(const std::shared_ptr<const SubfacePiecePage>& owner,
+        PLIC::details::GeometryOwnerGraphEditor& graph, bool retain)
+    {
+        return owner && NativeContactFundingAccess::project(graph, owner, owner->charged_bytes(),
+            owner->native_funding(owner, owner->charged_bytes()), retain);
     }
     void capture(IncidencePointDirectory<>& directory, std::size_t slot)
     {
@@ -387,7 +502,7 @@ struct SubfacePiecePage
     [[nodiscard]] std::size_t exclusive_bytes() const
     {
         return checked_sum(
-            charge.bytes, checked_sum(planes->metadata_bytes(),
+            charged_bytes(), checked_sum(planes->metadata_bytes(),
                               checked_sum(normals->metadata_bytes(),
                                   checked_sum(images->metadata_bytes(), physical ? physical->metadata_bytes() : 0))));
     }
@@ -417,15 +532,34 @@ struct SubfacePiecePage
             if (record.explicit_loop)
                 owners.observe(Role::SubfaceRing, record.explicit_loop, record.explicit_loop->charged_bytes(),
                     record.explicit_loop->origin());
-            owners.observe(Role::TileBody, record.body.body_storage_owner(), record.body.body_bytes(),
-                record.body.credit_origin());
-            if (owners.observe(Role::CreditMetadata, record.body.credit_owner(),
-                    record.body.credit_bytes() - record.body.body_bytes(), record.body.credit_origin(),
-                    IncidencePhysicalOwners::tile_credit_scope))
-                record.body.observe_source_owners(owners);
+            record.body.observe_physical_owners(owners);
             if (record.certified)
                 owners.observe_proof(*record.certified);
         }
+    }
+    static void project_certified(const CertifiedIncidenceLoopView& proof,
+        PLIC::details::GeometryOwnerGraphEditor& graph, bool retain)
+    {
+        Budget budget{std::numeric_limits<std::size_t>::max()};
+        struct Observation
+        {
+            PLIC::details::GeometryOwnerGraphEditor& graph;
+            bool retain;
+            NativeContactOwnerFunding funding;
+        } context{graph, retain, {}};
+        cartesian_detail::CreditConstruction observer(budget, &context,
+            [](void* raw, const std::shared_ptr<const void>& owner, const Budget*, std::size_t bytes,
+                bool, bool, std::uint64_t)
+            {
+                auto& value = *static_cast<Observation*>(raw);
+                const auto funding = std::exchange(value.funding, {});
+                return NativeContactFundingAccess::project(value.graph, owner, bytes, funding, value.retain);
+            },
+            [](void* raw, const NativeContactOwnerFunding& funding)
+            { static_cast<Observation*>(raw)->funding = funding; });
+        std::vector<std::shared_ptr<cartesian_detail::AuthorityOwnerCredit>> no_leases;
+        cartesian_detail::Allocation no_storage(budget);
+        proof.retain_dependencies(observer, no_leases, no_storage);
     }
     void visit_dependencies(const SubfaceOwnerVisit& visit, bool include_directory) const
     {
@@ -496,6 +630,52 @@ struct SubfacePiecePage
         }
     }
 };
+namespace
+{
+void project_provenance(const std::shared_ptr<const SubfaceProvenancePage>& page,
+    PLIC::details::GeometryOwnerGraphEditor& graph, bool retain)
+{
+    if (!SubfaceProvenancePage::project_body(page, graph, retain)) return;
+    CellView::project(page->keys, graph, retain);
+    BytesView::project(page->supports, graph, retain);
+    BytesView::project(page->domains, graph, retain);
+    for (const auto& shift : page->shifts) graph.displacement_identity(shift, retain);
+}
+void project_snapshot(const std::shared_ptr<const ContactSourcePointSnapshot>& source,
+    PLIC::details::GeometryOwnerGraphEditor& graph, bool retain)
+{
+    ContactSourcePointSnapshot::project(source, graph, retain);
+}
+void project_piece_page(const std::shared_ptr<const SubfacePiecePage>& page,
+    PLIC::details::GeometryOwnerGraphEditor& graph, bool retain)
+{
+    if (!SubfacePiecePage::project_body(page, graph, retain)) return;
+    PlaneView::project(page->planes, graph, retain);
+    NormalView::project(page->normals, graph, retain);
+    ImageView::project(page->images, graph, retain);
+    ContactPointPageView::project(page->physical, graph, retain);
+    project_snapshot(page->source, graph, retain);
+    for (const auto& record : page->records)
+    {
+        // Each record owns its provenance field even when several slots share
+        // a page. The page's direct children are first/last gated exactly once.
+        project_provenance(record.provenance.page, graph, retain);
+        SharedSubfaceRing::project_owners(record.explicit_loop, graph, retain);
+        record.body.project_owners(graph, retain);
+        if (record.certified)
+            SubfacePiecePage::project_certified(*record.certified, graph, retain);
+    }
+}
+} // namespace
+void CanonicalSubfaceView::project_owners(PLIC::details::GeometryOwnerGraphEditor& graph, bool retain) const
+{
+    project_piece_page(page_, graph, retain);
+}
+PLIC::details::NativeWeakOwnerObservation CanonicalSubfaceView::weak_page_observation() const
+{
+    if (!page_) return {};
+    return page_->native_funding(page_, page_->charged_bytes()).body.physical_observation();
+}
 struct SubfacePieceBuilder::Impl
 {
     PageCharge charge;
@@ -524,8 +704,9 @@ CanonicalSubfaceView SubfacePieceBuilder::append(const SubfaceProvenanceRef& pro
     {
         state.charge.append(state.pages);
         PageCharge memory(state.charge.arena);
-        memory.add(sizeof(SubfacePiecePage) + control_bytes);
-        auto page = std::make_shared<SubfacePiecePage>(state.pools, state.charge.arena);
+        memory.add(sizeof(SubfacePiecePage));
+        auto page = make_controlled<control_bytes>(*state.charge.arena, state.charge.arena,
+            [&] { return new SubfacePiecePage(state.pools, state.charge.arena); }).first;
         page->charge.bytes = std::exchange(memory.bytes, 0);
         state.pages.push_back(std::move(page));
     }
@@ -607,6 +788,10 @@ std::optional<CanonicalSubfaceIncident> CanonicalSubfaceView::second() const
     if (slot == absent)
         return std::nullopt;
     return CanonicalSubfaceIncident(record.provenance.page, slot);
+}
+std::span<const char> CanonicalSubfaceView::identity() const
+{
+    return provenance(piece(page_, slot_)).authority_identity;
 }
 std::span<const char> CanonicalSubfaceView::support() const
 {
@@ -735,6 +920,98 @@ MaterializedCanonicalSubface CanonicalSubfaceView::materialize(Budget& budget, I
     return {std::move(geometry), std::move(identity.data)};
 }
 
+NativeMaterializedCanonicalSubface CanonicalSubfaceView::materialize_native(
+    Budget& budget, IdentityBudget& identities, const geometry_detail::NativeConstructionAdmission& admission,
+    bool detached_support) const
+{
+    struct RestoreEnvironment
+    {
+        std::fenv_t previous{};
+        explicit RestoreEnvironment(const SubfacePiecePage& page)
+        {
+            const bool saved = std::fegetenv(&previous) == 0;
+            if (!page.captured_environment || !saved || std::fesetenv(&page.environment) != 0)
+            {
+                if (saved)
+                    (void) std::fesetenv(&previous);
+                throw std::invalid_argument("Canonical subface construction controls are unavailable.");
+            }
+        }
+        ~RestoreEnvironment() { (void) std::fesetenv(&previous); }
+    };
+    using Face = PLIC::PlanarFace<ordinary>;
+    using Access = PLIC::details::NativePlanarOwnerAccess;
+    const auto& record = piece(page_, slot_);
+    const RestoreEnvironment environment(*page_);
+    const auto intrinsic = record.body.intrinsic_loop();
+    const auto count = point_count();
+    struct Scratch
+    {
+        Budget& budget;
+        std::size_t bytes = 0;
+        ~Scratch() { budget.used -= bytes; }
+        void add(std::size_t value)
+        {
+            const auto next = checked_sum(bytes, value);
+            budget.add(value);
+            bytes = next;
+        }
+    } logical{budget};
+    logical.add(checked_product(std::max(intrinsic.size(), count), sizeof(ContactPointIdentity)));
+    logical.add(checked_product(Face::construction_capacity_bound(intrinsic.size()), 3));
+    logical.add(Face::construction_capacity_bound(count));
+    geometry_detail::NativeConstructorVector<Face::WidePoint> points(admission.allocator<Face::WidePoint>());
+    points.reserve(std::max(intrinsic.size(), count));
+    for (const auto slot : intrinsic)
+        points.push_back(PLIC::details::GeometryIdentityAccess::point(page_->point(slot)));
+    PLIC::OrdinaryIncidenceFrame frame{
+        page_->planes->get({record.plane}), page_->normals->get({record.normal}).values};
+    if (detached_support)
+    {
+        const auto storage = geometry_detail::native_constructor_storage(admission);
+        std::vector<char> key;
+        storage.owner->reserve(key, PLIC::canonical_key_size(frame.support));
+        PLIC::details::NativeGeometryByteWriter writer{&key, &admission};
+        writer.native_identity(frame.support);
+        auto retained = PLIC::details::GeometryIdentityAccess::decode_support_admitted(key, budget.limit, admission);
+        if (retained != frame.support)
+            throw std::invalid_argument("Detached native face support differs from the actual canonical support.");
+        frame.support = std::move(retained);
+    }
+    const auto initial = Access::retained(points, frame.normal, frame.support, admission);
+    const auto shift = provenance(record).shift;
+    const auto authority =
+        shift == absent ? initial : Access::translated(*initial, record.provenance.page->shifts.at(shift), admission);
+    const auto reversed = Access::reversed(*authority, admission);
+    const auto encoded = authority->encoded_incidence_size();
+    logical.add(checked_product(encoded, 6));
+    logical.add(authority->encoding_scratch_bytes());
+    const auto scratch = geometry_detail::native_constructor_storage(admission);
+    const auto forward = PLIC::details::NativePlanarCodecAccess::canonical(*authority, scratch);
+    const auto backward = PLIC::details::NativePlanarCodecAccess::canonical(*reversed, scratch);
+    const auto& canonical = std::min(forward, backward);
+    const auto identity_bytes = checked_sum(16, checked_sum(support().size(), canonical.size()));
+    const auto output_bytes = checked_sum(identity_bytes, sizeof(Face));
+    logical.add(output_bytes);
+    // The already authenticated page owns this exact key. Verify its full
+    // original construction bytes without creating another owning key buffer.
+    Reader key{identity()};
+    if (!std::ranges::equal(key.bytes_view(), support()) || !std::ranges::equal(key.bytes_view(), canonical))
+        throw std::invalid_argument("Captured original subface key differs from full materializer.");
+    key.done();
+    auto geometry = initial;
+    if (record.explicit_loop || record.certified)
+    {
+        points.clear();
+        for (std::size_t slot = 0; slot < count; ++slot)
+            points.push_back(PLIC::details::GeometryIdentityAccess::point(point(slot)));
+        geometry = Access::retained(points, frame.normal, frame.support, admission);
+    }
+    identities.face(budget, *geometry);
+    logical.bytes -= output_bytes; // Preserve the original numerical Budget contract.
+    return {std::move(geometry), identity()};
+}
+
 namespace subface_index_detail
 {
 template<class Row, class Less, bool FixedLeafCapacity>
@@ -833,14 +1110,28 @@ struct SubfaceIndexRoot
     static std::shared_ptr<SubfaceIndexRoot> create(const std::shared_ptr<Budget>& arena)
     {
         PageCharge memory(arena);
-        memory.add(sizeof(SubfaceIndexRoot) + control_bytes);
-        auto result = std::make_shared<SubfaceIndexRoot>(arena);
+        memory.add(sizeof(SubfaceIndexRoot));
+        auto result = make_controlled<control_bytes>(*arena, arena, [&] { return new SubfaceIndexRoot(arena); }).first;
         result->charge.bytes = std::exchange(memory.bytes, 0);
         return result;
     }
+    [[nodiscard]] std::size_t charged_bytes() const { return checked_sum(charge.bytes, control_bytes); }
+    [[nodiscard]] NativeContactOwnerFunding native_funding(
+        const std::shared_ptr<const SubfaceIndexRoot>& owner, std::size_t bytes) const
+    {
+        return NativeContactFundingAccess::split_named<control_bytes>(owner, bytes,
+            [](const SubfaceIndexRoot& value) { return value.charge.bytes; },
+            [](const SubfaceIndexRoot& value) -> const auto& { return value.charge.arena; });
+    }
+    static bool project_body(const std::shared_ptr<const SubfaceIndexRoot>& owner,
+        PLIC::details::GeometryOwnerGraphEditor& graph, bool retain)
+    {
+        return owner && NativeContactFundingAccess::project(graph, owner, owner->charged_bytes(),
+            owner->native_funding(owner, owner->charged_bytes()), retain);
+    }
     [[nodiscard]] std::size_t index_bytes() const
     {
-        auto result = charge.bytes;
+        auto result = charged_bytes();
         if (pieces)
             result = checked_sum(result, pieces->subtree_bytes);
         if (faces)
@@ -867,6 +1158,100 @@ struct SubfaceIndexRoot
             });
     }
 };
+namespace
+{
+std::shared_ptr<const geometry_detail::NativeAllocationState> subface_index_admission(
+    const std::shared_ptr<Budget>& arena, bool admitted)
+{
+    if (!admitted) return {};
+    const geometry_detail::NativeConstructionAdmission domain(
+        geometry_detail::NativeConstructionCounterAccess::create<Budget>(
+            arena->limit, 0, NativeSourceOwnerStore::mirror(arena)));
+    return domain.state();
+}
+} // namespace
+std::size_t AdaptiveSubfaceSnapshot::charged_bytes() const noexcept { return charge_ + control_bytes; }
+NativeContactOwnerFunding AdaptiveSubfaceSnapshot::native_funding(
+    const std::shared_ptr<const AdaptiveSubfaceSnapshot>& owner, std::size_t bytes) const
+{
+    return NativeContactFundingAccess::split_named<control_bytes>(owner, bytes,
+        [](const AdaptiveSubfaceSnapshot& value) { return value.charge_; },
+        [](const AdaptiveSubfaceSnapshot& value) -> const auto& { return value.arena_; });
+}
+PLIC::details::NativeWeakOwnerObservation AdaptiveSubfaceSnapshot::weak_observation(
+    const std::shared_ptr<const AdaptiveSubfaceSnapshot>& snapshot)
+{
+    if (!snapshot) return {};
+    return snapshot->native_funding(snapshot, snapshot->charged_bytes()).body.physical_observation();
+}
+void AdaptiveSubfaceSnapshot::project_legacy_scope(
+    PLIC::details::GeometryOwnerGraphEditor& graph, bool retain, const Budget* foreign_to) const
+{
+    using namespace subface_index_detail;
+    using Funding = NativeContactFundingAccess;
+    const auto& root = indexes_;
+    const auto project = [&](const auto& owner, const Budget* origin, std::size_t bytes)
+    {
+        return Funding::project_reimported(graph, owner, Funding::capture(owner, bytes, origin), retain);
+    };
+    if (root->charge.arena.get() != foreign_to && !project(root, root->charge.arena.get(), root->charged_bytes()))
+        return;
+    const auto pages = [&]<class Index>(std::type_identity<Index> tag, const auto& self,
+                           const typename Index::Ptr& node, const auto& row) -> void
+    {
+        if (!node || !graph.external(node, 0, retain)) return;
+        const auto* origin = node->charge.arena.get();
+        if (foreign_to != origin) project(node, origin, node->charge.bytes);
+        for (const auto& child : node->children) self(tag, self, child, row);
+        for (const auto& value : node->rows) row(value);
+    };
+    pages(std::type_identity<PieceIndex>{}, pages, root->pieces, [](const auto&) {});
+    pages(std::type_identity<FaceIndex>{}, pages, root->faces, [](const auto&) {});
+    pages(std::type_identity<OwnerIndex>{}, pages, root->owners, [&](const auto& row)
+    {
+        const auto& piece = row.page;
+        if (piece->charge.arena.get() == foreign_to || !project(piece, piece->charge.arena.get(), piece->charged_bytes()))
+            return;
+        PlaneView::project_reimported(piece->planes, graph, retain);
+        NormalView::project_reimported(piece->normals, graph, retain);
+        ImageView::project_reimported(piece->images, graph, retain);
+        ContactPointPageView::project_reimported(piece->physical, graph, retain);
+    });
+    pages(std::type_identity<ProvenanceIndex>{}, pages, root->provenance_owners, [&](const auto& row)
+    {
+        const auto& provenance = row.page;
+        if (provenance->charge.arena.get() == foreign_to ||
+            !project(provenance, provenance->charge.arena.get(), provenance->charged_bytes()))
+            return;
+        CellView::project_reimported(provenance->keys, graph, retain);
+        BytesView::project_reimported(provenance->supports, graph, retain);
+        BytesView::project_reimported(provenance->domains, graph, retain);
+    });
+}
+void AdaptiveSubfaceSnapshot::seal_legacy_scope(const AdaptiveSubfaceSnapshot* previous,
+    const std::shared_ptr<const geometry_detail::NativeAllocationState>& native)
+{
+    if (!native_index_) return;
+    const auto build = [&](const auto& prior, const Budget* foreign_to)
+    {
+        if (previous && previous->indexes_ == indexes_) return prior;
+        std::size_t used = 0;
+        PLIC::details::GeometryOwnerGraphEditor graph(prior, 0, used, arena_->limit, nullptr, nullptr, native);
+        project_legacy_scope(graph, true, foreign_to);
+        if (previous) previous->project_legacy_scope(graph, false, foreign_to);
+        return graph.finish();
+    };
+    if (previous)
+    {
+        legacy_ = build(previous->legacy_, nullptr);
+        const auto& prior = previous->origin() == origin() ? previous->inherited_legacy_ : previous->legacy_;
+        inherited_legacy_ = build(prior, origin());
+    }
+    else legacy_ = build(legacy_, nullptr);
+    if (legacy_.payload_bytes() != checked_sum(index_bytes_, exclusive_payload_bytes_) ||
+        inherited_legacy_.payload_bytes() != checked_sum(foreign_index_bytes_, foreign_exclusive_payload_bytes_))
+        throw std::logic_error("Native subface members differ from their original exact legacy admission scope.");
+}
 AdaptiveSubfaceSnapshot::~AdaptiveSubfaceSnapshot()
 {
     indexes_.reset();
@@ -874,7 +1259,8 @@ AdaptiveSubfaceSnapshot::~AdaptiveSubfaceSnapshot()
 }
 std::shared_ptr<const AdaptiveSubfaceSnapshot> AdaptiveSubfaceSnapshot::seal(ContactHaloContext context,
     GeometryConstructionControls controls, int resident, std::span<const CanonicalSubfaceView> pieces, Budget& budget,
-    std::shared_ptr<Budget> arena, ContactPhysicalResidency* residency, cartesian_detail::ArenaCredits* credits)
+    std::shared_ptr<Budget> arena, ContactPhysicalResidency* residency, cartesian_detail::ArenaCredits* credits,
+    bool native_index)
 {
     using namespace subface_index_detail;
     if (!arena || arena.get() != &budget || resident < 0 || pieces.size() > std::numeric_limits<std::size_t>::max() / 2)
@@ -889,18 +1275,20 @@ std::shared_ptr<const AdaptiveSubfaceSnapshot> AdaptiveSubfaceSnapshot::seal(Con
         selectors += local_first + local_second;
     }
     PageCharge memory(arena);
-    memory.add(sizeof(AdaptiveSubfaceSnapshot) + control_bytes);
-    auto result =
-        std::shared_ptr<AdaptiveSubfaceSnapshot>(new AdaptiveSubfaceSnapshot(context, controls, resident, arena));
+    memory.add(sizeof(AdaptiveSubfaceSnapshot));
+    auto result = make_controlled<control_bytes>(budget, arena,
+        [&] { return new AdaptiveSubfaceSnapshot(context, controls, resident, arena); }).first;
     result->charge_ = std::exchange(memory.bytes, 0);
+    result->native_index_ = native_index;
     auto indexes = SubfaceIndexRoot::create(arena);
+    const auto native = subface_index_admission(arena, native_index);
     {
         PageCharge scratch(arena);
         std::vector<CanonicalSubfaceView> ordered;
         reserve(ordered, pieces.size(), scratch);
         ordered.assign(pieces.begin(), pieces.end());
         std::sort(ordered.begin(), ordered.end(), PieceLess{});
-        indexes->pieces = PieceIndex(arena).build(ordered);
+        indexes->pieces = PieceIndex(arena, nullptr, {}, native).build(ordered);
     }
     {
         PageCharge scratch(arena);
@@ -915,7 +1303,7 @@ std::shared_ptr<const AdaptiveSubfaceSnapshot> AdaptiveSubfaceSnapshot::seal(Con
                 faces.push_back({view.page_.get(), std::uint8_t(2 * view.slot_ + 1)});
         }
         std::sort(faces.begin(), faces.end(), FaceLess{});
-        indexes->faces = FaceIndex(arena).build(faces);
+        indexes->faces = FaceIndex(arena, nullptr, {}, native).build(faces);
     }
     {
         PageCharge scratch(arena);
@@ -929,7 +1317,7 @@ std::shared_ptr<const AdaptiveSubfaceSnapshot> AdaptiveSubfaceSnapshot::seal(Con
             else
                 ++owners.back().references;
         const auto counted_pieces = unique_owners(owners);
-        indexes->owners = OwnerIndex(arena).build(counted_pieces);
+        indexes->owners = OwnerIndex(arena, nullptr, {}, native).build(counted_pieces);
         const auto account = [&](const auto& page)
         {
             const auto bytes = page->exclusive_bytes();
@@ -954,19 +1342,21 @@ std::shared_ptr<const AdaptiveSubfaceSnapshot> AdaptiveSubfaceSnapshot::seal(Con
                 });
         }
         const auto counted_provenance = unique_owners(provenance);
-        indexes->provenance_owners = ProvenanceIndex(arena).build(counted_provenance);
+        indexes->provenance_owners = ProvenanceIndex(arena, nullptr, {}, native).build(counted_provenance);
         for (const auto& owner : counted_provenance)
             account(owner.page);
     }
     result->index_bytes_ = indexes->index_bytes();
     result->indexes_ = std::move(indexes);
     result->size_ = pieces.size();
+    result->seal_legacy_scope(nullptr, native);
     return result;
 }
 std::shared_ptr<const AdaptiveSubfaceSnapshot> AdaptiveSubfaceSnapshot::derive(
     const std::shared_ptr<const AdaptiveSubfaceSnapshot>& previous, ContactHaloContext context,
     GeometryConstructionControls controls, int resident, std::span<const CanonicalSubfaceChange> edits, Budget& budget,
-    std::shared_ptr<Budget> arena, ContactPhysicalResidency* residency, cartesian_detail::ArenaCredits* credits)
+    std::shared_ptr<Budget> arena, ContactPhysicalResidency* residency, cartesian_detail::ArenaCredits* credits,
+    bool native_index)
 {
     using namespace subface_index_detail;
     if (!previous || !arena || arena.get() != &budget || resident != previous->resident_)
@@ -974,10 +1364,12 @@ std::shared_ptr<const AdaptiveSubfaceSnapshot> AdaptiveSubfaceSnapshot::derive(
     if (previous->size() && controls != previous->controls())
         controls.supported = false;
     PageCharge memory(arena);
-    memory.add(sizeof(AdaptiveSubfaceSnapshot) + control_bytes);
-    auto result =
-        std::shared_ptr<AdaptiveSubfaceSnapshot>(new AdaptiveSubfaceSnapshot(context, controls, resident, arena));
+    memory.add(sizeof(AdaptiveSubfaceSnapshot));
+    auto result = make_controlled<control_bytes>(budget, arena,
+        [&] { return new AdaptiveSubfaceSnapshot(context, controls, resident, arena); }).first;
     result->charge_ = std::exchange(memory.bytes, 0);
+    result->native_index_ = native_index && previous->native_index_;
+    const auto native = subface_index_admission(arena, result->native_index_);
     // A new incidence fork enters a fresh arena. Repeated edits in that
     // arena inherit the previous exact foreign allowance.
     result->foreign_index_bytes_ =
@@ -991,6 +1383,7 @@ std::shared_ptr<const AdaptiveSubfaceSnapshot> AdaptiveSubfaceSnapshot::derive(
         result->size_ = previous->size_;
         result->index_bytes_ = previous->index_bytes_;
         result->indexes_ = previous->indexes_;
+        result->seal_legacy_scope(previous.get(), native);
         return result;
     }
     auto indexes = SubfaceIndexRoot::create(arena);
@@ -998,12 +1391,12 @@ std::shared_ptr<const AdaptiveSubfaceSnapshot> AdaptiveSubfaceSnapshot::derive(
     indexes->faces = previous->indexes_->faces;
     indexes->owners = previous->indexes_->owners;
     indexes->provenance_owners = previous->indexes_->provenance_owners;
-    const PieceIndex pieces(arena, &result->work_);
-    const FaceIndex faces(arena, &result->work_);
-    const OwnerIndex owners(arena, &result->work_);
-    const ProvenanceIndex provenance_owners(arena, &result->work_);
+    const PieceIndex pieces(arena, &result->work_, {}, native);
+    const FaceIndex faces(arena, &result->work_, {}, native);
+    const OwnerIndex owners(arena, &result->work_, {}, native);
+    const ProvenanceIndex provenance_owners(arena, &result->work_, {}, native);
     if (previous->indexes_->charge.arena != arena)
-        result->work_.retired_foreign_index_bytes = previous->indexes_->charge.bytes;
+        result->work_.retired_foreign_index_bytes = previous->indexes_->charged_bytes();
     const PieceLess piece_less;
     const FaceLess face_less;
     const OwnerLess owner_less;
@@ -1108,7 +1501,56 @@ std::shared_ptr<const AdaptiveSubfaceSnapshot> AdaptiveSubfaceSnapshot::derive(
         throw std::logic_error("Canonical subface index retirement exceeds inherited admission.");
     result->foreign_index_bytes_ -= result->work_.retired_foreign_index_bytes;
     result->indexes_ = std::move(indexes);
+    result->seal_legacy_scope(previous.get(), native);
     return result;
+}
+void AdaptiveSubfaceSnapshot::project_owners(const std::shared_ptr<const AdaptiveSubfaceSnapshot>& snapshot,
+    PLIC::details::GeometryOwnerGraphEditor& graph, bool retain)
+{
+    if (!snapshot || !NativeContactFundingAccess::project(graph, snapshot, snapshot->charged_bytes(),
+            snapshot->native_funding(snapshot, snapshot->charged_bytes()), retain))
+        return;
+    const auto side_indexes = [&]
+    {
+        project_contact_side_index(snapshot->legacy_, graph, retain);
+        project_contact_side_index(snapshot->inherited_legacy_, graph, retain);
+    };
+    const auto indexes = [&]
+    {
+        const auto& root = snapshot->indexes_;
+        if (!SubfaceIndexRoot::project_body(root, graph, retain)) return;
+        NativePublicationOwnerGraph::Context context(graph, retain, false);
+        const auto index = [&]<class Index>(std::type_identity<Index> tag, const auto& self, const typename Index::Ptr& page,
+                               const auto& rows) -> void
+        {
+            if (!page) return;
+            if (page->charge.native)
+            {
+                if (!Index::visit_native_node(page, context.sink)) return;
+            }
+            else
+            {
+                if (snapshot->native_index_)
+                    throw std::invalid_argument("Native contact snapshot has a legacy ordered index allocation.");
+                if (!graph.external(page, page->charge.bytes, retain)) return;
+                graph.external(page->charge.arena, sizeof(Budget) + 4 * sizeof(void*), retain);
+            }
+            for (const auto& child : page->children) self(tag, self, child, rows);
+            for (const auto& row : page->rows) rows(row);
+        };
+        // Face rows borrow their piece page and add no owning edge.
+        using namespace subface_index_detail;
+        index(std::type_identity<PieceIndex>{}, index, root->pieces,
+            [&](const CanonicalSubfaceView& view) { view.project_owners(graph, retain); });
+        index(std::type_identity<FaceIndex>{}, index, root->faces, [](const auto&) {});
+        index(std::type_identity<OwnerIndex>{}, index, root->owners,
+            [&](const auto& row) { project_piece_page(row.page, graph, retain); });
+        index(std::type_identity<ProvenanceIndex>{}, index, root->provenance_owners,
+            [&](const auto& row) { project_provenance(row.page, graph, retain); });
+    };
+    if (!retain) side_indexes();
+    indexes();
+    if (retain) side_indexes();
 }
 void AdaptiveSubfaceSnapshot::visit_pieces(const CanonicalSubfaceEmit& emit) const
 {
@@ -1148,7 +1590,7 @@ void AdaptiveSubfaceSnapshot::visit_face_pieces(
 void AdaptiveSubfaceSnapshot::visit_owners(const SubfaceOwnerVisit& visit) const
 {
     using namespace subface_index_detail;
-    visit_owner(indexes_, indexes_->charge.arena.get(), indexes_->charge.bytes, visit);
+    visit_owner(indexes_, indexes_->charge.arena.get(), indexes_->charged_bytes(), visit);
     const auto index_owner = [&](const auto& page)
     { visit_owner(page, page->charge.arena.get(), page->charge.bytes, visit); };
     PieceIndex::visit_pages(indexes_->pieces, index_owner);
@@ -1158,14 +1600,14 @@ void AdaptiveSubfaceSnapshot::visit_owners(const SubfaceOwnerVisit& visit) const
     indexes_->visit_piece_pages(
         [&](const auto& page)
         {
-            visit_owner(page, page->charge.arena.get(), page->charge.bytes, visit);
+            visit_owner(page, page->charge.arena.get(), page->charged_bytes(), visit);
             page->visit_dependencies(visit, true);
             return true;
         });
     indexes_->visit_provenance_pages(
         [&](const auto& page)
         {
-            visit_owner(page, page->charge.arena.get(), page->charge.bytes, visit);
+            visit_owner(page, page->charge.arena.get(), page->charged_bytes(), visit);
             page->visit_dependencies(visit, true);
         });
 }

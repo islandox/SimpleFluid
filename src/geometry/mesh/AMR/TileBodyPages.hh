@@ -36,7 +36,8 @@ public:
     [[nodiscard]] TileBodyLoopView intrinsic_loop() const;
     [[nodiscard]] std::shared_ptr<const void> credit_owner() const noexcept;
     [[nodiscard]] std::size_t credit_bytes() const noexcept;
-    void observe_source_owners(IncidencePhysicalOwners&) const;
+    void observe_physical_owners(IncidencePhysicalOwners&) const;
+    void project_owners(PLIC::details::GeometryOwnerGraphEditor&, bool retain) const;
     [[nodiscard]] const Budget* credit_origin() const noexcept;
     void visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>&) const;
     [[nodiscard]] const void* page_identity() const noexcept;

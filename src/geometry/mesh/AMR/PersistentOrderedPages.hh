@@ -2,8 +2,11 @@
  * @brief Immutable ordered metadata pages with exact subtree allocation totals.
  */
 #pragma once
+#include "geometry/details/NativeConstructionAdmission.hh"
+#include "geometry/details/NativeConstructorOwnerSink.hh"
 #include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "geometry/mesh/AMR/NativeContactFunding.hh"
 
 #include <algorithm>
 #include <array>
@@ -33,25 +36,90 @@ inline std::size_t checked_product(std::size_t a, std::size_t b)
     return a * b;
 }
 
+struct NativePageAccounting
+{
+    geometry_detail::NativeConstructorStorageOwner storage;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> allocation, node;
+    explicit NativePageAccounting(const geometry_detail::NativeConstructionAdmission& admission)
+        : storage(geometry_detail::native_constructor_storage(admission)) {}
+    [[nodiscard]] std::size_t bytes() const
+    {
+        auto value = checked_sum(allocation->fixed_allocation_bytes(), storage.envelope->fixed_allocation_bytes());
+        value = checked_sum(value, storage.owner->exclusive_bytes());
+        return node ? checked_sum(value, node->fixed_allocation_bytes()) : value;
+    }
+};
 struct PageCharge
 {
     std::shared_ptr<Budget> arena;
-    std::size_t bytes = 0;
+    std::shared_ptr<NativePageAccounting> native;
+    std::size_t bytes = 0, allocator_bytes = 0;
 
-    explicit PageCharge(std::shared_ptr<Budget> owner) : arena(std::move(owner)) {}
-    ~PageCharge() { arena->used -= bytes; }
+    explicit PageCharge(
+        std::shared_ptr<Budget> owner, std::shared_ptr<const geometry_detail::NativeAllocationState> domain = {})
+        : arena(std::move(owner))
+    {
+        if (domain)
+        {
+            auto tracked = geometry_detail::NativeAllocationEnvelopeAccess::make<NativePageAccounting>(
+                geometry_detail::NativeConstructionAdmission::from_state(domain),
+                geometry_detail::NativeConstructionAdmission::from_state(domain));
+            tracked.owner->allocation = std::move(tracked.envelope);
+            native = std::move(tracked.owner);
+            bytes = allocator_bytes = native->bytes();
+        }
+    }
+    ~PageCharge()
+    {
+        const auto held = bytes - allocator_bytes;
+        if (native)
+        {
+            if (held) std::terminate();
+        }
+        else
+            arena->used -= held;
+    }
     PageCharge(const PageCharge&) = delete;
     PageCharge& operator=(const PageCharge&) = delete;
 
     void add(std::size_t value)
     {
         const auto next = checked_sum(bytes, value);
-        arena->add(value);
+        if (native)
+            throw std::invalid_argument("Native ordered rich row buffers require actual constructor receipts.");
+        else
+            arena->add(value);
         bytes = next;
     }
 
+    void release(std::size_t value) noexcept
+    {
+        if (value > bytes - allocator_bytes)
+            std::terminate();
+        bytes -= value;
+        if (native)
+            std::terminate();
+        else
+            arena->used -= value;
+    }
     template<class T> void append(std::vector<T>& values)
     {
+        if (native)
+        {
+            if (values.size() < values.capacity()) return;
+            const auto previous = values.capacity();
+            if (previous > arena->limit / sizeof(T) / 2)
+                throw std::invalid_argument("Native ordered vector capacity exceeds its active cap.");
+            const auto next = previous ? 2 * previous : 1;
+            std::vector<T> replacement;
+            native->storage.owner->reserve(replacement, next);
+            replacement.insert(replacement.end(), std::make_move_iterator(values.begin()),
+                std::make_move_iterator(values.end()));
+            values.swap(replacement);
+            if (previous) native->storage.owner->reset_buffer(replacement);
+            bytes = allocator_bytes = native->bytes();
+            return;
+        }
         const auto before = arena->used;
         try
         {
@@ -105,14 +173,58 @@ public:
         const Row* maximum = nullptr;
         std::size_t size = 0, subtree_bytes = 0, same_arena_bytes = 0;
         [[no_unique_address]] typename Weights::Summary weights{};
-        explicit Node(const std::shared_ptr<Budget>& arena) : charge(arena) {}
+        explicit Node(const std::shared_ptr<Budget>& arena,
+            std::shared_ptr<const geometry_detail::NativeAllocationState> native = {})
+            : charge(arena, std::move(native))
+        {
+        }
+        ~Node()
+        {
+            if (charge.native)
+            {
+                charge.native->storage.owner->reset_buffer(rows);
+                charge.native->storage.owner->reset_buffer(children);
+            }
+        }
         [[nodiscard]] bool leaf() const noexcept { return children.empty(); }
         [[nodiscard]] std::size_t occupancy() const noexcept { return leaf() ? rows.size() : children.size(); }
+
+    private:
+        friend class SimpleFluid::Meshes::AMR::adaptive_detail::NativeContactFundingAccess;
+        [[nodiscard]] NativeContactOwnerFunding native_funding(const Ptr& owner, std::size_t bytes) const
+        {
+            if (!charge.native) return {};
+            const auto& actual = charge.native;
+            if (owner.get() != this || !actual->node || !actual->node->matches(owner) || bytes != charge.bytes)
+                throw std::invalid_argument("Native contact index has a foreign actual page or extent.");
+            NativeContactOwnerFunding result;
+            result.original_bytes = bytes;
+            result.index_accounting = actual;
+            result.index_owner = actual->node;
+            result.index_extent = actual->allocation;
+            result.index_storage = actual->storage;
+            return result;
+        }
     };
 
-    explicit OrderedPages(std::shared_ptr<Budget> arena, Work* work = nullptr, Less less = {})
-        : arena_(std::move(arena)), work_(work), less_(std::move(less))
+    explicit OrderedPages(std::shared_ptr<Budget> arena, Work* work = nullptr, Less less = {},
+        std::shared_ptr<const geometry_detail::NativeAllocationState> native = {})
+        : arena_(std::move(arena)), native_(std::move(native)), work_(work), less_(std::move(less))
     {
+        if (native_)
+        {
+            const auto same_arena = [&](const std::shared_ptr<const void>& owner)
+            {
+                return owner && owner.get() == arena_.get() && !owner.owner_before(arena_) &&
+                    !arena_.owner_before(owner);
+            };
+            const auto& mirror = native_->mirror;
+            if (!same_arena(native_->counter_owner) &&
+                (!same_arena(mirror.owner) || !mirror.owner_proof.matches(mirror.owner)))
+                throw std::invalid_argument("Native ordered pages have a foreign scalar admission domain.");
+        }
+        if (native_ && !PLIC::geometry_encoding_capacity_profile_supported())
+            throw std::invalid_argument("Native ordered page vector capacity profile is not qualified.");
     }
 
     [[nodiscard]] Ptr build(std::span<const Row> sorted) const
@@ -122,7 +234,7 @@ public:
         for (std::size_t slot = 1; slot < sorted.size(); ++slot)
             if (!less_(sorted[slot - 1], sorted[slot]))
                 throw std::invalid_argument("Ordered metadata index contains duplicate selectors.");
-        PageCharge scratch(arena_);
+        PageCharge scratch(arena_, native_);
         std::vector<Ptr> pages;
         const auto groups = ceiling(sorted.size(), LeafCapacity);
         reserve(pages, groups, scratch);
@@ -147,9 +259,16 @@ public:
             }
             const auto old = pages.capacity() * sizeof(Ptr);
             pages.swap(parents);
-            std::vector<Ptr>().swap(parents);
-            scratch.bytes -= old;
-            arena_->used -= old;
+            if (scratch.native)
+            {
+                scratch.native->storage.owner->reset_buffer(parents);
+                scratch.bytes = scratch.allocator_bytes = scratch.native->bytes();
+            }
+            else
+            {
+                std::vector<Ptr>().swap(parents);
+                scratch.release(old);
+            }
         }
         return std::move(pages.front());
     }
@@ -210,6 +329,22 @@ public:
         return true;
     }
 
+    /** Exact native Node and receipt vertices; leaves child/row fields to the
+     * owning typed visitor after this first/last semantic transition. */
+    static bool visit_native_node(const Ptr& node, const geometry_detail::NativeConstructorOwnerSink& sink)
+    {
+        if (!node || !node->charge.native)
+            throw std::invalid_argument("Qualified native metadata node lacks actual allocation receipts.");
+        const auto& native = node->charge.native;
+        if (!sink.semantic(node, geometry_detail::NativeConstructorOwnerKind::Topology, native->node)) return false;
+        if (sink.semantic(native, geometry_detail::NativeConstructorOwnerKind::Storage, native->allocation))
+        {
+            sink.fixed(native->allocation);
+            sink.fixed(native->node);
+            sink.storage(native->storage);
+        }
+        return true;
+    }
     template<class Visit> static void visit_pages(const Ptr& root, const Visit& visit)
     {
         if (!root)
@@ -232,6 +367,12 @@ private:
     }
     template<class Value> static void reserve(std::vector<Value>& values, std::size_t count, PageCharge& charge)
     {
+        if (charge.native)
+        {
+            charge.native->storage.owner->reserve(values, count);
+            charge.bytes = charge.allocator_bytes = charge.native->bytes();
+            return;
+        }
         charge.add(checked_product(count, sizeof(Value)));
         values.reserve(count);
         if (values.capacity() != count)
@@ -255,6 +396,18 @@ private:
     }
     [[nodiscard]] std::shared_ptr<Node> allocate() const
     {
+        if (native_)
+        {
+            const auto admission = geometry_detail::NativeConstructionAdmission::from_state(native_);
+            auto tracked = geometry_detail::NativeAllocationEnvelopeAccess::make<Node>(admission, arena_);
+            auto node = std::move(tracked.owner);
+            PageCharge charge(arena_, native_);
+            charge.native->node = std::move(tracked.envelope);
+            node->charge.native = std::move(charge.native);
+            node->charge.bytes = node->charge.allocator_bytes = node->charge.native->bytes();
+            charge.bytes = charge.allocator_bytes = 0;
+            return node;
+        }
         PageCharge initial(arena_);
         initial.add(sizeof(Node) + control_bytes);
         auto node = std::make_shared<Node>(arena_);
@@ -280,8 +433,7 @@ private:
                 actual = checked_sum(actual, Buffers::bytes(row));
             if (actual > copied_buffers)
                 throw std::invalid_argument("Ordered row buffer copy exceeds its qualified admission.");
-            node->charge.bytes -= copied_buffers - actual;
-            arena_->used -= copied_buffers - actual;
+            node->charge.release(copied_buffers - actual);
         }
         node->maximum = &node->rows.back();
         node->size = values.size();
@@ -363,7 +515,7 @@ private:
         retire(second);
         if (first.leaf())
         {
-            PageCharge scratch(arena_);
+            PageCharge scratch(arena_, native_);
             std::array<Row, 2 * LeafCapacity> rows;
             [[maybe_unused]] std::size_t admitted_buffers = 0;
             if constexpr (Buffers::enabled)
@@ -383,8 +535,7 @@ private:
                     actual_buffers = checked_sum(actual_buffers, Buffers::bytes(*row));
                 if (actual_buffers > admitted_buffers)
                     throw std::invalid_argument("Ordered row buffer copy exceeds its qualified admission.");
-                scratch.bytes -= admitted_buffers - actual_buffers;
-                arena_->used -= admitted_buffers - actual_buffers;
+                scratch.release(admitted_buffers - actual_buffers);
             }
             return pack_leaves(std::span(rows.begin(), end));
         }
@@ -402,7 +553,7 @@ private:
             if (present != expected)
                 throw std::invalid_argument("Ordered metadata edit changed its accepted selector.");
             retire(node);
-            PageCharge scratch(arena_);
+            PageCharge scratch(arena_, native_);
             std::array<Row, LeafCapacity + 1> rows;
             [[maybe_unused]] std::size_t admitted_buffers = 0;
             if constexpr (Buffers::enabled)
@@ -427,8 +578,7 @@ private:
                     actual_buffers = checked_sum(actual_buffers, Buffers::bytes(*row));
                 if (actual_buffers > admitted_buffers)
                     throw std::invalid_argument("Ordered row buffer copy exceeds its qualified admission.");
-                scratch.bytes -= admitted_buffers - actual_buffers;
-                arena_->used -= admitted_buffers - actual_buffers;
+                scratch.release(admitted_buffers - actual_buffers);
             }
             return pack_leaves(std::span(rows.begin(), end));
         }
@@ -445,6 +595,7 @@ private:
         return pack_branches(rebalance(std::span(children.begin(), end)));
     }
     std::shared_ptr<Budget> arena_;
+    std::shared_ptr<const geometry_detail::NativeAllocationState> native_;
     Work* work_;
     [[no_unique_address]] Less less_;
 };

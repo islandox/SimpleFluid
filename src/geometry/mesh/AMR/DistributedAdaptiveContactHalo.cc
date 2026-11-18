@@ -16,6 +16,7 @@
 #include "DistributedAdaptiveClosureRecords.hh"
 #include "DistributedAdaptiveIncidence.hh"
 #include "IncidencePhysicalOwners.hh"
+#include "NativeSourceOwnerStore.hh"
 #include "PersistentContactGroups.hh"
 #include "PersistentContactTraces.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
@@ -338,6 +339,7 @@ struct DistributedAdaptiveContactHalo::Impl
     ContactHaloBeforeSend before_send;
     std::shared_ptr<Budget> arena;
     std::shared_ptr<std::size_t> external_lease_bytes = std::make_shared<std::size_t>(0);
+    bool native_source_floors_sealed = false;
     Budget& budget;
     DeferredOwnerCharges deferred_owners;
     IdentityBudget identities;
@@ -393,11 +395,15 @@ struct DistributedAdaptiveContactHalo::Impl
     const char* diagnostic_phase = "construct";
 
     Impl(const AdaptiveProviderKernel& kernel_, Teuchos::RCP<const Teuchos::Comm<int>> comm_,
-        AdaptiveClosureOptions options_, ContactHaloContext context_, ContactHaloBeforeSend before_send_)
+        AdaptiveClosureOptions options_, ContactHaloContext context_, ContactHaloBeforeSend before_send_,
+        std::size_t caller_live_bytes)
         : kernel(kernel_), comm(std::move(comm_)), options(options_), context(context_),
-          before_send(std::move(before_send_)), arena(std::make_shared<Budget>(Budget{options.byte_budget})),
+          before_send(std::move(before_send_)),
+          arena(std::make_shared<Budget>(Budget{options.byte_budget, caller_live_bytes,
+              caller_live_bytes, caller_live_bytes})),
           budget(*arena), deferred_owners(budget), trace_pool(std::in_place, budget), affected_pairs(budget),
-          work(std::in_place, arena), ranks(comm.is_null() ? 0 : comm->getSize()), rank(comm.is_null() ? -1 : comm->getRank())
+          work(std::in_place, arena), ranks(comm.is_null() ? 0 : comm->getSize()),
+          rank(comm.is_null() ? -1 : comm->getRank()), external_retained_bytes(caller_live_bytes)
     {
         budget.add(sizeof(Impl) + sizeof(Budget) + sizeof(std::size_t) + 128 + sizeof(DistributedAdaptiveContactHalo) +
                    sizeof(Groups));
@@ -2486,6 +2492,12 @@ std::vector<AdaptiveMark> DistributedAdaptiveContactHalo::Impl::evaluate(bool re
 DistributedAdaptiveContactHalo::DistributedAdaptiveContactHalo(const AdaptiveProviderKernel& kernel,
     Teuchos::RCP<const Teuchos::Comm<int>> comm, AdaptiveClosureOptions options, ContactHaloContext context,
     ContactHaloBeforeSend before_send)
+    : DistributedAdaptiveContactHalo(kernel, std::move(comm), options, context, std::move(before_send), 0)
+{
+}
+DistributedAdaptiveContactHalo::DistributedAdaptiveContactHalo(const AdaptiveProviderKernel& kernel,
+    Teuchos::RCP<const Teuchos::Comm<int>> comm, AdaptiveClosureOptions options, ContactHaloContext context,
+    ContactHaloBeforeSend before_send, std::size_t caller_live_bytes)
 {
     if (comm.is_null())
         throw std::invalid_argument("Spatial closure needs a communicator.");
@@ -2494,9 +2506,11 @@ DistributedAdaptiveContactHalo::DistributedAdaptiveContactHalo(const AdaptivePro
     collective(*comm,
         [&]
         {
-            if (sizeof(Impl) > options.byte_budget)
+            constexpr auto header = sizeof(Impl) + sizeof(Budget) + sizeof(std::size_t) + 128 +
+                sizeof(DistributedAdaptiveContactHalo) + sizeof(Impl::Groups);
+            if (caller_live_bytes > options.byte_budget || header > options.byte_budget - caller_live_bytes)
                 throw std::invalid_argument("Spatial closure session exceeds its byte budget.");
-            impl_ = std::make_unique<Impl>(kernel, comm, options, context, std::move(before_send));
+            impl_ = std::make_unique<Impl>(kernel, comm, options, context, std::move(before_send), caller_live_bytes);
         });
     impl_->initialize_collective();
 }
@@ -3450,6 +3464,20 @@ std::size_t DistributedAdaptiveContactHalo::cache_storage_bytes() const noexcept
     return impl_->budget.used - impl_->external_retained_bytes - current_fork_overlap_bytes() -
            *impl_->external_lease_bytes;
 }
+const std::shared_ptr<Budget>& DistributedAdaptiveContactHalo::allocation_arena() const noexcept
+{
+    return impl_->arena;
+}
+PLIC::details::geometry_demand::GeometryOwnerManifest DistributedAdaptiveContactHalo::source_owner_manifest() const
+{
+    return impl_->physical_owners ? impl_->physical_owners->source_owners() :
+        PLIC::details::geometry_demand::GeometryOwnerManifest{};
+}
+PLIC::details::GeometryNativeAdministration DistributedAdaptiveContactHalo::source_owner_administration() const
+{
+    return impl_->physical_owners ? impl_->physical_owners->source_administration() :
+        PLIC::details::GeometryNativeAdministration{};
+}
 ContactExternalResidencyLease DistributedAdaptiveContactHalo::external_residency_lease() const
 {
     return ContactExternalResidencyLease(impl_->arena, impl_->external_lease_bytes);
@@ -3461,6 +3489,8 @@ ContactExternalResidencyLease::ContactExternalResidencyLease(
 }
 ContactExternalResidencyLease::~ContactExternalResidencyLease()
 {
+    if (transfer_pending_)
+        std::terminate();
     if (arena_)
     {
         arena_->used -= bytes_;
@@ -3468,13 +3498,18 @@ ContactExternalResidencyLease::~ContactExternalResidencyLease()
     }
 }
 ContactExternalResidencyLease::ContactExternalResidencyLease(ContactExternalResidencyLease&& other) noexcept
-    : arena_(std::move(other.arena_)), total_(std::move(other.total_)), bytes_(std::exchange(other.bytes_, 0))
+    : arena_(std::move(other.arena_)), total_(std::move(other.total_)),
+      return_channel_(std::move(other.return_channel_)), bytes_(std::exchange(other.bytes_, 0))
 {
+    if (other.transfer_pending_)
+        std::terminate();
 }
 ContactExternalResidencyLease& ContactExternalResidencyLease::operator=(ContactExternalResidencyLease&& other) noexcept
 {
     if (this != &other)
     {
+        if (transfer_pending_ || other.transfer_pending_)
+            std::terminate();
         if (arena_)
         {
             arena_->used -= bytes_;
@@ -3482,21 +3517,134 @@ ContactExternalResidencyLease& ContactExternalResidencyLease::operator=(ContactE
         }
         arena_ = std::move(other.arena_);
         total_ = std::move(other.total_);
+        return_channel_ = std::move(other.return_channel_);
         bytes_ = std::exchange(other.bytes_, 0);
     }
     return *this;
 }
+ContactExternalResidencyLease::PreparedTransfer::PreparedTransfer(
+    ContactExternalResidencyLease& target, ContactExternalResidencyLease& source, std::size_t amount)
+    : target_(&target), source_(&source), amount_(amount)
+{
+    if (&target == &source || !target.arena_ || target.arena_.get() != source.arena_.get() ||
+        target.arena_.owner_before(source.arena_) || source.arena_.owner_before(target.arena_) ||
+        target.total_.get() != source.total_.get() || target.total_.owner_before(source.total_) ||
+        source.total_.owner_before(target.total_) || target.transfer_pending_ || source.transfer_pending_ ||
+        amount > source.bytes_ || amount > std::numeric_limits<std::size_t>::max() - target.bytes_)
+        throw std::invalid_argument("External residency transfer lacks exact same-arena credit.");
+    target.transfer_pending_ = source.transfer_pending_ = true;
+}
+ContactExternalResidencyLease::PreparedTransfer::~PreparedTransfer()
+{
+    if (target_)
+        target_->transfer_pending_ = source_->transfer_pending_ = false;
+}
+ContactExternalResidencyLease::PreparedTransfer::PreparedTransfer(PreparedTransfer&& other) noexcept
+    : target_(std::exchange(other.target_, nullptr)), source_(std::exchange(other.source_, nullptr)),
+      amount_(std::exchange(other.amount_, 0))
+{
+}
+void ContactExternalResidencyLease::PreparedTransfer::commit() noexcept
+{
+    if (!target_)
+        return;
+    target_->bytes_ += amount_;
+    source_->bytes_ -= amount_;
+    target_->transfer_pending_ = source_->transfer_pending_ = false;
+    target_ = source_ = nullptr;
+    amount_ = 0;
+}
+ContactExternalResidencyLease::PreparedTransfer ContactExternalResidencyLease::prepare_transfer(
+    ContactExternalResidencyLease& source, std::size_t bytes)
+{
+    return PreparedTransfer(*this, source, bytes);
+}
+ContactExternalResidencyLease ContactExternalResidencyLease::prepare_mirror(std::size_t bytes) const
+{
+    if (transfer_pending_ || !arena_ || !total_)
+        throw std::logic_error("Cannot mirror an unbound or staged external residency lease.");
+    ContactExternalResidencyLease staged(arena_, total_);
+    staged.resize(bytes);
+    return staged;
+}
+ContactExternalResidencyLease::PreparedBatch::PreparedBatch(
+    ContactExternalResidencyLease& source, std::span<const TransferPart> parts)
+    : source_(&source), parts_(parts)
+{
+    if (!source.arena_ || !source.total_ || source.transfer_pending_)
+        throw std::invalid_argument("Source coverage floor is unbound or already reserved.");
+    const ContactExternalResidencyLease* previous = nullptr;
+    for (const auto& part : parts)
+    {
+        if (!part.target || part.target == &source || (previous && !std::less<const ContactExternalResidencyLease*>{}(
+                previous, part.target)) || source.arena_.get() != part.target->arena_.get() ||
+            source.arena_.owner_before(part.target->arena_) || part.target->arena_.owner_before(source.arena_) ||
+            source.total_.get() != part.target->total_.get() || source.total_.owner_before(part.target->total_) ||
+            part.target->total_.owner_before(source.total_) || part.target->transfer_pending_ ||
+            part.bytes > std::numeric_limits<std::size_t>::max() - part.target->bytes_ ||
+            part.bytes > std::numeric_limits<std::size_t>::max() - total_)
+            throw std::invalid_argument("Subset coverage batch changes arena/control, ordering or extent.");
+        total_ += part.bytes;
+        previous = part.target;
+    }
+    if (total_ > source.bytes_)
+        throw std::invalid_argument("Subset coverage exceeds its exact pre-admitted source floor.");
+    source.transfer_pending_ = true;
+    for (const auto& part : parts_) part.target->transfer_pending_ = true;
+}
+ContactExternalResidencyLease::PreparedBatch::~PreparedBatch()
+{
+    if (!source_) return;
+    source_->transfer_pending_ = false;
+    for (const auto& part : parts_) part.target->transfer_pending_ = false;
+}
+ContactExternalResidencyLease::PreparedBatch::PreparedBatch(PreparedBatch&& other) noexcept
+    : source_(std::exchange(other.source_, nullptr)), parts_(std::exchange(other.parts_, {})),
+      total_(std::exchange(other.total_, 0)) {}
+void ContactExternalResidencyLease::PreparedBatch::commit() noexcept
+{
+    if (!source_) return;
+    source_->bytes_ -= total_;
+    source_->transfer_pending_ = false;
+    for (const auto& part : parts_)
+    {
+        part.target->bytes_ += part.bytes;
+        part.target->transfer_pending_ = false;
+    }
+    source_ = nullptr;
+    parts_ = {};
+    total_ = 0;
+}
+ContactExternalResidencyLease::PreparedBatch ContactExternalResidencyLease::prepare_batch(
+    std::span<const TransferPart> parts)
+{
+    return PreparedBatch(*this, parts);
+}
+void ContactExternalResidencyLease::return_subset_coverage(ContactExternalResidencyLease& source) noexcept
+{
+    // This incoming credit can only increase the floor. An already prepared
+    // outgoing debit therefore remains valid whether it commits or cancels.
+    if (this == &source || source.transfer_pending_ || !arena_ || !total_ || arena_.get() != source.arena_.get() ||
+        arena_.owner_before(source.arena_) || source.arena_.owner_before(arena_) || total_.get() != source.total_.get() ||
+        total_.owner_before(source.total_) || source.total_.owner_before(total_) ||
+        source.bytes_ > std::numeric_limits<std::size_t>::max() - bytes_)
+        std::terminate();
+    bytes_ += std::exchange(source.bytes_, 0);
+}
 void ContactExternalResidencyLease::adopt_precharged(std::size_t bytes)
 {
-    if (!arena_ || bytes_ || bytes > arena_->used)
+    if (transfer_pending_ || !arena_ || bytes_ || bytes > arena_->used ||
+        bytes > std::numeric_limits<std::size_t>::max() - *total_)
         throw std::logic_error("Invalid pre-admitted external residency transfer.");
     *total_ += bytes;
     bytes_ = bytes;
 }
 void ContactExternalResidencyLease::resize(std::size_t bytes)
 {
-    if (!arena_)
-        throw std::logic_error("External residency lease lacks its allocation arena.");
+    if (transfer_pending_ || !arena_ || !total_)
+        throw std::logic_error("External residency lease is unbound or has a pending transfer.");
+    if (bytes > bytes_ && bytes - bytes_ > std::numeric_limits<std::size_t>::max() - *total_)
+        throw std::overflow_error("External residency lease total overflows.");
     if (bytes > bytes_)
     {
         arena_->add(bytes - bytes_);

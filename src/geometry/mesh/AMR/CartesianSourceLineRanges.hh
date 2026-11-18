@@ -29,6 +29,8 @@ namespace cartesian_line_detail
 } // namespace cartesian_line_detail
 class CartesianSourceManifestSet;
 class CartesianSourceLineRangeBuilder;
+class NativeContactFundingAccess;
+struct NativeContactOwnerFunding;
 /** Only the actual session may bind its closed native owner manifests, real
  * complete-line pass and published point snapshot. Eligibility bits and key
  * parsing cannot construct this admission. */
@@ -83,6 +85,9 @@ public:
     void visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>&) const;
 
 private:
+    friend class NativeContactFundingAccess;
+    [[nodiscard]] NativeContactOwnerFunding native_funding(
+        const std::shared_ptr<const CartesianSourceLineRangeCatalog>&, std::size_t) const;
     struct Impl;
     std::unique_ptr<Impl> impl_;
     CartesianSourceLineRangeCatalog();
@@ -124,6 +129,9 @@ public:
         std::vector<std::shared_ptr<cartesian_detail::AuthorityOwnerCredit>>&, cartesian_detail::Allocation&) const;
 
 private:
+    friend class NativeContactFundingAccess;
+    [[nodiscard]] NativeContactOwnerFunding native_funding(
+        const std::shared_ptr<const CartesianSourceLineRangeRecipe>&, std::size_t) const;
     struct Impl;
     std::unique_ptr<Impl> impl_;
     CartesianSourceLineRangeRecipe();

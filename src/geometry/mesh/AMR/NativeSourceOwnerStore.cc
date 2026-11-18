@@ -57,4 +57,9 @@ geometry_detail::NativeAllocationMirror NativeSourceOwnerStore::make_mirror(
     result.retire_callback = publication ? retire_halo<true> : retire_halo<false>;
     return result;
 }
+PLIC::details::OwnerManifestPair NativeSourceOwnerStore::single(
+    PLIC::details::geometry_demand::GeometryOwnerManifest ordinary)
+{
+    return PLIC::details::OwnerManifestPair::sealed({std::move(ordinary), {}}, 0);
+}
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

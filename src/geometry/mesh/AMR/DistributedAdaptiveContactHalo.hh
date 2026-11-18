@@ -18,6 +18,9 @@
 #include <span>
 #include <vector>
 
+namespace SimpleFluid::PLIC::details { class GeometryNativeAdministration; }
+namespace SimpleFluid::geometry_detail { class NativeConstructionAdmission; }
+
 namespace SimpleFluid::Meshes::AMR
 {
 class AdaptiveLeafLayout;
@@ -28,6 +31,10 @@ class DistributedAdaptiveHierarchy;
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 class DistributedAdaptiveContactHalo;
+class NativeSourceOwnerStore;
+class NativeSourceCoverage;
+class NativeSourceOwnerCoverage;
+struct NativeContactSourceCoverage;
 /** Borrow the accepted canonical cache for internal diagnostics. The caller
  * must retain the hierarchy throughout use of the returned reference. */
 [[nodiscard]] const DistributedAdaptiveContactHalo& contact_cache(const DistributedAdaptiveHierarchy&);
@@ -71,11 +78,61 @@ public:
     ContactExternalResidencyLease& operator=(ContactExternalResidencyLease&&) noexcept;
     ContactExternalResidencyLease(const ContactExternalResidencyLease&) = delete;
     ContactExternalResidencyLease& operator=(const ContactExternalResidencyLease&) = delete;
+    /** A privately admitted growth lease. Preparation consumes only the new
+     * lease; the accepted destination is unchanged until commit. Both leases
+     * must stay at their addresses until this token commits or is destroyed. */
+    class PreparedTransfer
+    {
+    public:
+        ~PreparedTransfer();
+        PreparedTransfer(PreparedTransfer&&) noexcept;
+        PreparedTransfer& operator=(PreparedTransfer&&) = delete;
+        PreparedTransfer(const PreparedTransfer&) = delete;
+        PreparedTransfer& operator=(const PreparedTransfer&) = delete;
+        void commit() noexcept;
+
+    private:
+        friend class ContactExternalResidencyLease;
+        PreparedTransfer(ContactExternalResidencyLease&, ContactExternalResidencyLease&, std::size_t);
+        ContactExternalResidencyLease* target_;
+        ContactExternalResidencyLease* source_;
+        std::size_t amount_;
+    };
+    /** Exact same-arena/total-control transfer of an already admitted lease.
+     * No new allocation or Budget charge occurs in commit(). */
+    [[nodiscard]] PreparedTransfer prepare_transfer(ContactExternalResidencyLease&, std::size_t);
+    /** Reserve an independent mirrored obligation in this halo arena. This
+     * always checks the actual halo Budget before admitting growth. */
+    [[nodiscard]] ContactExternalResidencyLease prepare_mirror(std::size_t) const;
+    struct TransferPart
+    {
+        ContactExternalResidencyLease* target;
+        std::size_t bytes;
+    };
+    /** One source floor can fund several independent physical-owner subset
+     * tokens. Caller-owned parts remain stable and sorted by target address. */
+    class PreparedBatch
+    {
+    public:
+        ~PreparedBatch();
+        PreparedBatch(PreparedBatch&&) noexcept;
+        PreparedBatch(const PreparedBatch&) = delete;
+        PreparedBatch& operator=(const PreparedBatch&) = delete;
+        void commit() noexcept;
+    private:
+        friend class ContactExternalResidencyLease;
+        PreparedBatch(ContactExternalResidencyLease&, std::span<const TransferPart>);
+        ContactExternalResidencyLease* source_;
+        std::span<const TransferPart> parts_;
+        std::size_t total_ = 0;
+    };
+    [[nodiscard]] PreparedBatch prepare_batch(std::span<const TransferPart>);
     /** Admission preserves old/new overlap until the caller publishes then
      * shrinks to the new resident union. Cumulative allocation stays monotonic. */
     void resize(std::size_t);
     /** Transfer a charge already present in this arena from caller scratch. */
     void adopt_precharged(std::size_t);
+    [[nodiscard]] const std::shared_ptr<Budget>& arena_identity() const noexcept { return arena_; }
     [[nodiscard]] std::size_t bytes() const noexcept { return bytes_; }
     [[nodiscard]] std::size_t available() const noexcept
     {
@@ -83,9 +140,15 @@ public:
     }
 
 private:
+    friend class NativeSourceOwnerStore;
+    friend class NativeSourceCoverage;
+    friend class NativeSourceOwnerCoverage;
+    void return_subset_coverage(ContactExternalResidencyLease&) noexcept;
     std::shared_ptr<Budget> arena_;
     std::shared_ptr<std::size_t> total_;
+    std::shared_ptr<void> return_channel_;
     std::size_t bytes_ = 0;
+    bool transfer_pending_ = false;
 };
 struct ContactRetiredLeaf
 {
@@ -198,6 +261,8 @@ class SIMPLEFLUID_LOCAL DistributedAdaptiveContactHalo
 public:
     DistributedAdaptiveContactHalo(const AdaptiveProviderKernel&, Teuchos::RCP<const Teuchos::Comm<int>>,
         AdaptiveClosureOptions, ContactHaloContext = {}, ContactHaloBeforeSend = {});
+    DistributedAdaptiveContactHalo(const AdaptiveProviderKernel&, Teuchos::RCP<const Teuchos::Comm<int>>,
+        AdaptiveClosureOptions, ContactHaloContext, ContactHaloBeforeSend, std::size_t caller_live_bytes);
     ~DistributedAdaptiveContactHalo();
     DistributedAdaptiveContactHalo(DistributedAdaptiveContactHalo&&) noexcept;
     DistributedAdaptiveContactHalo& operator=(DistributedAdaptiveContactHalo&&) noexcept;
@@ -213,6 +278,11 @@ public:
     void apply_delta(std::span<const ContactRetiredLeaf>, std::span<const AdaptiveCellKey>, ContactHaloContext,
         const ContactOwnedLeafLookup&);
     [[nodiscard]] Budget& allocation() noexcept;
+    [[nodiscard]] const std::shared_ptr<Budget>& allocation_arena() const noexcept;
+    [[nodiscard]] PLIC::details::geometry_demand::GeometryOwnerManifest source_owner_manifest() const;
+    [[nodiscard]] PLIC::details::GeometryNativeAdministration source_owner_administration() const;
+    /** One-time funding transfer during private hierarchy candidate assembly. */
+    [[nodiscard]] NativeContactSourceCoverage source_coverage(const geometry_detail::NativeConstructionAdmission&);
     [[nodiscard]] ContactExternalResidencyLease external_residency_lease() const;
     void bind_external_retained_bytes(std::size_t) noexcept;
     [[nodiscard]] std::size_t cache_storage_bytes() const noexcept;

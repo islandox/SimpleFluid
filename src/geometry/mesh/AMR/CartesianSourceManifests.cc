@@ -378,13 +378,22 @@ bool CartesianSourceManifestSet::receipts_admitted_in(const CartesianAuthorityAr
     const auto previous = predecessor_.lock();
     return previous && arena.prepaid(previous, previous->allocation_budget(), previous->metadata_bytes(), false);
 }
+NativeContactOwnerFunding CartesianSourceManifestSet::native_funding(
+    const std::shared_ptr<const CartesianSourceManifestSet>& owner, std::size_t bytes) const
+{
+    auto funding = NativeContactFundingAccess::split_named<source_control_bytes>(owner, bytes,
+        [](const CartesianSourceManifestSet& value) { return value.charge_ - source_control_bytes; },
+        [](const CartesianSourceManifestSet& value) -> const auto& { return value.keeper_; });
+    funding.related_control = predecessor_control_;
+    return funding;
+}
 CartesianSourceManifestSet::~CartesianSourceManifestSet()
 {
     peers_.reset();
     local_.reset();
     decltype(leases_){}.swap(leases_);
-    if (budget_)
-        budget_->used -= charge_;
+    if (charge_)
+        budget_->used -= charge_ - source_control_bytes;
 }
 void CartesianSourceManifestSet::decode_inventory(std::vector<Source>& sources, const AMRGrid& grid,
     ContactHaloContext context, int owner, std::uint64_t version, std::size_t cells, std::span<const char> bytes,
@@ -696,9 +705,10 @@ struct CartesianSourceManifestSet::Builder
     ExplicitTree explicit_cells;
     PeerTree peers;
 
-    Builder(CartesianSourceManifestSet& output, std::shared_ptr<Budget> owner)
-        : result(output), arena(std::move(owner)), ranges(arena, &work), sources(arena, &work),
-          explicit_cells(arena, &work), peers(arena, &work)
+    Builder(CartesianSourceManifestSet& output, std::shared_ptr<Budget> owner,
+        const std::shared_ptr<const geometry_detail::NativeAllocationState>& native = {})
+        : result(output), arena(std::move(owner)), ranges(arena, &work, {}, native), sources(arena, &work, {}, native),
+          explicit_cells(arena, &work, {}, native), peers(arena, &work, {}, native)
     {
     }
 
@@ -707,9 +717,11 @@ struct CartesianSourceManifestSet::Builder
         if (bytes.empty())
             return {};
         ContactGroupAllocation memory(arena);
-        memory.add(add(sizeof(ReceiptBytes) + 128, bytes.size()));
-        result.receipt_work_.copied_body_bytes = add(result.receipt_work_.copied_body_bytes, memory.bytes());
-        return std::make_shared<ReceiptBytes>(std::move(memory), bytes);
+        memory.add(add(sizeof(ReceiptBytes), bytes.size()));
+        auto receipt = contact_funding_detail::make_controlled<ReceiptBytes::control_bytes>(
+            *arena, arena, [&] { return new ReceiptBytes(std::move(memory), bytes); }).first;
+        result.receipt_work_.copied_body_bytes = add(result.receipt_work_.copied_body_bytes, receipt->metadata_bytes());
+        return receipt;
     }
     static bool same_range(const CartesianIncidenceRange& a, const CartesianIncidenceRange& b) noexcept
     {
@@ -985,8 +997,9 @@ std::shared_ptr<const CartesianSourceManifestSet> CartesianSourceManifestSet::ex
                 throw std::invalid_argument("Native source witness differs from closed owner inventory.");
             if (!admission.inventory_)
                 throw std::invalid_argument("Missing native owner construction witness.");
-            retained.retain(sizeof(CartesianSourceManifestSet) + 128);
-            result = std::shared_ptr<CartesianSourceManifestSet>(new CartesianSourceManifestSet);
+            retained.retain(sizeof(CartesianSourceManifestSet));
+            result = contact_funding_detail::make_controlled<source_control_bytes>(
+                budget, keeper, [] { return new CartesianSourceManifestSet; }).first;
             result->grid_ = admission.grid_;
             result->context_ = admission.context_;
             result->generation_ = admission.generation_;
@@ -1092,13 +1105,19 @@ std::shared_ptr<const CartesianSourceManifestSet> CartesianSourceManifestSet::ex
                 arena->prepaid(previous, previous->allocation_budget(), previous->metadata_bytes(), false);
             result->shared_receipts_ = shared;
             if (shared)
+            {
                 result->predecessor_ = previous;
+                if (previous->has_arena_keeper())
+                    result->predecessor_control_ =
+                        previous->native_funding(previous, previous->metadata_bytes()).body.physical_observation();
+            }
             const auto page_arena = keeper ? keeper : std::shared_ptr<Budget>(std::shared_ptr<void>{}, &budget);
-            Builder(*result, page_arena).publish(shared ? previous.get() : nullptr, peers, sources, explicit_cells);
+            Builder(*result, page_arena, arena->native_index)
+                .publish(shared ? previous.get() : nullptr, peers, sources, explicit_cells);
         });
     result->budget_ = &budget;
     result->keeper_ = std::move(keeper);
-    result->charge_ = std::exchange(retained.bytes, 0);
+    result->charge_ = std::exchange(retained.bytes, 0) + source_control_bytes;
     credits.committed = true;
     return result;
 }

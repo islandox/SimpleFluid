@@ -7,6 +7,7 @@
 #include "ContactSourcePoints.hh"
 #include <limits>
 #include <memory>
+#include <optional>
 #include <type_traits>
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
@@ -28,9 +29,9 @@ public:
 
     template<class T>
     bool observe(Role role, const std::shared_ptr<T>& value, std::size_t bytes, const Budget* origin,
-        ContactPhysicalResidency::PointScope scope = 0)
+        ContactPhysicalResidency::PointScope scope = 0, const NativeContactOwnerFunding* funding = nullptr)
     {
-        if (!value || !bytes)
+        if (!value)
             return false;
         if constexpr (std::is_same_v<std::remove_cv_t<T>, cartesian_detail::AuthorityOwnerCredit>)
             if (!scope && role == Role::CreditMetadata)
@@ -41,7 +42,7 @@ public:
             const bool hinted = arena_ && active && active->references == 1 && arena_->hint_retirement(value);
             try
             {
-                return residency_.release(role, value, scope).retired();
+                return residency_.release(role, value, scope, funding).retired();
             }
             catch (...)
             {
@@ -51,8 +52,8 @@ public:
             }
         }
         const auto prepaid = arena_ ? arena_->find_paid_token(value, origin, bytes) : nullptr;
-        const auto transition =
-            residency_.retain(role, value, bytes, origin, prepaid ? &prepaid->charged_payload : nullptr, scope);
+        const auto transition = residency_.retain(
+            role, value, bytes, origin, prepaid ? &prepaid->charged_payload : nullptr, scope, funding);
         if (arena_ && transition.inserted())
             arena_->cancel_retirement(value);
         return transition.inserted();
@@ -82,8 +83,7 @@ public:
     {
         if (view)
             view->visit_credit_owners(
-                [&](const auto& credit, std::size_t bytes)
-                { residency_.observe_point_credit(credit, bytes, added_); });
+                [&](const auto& credit, std::size_t bytes) { residency_.observe_point_credit(credit, bytes, added_); });
     }
 
     template<class Proof> void observe_proof(const Proof& proof)
@@ -138,15 +138,21 @@ public:
 private:
     template<class Visit> void observe_dependencies(const Visit& visit)
     {
-        cartesian_detail::CreditConstruction observer(budget_, this,
+        cartesian_detail::CreditConstruction observer(
+            budget_, this,
             [](void* context, const std::shared_ptr<const void>& owner, const Budget* origin, std::size_t bytes,
                 bool keeper, bool metadata, std::uint64_t scope)
             {
                 if (!origin || !keeper)
                     throw std::invalid_argument("Incidence proof dependency has no immutable arena lifetime.");
-                return static_cast<IncidencePhysicalOwners*>(context)->observe(
-                    metadata ? Role::CreditMetadata : Role::SourceDependency, owner, bytes, origin, scope);
-            });
+                auto& self = *static_cast<IncidencePhysicalOwners*>(context);
+                const auto result = self.observe(metadata ? Role::CreditMetadata : Role::SourceDependency, owner, bytes,
+                    origin, scope, self.pending_funding_ ? &*self.pending_funding_ : nullptr);
+                self.pending_funding_.reset();
+                return result;
+            },
+            [](void* raw, const NativeContactOwnerFunding& funding)
+            { static_cast<IncidencePhysicalOwners*>(raw)->pending_funding_ = funding; });
         Credits unused;
         cartesian_detail::Allocation scratch(budget_);
         visit(observer, unused, scratch);
@@ -156,5 +162,6 @@ private:
     cartesian_detail::ArenaCredits* arena_;
     Budget& budget_;
     bool added_;
+    std::optional<NativeContactOwnerFunding> pending_funding_;
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

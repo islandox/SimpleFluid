@@ -6,6 +6,7 @@
 #include "ContactPointValueIndex.hh"
 #include "PersistentOrderedPages.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
+#include "geometry/PLIC/details/GeometryOwnerGraph.hh"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -74,6 +75,23 @@ inline void retain_point_manifest(const std::shared_ptr<const CartesianSourceMan
 class ContactSourcePointSnapshot
 {
 public:
+    static void project(const std::shared_ptr<const ContactSourcePointSnapshot>& source,
+        PLIC::details::GeometryOwnerGraphEditor& graph, bool retain)
+    {
+        if (!source) return;
+        using Funding = NativeContactFundingAccess;
+        const auto source_bytes = source->metadata_bytes();
+        if (!Funding::project(graph, source, source_bytes,
+                Funding::capture(source, source_bytes, source->allocation_budget()), retain))
+            return;
+        source->visit_dependencies<CartesianDependencyVisit::Observed>(
+            [&](const auto& owner, const Budget* origin, std::size_t bytes, bool)
+            {
+                using Element = typename std::remove_cvref_t<decltype(owner)>::element_type;
+                const std::shared_ptr<const std::remove_const_t<Element>> stable = owner;
+                return Funding::project(graph, stable, bytes, Funding::capture(stable, bytes, origin), retain);
+            });
+    }
     static std::shared_ptr<const ContactSourcePointSnapshot> capture(const ContactSourcePointAdmission&, bool hashing,
         const ContactSourcePointRead&, Budget&, std::shared_ptr<Budget>, std::shared_ptr<CartesianAuthorityArena>,
         bool canonical_hash = true);
@@ -183,6 +201,9 @@ public:
     }
 
 private:
+    friend class NativeContactFundingAccess;
+    [[nodiscard]] NativeContactOwnerFunding native_funding(
+        const std::shared_ptr<const ContactSourcePointSnapshot>&, std::size_t) const;
     template<class Hasher, class Payload> friend class IncidencePointDirectory;
     static std::shared_ptr<const ContactSourcePointSnapshot> capture_impl(const ContactSourcePointAdmission&,
         bool hashing, const ContactSourcePointRead&, Budget&, std::shared_ptr<Budget>,
@@ -224,6 +245,8 @@ private:
             return index >= first_slot && index - first_slot < values.size() ? &values[index - first_slot] : nullptr;
         }
         [[nodiscard]] std::size_t metadata_bytes() const noexcept { return charge + control_charge; }
+        [[nodiscard]] NativeContactOwnerFunding native_funding(
+            const std::shared_ptr<const ValueBlock>&, std::size_t) const;
         [[nodiscard]] std::pair<const void*, std::size_t> borrowed_control_payload() const noexcept
         {
             return {control_identity, control_payload_bytes};

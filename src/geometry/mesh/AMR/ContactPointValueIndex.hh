@@ -140,7 +140,8 @@ public:
      * Only private roots are changed; an exception leaves published roots intact. */
     void append(const Reader& read, std::array<std::size_t, 3> first_components,
         std::array<std::size_t, 3> component_counts, std::size_t first_point, std::size_t point_count,
-        std::span<const std::uint64_t> routes, const std::shared_ptr<Budget>& arena, Work& work)
+        std::span<const std::uint64_t> routes, const std::shared_ptr<Budget>& arena, Work& work,
+        const std::shared_ptr<const geometry_detail::NativeAllocationState>& native = {})
     {
         if (!arena || !read.context || !read.point || !read.component || first_point > point_count)
             throw std::invalid_argument("Unbound point index append.");
@@ -160,11 +161,11 @@ public:
             reject_cross_root_duplicates<Scalars64>(
                 scalars64[axis], std::min(first_components[axis], split), split, less);
             scalars32[axis] = append_range<Scalars32, std::uint32_t>(
-                scalars32[axis], std::min(first_components[axis], split), split, arena, less, true, work);
+                scalars32[axis], std::min(first_components[axis], split), split, arena, less, true, work, native);
             reject_cross_root_duplicates<Scalars32>(
                 scalars32[axis], std::max(first_components[axis], split), component_counts[axis], less);
             scalars64[axis] = append_range<Scalars64, std::uint64_t>(scalars64[axis],
-                std::max(first_components[axis], split), component_counts[axis], arena, less, true, work);
+                std::max(first_components[axis], split), component_counts[axis], arena, less, true, work, native);
         }
         if (routing_ != Routing::Ordered && routes.size() != point_count - first_point)
             throw std::invalid_argument("Point index routing does not match its appended values.");
@@ -181,7 +182,7 @@ public:
                 rows.push_back({slot, routes[slot - first_point]});
             const RoutedOrder less{read, &work.probes};
             std::sort(rows.begin(), rows.end(), less);
-            const CustomPoints index(arena, &work.pages, less);
+            const CustomPoints index(arena, &work.pages, less, native);
             if (!custom)
                 custom = index.build(rows);
             else
@@ -194,10 +195,10 @@ public:
             const auto split = std::min(point_count, narrow_limit);
             reject_cross_root_duplicates<Points64>(points64, std::min(first_point, split), split, less);
             points32 = append_range<Points32, std::uint32_t>(
-                points32, std::min(first_point, split), split, arena, less, true, work);
+                points32, std::min(first_point, split), split, arena, less, true, work, native);
             reject_cross_root_duplicates<Points32>(points32, std::max(first_point, split), point_count, less);
             points64 = append_range<Points64, std::uint64_t>(
-                points64, std::max(first_point, split), point_count, arena, less, true, work);
+                points64, std::max(first_point, split), point_count, arena, less, true, work, native);
         }
         scalars32_ = std::move(scalars32);
         scalars64_ = std::move(scalars64);
@@ -331,7 +332,8 @@ private:
     }
     template<class Index, class UInt, class Less>
     static typename Index::Ptr append_range(const typename Index::Ptr& root, std::size_t first, std::size_t count,
-        const std::shared_ptr<Budget>& arena, const Less& less, bool sort, Work& work)
+        const std::shared_ptr<Budget>& arena, const Less& less, bool sort, Work& work,
+        const std::shared_ptr<const geometry_detail::NativeAllocationState>& native)
     {
         if (first == count)
             return root;
@@ -342,7 +344,7 @@ private:
             slots.push_back(UInt(slot));
         if (sort)
             std::sort(slots.begin(), slots.end(), less);
-        const Index index(arena, &work.pages, less);
+        const Index index(arena, &work.pages, less, native);
         if (!root)
             return index.build(slots);
         auto next = root;

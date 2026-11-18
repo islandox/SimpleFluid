@@ -172,6 +172,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto")
     # Authenticated native construction/proofs use the original strict arithmetic contract.
     set_source_files_properties(
+        mesh/AMR/DistributedCartesianKernel.cc
         "${PROJECT_SOURCE_DIR}/src/parallel/details/NativeTpetraMapAdmission.cc"
         mesh/AMR/NativePublicationOwnerGraph.cc
         mesh/AMR/NativeSourceOwnerStore.cc

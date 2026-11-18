@@ -1,4 +1,5 @@
 #pragma once
+#include "NativeContactFunding.hh"
 #include "CartesianAuthorityCredits.hh"
 #include "CartesianIncidenceSource.hh"
 #include "CartesianSourceInventory.hh"
@@ -40,9 +41,18 @@ class CartesianSourceManifestSet : public std::enable_shared_from_this<Cartesian
 {
     struct ReceiptBytes
     {
+        static constexpr std::size_t control_bytes = 128;
         ContactGroupAllocation admission;
         AdaptiveBytes bytes;
         ReceiptBytes(ContactGroupAllocation, std::span<const char>);
+        [[nodiscard]] std::size_t metadata_bytes() const noexcept { return admission.bytes() + control_bytes; }
+        [[nodiscard]] NativeContactOwnerFunding native_funding(
+            const std::shared_ptr<const ReceiptBytes>& owner, std::size_t extent) const
+        {
+            return NativeContactFundingAccess::split_named<control_bytes>(owner, extent,
+                [](const ReceiptBytes& value) { return value.admission.bytes(); },
+                [](const ReceiptBytes& value) -> const auto& { return value.admission.keeper(); });
+        }
     };
     struct RangeLess
     {
@@ -329,6 +339,10 @@ private:
         std::size_t source_begin, source_end, explicit_begin, explicit_end;
     };
     struct Builder;
+    friend class NativeContactFundingAccess;
+    static constexpr std::size_t source_control_bytes = 128;
+    [[nodiscard]] NativeContactOwnerFunding native_funding(
+        const std::shared_ptr<const CartesianSourceManifestSet>&, std::size_t) const;
     CartesianSourceManifestSet() = default;
     static void decode_wire(const AMRGrid&, ContactHaloContext, std::uint64_t, std::span<const OwnerPacket>, int,
         std::vector<Source>&, std::vector<ExplicitCell>&, std::vector<WirePeer>&, cartesian_detail::Allocation&);
@@ -338,7 +352,7 @@ private:
     [[nodiscard]] std::size_t irregular_range_admission(std::size_t ordinal) const
     {
         const auto& stored = source(ordinal).irregular_ranges_;
-        return stored ? stored->admission.bytes() : 0;
+        return stored ? stored->metadata_bytes() : 0;
     }
 
     template<CartesianDependencyVisit Mode, class Visitor> void visit_receipt_dependencies(Visitor& visitor) const
@@ -358,7 +372,7 @@ private:
         const auto enter_body = [&](const auto& owner)
         {
             if (owner)
-                enter(owner, &owner->admission.arena(), owner->admission.bytes(), bool(keeper_));
+                enter(owner, &owner->admission.arena(), owner->metadata_bytes(), bool(keeper_));
         };
         const auto visit_ranges = [&](auto&& self, const auto& node) -> void
         {
@@ -415,6 +429,7 @@ private:
     PeerTree::Ptr peers_;
     ReceiptWork receipt_work_;
     std::weak_ptr<const CartesianSourceManifestSet> predecessor_;
+    PLIC::details::NativeWeakOwnerObservation predecessor_control_;
     bool shared_receipts_ = false;
     std::shared_ptr<const CartesianSourceInventory> local_;
     std::vector<std::shared_ptr<cartesian_detail::AuthorityOwnerCredit>> leases_;

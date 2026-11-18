@@ -2,6 +2,7 @@
  * @brief Persistent Cartesian ancestry selectors and exact streamed inventory identities.
  */
 #pragma once
+#include "NativeContactFunding.hh"
 #include "geometry/mesh/AMR/CartesianAuthorityCredits.hh"
 #include "geometry/mesh/AMR/CartesianIncidenceAuthority.hh"
 #include "geometry/mesh/AMR/PersistentOrderedPages.hh"
@@ -342,6 +343,10 @@ private:
     struct Builder;
     [[nodiscard]] bool is_added(const Batch& batch) const noexcept { return batch.slot_ >= first_added_slot_; }
     [[nodiscard]] bool derived_from(const std::shared_ptr<const CartesianSourceInventory>&) const noexcept;
+    friend class NativeContactFundingAccess;
+    static constexpr std::size_t source_control_bytes = 128;
+    [[nodiscard]] NativeContactOwnerFunding native_funding(
+        const std::shared_ptr<const CartesianSourceInventory>&, std::size_t) const;
     CartesianSourceInventory() = default;
     static std::shared_ptr<const CartesianSourceInventory> construct(const CartesianSourceInventory*,
         ContactHaloContext, int, std::uint64_t, std::span<const Retirement>, std::span<const CapturedSource>, Budget&,
@@ -357,6 +362,7 @@ private:
     SelectorTree::Ptr selectors_;
     DependencyWork work_;
     std::weak_ptr<const CartesianSourceInventory> predecessor_;
+    PLIC::details::NativeWeakOwnerObservation predecessor_control_;
     std::vector<std::shared_ptr<cartesian_detail::AuthorityOwnerCredit>> leases_;
     Budget* budget_ = nullptr;
     std::shared_ptr<Budget> keeper_;

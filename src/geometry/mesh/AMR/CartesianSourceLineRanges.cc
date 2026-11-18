@@ -1,5 +1,6 @@
 #include "CartesianSourceLineRanges.hh"
 #include "CartesianSourceManifests.hh"
+#include "NativeContactFunding.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include <algorithm>
 #include <array>
@@ -23,29 +24,9 @@ constexpr auto absent = std::numeric_limits<std::size_t>::max();
 /** Captured in the owning shared_ptr's deleter. Deleter storage survives until
  * final weak-control deletion, so its immutable charge/keeper cannot disappear
  * when the geometry body alone expires. The token itself has no weak owner. */
-struct ControlCredit
-{
-    Budget* budget = nullptr;
-    std::shared_ptr<Budget> keeper;
-    std::size_t charge = 0;
-    ~ControlCredit()
-    {
-        if (budget)
-            budget->used -= charge;
-    }
-};
-constexpr std::size_t control_bytes = sizeof(ControlCredit) + 2 * control;
-std::shared_ptr<ControlCredit> make_control(Budget& budget, const std::shared_ptr<Budget>& keeper)
-{
-    cartesian_detail::check_keeper(budget, keeper);
-    Allocation memory(budget);
-    memory.retain(control_bytes);
-    auto result = std::make_shared<ControlCredit>();
-    result->budget = &budget;
-    result->keeper = keeper;
-    result->charge = std::exchange(memory.bytes, 0);
-    return result;
-}
+using contact_funding_detail::ControlCredit;
+using contact_funding_detail::make_controlled;
+constexpr auto control_bytes = ControlCredit::allowance();
 template<class T>
 void retain_owner(cartesian_detail::CreditConstruction& credits, const std::shared_ptr<T>& owner, const Budget* origin,
     std::size_t bytes, bool keeper, std::vector<std::shared_ptr<cartesian_detail::AuthorityOwnerCredit>>& leases,
@@ -434,6 +415,13 @@ struct CartesianSourceLineRangeBuilder::Impl
 };
 CartesianSourceLineRangeCatalog::CartesianSourceLineRangeCatalog() = default;
 CartesianSourceLineRangeCatalog::~CartesianSourceLineRangeCatalog() = default;
+NativeContactOwnerFunding CartesianSourceLineRangeCatalog::native_funding(
+    const std::shared_ptr<const CartesianSourceLineRangeCatalog>& owner, std::size_t bytes) const
+{
+    return NativeContactFundingAccess::split_named(owner, bytes,
+        [](const CartesianSourceLineRangeCatalog& value) { return value.impl_->charge; },
+        [](const CartesianSourceLineRangeCatalog& value) { return value.impl_->control_credit; });
+}
 std::size_t CartesianSourceLineRangeCatalog::metadata_bytes() const noexcept
 {
     return impl_->charge + control_bytes;
@@ -552,6 +540,13 @@ std::size_t CartesianSourceLineRangeRecipe::result_selector_count() const noexce
 {
     return impl_->compact_results.size() + impl_->wide_results.size();
 }
+NativeContactOwnerFunding CartesianSourceLineRangeRecipe::native_funding(
+    const std::shared_ptr<const CartesianSourceLineRangeRecipe>& owner, std::size_t bytes) const
+{
+    return NativeContactFundingAccess::split_named(owner, bytes,
+        [](const CartesianSourceLineRangeRecipe& value) { return value.impl_->charge; },
+        [](const CartesianSourceLineRangeRecipe& value) { return value.impl_->control_credit; });
+}
 std::size_t CartesianSourceLineRangeRecipe::metadata_bytes() const noexcept
 {
     return impl_->charge + control_bytes;
@@ -588,14 +583,13 @@ CartesianSourceLineRangeBuilder::CartesianSourceLineRangeBuilder(
     impl_->memory.bytes = std::exchange(construction.bytes, 0);
     Allocation memory(budget);
     memory.retain(sizeof(CartesianSourceLineRangeCatalog) + sizeof(CartesianSourceLineRangeCatalog::Impl));
-    auto catalog_control = make_control(budget, arena->keeper);
-    const auto* catalog_control_identity = catalog_control.get();
-    impl_->catalog = std::shared_ptr<CartesianSourceLineRangeCatalog>(new CartesianSourceLineRangeCatalog,
-        [catalog_control = std::move(catalog_control)](auto* value) { delete value; });
+    auto [catalog_owner, catalog_control] =
+        make_controlled(budget, arena->keeper, [] { return new CartesianSourceLineRangeCatalog; });
+    impl_->catalog = std::move(catalog_owner);
     auto& catalog = *impl_->catalog;
     catalog.impl_ = std::make_unique<CartesianSourceLineRangeCatalog::Impl>();
     auto& c = *catalog.impl_;
-    c.control_credit = catalog_control_identity;
+    c.control_credit = catalog_control.get();
     c.manifests = admission.manifests_;
     c.points = admission.points_;
     c.context = admission.context_;
@@ -719,13 +713,11 @@ std::shared_ptr<const CartesianSourceLineRangeRecipe> CartesianSourceLineRangeBu
     }
     Allocation memory(*c.budget);
     memory.retain(sizeof(CartesianSourceLineRangeRecipe) + sizeof(CartesianSourceLineRangeRecipe::Impl));
-    auto recipe_control = make_control(*c.budget, c.keeper);
-    const auto* recipe_control_identity = recipe_control.get();
-    auto result = std::shared_ptr<CartesianSourceLineRangeRecipe>(new CartesianSourceLineRangeRecipe,
-        [recipe_control = std::move(recipe_control)](auto* value) { delete value; });
+    auto [result, recipe_control] =
+        make_controlled(*c.budget, c.keeper, [] { return new CartesianSourceLineRangeRecipe; });
     result->impl_ = std::make_unique<CartesianSourceLineRangeRecipe::Impl>();
     auto& r = *result->impl_;
-    r.control_credit = recipe_control_identity;
+    r.control_credit = recipe_control.get();
     r.catalog = impl_->catalog;
     r.count = values.size();
     r.line_slot = line;

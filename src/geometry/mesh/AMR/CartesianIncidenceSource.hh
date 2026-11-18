@@ -2,6 +2,7 @@
  * @brief Immutable local Cartesian incidence sources and exact replay certificates.
  */
 #pragma once
+#include "NativeContactFunding.hh"
 #include "geometry/mesh/AMR/CompleteLineQuery.hh"
 #include "geometry/mesh/AMR/ContactHaloContext.hh"
 #include "geometry/mesh/AMR/ContactPayloadCensus.hh"
@@ -189,11 +190,16 @@ public:
     void visit_cell(const CartesianCellAncestry&, Budget&, const CartesianSurfaceEmit&) const;
 
 private:
+    friend class NativeContactFundingAccess;
+    static constexpr std::size_t source_control_bytes = 128;
+    [[nodiscard]] NativeContactOwnerFunding native_funding(
+        const std::shared_ptr<const CartesianIncidenceSource>&, std::size_t) const;
     CartesianIncidenceSource() = default;
     void build_identity(Budget&, std::size_t& retained);
     AMRGrid grid_;
     CartesianEvaluationEnvironment evaluation_;
     std::shared_ptr<const AdaptiveProviderKernel> kernel_;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> kernel_allocation_;
     AdaptiveBytes domain_, identity_;
     std::vector<CartesianIncidenceRange> ranges_;
     std::vector<CartesianIncidenceAxis> axes_;

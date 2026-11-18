@@ -1,6 +1,7 @@
 #pragma once
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <cstddef>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -88,6 +89,12 @@ public:
         reserve(values, old ? 2 * old : 1);
     }
 private:
+    friend class ContactPhysicalResidency;
+    void disown_precharged(std::size_t bytes) noexcept
+    {
+        if (bytes > bytes_) std::terminate();
+        bytes_ -= bytes;
+    }
     std::shared_ptr<Budget> arena_;
     std::size_t bytes_ = 0;
 };

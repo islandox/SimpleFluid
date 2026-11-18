@@ -2,6 +2,7 @@
 #include "ContactAllocationScope.hh"
 #include "geometry/mesh/AMR/CartesianIncidenceBudget.hh"
 #include "geometry/mesh/AMR/ContactPayloadCensus.hh"
+#include "geometry/mesh/AMR/NativeContactFunding.hh"
 #include <algorithm>
 #include <cstddef>
 #include <map>
@@ -18,10 +19,11 @@ namespace SimpleFluid::Meshes::AMR::adaptive_detail::cartesian_detail
  * Imported leases admit only metadata, never another arena's credit amount. */
 struct AuthorityOwnerCredit
 {
-    Budget* budget;
+    static constexpr std::size_t control_bytes = 128;
+    Budget* budget = nullptr;
     std::shared_ptr<Budget> keeper;
     std::weak_ptr<const void> owner;
-    std::size_t payload, metadata;
+    std::size_t payload = 0, metadata = 0;
     std::size_t charged_payload = payload;
     const Budget* origin = nullptr;
     bool credit_metadata = false;
@@ -31,7 +33,28 @@ struct AuthorityOwnerCredit
     // observation therefore remains valid even after that owner's body dies.
     const void* observed_control = nullptr;
     std::size_t observed_control_bytes = 0;
-    ~AuthorityOwnerCredit() { budget->used -= charged_payload + metadata; }
+    PLIC::details::NativeWeakOwnerObservation target_control;
+    ~AuthorityOwnerCredit()
+    {
+        if (budget) budget->used -= charged_payload + metadata - control_bytes;
+    }
+    [[nodiscard]] NativeContactOwnerFunding native_funding(
+        const std::shared_ptr<const AuthorityOwnerCredit>& credit, std::size_t extent) const
+    {
+        auto funding = NativeContactFundingAccess::split_named<control_bytes>(credit, extent,
+            [](const AuthorityOwnerCredit& value) { return value.metadata - control_bytes; },
+            [](const AuthorityOwnerCredit& value) -> const auto& { return value.keeper; });
+        funding.related_control = target_control;
+        return funding;
+    }
+    static bool project(const std::shared_ptr<const AuthorityOwnerCredit>& credit,
+        PLIC::details::GeometryOwnerGraphEditor& graph, bool retain)
+    {
+        if (!credit) return false;
+        const auto bytes = credit->metadata;
+        const auto funding = credit->native_funding(credit, bytes);
+        return NativeContactFundingAccess::project(graph, credit, bytes, funding, retain);
+    }
     /** Transfer an already admitted body to the shared owner allowance. */
     [[nodiscard]] std::size_t take_payload_charge() noexcept { return std::exchange(charged_payload, 0); }
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
@@ -54,10 +77,11 @@ struct ArenaCredits
         const void*, const std::shared_ptr<const void>&, const Budget*, std::size_t, bool credit_metadata) noexcept;
     using Entries = std::map<Owner, std::shared_ptr<AuthorityOwnerCredit>, std::owner_less<>>;
     static constexpr std::size_t node_bytes = sizeof(Entries::value_type) + 4 * sizeof(void*);
-    static constexpr std::size_t control_bytes = 128;
+    static constexpr std::size_t control_bytes = AuthorityOwnerCredit::control_bytes;
     static constexpr std::size_t token_bytes = sizeof(AuthorityOwnerCredit) + control_bytes;
     Budget* budget;
     std::shared_ptr<Budget> keeper;
+    std::shared_ptr<const geometry_detail::NativeAllocationState> native_index;
     Entries entries;
     using RetiredHints = std::map<const AuthorityOwnerCredit*, Entries::iterator>;
     static constexpr std::size_t hint_node_bytes = sizeof(RetiredHints::value_type) + 4 * sizeof(void*);
@@ -212,6 +236,8 @@ struct CreditConstruction
     std::vector<AuthorityOwnerCredit*> recharged;
     void* observer_context = nullptr;
     Observer observer = nullptr;
+    using FundingObserver = void (*)(void*, const NativeContactOwnerFunding&);
+    FundingObserver funding_observer = nullptr;
     using Seen = std::map<ArenaCredits::Owner, bool, std::owner_less<>>;
     Seen seen;
     bool committed = false;
@@ -230,8 +256,8 @@ struct CreditConstruction
     }
     /** Observe exact dependencies without creating a typed directory or leases.
      * The callback controls whether a newly observed owner needs descent. */
-    CreditConstruction(Budget& budget, void* context, Observer visit)
-        : scratch(budget), observer_context(context), observer(visit)
+    CreditConstruction(Budget& budget, void* context, Observer visit, FundingObserver funding = nullptr)
+        : scratch(budget), observer_context(context), observer(visit), funding_observer(funding)
     {
         if (!observer)
             throw std::invalid_argument("Cartesian credit observation needs a visitor.");
@@ -257,6 +283,11 @@ struct CreditConstruction
         credit_metadata |= std::is_same_v<std::remove_cv_t<T>, AuthorityOwnerCredit>;
         if (observer)
         {
+            if (funding_observer)
+            {
+                const auto funding = NativeContactFundingAccess::capture(owner, bytes, origin);
+                if (funding.original_bytes) funding_observer(observer_context, funding);
+            }
             std::uint64_t scope = 0;
             if constexpr (std::is_same_v<std::remove_cv_t<T>, AuthorityOwnerCredit>)
                 scope = owner->arena_scope;
@@ -279,9 +310,14 @@ struct CreditConstruction
             constexpr auto metadata = ArenaCredits::token_bytes;
             const bool prepaid = arena->prepaid(owner, origin, bytes, credit_metadata);
             const auto charged = prepaid ? 0 : bytes;
-            token.retain(add(charged, metadata));
+            token.retain(add(charged, metadata - ArenaCredits::control_bytes));
             node.retain(ArenaCredits::node_bytes);
-            auto value = std::make_shared<AuthorityOwnerCredit>(arena->budget, arena->keeper, key, bytes, metadata);
+            auto value = contact_funding_detail::make_controlled<ArenaCredits::control_bytes>(
+                *arena->budget, arena->keeper, [] { return new AuthorityOwnerCredit; }).first;
+            value->keeper = arena->keeper;
+            value->owner = key;
+            value->payload = bytes;
+            value->metadata = metadata;
             value->charged_payload = charged;
             value->origin = origin;
             value->arena_scope = arena->scope_id;
@@ -293,6 +329,10 @@ struct CreditConstruction
                 value->observed_control = control.first;
                 value->observed_control_bytes = control.second;
             }
+            const auto funding = NativeContactFundingAccess::capture(owner, bytes, origin);
+            if (funding.original_bytes)
+                value->target_control = funding.body.physical_observation();
+            value->budget = arena->budget;
             token.bytes = 0;
             at = arena->entries.emplace(key, std::move(value)).first;
             arena->charge = add(arena->charge, node.bytes);

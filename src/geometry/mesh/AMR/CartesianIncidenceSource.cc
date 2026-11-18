@@ -4,6 +4,7 @@
 #include "geometry/mesh/AMR/CartesianIncidenceSource.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/mesh/AMR/CartesianIncidenceBudget.hh"
+#include "geometry/mesh/AMR/NativeSourceOwnerStore.hh"
 #include "geometry/mesh/AMR/SupportSurfaceCodec.hh"
 #include "geometry/mesh/OrthogonalIndexer.hh"
 #include <algorithm>
@@ -362,8 +363,13 @@ std::shared_ptr<const CartesianIncidenceSource> CartesianIncidenceSource::make(c
         throw std::invalid_argument("Cartesian incidence source needs owner and connected domain.");
     cartesian_detail::check_keeper(budget, keeper);
     Scope retained(budget), scratch(budget);
-    retained.retain(sizeof(CartesianIncidenceSource) + 2 * owner_bytes + sizeof(AMRGrid) + sizeof(void*));
-    auto result = std::shared_ptr<CartesianIncidenceSource>(new CartesianIncidenceSource);
+    constexpr auto compatibility_kernel = owner_bytes + sizeof(AMRGrid) + sizeof(void*);
+    const std::shared_ptr<Budget> empty;
+    const bool native_replay = keeper && (keeper.owner_before(empty) || empty.owner_before(keeper)) &&
+        geometry_detail::native_constructor_capacity_profile_supported();
+    retained.retain(sizeof(CartesianIncidenceSource) + (native_replay ? 0 : compatibility_kernel));
+    auto result = contact_funding_detail::make_controlled<source_control_bytes>(
+        budget, keeper, [] { return new CartesianIncidenceSource; }).first;
     result->grid_ = grid;
     result->evaluation_ = cartesian_evaluation_environment();
     result->context_ = context;
@@ -373,9 +379,19 @@ std::shared_ptr<const CartesianIncidenceSource> CartesianIncidenceSource::make(c
     result->keeper_ = std::move(keeper);
     retained.reserve(result->domain_, domain.size());
     result->domain_.assign(domain.begin(), domain.end());
+    if (native_replay)
     {
-        scratch.retain(sizeof(AMRGrid) + sizeof(void*) + owner_bytes);
-        result->kernel_ = cartesian_adaptive_kernel(grid);
+        const geometry_detail::NativeConstructionAdmission admission(
+            geometry_detail::NativeConstructionCounterAccess::create<Budget>(
+                budget.limit, 0, NativeSourceOwnerStore::mirror(result->keeper_)));
+        auto replay = cartesian_incidence_replay_kernel(grid, admission);
+        result->kernel_ = std::move(replay.owner);
+        result->kernel_allocation_ = std::move(replay.envelope);
+    }
+    else
+    {
+        scratch.retain(compatibility_kernel);
+        result->kernel_ = cartesian_incidence_replay_kernel(grid);
     }
     std::vector<CartesianIncidenceRange> temporary;
     std::vector<ID> revisions;
@@ -482,7 +498,7 @@ std::shared_ptr<const CartesianIncidenceSource> CartesianIncidenceSource::make(c
     }
     // Fixed exact serialization size; every dynamic buffer is admitted before allocation.
     result->build_identity(budget, retained.bytes);
-    result->charge_ = retained.bytes;
+    result->charge_ = retained.bytes + source_control_bytes;
     retained.bytes = 0;
     return result;
 }
@@ -554,12 +570,15 @@ std::shared_ptr<const CartesianIncidenceSource> CartesianIncidenceSource::reeval
     if (!keeper && &budget == budget_)
         keeper = keeper_;
     Scope retained(budget);
-    retained.retain(sizeof(CartesianIncidenceSource) + 2 * owner_bytes + sizeof(AMRGrid) + sizeof(void*));
-    auto result = std::shared_ptr<CartesianIncidenceSource>(new CartesianIncidenceSource);
+    constexpr auto compatibility_kernel = owner_bytes + sizeof(AMRGrid) + sizeof(void*);
+    retained.retain(sizeof(CartesianIncidenceSource) + (kernel_allocation_ ? 0 : compatibility_kernel));
+    auto result = contact_funding_detail::make_controlled<source_control_bytes>(
+        budget, keeper, [] { return new CartesianIncidenceSource; }).first;
     result->budget_ = &budget;
     result->keeper_ = std::move(keeper);
     result->grid_ = grid_;
     result->kernel_ = kernel_;
+    result->kernel_allocation_ = kernel_allocation_;
     result->owner_ = owner_;
     result->context_ = context_;
     result->version_ = version_ + 1;
@@ -581,9 +600,20 @@ std::shared_ptr<const CartesianIncidenceSource> CartesianIncidenceSource::reeval
             axis.values.push_back(source_coordinate(grid_, axis.axis, add(axis.first, i), axis.level));
     }
     result->build_identity(budget, retained.bytes);
-    result->charge_ = retained.bytes;
+    result->charge_ = retained.bytes + source_control_bytes;
     retained.bytes = 0;
     return result;
+}
+NativeContactOwnerFunding CartesianIncidenceSource::native_funding(
+    const std::shared_ptr<const CartesianIncidenceSource>& owner, std::size_t bytes) const
+{
+    auto funding = NativeContactFundingAccess::split_named<source_control_bytes>(owner, bytes,
+        [](const CartesianIncidenceSource& value) { return value.charge_ - source_control_bytes; },
+        [](const CartesianIncidenceSource& value) -> const auto& { return value.keeper_; });
+    if (kernel_allocation_ && !kernel_allocation_->shares_control(kernel_))
+        throw std::invalid_argument("Contact replay differs from its actual compact kernel allocation.");
+    funding.dependent_fixed = kernel_allocation_;
+    return funding;
 }
 CartesianIncidenceSource::~CartesianIncidenceSource()
 {
@@ -593,8 +623,8 @@ CartesianIncidenceSource::~CartesianIncidenceSource()
     decltype(ranges_)().swap(ranges_);
     decltype(axes_)().swap(axes_);
     decltype(revisions_)().swap(revisions_);
-    if (budget_)
-        budget_->used -= charge_;
+    if (charge_)
+        budget_->used -= charge_ - source_control_bytes;
 }
 bool CartesianIncidenceSource::contains(const CartesianCellAncestry& cell) const noexcept
 {

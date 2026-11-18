@@ -1,6 +1,7 @@
 #include "ContactSourcePoints.hh"
 #include "CartesianIncidenceBudget.hh"
 #include "IdentityPoolHash.hh"
+#include "NativeContactFunding.hh"
 #include <algorithm>
 #include <bit>
 #include <cfenv>
@@ -31,28 +32,9 @@ public:
     ~MetadataEnvironment() { (void) std::fesetenv(&caller_); }
 };
 /** Kept in the deleter until the final weak control is destroyed. */
-struct ControlCredit
-{
-    Budget* budget = nullptr;
-    std::shared_ptr<Budget> keeper;
-    std::size_t charge = 0;
-    ~ControlCredit()
-    {
-        if (budget)
-            budget->used -= charge;
-    }
-};
-constexpr std::size_t control_bytes = sizeof(ControlCredit) + 2 * 128;
-std::shared_ptr<ControlCredit> make_control(Budget& budget, const std::shared_ptr<Budget>& keeper)
-{
-    Allocation memory(budget);
-    memory.retain(control_bytes);
-    auto result = std::make_shared<ControlCredit>();
-    result->budget = &budget;
-    result->keeper = keeper;
-    result->charge = std::exchange(memory.bytes, 0);
-    return result;
-}
+using contact_funding_detail::ControlCredit;
+using contact_funding_detail::make_controlled;
+constexpr auto control_bytes = ControlCredit::allowance();
 bool full_equal(const ContactSourcePoint& first, const ContactSourcePoint& second)
 {
     const auto bytes = PLIC::canonical_key_size(first);
@@ -75,6 +57,19 @@ bool same_grid(const AMRGrid& a, const AMRGrid& b)
     return true;
 }
 } // namespace
+NativeContactOwnerFunding ContactSourcePointSnapshot::native_funding(
+    const std::shared_ptr<const ContactSourcePointSnapshot>& owner, std::size_t bytes) const
+{
+    return NativeContactFundingAccess::split_named(owner, bytes,
+        [](const ContactSourcePointSnapshot& value) { return value.charge_; },
+        [](const ContactSourcePointSnapshot& value) { return static_cast<const ControlCredit*>(value.control_identity_); });
+}
+NativeContactOwnerFunding ContactSourcePointSnapshot::ValueBlock::native_funding(
+    const std::shared_ptr<const ValueBlock>& owner, std::size_t bytes) const
+{
+    return NativeContactFundingAccess::split_named(owner, bytes, [](const ValueBlock& value) { return value.charge; },
+        [](const ValueBlock& value) { return static_cast<const ControlCredit*>(value.control_identity); });
+}
 ContactSourcePointSnapshot::ValueBlock::~ValueBlock()
 {
     for (auto& values : components)
@@ -267,10 +262,9 @@ std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::ca
         throw std::invalid_argument("Point source admission lacks its current closed source inventory.");
     Allocation memory(budget), scratch(budget), routes_memory(budget), values_memory(budget);
     memory.retain(sizeof(ContactSourcePointSnapshot));
-    const auto snapshot_control = make_control(budget, keeper);
+    auto [result, snapshot_control] =
+        make_controlled(budget, keeper, [] { return new ContactSourcePointSnapshot; });
     cartesian_detail::CreditConstruction credits(arena);
-    auto result = std::shared_ptr<ContactSourcePointSnapshot>(
-        new ContactSourcePointSnapshot, [snapshot_control](auto* body) { delete body; });
     result->self_ = result;
     result->control_charge_ = control_bytes;
     result->control_identity_ = snapshot_control.get();
@@ -316,8 +310,8 @@ std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::ca
     if (result->new_records_)
     {
         values_memory.retain(sizeof(ValueBlock));
-        const auto block_control = make_control(budget, keeper);
-        appended = std::shared_ptr<ValueBlock>(new ValueBlock, [block_control](auto* body) { delete body; });
+        auto [block_owner, block_control] = make_controlled(budget, keeper, [] { return new ValueBlock; });
+        appended = std::move(block_owner);
         appended->control_charge = control_bytes;
         appended->control_identity = block_control.get();
         appended->control_payload_bytes = sizeof(ControlCredit);
@@ -326,7 +320,7 @@ std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::ca
         appended->component_first = result->component_counts_;
         const Block block = appended;
         const auto directory_arena = keeper ? keeper : std::shared_ptr<Budget>(std::shared_ptr<Budget>{}, &budget);
-        const BlockDirectory directory(directory_arena, &result->directory_work_);
+        const BlockDirectory directory(directory_arena, &result->directory_work_, {}, arena->native_index);
         result->blocks_ = directory.edit(result->blocks_, block, &block, false);
         if (!result->slot_namespace_)
             result->slot_namespace_ = block.get();
@@ -453,7 +447,7 @@ std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::ca
     {
         const auto page_arena = keeper ? keeper : std::shared_ptr<Budget>(std::shared_ptr<Budget>{}, &budget);
         result->indexes_.append(result->index_reader(), appended->component_first, result->component_counts_, first,
-            result->count_, hashes, page_arena, result->index_work_);
+            result->count_, hashes, page_arena, result->index_work_, arena->native_index);
     }
     result->index_build_bytes_ = budget.cumulative - index_build_start;
     // Shared residency already covers the dependencies beneath an exact

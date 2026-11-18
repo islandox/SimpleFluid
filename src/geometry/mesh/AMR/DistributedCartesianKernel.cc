@@ -500,6 +500,16 @@ std::shared_ptr<const AdaptiveProviderKernel> cartesian_adaptive_kernel(AMRGrid 
 {
     return std::make_shared<const CartesianKernel>(std::move(grid));
 }
+std::shared_ptr<const AdaptiveProviderKernel> adaptive_detail::cartesian_incidence_replay_kernel(AMRGrid grid)
+{
+    return std::make_shared<const CartesianKernel>(std::move(grid));
+}
+geometry_detail::NativeTrackedOwner<const AdaptiveProviderKernel> adaptive_detail::cartesian_incidence_replay_kernel(
+    AMRGrid grid, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    auto replay = geometry_detail::NativeAllocationEnvelopeAccess::make<CartesianKernel>(admission, std::move(grid));
+    return {std::move(replay.owner), std::move(replay.envelope)};
+}
 std::size_t adaptive_detail::native_cartesian_kernel_payload_bytes() noexcept
 {
     return sizeof(CartesianKernel);

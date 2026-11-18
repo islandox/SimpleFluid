@@ -280,8 +280,10 @@ struct CartesianSourceInventory::Builder
     RangeTree ranges;
     BatchTree batches;
     SelectorTree selectors;
-    Builder(CartesianSourceInventory& inventory, const std::shared_ptr<Budget>& arena)
-        : result(inventory), ranges(arena, &work), batches(arena, &work), selectors(arena, &work)
+    Builder(CartesianSourceInventory& inventory, const std::shared_ptr<Budget>& arena,
+        const std::shared_ptr<const geometry_detail::NativeAllocationState>& native)
+        : result(inventory), ranges(arena, &work, {}, native), batches(arena, &work, {}, native),
+          selectors(arena, &work, {}, native)
     {
     }
 
@@ -589,8 +591,9 @@ std::shared_ptr<const CartesianSourceInventory> CartesianSourceInventory::constr
 
     cartesian_detail::CreditConstruction credits(arena);
     Allocation retained(budget);
-    retained.retain(sizeof(CartesianSourceInventory) + 128);
-    auto result = std::shared_ptr<CartesianSourceInventory>(new CartesianSourceInventory);
+    retained.retain(sizeof(CartesianSourceInventory));
+    auto result = contact_funding_detail::make_controlled<source_control_bytes>(
+        budget, keeper, [] { return new CartesianSourceInventory; }).first;
     result->budget_ = &budget;
     result->keeper_ = std::move(keeper);
     result->context_ = context;
@@ -601,6 +604,10 @@ std::shared_ptr<const CartesianSourceInventory> CartesianSourceInventory::constr
     if (old)
     {
         result->predecessor_ = old->weak_from_this();
+        if (old->has_arena_keeper())
+            if (const auto previous = result->predecessor_.lock())
+                result->predecessor_control_ =
+                    previous->native_funding(previous, previous->metadata_bytes()).body.physical_observation();
         result->next_slot_ = old->next_slot_;
     }
     result->first_added_slot_ = result->next_slot_;
@@ -610,7 +617,7 @@ std::shared_ptr<const CartesianSourceInventory> CartesianSourceInventory::constr
     // Borrowed-arena compatibility roots never cross a publication fork.
     const auto page_arena =
         result->keeper_ ? result->keeper_ : std::shared_ptr<Budget>(std::shared_ptr<void>{}, &budget);
-    Builder builder(*result, page_arena);
+    Builder builder(*result, page_arena, arena->native_index);
     if (result->shared_dependencies_)
     {
         result->batches_ = old->batches_;
@@ -667,7 +674,7 @@ std::shared_ptr<const CartesianSourceInventory> CartesianSourceInventory::constr
         (void) add(96, result->batches_->weights.identity_bytes);
     result->work_.allocated_pages = builder.work.copied_pages;
     result->work_.allocated_bytes = builder.work.copied_bytes;
-    result->charge_ = retained.bytes;
+    result->charge_ = retained.bytes + source_control_bytes;
     retained.bytes = 0;
     credits.committed = true;
     return result;
@@ -761,13 +768,22 @@ bool CartesianSourceInventory::derived_from(
     return source && !predecessor_.owner_before(source) && !source.owner_before(predecessor_) &&
            predecessor_.lock().get() == source.get();
 }
+NativeContactOwnerFunding CartesianSourceInventory::native_funding(
+    const std::shared_ptr<const CartesianSourceInventory>& owner, std::size_t bytes) const
+{
+    auto funding = NativeContactFundingAccess::split_named<source_control_bytes>(owner, bytes,
+        [](const CartesianSourceInventory& value) { return value.charge_ - source_control_bytes; },
+        [](const CartesianSourceInventory& value) -> const auto& { return value.keeper_; });
+    funding.related_control = predecessor_control_;
+    return funding;
+}
 CartesianSourceInventory::~CartesianSourceInventory()
 {
     // Drop actual immutable owners before returning the exclusive header.
     selectors_.reset();
     batches_.reset();
     decltype(leases_){}.swap(leases_);
-    if (budget_)
-        budget_->used -= charge_;
+    if (charge_)
+        budget_->used -= charge_ - source_control_bytes;
 }
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail
