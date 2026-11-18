@@ -59,24 +59,35 @@ public:
 
     void append(const NativePaidExtentCharge&, NativeOwnerReceipts::Action);
     // The caller keeps the receipt pages alive until the batch is consumed.
-    void append_borrowed(const NativePaidExtentCharge&, NativeOwnerReceipts::Action);
+    void append_borrowed(NativePaidExtentRef, NativeOwnerReceipts::Action);
+    void append_borrowed(const NativePaidExtentCharge& charge, NativeOwnerReceipts::Action action)
+    { append_borrowed(&charge, action); }
     [[nodiscard]] std::span<NativeOwnerReceipts::Edit> rows() noexcept;
+    void retain_prefix(std::size_t) noexcept;
     void clear() noexcept;
 
 private:
-    struct ChargeBlock
+    template<class Value> struct Charges
     {
-        std::array<NativePaidExtentCharge, 8> charges;
-        ChargeBlock* previous;
+        struct Block
+        {
+            std::array<Value, 8> values;
+            Block* previous;
+        };
+        std::array<Value, 8> local{};
+        Block* tail = nullptr;
+        std::size_t size = 0;
+        const Value& append(const Value&, const Admission&);
+        void clear(const Admission&) noexcept;
     };
 
     Admission admission_;
     std::array<NativeOwnerReceipts::Edit, 8> inline_{};
     std::size_t size_ = 0;
     geometry_detail::NativeAdministrationVector<NativeOwnerReceipts::Edit> overflow_;
-    std::array<NativePaidExtentCharge, 8> inline_charges_;
-    ChargeBlock* block_ = nullptr;
-    std::size_t charges_ = 0;
+    Charges<NativeReceiptFact> facts_;
+    Charges<NativeReceiptWithWitness> witnesses_;
+    Charges<NativePaidExtentCharge> proofs_;
 };
 /** Borrowed first/last physical-owner visitor. Returning false proves this
  * exact owner's child edges are already held by the destination allowance.
@@ -131,8 +142,8 @@ struct NativeAdministrationSink
     // Actual changed metadata owner, once per physical root edge. Its receipt
     // includes its real shared control and concrete backing allocations.
     void (*metadata_owner)(void*, const std::shared_ptr<const void>&, bool retain) = nullptr;
-    void (*financial_pin)(void*, const NativePaidExtentCharge&, bool retain) = nullptr;
-    void financial(const NativePaidExtentCharge& value, bool retain) const
+    void (*financial_pin)(void*, NativePaidExtentRef, bool retain) = nullptr;
+    void financial(NativePaidExtentRef value, bool retain) const
     { if (value.has_lifetime_children() && financial_pin) financial_pin(context, value, retain); }
     void owner(const std::shared_ptr<const void>& value, bool retain) const
     {
@@ -212,5 +223,6 @@ private:
  * certificate data belong to immutable source owners referenced by rows.
  * Include GeometryDemandPages.tcc only from a compiled implementation provider
  * or a private component test that owns its template instantiation. */
-template<class Row, class Less, bool CompactBranches = false> class OrderedPages;
+struct NoLeafWitnesses {};
+template<class Row, class Less, bool CompactBranches = false, class Witnesses = NoLeafWitnesses> class OrderedPages;
 } // namespace SimpleFluid::PLIC::details::geometry_demand

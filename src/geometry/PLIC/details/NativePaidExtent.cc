@@ -14,7 +14,112 @@ bool same_paid(const std::weak_ptr<const void>& a, const std::shared_ptr<const v
 {
     return b && a.lock().get() == b.get() && !a.owner_before(b) && !b.owner_before(a);
 }
+thread_local geometry_demand::ReceiptWork paid_receipt_work;
 } // namespace
+geometry_demand::ReceiptWork geometry_demand::receipt_work() noexcept { return paid_receipt_work; }
+void geometry_demand::reset_receipt_work() noexcept { paid_receipt_work = {}; }
+void geometry_demand::observe_receipt_block(std::size_t bytes, bool proof) noexcept
+{ (proof ? paid_receipt_work.proof_blocks : paid_receipt_work.fact_blocks) += bytes; }
+void geometry_demand::observe_receipt_leaf(std::size_t rows, std::size_t proofs) noexcept
+{
+    paid_receipt_work.leaf_rows += rows;
+    paid_receipt_work.leaf_proofs += proofs;
+}
+void geometry_demand::observe_receipt_administration(std::size_t bytes) noexcept
+{ paid_receipt_work.administration_index += bytes; }
+bool NativeReceiptFact::live() const noexcept
+{
+    const auto owner = owner_.lock(), origin = origin_.lock();
+    return proof_ && bytes_ && owner && owner.get() == address_ && origin && origin.get() == origin_address_;
+}
+bool NativePaidExtentCharge::compact() const noexcept
+{
+    return (proof_ == 0 || proof_ == 1 || proof_ == 8) && !has_lifetime_children() && !financial_address_;
+}
+bool NativePaidExtentCharge::native_witness_only() const noexcept
+{
+    const auto* native = std::get_if<NativeWeakOwnerObservation::NativeObservation>(&physical_fixed_.fixed_);
+    return proof_ >= 1 && proof_ <= 3 && native && native->envelope && !native->envelope_owner &&
+           native->address == address_ && (proof_ != 3 || storage_bytes_ == bytes_) &&
+           !financial_fixed_ && !lease_pin_ && !financial_address_;
+}
+NativeReceiptWithWitness::NativeReceiptWithWitness(const NativePaidExtentCharge& value) noexcept
+    : NativeReceiptFact(value), envelope_(*value.physical_fixed_.native_envelope()),
+      storage_revision_(value.storage_revision_)
+{
+    if (proof_ == 2) validation_ = value.profile_;
+    if (proof_ == 3) validation_ = value.storage_;
+}
+NativePaidExtentCharge NativePaidExtentCharge::restore(const NativeReceiptWithWitness& record) noexcept
+{
+    NativePaidExtentCharge result(record);
+    // Issuance already checked the exact alias. The released body can be
+    // expired here while the receipt still projects its fixed control tail.
+    result.physical_fixed_.fixed_ = NativeWeakOwnerObservation::NativeObservation{
+        record.envelope_, record.address_, false};
+    if (result.proof_ == 2)
+        result.profile_ = std::get<std::weak_ptr<const geometry_detail::NativeRetainedExtent>>(record.validation_);
+    if (result.proof_ == 3)
+    {
+        result.storage_ = std::get<std::weak_ptr<const geometry_detail::NativeConstructorStorage>>(record.validation_);
+        result.storage_revision_ = record.storage_revision_;
+        result.storage_bytes_ = record.bytes_;
+    }
+    return result;
+}
+bool NativePaidExtentRef::has_native_witness() const noexcept
+{
+    const auto* full = proof();
+    return stored_witness() || (full && full->native_witness_only());
+}
+NativeReceiptWithWitness NativePaidExtentRef::native_witness() const noexcept
+{
+    if (const auto* witness = stored_witness())
+        return *witness;
+    const auto* full = proof();
+    if (!full || !full->native_witness_only())
+        std::terminate();
+    return NativeReceiptWithWitness(*full);
+}
+const void* NativePaidExtentRef::financial_address() const noexcept
+{
+    const auto* full = proof();
+    return full ? full->financial_address() : nullptr;
+}
+bool NativePaidExtentRef::has_financial_pin() const noexcept
+{
+    const auto* full = proof();
+    return full && full->has_financial_pin();
+}
+bool NativePaidExtentRef::has_lifetime_children() const noexcept
+{
+    const auto* full = proof();
+    return stored_witness() || (full && full->has_lifetime_children());
+}
+bool NativePaidExtentRef::valid() const
+{
+    if (const auto* full = proof())
+        return full->valid();
+    if (const auto* witness = stored_witness())
+        return NativePaidExtentCharge::restore(*witness).valid();
+    return *this && fact().live();
+}
+NativePaidExtentCharge NativePaidExtentRef::value() const noexcept
+{
+    if (const auto* full = proof())
+        return *full;
+    if (const auto* witness = stored_witness())
+        return NativePaidExtentCharge::restore(*witness);
+    return NativePaidExtentCharge(fact());
+}
+bool NativePaidExtentRef::same_receipt_fact(NativePaidExtentRef other) const noexcept
+{
+    if (!same_physical_origin(other) || fact().bytes() != other.fact().bytes())
+        return false;
+    if (const auto* full = proof(); full && other.proof())
+        return full->same_receipt_fact(*other.proof());
+    return (receipt_.index() == 0 && other.receipt_.index() == 0) || value().same_receipt_fact(other.value());
+}
 NativePaidExtentCharge NativePaidExtentCharge::made(std::uint8_t kind, const std::shared_ptr<const void>& owner,
     std::size_t bytes, const std::shared_ptr<const geometry_detail::NativeAllocationState>& state)
 {
@@ -278,12 +383,12 @@ bool NativePaidExtentCharge::same_financial_control(const NativePaidExtentCharge
     const std::weak_ptr<const void> b = other.borrowed_financial_ ? other.financial_observation_ : other.lease_pin_;
     return financial_address_ == other.financial_address_ && !a.owner_before(b) && !b.owner_before(a);
 }
-bool NativePaidExtentCharge::same_owner_fact(const NativePaidExtentCharge& other) const noexcept
+bool NativeReceiptFact::same_owner_fact(const NativeReceiptFact& other) const noexcept
 {
     return kind_ == other.kind_ && address_ == other.address_ && !owner_.owner_before(other.owner_) &&
            !other.owner_.owner_before(owner_);
 }
-bool NativePaidExtentCharge::same_origin_fact(const NativePaidExtentCharge& other) const noexcept
+bool NativeReceiptFact::same_origin_fact(const NativeReceiptFact& other) const noexcept
 {
     return origin_address_ == other.origin_address_ && !origin_.owner_before(other.origin_) &&
            !other.origin_.owner_before(origin_);
@@ -348,42 +453,105 @@ namespace paid_extent_detail
 {
 struct Row
 {
-    NativePaidExtentCharge charge;
+    // A rich row borrows the full proof stored in its own leaf buffer. A
+    // staging row may borrow another pinned leaf or the current edit block.
+    std::variant<NativeReceiptFact, const NativeReceiptWithWitness*, const NativePaidExtentCharge*> payload;
     std::size_t references = 0;
-    [[nodiscard]] std::size_t exclusive_payload_bytes() const noexcept { return charge.source_only(); }
+
+    Row() = default;
+    Row(NativePaidExtentRef receipt, std::size_t count) noexcept : references(count)
+    {
+        if (const auto* witness = receipt.stored_witness())
+            payload = witness;
+        else if (const auto* proof = receipt.proof())
+            payload = proof;
+        else
+            payload = receipt.fact();
+    }
+    Row(const Row&) noexcept = default;
+    Row& operator=(const Row&) noexcept = default;
+
+    [[nodiscard]] NativePaidExtentRef receipt() const noexcept
+    {
+        if (const auto* proof = std::get_if<const NativePaidExtentCharge*>(&payload))
+            return *proof;
+        if (const auto* witness = std::get_if<const NativeReceiptWithWitness*>(&payload))
+            return NativePaidExtentRef(**witness);
+        return NativePaidExtentRef(std::get<NativeReceiptFact>(payload));
+    }
+    [[nodiscard]] std::size_t exclusive_payload_bytes() const noexcept { return receipt().fact().source_only(); }
 };
-// The accepted leaf or the edit batch owns each referenced receipt. Borrow
-// through sorting and leaf merge, then copy only the published row payload.
 struct RowChange
 {
-    const NativePaidExtentCharge* charge = nullptr;
+    NativePaidExtentRef charge;
     std::size_t references = 0;
     RowChange() = default;
-    RowChange(const NativePaidExtentCharge* value, std::size_t count) : charge(value), references(count) {}
-    RowChange(const Row& value) : RowChange(&value.charge, value.references) {}
-    operator Row() const noexcept { return {*charge, references}; }
+    RowChange(NativePaidExtentRef value, std::size_t count) : charge(value), references(count) {}
+    RowChange(const Row& value) : RowChange(value.receipt(), value.references) {}
+    [[nodiscard]] NativePaidExtentRef receipt() const noexcept { return charge; }
+    operator Row() const noexcept { return {charge, references}; }
 };
 struct Less
 {
-    bool operator()(const NativePaidExtentCharge& a, const NativePaidExtentCharge& b) const noexcept
+    bool operator()(NativePaidExtentRef a, NativePaidExtentRef b) const noexcept
     {
-        if (a.kind() != b.kind()) return a.kind() < b.kind();
-        if (a.owner_address() != b.owner_address())
-            return std::less<const void*>{}(a.owner_address(), b.owner_address());
-        if (a.origin_address() != b.origin_address())
-            return std::less<const void*>{}(a.origin_address(), b.origin_address());
-        if (a.direct_h() != b.direct_h()) return a.direct_h() < b.direct_h();
-        if (a.publication_h() != b.publication_h()) return a.publication_h() < b.publication_h();
+        const auto& first = a.fact();
+        const auto& second = b.fact();
+        if (first.kind() != second.kind()) return first.kind() < second.kind();
+        if (first.owner_address() != second.owner_address())
+            return std::less<const void*>{}(first.owner_address(), second.owner_address());
+        if (first.origin_address() != second.origin_address())
+            return std::less<const void*>{}(first.origin_address(), second.origin_address());
+        if (first.direct_h() != second.direct_h()) return first.direct_h() < second.direct_h();
+        if (first.publication_h() != second.publication_h()) return first.publication_h() < second.publication_h();
         if (a.financial_address() != b.financial_address())
             return std::less<const void*>{}(a.financial_address(), b.financial_address());
-        return a.borrowed_financial() < b.borrowed_financial();
+        return first.borrowed_financial() < second.borrowed_financial();
     }
-    bool operator()(const Row& a, const Row& b) const noexcept { return (*this)(a.charge, b.charge); }
-    bool operator()(const Row& a, const RowChange& b) const noexcept { return (*this)(a.charge, *b.charge); }
-    bool operator()(const RowChange& a, const Row& b) const noexcept { return (*this)(*a.charge, b.charge); }
-    bool operator()(const RowChange& a, const RowChange& b) const noexcept { return (*this)(*a.charge, *b.charge); }
+    template<class First, class Second> bool operator()(const First& a, const Second& b) const noexcept
+    { return (*this)(a.receipt(), b.receipt()); }
 };
-using Pages = geometry_demand::OrderedPages<Row, Less>;
+struct LeafWitnesses
+{
+    std::vector<NativeReceiptWithWitness> native;
+    std::vector<NativePaidExtentCharge> proofs;
+
+    [[nodiscard]] std::size_t buffer_bytes() const noexcept
+    { return native.capacity() * sizeof(NativeReceiptWithWitness) + proofs.capacity() * sizeof(NativePaidExtentCharge); }
+
+    template<class Range, class Reserve>
+    void build(std::vector<Row>& rows, const Range& input, const Reserve& reserve)
+    {
+        geometry_demand::observe_receipt_leaf(rows.capacity() * sizeof(Row), 0);
+        std::size_t native_count = 0, proof_count = 0;
+        for (const auto& row : input)
+        {
+            const auto receipt = row.receipt();
+            if (receipt.has_native_witness()) ++native_count;
+            else if (receipt.proof()) ++proof_count;
+        }
+        if (native_count)
+        {
+            reserve(native, native_count);
+            geometry_demand::observe_receipt_leaf(0, native.capacity() * sizeof(NativeReceiptWithWitness));
+        }
+        if (proof_count)
+        {
+            reserve(proofs, proof_count);
+            geometry_demand::observe_receipt_leaf(0, proofs.capacity() * sizeof(NativePaidExtentCharge));
+        }
+        for (const auto& row : input)
+        {
+            auto receipt = row.receipt();
+            if (receipt.has_native_witness())
+                receipt = NativePaidExtentRef(native.emplace_back(receipt.native_witness()));
+            else if (const auto* proof = receipt.proof())
+                receipt = &proofs.emplace_back(*proof);
+            rows.emplace_back(receipt, row.references);
+        }
+    }
+};
+using Pages = geometry_demand::OrderedPages<Row, Less, false, LeafWitnesses>;
 } // namespace paid_extent_detail
 namespace geometry_demand
 {
@@ -410,44 +578,45 @@ bool NativeOwnerReceipts::contains(const NativePaidExtentCharge& charge) const
     using namespace paid_extent_detail;
     if (!state_)
         return false;
-    const Row key{charge, 0};
+    const Row key{&charge, 0};
     const auto* old = Pages::lower_bound(state_->root, [&](const Row& value) { return Less{}(value, key); });
-    return old && !Less{}(key, *old) && old->charge.same_receipt_fact(charge);
+    return old && !Less{}(key, *old) && old->receipt().same_receipt_fact(&charge);
 }
-bool NativeOwnerReceipts::contains_any(const NativePaidExtentCharge& charge) const
+bool NativeOwnerReceipts::contains_any(NativePaidExtentRef charge) const
 {
     return contains_category(charge, Category::Any);
 }
-bool NativeOwnerReceipts::contains_direct_h(const NativePaidExtentCharge& charge) const
+bool NativeOwnerReceipts::contains_direct_h(NativePaidExtentRef charge) const
 {
     return contains_category(charge, Category::DirectH);
 }
-bool NativeOwnerReceipts::contains_publication_h(const NativePaidExtentCharge& charge) const
+bool NativeOwnerReceipts::contains_publication_h(NativePaidExtentRef charge) const
 {
     return contains_category(charge, Category::PublicationH);
 }
-bool NativeOwnerReceipts::contains_category(const NativePaidExtentCharge& charge, Category category) const
+bool NativeOwnerReceipts::contains_category(NativePaidExtentRef charge, Category category) const
 {
     if (!state_)
         return false;
+    const auto& key = charge.fact();
     bool found = false;
     paid_extent_detail::Pages::visit_from(state_->root,
         [&](const auto& row)
         {
-            const auto& value = row.charge;
-            return value.kind() < charge.kind() || (value.kind() == charge.kind() &&
-                std::less<const void*>{}(value.owner_address(), charge.owner_address()));
+            const auto& value = row.receipt().fact();
+            return value.kind() < key.kind() || (value.kind() == key.kind() &&
+                std::less<const void*>{}(value.owner_address(), key.owner_address()));
         },
         [&](const auto& row)
         {
-            const auto& value = row.charge;
-            if (value.kind() != charge.kind() || value.owner_address() != charge.owner_address())
+            const auto& value = row.receipt().fact();
+            if (value.kind() != key.kind() || value.owner_address() != key.owner_address())
                 return false;
             const bool in_category = category == Category::Any ||
                 (category == Category::DirectH ? value.direct_h() : value.publication_h());
-            if (in_category && value.same_owner_fact(charge) && value.same_origin_fact(charge))
+            if (in_category && row.receipt().same_physical_origin(charge))
             {
-                if (value.bytes() != charge.bytes())
+                if (value.bytes() != key.bytes())
                     invalid_paid("Canonical paid physical extent changed between categories.");
                 found = true;
             }
@@ -468,19 +637,22 @@ void NativeOwnerReceipts::visit_owner(std::uint8_t kind, const std::shared_ptr<c
         state_->root,
         [&](const Row& row)
         {
-            return row.charge.kind() < kind ||
-                   (row.charge.kind() == kind && std::less<const void*>{}(row.charge.owner_address(), owner.get()));
+            const auto& value = row.receipt().fact();
+            return value.kind() < kind ||
+                   (value.kind() == kind && std::less<const void*>{}(value.owner_address(), owner.get()));
         },
         [&](const Row& row)
         {
-            if (row.charge.kind() != kind || row.charge.owner_address() != owner.get())
+            const auto value = row.receipt();
+            const auto& fact = value.fact();
+            if (fact.kind() != kind || fact.owner_address() != owner.get())
                 return false;
-            if (row.charge.owner_.expired())
+            if (fact.owner_.expired())
                 return true;
-            if (!same_paid(row.charge.owner_, owner))
+            if (!same_paid(fact.owner_, owner))
                 invalid_paid("Paid owner query has foreign controls.");
-            if (row.charge.valid())
-                sink.visit(sink.context, row.charge, row.references);
+            if (value.valid())
+                sink.visit(sink.context, value.value(), row.references);
             return true;
         });
 }
@@ -493,12 +665,12 @@ NativeOwnerReceipts NativeOwnerReceipts::recorded(
         if (charge.has_financial_pin()) invalid_paid("Native financial receipt no longer authenticates live funding.");
         return *this;
     }
-    const Row key{charge, 0};
+    const Row key{&charge, 0};
     const auto* old =
         Pages::lower_bound(state_ ? state_->root : nullptr, [&](const Row& value) { return Less{}(value, key); });
     if (old && !Less{}(key, *old))
     {
-        if (!old->charge.same_receipt_fact(charge))
+        if (!old->receipt().same_receipt_fact(&charge))
             invalid_paid("Native receipt replaces an immutable owner/control or extent.");
         return *this;
     }
@@ -513,13 +685,13 @@ NativeOwnerReceipts NativeOwnerReceipts::retained(
         if (charge.has_financial_pin()) invalid_paid("Native financial receipt no longer authenticates live funding.");
         return *this;
     }
-    Row row{charge, 1};
+    Row row{&charge, 1};
     const auto* old =
         Pages::lower_bound(state_ ? state_->root : nullptr, [&](const Row& value) { return Less{}(value, row); });
     const bool present = old && !Less{}(row, *old);
     if (present)
     {
-        if (!old->charge.same_receipt_fact(charge))
+        if (!old->receipt().same_receipt_fact(&charge))
             invalid_paid("Paid owner changes immutable control/extent/origin.");
         row.references = geometry_demand::checked_sum(old->references, 1);
     }
@@ -538,11 +710,11 @@ NativeOwnerReceipts NativeOwnerReceipts::retired(
     using namespace paid_extent_detail;
     if (!state_)
         invalid_paid("Retired paid owner is absent.");
-    Row key{charge, 0};
+    const Row key{&charge, 0};
     const auto* old = Pages::lower_bound(state_->root, [&](const Row& value) { return Less{}(value, key); });
     if (!old || Less{}(key, *old) || !old->references)
         invalid_paid("Retired paid owner has no exact origin row.");
-    if (!old->charge.same_receipt_fact(charge))
+    if (!old->receipt().same_receipt_fact(&charge))
         invalid_paid("Retired paid owner changes immutable extent or financial control.");
     auto row = *old;
     --row.references;
@@ -561,7 +733,7 @@ NativeOwnerReceipts NativeOwnerReceipts::edited(std::span<Edit> edits, geometry_
     std::span<const geometry_demand::OwnerRecord> owner_changes) const
 {
     return edited_with(edits, admission, owner_changes,
-        [&](const NativePaidExtentCharge& key) -> const geometry_demand::OwnerRecord*
+        [&](const NativeReceiptFact& key) -> const geometry_demand::OwnerRecord*
         {
             const auto pos = std::lower_bound(owner_changes.begin(), owner_changes.end(), key,
                 [](const auto& row, const auto& charge)
@@ -574,13 +746,20 @@ NativeOwnerReceipts NativeOwnerReceipts::edited(std::span<Edit> edits, geometry_
             return nullptr;
         });
 }
+NativeOwnerReceipts NativeOwnerReceipts::edited_with_presence(std::span<Edit> edits, geometry_demand::Admission admission,
+    std::span<const Edit>& presence) const
+{
+    presence = {};
+    return edited_with(edits, admission, std::span<const geometry_demand::OwnerRecord>{},
+        [](const NativeReceiptFact&) -> const geometry_demand::OwnerRecord* { return nullptr; }, &presence);
+}
 NativeOwnerReceipts NativeOwnerReceipts::edited_graph(std::span<Edit> edits, geometry_demand::Admission admission,
     const geometry_demand::OwnerEdits& owner_changes) const
 {
     const auto owners = owner_changes | std::views::transform(
         [](const auto& edit) -> const geometry_demand::OwnerRecord& { return edit.row; });
     return edited_with(edits, admission, owners,
-        [&](const NativePaidExtentCharge& key) -> const geometry_demand::OwnerRecord*
+        [&](const NativeReceiptFact& key) -> const geometry_demand::OwnerRecord*
         {
             const auto* edit = owner_changes.find({owner_changes.channel(), key.kind(), key.owner_address()});
             return edit ? &edit->row : nullptr;
@@ -588,7 +767,7 @@ NativeOwnerReceipts NativeOwnerReceipts::edited_graph(std::span<Edit> edits, geo
 }
 template<class Owners, class Find>
 NativeOwnerReceipts NativeOwnerReceipts::edited_with(std::span<Edit> edits, geometry_demand::Admission admission,
-    const Owners& owner_changes, const Find& find_owner) const
+    const Owners& owner_changes, const Find& find_owner, std::span<const Edit>* presence) const
 {
     using namespace paid_extent_detail;
     for (std::size_t i = 0; i != edits.size(); ++i)
@@ -600,17 +779,17 @@ NativeOwnerReceipts NativeOwnerReceipts::edited_with(std::span<Edit> edits, geom
     const Less less;
     std::sort(edits.begin(), edits.end(), [less](const Edit& a, const Edit& b)
         {
-            if (less(*a.charge, *b.charge)) return true;
-            if (less(*b.charge, *a.charge)) return false;
+            if (less(a.charge, b.charge)) return true;
+            if (less(b.charge, a.charge)) return false;
             return a.sequence < b.sequence;
         });
     const auto accepted = state_ ? state_->root : Pages::Ptr{};
-    const auto owner_before = [](const NativePaidExtentCharge& charge, const geometry_demand::OwnerKey& key)
+    const auto owner_before = [](const NativeReceiptFact& charge, const geometry_demand::OwnerKey& key)
     {
         return charge.kind() < key.kind || (charge.kind() == key.kind &&
             std::less<const void*>{}(charge.owner_address(), key.address));
     };
-    const auto check_removed_control = [](const NativePaidExtentCharge& charge, const auto& owner)
+    const auto check_removed_control = [](const NativeReceiptFact& charge, const auto& owner)
     {
         if (!same_paid(charge.owner_, owner.owner))
             invalid_paid("Removed paid owner changes its exact shared control.");
@@ -621,12 +800,13 @@ NativeOwnerReceipts NativeOwnerReceipts::edited_with(std::span<Edit> edits, geom
         for (const auto& owner : owner_changes)
         {
             if (owner.references) continue;
-            Pages::visit_from(accepted, [&](const Row& row) { return owner_before(row.charge, owner.key); },
+            Pages::visit_from(accepted, [&](const Row& row) { return owner_before(row.receipt().fact(), owner.key); },
                 [&](const Row& row)
                 {
-                    if (row.charge.kind() != owner.key.kind || row.charge.owner_address() != owner.key.address)
+                    const auto& charge = row.receipt().fact();
+                    if (charge.kind() != owner.key.kind || charge.owner_address() != owner.key.address)
                         return false;
-                    check_removed_control(row.charge, owner);
+                    check_removed_control(charge, owner);
                     visit(row);
                     return true;
                 });
@@ -634,7 +814,7 @@ NativeOwnerReceipts NativeOwnerReceipts::edited_with(std::span<Edit> edits, geom
     };
     std::size_t maximum = 0;
     for (std::size_t i = 0; i != edits.size(); ++i)
-        if (!i || less(*edits[i - 1].charge, *edits[i].charge))
+        if (!i || less(edits[i - 1].charge, edits[i].charge))
             ++maximum;
     visit_removed([&](const Row&) { maximum = geometry_demand::checked_sum(maximum, 1); });
     if (!maximum)
@@ -650,21 +830,21 @@ NativeOwnerReceipts NativeOwnerReceipts::edited_with(std::span<Edit> edits, geom
             invalid_paid("Paid receipt batch capacity is unqualified.");
         rows = overflow;
     }
-    std::size_t count = 0;
+    std::size_t count = 0, transitions = 0;
     for (std::size_t begin = 0; begin != edits.size();)
     {
-        const auto& key = *edits[begin].charge;
-        const auto* old = Pages::lower_bound(accepted, [&](const Row& row) { return less(row.charge, key); });
-        if (old && less(key, old->charge)) old = nullptr;
-        RowChange row = old ? RowChange(*old) : RowChange(&key, 0);
+        const auto key = edits[begin].charge;
+        const auto* old = Pages::lower_bound(accepted, [&](const Row& row) { return less(row.receipt(), key); });
+        if (old && less(key, old->receipt())) old = nullptr;
+        RowChange row = old ? RowChange(*old) : RowChange(key, 0);
         std::size_t end = begin;
         do
         {
             const auto& edit = edits[end++];
-            const auto& charge = *edit.charge;
+            const auto charge = edit.charge;
             if (edit.action == Action::Retire || edit.action == Action::RetireIfRecorded)
             {
-                if (!row.references || !row.charge->same_receipt_fact(charge))
+                if (!row.references || !row.charge.same_receipt_fact(charge))
                 {
                     if (edit.action == Action::Retire)
                         invalid_paid("Retired paid owner has no exact origin row.");
@@ -674,28 +854,34 @@ NativeOwnerReceipts NativeOwnerReceipts::edited_with(std::span<Edit> edits, geom
             }
             else if (charge.valid())
             {
-                if ((old && !old->charge.same_receipt_fact(charge)) ||
-                    (row.references && !row.charge->same_receipt_fact(charge)))
+                if ((old && !old->receipt().same_receipt_fact(charge)) ||
+                    (row.references && !row.charge.same_receipt_fact(charge)))
                     invalid_paid("Paid owner changes immutable control/extent/origin.");
-                if (!row.references) row.charge = &charge;
+                if (!row.references) row.charge = charge;
                 if (edit.action == Action::Retain || !row.references)
                     row.references = geometry_demand::checked_sum(row.references, 1);
             }
             else if (charge.has_financial_pin())
                 invalid_paid("Native financial receipt no longer authenticates live funding.");
-        } while (end != edits.size() && !less(key, *edits[end].charge));
+        } while (end != edits.size() && !less(key, edits[end].charge));
         if (row.references != (old ? old->references : 0))
         {
-            const auto* owner = find_owner(key);
+            const auto* owner = find_owner(key.fact());
             if (owner && !owner->references)
-                check_removed_control(*row.charge, *owner); // Already covered by the last-owner pass.
+                check_removed_control(row.charge.fact(), *owner); // Already covered by the last-owner pass.
             else
-                rows[count++] = std::move(row);
+            {
+                rows[count++] = row;
+                // Presence is used by the paired union. Each complete key
+                // can write at most one output into the slots already read.
+                if (presence && (old == nullptr) == bool(row.references))
+                    edits[transitions++] = {row.charge, row.references ? Action::Retain : Action::RetireIfRecorded};
+            }
         }
         begin = end;
     }
     const auto explicit_changes = count;
-    visit_removed([&](const Row& row) { rows[count++] = {&row.charge, 0}; });
+    visit_removed([&](const Row& row) { rows[count++] = {row.receipt(), 0}; });
     if (!count)
         return *this;
     auto changes = rows.first(count);
@@ -706,13 +892,17 @@ NativeOwnerReceipts NativeOwnerReceipts::edited_with(std::span<Edit> edits, geom
                                [](const RowChange& row) { return row.references; }) :
                            Pages(admission).build_from(input);
     if (!root)
+    {
+        if (presence) *presence = edits.first(transitions);
         return {};
+    }
     admission.charge(1, sizeof(State) + geometry_demand::control_bytes);
     auto next = admission.shared<State>(std::move(root));
     const auto bytes = sizeof(State) + (admission.native ? geometry_demand::metadata_control_bytes(next) : 0);
     admission.created(next, bytes, bytes + (admission.native ? 0 : geometry_demand::control_bytes));
     NativeOwnerReceipts result;
     result.state_ = std::move(next);
+    if (presence) *presence = edits.first(transitions);
     return result;
 }
 void NativeOwnerReceipts::visit(Sink sink) const
@@ -723,12 +913,21 @@ void NativeOwnerReceipts::visit(Sink sink) const
         state_->root, [](const auto&) { return false; },
         [&](const auto& row)
         {
-            sink.visit(sink.context, row.charge, row.references);
+            sink.visit(sink.context, row.receipt().value(), row.references);
             return true;
         });
 }
 void NativeOwnerReceipts::visit_added(
     const NativeOwnerReceipts& previous, Sink sink, geometry_demand::PageWork* work) const
+{
+    visit_added_refs(previous, {&sink, [](void* raw, NativePaidExtentRef charge, std::size_t references)
+        {
+            auto& sink = *static_cast<Sink*>(raw);
+            sink.visit(sink.context, charge.value(), references);
+        }}, work);
+}
+void NativeOwnerReceipts::visit_added_refs(
+    const NativeOwnerReceipts& previous, BorrowedSink sink, geometry_demand::PageWork* work) const
 {
     using namespace paid_extent_detail;
     if (same_root(previous) || !state_)
@@ -764,7 +963,7 @@ void NativeOwnerReceipts::visit_added(
                     previous.state_ ? previous.state_->root : nullptr,
                     [&](const auto& value) { return Less{}(value, row); }, work);
                 if (!old || Less{}(row, *old))
-                    sink.visit(sink.context, row.charge, row.references);
+                    sink.visit(sink.context, row.receipt(), row.references);
             }
         else
             for (const auto& child : node->children)
@@ -784,7 +983,12 @@ void NativeOwnerReceipts::visit_administration(geometry_demand::MetadataSink sin
         for (unsigned edge = 0; edge != 2; ++edge)
             geometry_demand::visit_native_state(geometry_demand::metadata_state(state_), sink);
     paid_extent_detail::Pages::visit_dependencies(state_->root, sink,
-        [&](const auto& row) { sink.financial(row.charge); });
+        [&](const auto& row)
+        {
+            const auto receipt = row.receipt();
+            if (const auto* proof = receipt.proof()) sink.financial(*proof);
+            else if (receipt.stored_witness()) sink.financial(receipt.value());
+        });
 }
 void NativeOwnerReceipts::visit_native_administration_delta(const NativeOwnerReceipts& previous,
     geometry_demand::NativeAdministrationSink sink, geometry_demand::PageWork* work) const
@@ -803,7 +1007,7 @@ void NativeOwnerReceipts::visit_native_administration_delta(const NativeOwnerRec
     }
     paid_extent_detail::Pages::visit_native_administration_delta(
         previous.state_ ? previous.state_->root : nullptr, state_ ? state_->root : nullptr, sink, work, true,
-        [&](const auto& row, bool retain) { sink.financial(row.charge, retain); });
+        [&](const auto& row, bool retain) { sink.financial(row.receipt(), retain); });
 }
 std::size_t NativeOwnerReceipts::metadata_admission_bytes() const noexcept
 {

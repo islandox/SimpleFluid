@@ -97,7 +97,8 @@ public:
         const NativeOwnerReceipts* previous_receipts = nullptr, const NativeOwnerReceipts* receipts = nullptr,
         const NativeOwnerReceipts* previous_bounded_receipts = nullptr,
         const NativeOwnerReceipts* bounded_receipts = nullptr, std::shared_ptr<const void> source_group_header = {},
-        const NativePaidExtentGroup* source_group = nullptr) const;
+        const NativePaidExtentGroup* source_group = nullptr,
+        geometry_demand::ReceiptEdits* body_presence = nullptr) const;
 
 private:
     friend class GeometryOwnerUnion;

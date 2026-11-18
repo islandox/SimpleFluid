@@ -344,10 +344,17 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
     const std::shared_ptr<const geometry_detail::NativeAllocationState>& state, GeometryOwnerUnionWork& work,
     const NativeOwnerReceipts* previous_receipts, const NativeOwnerReceipts* receipts,
     const NativeOwnerReceipts* previous_bounded_receipts, const NativeOwnerReceipts* bounded_receipts,
-    std::shared_ptr<const void> new_source_group_header, const NativePaidExtentGroup* new_source_group) const
+    std::shared_ptr<const void> new_source_group_header, const NativePaidExtentGroup* new_source_group,
+    geometry_demand::ReceiptEdits* body_presence) const
 {
     using namespace geometry_demand;
     using namespace allocation_detail;
+    const struct ObserveAdministration
+    {
+        const std::size_t& cursor;
+        std::size_t start;
+        ~ObserveAdministration() { observe_receipt_administration(cursor - start); }
+    } observed{used, used};
     if (!body.owners[0].owner_count() && !body.owners[1].owner_count() && !controls.root_control() &&
         (!receipts || receipts->empty()) && (!bounded_receipts || bounded_receipts->empty()) && !new_source_group)
         return {};
@@ -371,7 +378,7 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
     };
     geometry_detail::NativeAdministrationVector<Edge> pending{
         geometry_detail::NativeAdministrationAllocator<Edge>(state)};
-    struct FinancialEdge { const NativePaidExtentCharge* charge; bool retain; };
+    struct FinancialEdge { NativePaidExtentRef charge; bool retain; };
     geometry_detail::NativeAdministrationVector<FinancialEdge> pending_financial{
         geometry_detail::NativeAdministrationAllocator<FinancialEdge>(state)};
     const auto charge_work = [&](std::size_t bytes)
@@ -391,7 +398,16 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
     owner_union_detail::OriginEdits direct_h(result.direct_origins, admission);
     owner_union_detail::OriginEdits publication_h(result.publication_origins, admission);
     owner_union_detail::OriginEdits overlap(result.group_overlap, admission);
-    geometry_demand::ReceiptEdits receipt_edits(admission);
+    geometry_demand::ReceiptEdits local_edits(admission);
+    auto& receipt_edits = body_presence ? *body_presence : local_edits;
+    if (body_presence)
+    {
+        const auto edits = receipt_edits.rows();
+        const auto end = std::remove_if(edits.begin(), edits.end(), [](const auto& edit)
+            { return edit.action == NativeOwnerReceipts::Action::Retain && !edit.charge.valid(); });
+        receipt_edits.retain_prefix(end - edits.begin());
+    }
+    const auto body_changes = receipt_edits.rows().size();
     const auto flush_origins = [&]
     {
         all_origins.flush();
@@ -435,7 +451,7 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
         if (charge.publication_h())
             publication_h.change(arena, bytes, retain);
     };
-    const auto overlap_change = [&](const NativePaidExtentCharge& value, bool retain)
+    const auto overlap_change = [&](const NativeReceiptFact& value, bool retain)
     {
         const auto owner = value.owner();
         if (owner && result.source_group && result.source_group->contains(value.kind(), owner, value.bytes()))
@@ -461,28 +477,29 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
             // old graph's extents, including a same-arena metadata exchange.
             for (const bool retain : {true, false})
             {
-                const NativePaidExtentCharge* previous = nullptr;
+                NativePaidExtentRef previous;
                 for (const auto& edit : changes)
                 {
-                    const auto& value = *edit.charge;
-                    if (previous && previous->same_physical_origin(value))
+                    const auto value = edit.charge;
+                    if (previous && previous.same_physical_origin(value))
                         continue;
-                    previous = &value;
+                    previous = value;
+                    const auto& fact = value.fact();
                     const bool before = old_paid.contains_any(value);
                     const bool after = result.paid.contains_any(value);
                     if (before != after && after == retain)
                     {
-                        all_origins.change(value.origin(), value.bytes(), retain);
-                        overlap_change(value, retain);
+                        all_origins.change(fact.origin(), fact.bytes(), retain);
+                        overlap_change(fact, retain);
                     }
                     const bool direct_before = old_paid.contains_direct_h(value);
                     const bool direct_after = result.paid.contains_direct_h(value);
                     if (direct_before != direct_after && direct_after == retain)
-                        direct_h.change(value.origin(), value.bytes(), retain);
+                        direct_h.change(fact.origin(), fact.bytes(), retain);
                     const bool publication_before = old_paid.contains_publication_h(value);
                     const bool publication_after = result.paid.contains_publication_h(value);
                     if (publication_before != publication_after && publication_after == retain)
-                        publication_h.change(value.origin(), value.bytes(), retain);
+                        publication_h.change(fact.origin(), fact.bytes(), retain);
                 }
             }
         receipt_edits.clear();
@@ -494,15 +511,15 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
             geometry_demand::ReceiptEdits& edits;
             bool retain;
         } add_context{receipt_edits, true}, retire_context{receipt_edits, false};
-        const auto visit = [](void* raw, const NativePaidExtentCharge& value, std::size_t)
+        const auto visit = [](void* raw, NativePaidExtentRef value, std::size_t)
         {
             auto& context = *static_cast<Context*>(raw);
-            if (!value.source_only() && (!context.retain || value.valid()))
+            if (!value.fact().source_only() && (!context.retain || value.valid()))
                 context.edits.append_borrowed(value, context.retain ? NativeOwnerReceipts::Action::Retain :
                     NativeOwnerReceipts::Action::RetireIfRecorded);
         };
-        after.visit_added(before, {&add_context, visit}, &work.native_administration);
-        before.visit_added(after, {&retire_context, visit}, &work.native_administration);
+        after.visit_added_refs(before, {&add_context, visit}, &work.native_administration);
+        before.visit_added_refs(after, {&retire_context, visit}, &work.native_administration);
     };
     const auto append = [&](const std::shared_ptr<const geometry_detail::NativeAllocationState>& owner,
                             std::size_t count, bool retain)
@@ -525,9 +542,8 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
         }
         pending.push_back({owner, count, retain});
     };
-    const auto append_financial = [&](const NativePaidExtentCharge& charge, bool retain)
+    const auto append_financial = [&](NativePaidExtentRef charge, bool retain)
     {
-        if (!charge.has_lifetime_children()) return;
         if (pending_financial.size() == pending_financial.capacity())
         {
             const auto count = pending_financial.capacity() ? product(pending_financial.capacity(), 2) : 1;
@@ -536,7 +552,7 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
             if (pending_financial.capacity() != count)
                 exhausted("Native financial projection scratch capacity is unqualified.");
         }
-        pending_financial.push_back({&charge, retain});
+        pending_financial.push_back({charge, retain});
     };
     struct Capture
     {
@@ -578,7 +594,7 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
             [](void* raw, const auto& state, std::size_t count, bool retain)
             { static_cast<Capture*>(raw)->append_edge(state, count, retain); },
             [](void* raw, const auto& owner, bool retain) { static_cast<Capture*>(raw)->owner(owner, retain); },
-            [](void* raw, const NativePaidExtentCharge& charge, bool retain)
+            [](void* raw, NativePaidExtentRef charge, bool retain)
             { static_cast<Capture*>(raw)->financial_edge(charge, retain); }};
     };
     if (!same_current)
@@ -601,7 +617,15 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
             previous_body.owners[channel], sink(external), &work.native_administration);
     controls.visit_native_administration_delta(previous_controls, sink(external), &work.native_administration);
     const NativeOwnerReceipts empty;
-    receipt_delta(previous_receipts ? *previous_receipts : empty, receipts ? *receipts : empty);
+    if (body_presence)
+    {
+        // Keep metadata, then body, then Bounded changes in their original
+        // order for any receipt key touched by more than one role.
+        auto edits = receipt_edits.rows();
+        std::rotate(edits.begin(), edits.begin() + body_changes, edits.end());
+    }
+    else
+        receipt_delta(previous_receipts ? *previous_receipts : empty, receipts ? *receipts : empty);
     receipt_delta(previous_bounded_receipts ? *previous_bounded_receipts : empty,
         bounded_receipts ? *bounded_receipts : empty);
     // Root receipt indexes are real children. A shared root reached through
@@ -684,9 +708,9 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
                 if (!edge.retain)
                     editor.native_state_edges(edge.state, edge.references, false);
             for (const auto& edge : pending_financial)
-                if (edge.retain) editor.financial_pin(*edge.charge, true);
+                if (edge.retain) editor.financial_pin(edge.charge.value(), true);
             for (const auto& edge : pending_financial)
-                if (!edge.retain) editor.financial_pin(*edge.charge, false);
+                if (!edge.retain) editor.financial_pin(edge.charge.value(), false);
             result.owners = editor.finish();
             auto next_receipts = editor.paid_receipts();
             receipt_delta(result.domain_paid, next_receipts);
@@ -971,7 +995,9 @@ GeometryOwnerUnion GeometryOwnerUnion::staged(std::span<const Replacement> repla
             {
                 auto& a = *static_cast<Allowance*>(raw);
                 if (a.used > a.limit || bytes > a.limit - a.used)
-                    allocation_detail::exhausted("Owner union administration exceeds quota.");
+                    throw GeometryError(GeometryErrorCode::ResourceLimit,
+                        "Owner union administration exceeds quota: used=" + std::to_string(a.used) +
+                            " request=" + std::to_string(bytes) + " limit=" + std::to_string(a.limit) + ".");
                 if (const auto state = GeometryAllocationOwnerAccess::native_state(a.ledger))
                     state->record_ledger_work(bytes);
                 a.used += bytes;
@@ -999,18 +1025,18 @@ GeometryOwnerUnion GeometryOwnerUnion::staged(std::span<const Replacement> repla
             geometry_demand::ReceiptEdits& edits;
             bool retain;
         } paid_add{receipt_edits, true}, paid_remove{receipt_edits, false};
-        const auto paid_edit = [](void* raw, const NativePaidExtentCharge& value, std::size_t)
+        const auto paid_edit = [](void* raw, NativePaidExtentRef value, std::size_t)
         {
             auto& context = *static_cast<PaidEdits*>(raw);
-            if (!value.source_only() && (!context.retain || value.valid()))
+            if (!value.fact().source_only() && (!context.retain || value.valid()))
                 context.edits.append_borrowed(value, context.retain ? NativeOwnerReceipts::Action::Retain :
                     NativeOwnerReceipts::Action::RetireIfRecorded);
         };
         for (const auto& replacement : replacements)
-            receipts(replacement.retain).visit_added(
+            receipts(replacement.retain).visit_added_refs(
                 receipts(replacement.retire), {&paid_add, paid_edit}, &work.native_administration);
         for (const auto& replacement : replacements)
-            receipts(replacement.retire).visit_added(
+            receipts(replacement.retire).visit_added_refs(
                 receipts(replacement.retain), {&paid_remove, paid_edit}, &work.native_administration);
         owner_union_detail::ControlEdits controls{controls_, admission};
         const auto refs = [&](GeometryOwnerGraphEditor& editor, const geometry_demand::OwnerRecord& row)
@@ -1103,14 +1129,15 @@ GeometryOwnerUnion GeometryOwnerUnion::staged(std::span<const Replacement> repla
         for (const auto& replacement : replacements)
             if (replacement.retire && *replacement.retire)
                 edit(*replacement.retire, false);
-        result.paid_body_[0] = result.paid_body_[0].edited(receipt_edits.rows(), admission);
-        receipt_edits.clear();
+        std::span<const NativeOwnerReceipts::Edit> presence;
+        result.paid_body_[0] = result.paid_body_[0].edited_with_presence(receipt_edits.rows(), admission, presence);
+        receipt_edits.retain_prefix(presence.size());
         result.owners_ = OwnerManifestPair::sealed({ordinary.finish(), bounded.finish()}, overlap);
         result.controls_ = controls.finish(&work.controls);
         result.native_administration_ = native_administration_.updated(owners_, result.owners_, controls_,
             result.controls_, used, limit, GeometryAllocationOwnerAccess::native_state(ordinary_ledger), work,
             &paid_body_[0], &result.paid_body_[0], &paid_body_[1], &result.paid_body_[1],
-            result.source_group_header_, result.source_group_);
+            result.source_group_header_, result.source_group_, &receipt_edits);
         result.resident_bytes_ = allocation_detail::add(
             allocation_detail::add(result.owners_.payload_bytes(), result.owners_.index_admission_bytes()),
             allocation_detail::add(result.controls_.control_bytes(), result.controls_.index_admission_bytes()));

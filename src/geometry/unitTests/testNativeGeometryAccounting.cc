@@ -976,6 +976,93 @@ TEST(NativeGeometryAccounting, PagedOwnerEditsPreserveFlatTypedAndWeakReceiptLif
     EXPECT_EQ(second.references(0, kind, state), 5 * active);
 }
 
+TEST(NativeGeometryAccounting, CompactFixedReceiptPagesAndScratchKeepExactPresenceTransitions)
+{
+    using Receipts = D::NativeOwnerReceipts;
+    using Action = Receipts::Action;
+    auto arena = std::make_shared<A::Budget>(A::Budget{cap});
+    const N::NativeConstructionAdmission admission(
+        N::NativeConstructionCounterAccess::create<Counter>(cap, 0, A::NativeSourceOwnerStore::mirror(arena)));
+    constexpr auto count = 4 * G::leaf_capacity;
+    std::array<N::NativeTrackedOwner<unsigned>, count + 1> owners;
+    for (auto& owner : owners)
+        owner = N::NativeAllocationEnvelopeAccess::make<unsigned>(admission);
+    const auto charge = [&](std::size_t index) { return D::NativePaidExtentCharge::fixed(owners[index].envelope); };
+    std::size_t used = 0;
+    const G::Admission demand{&used, [](void* raw, std::size_t bytes) { *static_cast<std::size_t*>(raw) += bytes; },
+        nullptr, admission.state()};
+    G::ReceiptEdits edits(demand);
+    const auto scratch_start = admission.statistics().actual_cumulative;
+    for (std::size_t index = 0; index != count; ++index)
+        edits.append(charge(index), Action::Record);
+    EXPECT_LT(admission.statistics().actual_cumulative - scratch_start, count * sizeof(D::NativePaidExtentCharge) / 2);
+    const auto leaf_start = admission.statistics().actual_cumulative;
+    std::span<const Receipts::Edit> presence;
+    const auto first = Receipts{}.edited_with_presence(edits.rows(), demand, presence);
+    ASSERT_EQ(presence.size(), count);
+    EXPECT_LT(admission.statistics().actual_cumulative - leaf_start, count * sizeof(D::NativePaidExtentCharge) / 2);
+    for (const auto& addition : presence)
+        EXPECT_EQ(addition.action, Action::Retain);
+
+    edits.clear();
+    edits.append(charge(0), Action::Retain);
+    edits.append(charge(1), Action::Retire);
+    edits.append(charge(1), Action::Record);
+    edits.append(charge(2), Action::Retire);
+    edits.append(charge(count), Action::Record);
+    edits.append(charge(count), Action::Retire);
+    const auto second = first.edited_with_presence(edits.rows(), demand, presence);
+    ASSERT_EQ(presence.size(), 1u);
+    EXPECT_EQ(presence.front().action, Action::RetireIfRecorded);
+    EXPECT_EQ(presence.front().charge.fact().owner_address(), owners[2].envelope.get());
+    edits.clear();
+    for (std::size_t index = 0; index != count; ++index)
+    {
+        EXPECT_TRUE(first.contains(charge(index)));
+        EXPECT_EQ(second.contains(charge(index)), index != 2);
+    }
+    EXPECT_FALSE(second.contains(charge(count)));
+    std::size_t references = 0;
+    second.visit_owner(charge(0).kind(), owners[0].envelope, {&references, [](void* raw, const auto&, std::size_t n)
+        { *static_cast<std::size_t*>(raw) += n; }});
+    EXPECT_EQ(references, 2u);
+}
+
+TEST(NativeGeometryAccounting, CompactNativeWitnessRetainsControlAndChecksStorageRevision)
+{
+    auto arena = std::make_shared<A::Budget>(A::Budget{cap});
+    const N::NativeConstructionAdmission admission(
+        N::NativeConstructionCounterAccess::create<Counter>(cap, 0, A::NativeSourceOwnerStore::mirror(arena)));
+    const auto storage = N::native_constructor_storage(admission);
+    std::vector<std::uint64_t> buffer;
+    storage.owner->reserve(buffer, 23);
+    auto charge = D::NativePaidExtentCharge::storage(storage);
+    ASSERT_TRUE(charge.valid());
+    std::size_t used = 0;
+    const G::Admission demand{&used, [](void* raw, std::size_t bytes) { *static_cast<std::size_t*>(raw) += bytes; },
+        nullptr, admission.state()};
+    const auto before = G::receipt_work();
+    const auto accepted = D::NativeOwnerReceipts{}.recorded(charge, demand);
+    const auto witness_bytes = G::receipt_work().leaf_proofs - before.leaf_proofs;
+    EXPECT_GT(witness_bytes, 0u);
+    EXPECT_LT(witness_bytes, sizeof(charge));
+    std::size_t valid = 0;
+    const D::NativeOwnerReceipts::Sink count{&valid, [](void* raw, const auto&, std::size_t references)
+        { *static_cast<std::size_t*>(raw) += references; }};
+    accepted.visit_owner(charge.kind(), storage.owner, count);
+    EXPECT_EQ(valid, 1u);
+    storage.owner->reset_buffer(buffer);
+    valid = 0;
+    accepted.visit_owner(charge.kind(), storage.owner, count);
+    EXPECT_EQ(valid, 0u);
+    accepted.visit({&charge, [](void* raw, const auto& stored, std::size_t)
+        {
+            const auto& original = *static_cast<const D::NativePaidExtentCharge*>(raw);
+            EXPECT_TRUE(stored.physical_observation().same_observation(original.physical_observation()));
+            EXPECT_FALSE(stored.valid());
+        }});
+}
+
 TEST(NativeGeometryAccounting, PaidReceiptBatchChecksReferenceOrderAndReducesPageCopies)
 {
     auto arena = std::make_shared<A::Budget>(A::Budget{cap});

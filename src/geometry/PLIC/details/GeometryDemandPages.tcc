@@ -39,35 +39,61 @@ inline ReceiptEdits::~ReceiptEdits()
 {
     clear();
 }
-inline void ReceiptEdits::append(const NativePaidExtentCharge& charge, NativeOwnerReceipts::Action action)
+template<class Value>
+const Value& ReceiptEdits::Charges<Value>::append(const Value& value, const Admission& admission)
 {
-    NativePaidExtentCharge* stored;
-    if (charges_ < inline_charges_.size())
-        stored = &inline_charges_[charges_];
+    Value* stored;
+    if (size < local.size())
+        stored = &local[size];
     else
     {
-        constexpr auto block_size = std::tuple_size_v<decltype(ChargeBlock::charges)>;
-        const auto index = (charges_ - inline_charges_.size()) % block_size;
+        constexpr auto block_size = std::tuple_size_v<decltype(Block::values)>;
+        const auto index = (size - local.size()) % block_size;
         if (!index)
         {
-            admission_.charge(1, sizeof(ChargeBlock));
-            auto allocate = admission_.allocator<ChargeBlock>();
+            admission.charge(1, sizeof(Block));
+            auto allocate = admission.allocator<Block>();
             auto* next = allocate.allocate(1);
             std::construct_at(next);
-            next->previous = block_;
-            block_ = next;
+            observe_receipt_block(sizeof(Block), !std::is_same_v<Value, NativeReceiptFact>);
+            next->previous = tail;
+            tail = next;
         }
-        stored = &block_->charges[index];
+        stored = &tail->values[index];
     }
-    *stored = charge;
-    ++charges_;
-    append_borrowed(*stored, action);
+    ++size;
+    return *stored = value;
 }
-inline void ReceiptEdits::append_borrowed(const NativePaidExtentCharge& charge, NativeOwnerReceipts::Action action)
+template<class Value>
+void ReceiptEdits::Charges<Value>::clear(const Admission& admission) noexcept
+{
+    for (auto& value : std::span(local).first(std::min(size, local.size())))
+        value = {};
+    size = 0;
+    auto allocate = admission.allocator<Block>();
+    while (tail)
+    {
+        auto* released = tail;
+        tail = tail->previous;
+        std::destroy_at(released);
+        allocate.deallocate(released, 1);
+    }
+}
+inline void ReceiptEdits::append(const NativePaidExtentCharge& charge, NativeOwnerReceipts::Action action)
+{
+    const NativePaidExtentRef ref(&charge);
+    if (ref.has_native_witness())
+        append_borrowed(NativePaidExtentRef(witnesses_.append(ref.native_witness(), admission_)), action);
+    else if (const auto* proof = ref.proof())
+        append_borrowed(&proofs_.append(*proof, admission_), action);
+    else
+        append_borrowed(NativePaidExtentRef(facts_.append(ref.fact(), admission_)), action);
+}
+inline void ReceiptEdits::append_borrowed(NativePaidExtentRef charge, NativeOwnerReceipts::Action action)
 {
     if (overflow_.empty() && size_ < inline_.size())
     {
-        inline_[size_++] = {&charge, action};
+        inline_[size_++] = {charge, action};
         return;
     }
     if (overflow_.size() == overflow_.capacity())
@@ -84,28 +110,29 @@ inline void ReceiptEdits::append_borrowed(const NativePaidExtentCharge& charge, 
         overflow_.insert(overflow_.end(), inline_.begin(), inline_.begin() + size_);
         size_ = 0;
     }
-    overflow_.push_back({&charge, action});
+    overflow_.push_back({charge, action});
 }
 inline std::span<NativeOwnerReceipts::Edit> ReceiptEdits::rows() noexcept
 {
     if (!overflow_.empty()) return overflow_;
     return std::span(inline_).first(size_);
 }
+inline void ReceiptEdits::retain_prefix(std::size_t count) noexcept
+{
+    if (count > rows().size())
+        std::terminate();
+    if (overflow_.empty())
+        size_ = count;
+    else
+        overflow_.resize(count);
+}
 inline void ReceiptEdits::clear() noexcept
 {
     overflow_.clear();
     size_ = 0;
-    for (auto& charge : std::span(inline_charges_).first(std::min(charges_, inline_charges_.size())))
-        charge = {};
-    charges_ = 0;
-    auto allocate = admission_.allocator<ChargeBlock>();
-    while (block_)
-    {
-        auto* released = block_;
-        block_ = block_->previous;
-        std::destroy_at(released);
-        allocate.deallocate(released, 1);
-    }
+    facts_.clear(admission_);
+    witnesses_.clear(admission_);
+    proofs_.clear(admission_);
 }
 inline void visit_native_state(
     const std::shared_ptr<const geometry_detail::NativeAllocationState>& state, MetadataSink sink)
@@ -205,7 +232,7 @@ template<class T, class... Args> std::shared_ptr<T> Admission::shared(Args&&... 
     proof->constructed = true;
     return owner;
 }
-template<class Row, class Less, bool CompactBranches> class OrderedPages
+template<class Row, class Less, bool CompactBranches, class Witnesses> class OrderedPages
 {
 public:
     struct Node;
@@ -216,9 +243,14 @@ public:
         std::size_t bytes = 0, payload_bytes = 0;
         std::vector<Row> rows;
         std::vector<Ptr> children;
+        [[no_unique_address]] Witnesses witnesses;
         [[nodiscard]] std::size_t native_buffer_bytes() const noexcept
         {
-            return rows.capacity() * sizeof(Row) + children.capacity() * sizeof(Ptr);
+            const auto index = rows.capacity() * sizeof(Row) + children.capacity() * sizeof(Ptr);
+            if constexpr (std::is_same_v<Witnesses, NoLeafWitnesses>)
+                return index;
+            else
+                return index + witnesses.buffer_bytes();
         }
         const Row* maximum = nullptr;
         std::size_t size = 0, subtree_bytes = 0, subtree_payload_bytes = 0, subtree_owner_bytes = 0, logical_size = 0,
@@ -671,9 +703,12 @@ private:
     {
         auto node = allocate();
         reserve(node->rows, values.size());
-        node->bytes = checked_sum(node->bytes, values.size() * sizeof(Row));
-        for (const auto& value : values)
-            node->rows.emplace_back(value);
+        if constexpr (std::is_same_v<Witnesses, NoLeafWitnesses>)
+            for (const auto& value : values)
+                node->rows.emplace_back(value);
+        else
+            node->witnesses.build(node->rows, values, [&](auto& storage, std::size_t count) { reserve(storage, count); });
+        node->bytes = checked_sum(node->bytes, node->native_buffer_bytes());
         node->maximum = &node->rows.back();
         node->size = values.size();
         for (const auto& row : node->rows)

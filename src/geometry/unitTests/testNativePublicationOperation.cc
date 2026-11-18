@@ -3,7 +3,9 @@
 #include "geometry/mesh/AMR/NativeSourceOwnerStore.hh"
 #include "geometry/mesh/AMR/NativePublicationOperation.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotAccess.hh"
+#include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "utils/testing_environment.hh"
 #include <Tpetra_Core.hpp>
 #include "geometry/mesh/AMR/PersistentOrderedPages.hh"
@@ -169,5 +171,68 @@ TEST(NativePublicationOperation, ActualBuiltInSourceStagingFailurePreservesRoots
     D::NativePublicationSession staged(retry.inputs(), retry.admission(), &retry.geometry_accounting(),
         &retry.source_coverage_transaction());
     EXPECT_DOUBLE_EQ(staged.source(*source->owned_leaves().begin())->metrics().volume, .125);
+}
+
+TEST(NativePublicationOperation, UnionAdmissionRejectsCollectivelyAndPreservesAcceptedPublication)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    A::AMRGrid config;
+    config.block_cells = {2, 2, 2};
+    A::CartesianAMR original(config);
+    const std::array<std::uint64_t, 8> cells{0, 1, 2, 3, 4, 5, 6, 7};
+    const auto owned = comm->getRank() == 0 ? std::span<const std::uint64_t>(cells) : std::span<const std::uint64_t>{};
+    auto detached = original.detach_owned(owned, {'u', 'n', 'i', 'o', 'n'});
+    const A::DistributedAdaptiveHierarchy source(std::move(detached.owned), std::move(detached.families),
+        std::move(detached.kernel), comm);
+    const auto schema = A::native_publication_schema(source);
+    const auto first = A::publish_adaptive_native(source, schema);
+    const auto before = D::NativePublicationSession::capture(source);
+    const auto revision = before.cache->revision;
+    const auto receipt = before.cache->receipt;
+    const auto indexes = before.cache->indexes;
+    const auto totals = D::GeometrySnapshotAccess::cache_admission_statistics(source);
+    const auto arena = D::GeometrySnapshotAccess::contact_cache(source).allocation_arena();
+    const auto live = arena->used, spent = arena->cumulative, original_limit = arena->limit;
+    struct Probe
+    {
+        D::Budget& arena;
+        std::size_t limit;
+        bool reject;
+        bool entered = false;
+    } probe{*arena, original_limit, comm->getRank() == comm->getSize() - 1};
+    D::PipelineObserver observer;
+    observer.context = &probe;
+    observer.native_owner = [](void* raw, D::PipelineNativeOwnerStage stage, bool entering,
+                               D::PipelineNativeOwnerAdmission) noexcept
+    {
+        if (stage != D::PipelineNativeOwnerStage::Union)
+            return;
+        auto& probe = *static_cast<Probe*>(raw);
+        probe.entered |= entering;
+        if (probe.reject)
+            probe.arena.limit = entering ? probe.arena.used : probe.limit;
+    };
+    {
+        const struct RestoreObserver
+        {
+            D::PipelineObserver previous;
+            ~RestoreObserver() { (void) D::set_pipeline_observer(previous); }
+        } restore{D::set_pipeline_observer(observer)};
+        EXPECT_THROW((void) A::publish_adaptive_native(source, schema), std::invalid_argument);
+    }
+    EXPECT_TRUE(probe.entered);
+    EXPECT_EQ(arena->limit, original_limit);
+    EXPECT_EQ(arena->used, live);
+    EXPECT_GT(arena->cumulative, spent);
+    const auto after = D::NativePublicationSession::capture(source);
+    EXPECT_EQ(after.cache->revision, revision);
+    EXPECT_EQ(after.cache->receipt, receipt);
+    EXPECT_EQ(after.cache->indexes, indexes);
+    EXPECT_EQ(after.source_coverage, before.source_coverage);
+    EXPECT_TRUE(D::NativePublicationSession::receipt_matches(after, first.partition(), first.mesh()->owned_cell_map()));
+    EXPECT_EQ(D::GeometrySnapshotAccess::cache_admission_statistics(source).resident_bytes, totals.resident_bytes);
+    const auto retried = A::publish_adaptive_native(source, schema);
+    EXPECT_TRUE(D::NativePublicationSession::receipt_matches(
+        D::NativePublicationSession::capture(source), retried.partition(), retried.mesh()->owned_cell_map()));
 }
 } // namespace

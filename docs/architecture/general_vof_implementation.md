@@ -262,6 +262,19 @@ row window and admits branch scratch from the child pages the edit actually
 produces. Actual allocations retire with their owners. Cumulative index charges
 remain spent on success or rejection.
 
+Native paid receipts store fixed identities, weak controls, and immutable extents
+in compact edit blocks and ordered leaf rows. Receipt leaves admit a separate
+backing buffer for proofs that carry profile, storage, or financial evidence.
+Native envelope witnesses store the exact envelope and the applicable weak
+profile or storage validation. The operation's authorization registry uses
+these same receipt forms.
+The buffer belongs to its leaf and pins the exact children of its proof rows.
+Unchanged leaf controls share those proofs across generations. A copied leaf
+holds its own typed proof edges. The paired union consumes the body receipt
+edit's first and last key transitions and reuses the same edit storage during
+native administration. Origin credit, category counts, and allocator-domain
+edges follow their existing first and last transitions.
+
 Ordinary procedural Cartesian cells retain a shared source context and a catalog
 slot. Its immutable base owns the evaluated source axes, compact interval
 selectors and original support facts. Canonical support slots are indexed by

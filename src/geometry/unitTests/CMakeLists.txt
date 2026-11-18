@@ -472,4 +472,8 @@ foreach(_publication_ranks IN ITEMS 2 4)
     TARGET testNativePublicationOutputAccounting PROCS ${_publication_ranks}
     ARGS "--gtest_filter=NativePublicationOutputAccounting.*"
     LABELS "mpi;amr;native;admission" TIMEOUT 300)
+  simplefluid_add_mpi_test(NAME NativePublicationUnionRollback_${_publication_ranks}procs
+    TARGET testNativePublicationOperation PROCS ${_publication_ranks}
+    ARGS "--gtest_filter=NativePublicationOperation.UnionAdmissionRejectsCollectivelyAndPreservesAcceptedPublication"
+    LABELS "mpi;amr;native;admission;empty_rank" TIMEOUT 60)
 endforeach()

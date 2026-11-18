@@ -153,7 +153,7 @@ private:
         };
         geometry_demand::Admission admission();
         std::optional<geometry_demand::ReceiptEdits> paid_edits;
-        std::array<const NativePaidExtentCharge*, 8> recent_fixed_receipts{};
+        std::array<const NativeReceiptFact*, 8> recent_fixed_receipts{};
         bool paid_reference_edits = false;
         void edit_paid(const NativePaidExtentCharge&, NativeOwnerReceipts::Action = NativeOwnerReceipts::Action::Record);
         template<class Kind> std::size_t references(Kind, const std::shared_ptr<const void>&, std::size_t bytes) const;

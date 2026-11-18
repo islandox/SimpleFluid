@@ -84,6 +84,16 @@ NativePaidOwnerAuthority::NativePaidOwnerAuthority(
       receipts_(std::less<Key>{}, admission_.allocator<std::pair<const Key, Receipt>>())
 {
 }
+NativePaidExtentRef NativePaidOwnerAuthority::charge(const Receipt& receipt) noexcept
+{
+    return std::visit([](const auto& value) -> NativePaidExtentRef
+        {
+            if constexpr (std::is_same_v<std::remove_cvref_t<decltype(value)>, std::monostate>) return {};
+            else if constexpr (std::is_same_v<typename std::remove_cvref_t<decltype(value)>::element_type,
+                                   NativePaidExtentCharge>) return value.get();
+            else return NativePaidExtentRef(*value);
+        }, receipt.charge);
+}
 void NativePaidOwnerAuthority::record(std::uint8_t channel, std::uint8_t kind, const std::shared_ptr<const void>& owner,
     std::size_t bytes, NativePaidExtentCharge charge)
 {
@@ -91,24 +101,44 @@ void NativePaidOwnerAuthority::record(std::uint8_t channel, std::uint8_t kind, c
     if (channel > 1 || !owner || (!owner.owner_before(empty) && !empty.owner_before(owner)))
         invalid("Native receipt has no actual owner control or valid channel.");
     const Key key{channel, kind, owner.get()};
+    const auto update_charge = [&](Receipt& receipt)
+    {
+        if (!charge.valid())
+            return;
+        const auto store = [&]<class Value>(const Value& value)
+        {
+            if (auto* existing = std::get_if<std::shared_ptr<Value>>(&receipt.charge))
+                **existing = value;
+            else
+                receipt.charge = admission_.shared<Value>(value);
+        };
+        const NativePaidExtentRef value(&charge);
+        if (value.has_native_witness())
+            store(value.native_witness());
+        else if (const auto* proof = value.proof())
+            store(*proof);
+        else
+            store(value.fact());
+    };
     if (const auto found = receipts_.find(key); found != receipts_.end())
     {
         if (found->second.owner.expired())
         {
             // Address reuse is a new physical allocation. The stale weak
             // receipt cannot authenticate it, but its new native receipt can.
-            found->second = {owner, bytes};
-            found->second.charge = std::move(charge);
+            Receipt replacement{owner, bytes};
+            update_charge(replacement);
+            found->second = std::move(replacement);
             return;
         }
         if (!same(found->second.owner, owner) || found->second.bytes != bytes)
             invalid("Native receipt changes its actual shared control or extent.");
-        if (charge.valid())
-            found->second.charge = std::move(charge);
+        update_charge(found->second);
         return;
     }
-    auto [created, inserted] = receipts_.emplace(key, Receipt{owner, bytes});
-    created->second.charge = std::move(charge);
+    Receipt receipt{owner, bytes};
+    update_charge(receipt);
+    receipts_.emplace(key, std::move(receipt));
 }
 bool NativePaidOwnerAuthority::admits(
     std::uint8_t channel, std::uint8_t kind, const std::shared_ptr<const void>& owner, std::size_t bytes) const
@@ -459,9 +489,13 @@ NativePaidExtentCharge GeometryAllocationOwnerAccess::paid_charge(const Geometry
         return {};
     auto* authority = ledger.impl_->native_authority();
     const auto at = authority->receipts_.find({channel, kind, owner.get()});
-    if (at == authority->receipts_.end() || !at->second.charge.matches(kind, owner, bytes))
+    if (at == authority->receipts_.end())
         return {};
-    return at->second.charge;
+    const auto recorded = NativePaidOwnerAuthority::charge(at->second);
+    if (!recorded)
+        return {};
+    auto charge = recorded.value();
+    return charge.matches(kind, owner, bytes) ? std::move(charge) : NativePaidExtentCharge{};
 }
 std::shared_ptr<const geometry_detail::NativeAllocationState> GeometryAllocationOwnerAccess::native_state(
     const GeometryAllocationLedger& ledger) noexcept

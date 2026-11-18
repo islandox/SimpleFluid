@@ -5,6 +5,7 @@
 #include "geometry/details/NativeConstructorStorage.hh"
 #include "geometry/details/NativeSchemaOwner.hh"
 #include <map>
+#include <variant>
 namespace SimpleFluid::geometry_detail
 {
 class NativeTpetraMapAdmission;
@@ -83,10 +84,14 @@ private:
         std::size_t bytes;
         std::weak_ptr<const geometry_detail::NativeRetainedExtent> profile;
         bool profiled = false, concrete = false;
-        NativePaidExtentCharge charge;
+        // Semantic anchors carry no allocation receipt. The active receipt
+        // owns just the exact fact or proof issued for this allocation.
+        std::variant<std::monostate, std::shared_ptr<NativeReceiptFact>,
+            std::shared_ptr<NativeReceiptWithWitness>, std::shared_ptr<NativePaidExtentCharge>> charge;
         std::weak_ptr<const geometry_detail::NativeConstructorStorage> storage;
         std::size_t storage_revision = 0, storage_bytes = 0;
     };
+    [[nodiscard]] static NativePaidExtentRef charge(const Receipt&) noexcept;
     NativePaidOwnerAuthority(geometry_detail::NativeConstructionAdmission, const SealedSourcePrefix&);
     void record(
         std::uint8_t, std::uint8_t, const std::shared_ptr<const void>&, std::size_t, NativePaidExtentCharge = {});

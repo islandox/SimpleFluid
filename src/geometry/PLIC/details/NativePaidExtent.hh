@@ -16,16 +16,32 @@ namespace SimpleFluid::PLIC::details
 {
 class NativeActualBufferProof;
 class NativeGeometryAccounting;
+class NativePaidOwnerAuthority;
 class GeometryAllocationOwnerAccess;
 class GeometryOwnerGraphEditor;
+class NativeReceiptWithWitness;
+namespace paid_extent_detail { struct Row; struct LeafWitnesses; }
 namespace geometry_demand
 {
 struct Admission;
 struct MetadataSink;
 struct NativeAdministrationSink;
 class OwnerEdits;
+class ReceiptEdits;
 struct OwnerRecord;
 struct PageWork;
+/** Successful C++ buffer requests on the calling thread. Operation/arena
+ * scopes supply live and peak admission, including overlapped generations. */
+struct ReceiptWork
+{
+    std::size_t fact_blocks = 0, proof_blocks = 0, leaf_rows = 0, leaf_proofs = 0;
+    std::size_t administration_index = 0;
+};
+[[nodiscard]] ReceiptWork receipt_work() noexcept;
+void reset_receipt_work() noexcept;
+void observe_receipt_block(std::size_t, bool proof) noexcept;
+void observe_receipt_leaf(std::size_t rows, std::size_t proofs) noexcept;
+void observe_receipt_administration(std::size_t) noexcept;
 } // namespace geometry_demand
 /** Separate diagnostic seam: concrete issuers expose actual typed fields;
  * Census never calls the production owner projector. */
@@ -46,12 +62,11 @@ struct NativeFinancialInspectionSink
         weak(context, observation);
     }
 };
-class NativePaidExtentCharge
+/** The complete value of a fixed or metadata receipt. Rich receipts use
+ * these same key and extent fields alongside their original typed proof. */
+class NativeReceiptFact
 {
 public:
-    NativePaidExtentCharge() = default;
-    [[nodiscard]] bool valid() const;
-    [[nodiscard]] bool matches(std::uint8_t kind, const std::shared_ptr<const void>&, std::size_t bytes) const;
     [[nodiscard]] std::shared_ptr<const void> owner() const noexcept { return owner_.lock(); }
     [[nodiscard]] std::shared_ptr<const void> origin() const noexcept { return origin_.lock(); }
     [[nodiscard]] std::size_t bytes() const noexcept { return bytes_; }
@@ -63,6 +78,34 @@ public:
     [[nodiscard]] bool direct_h() const noexcept { return direct_h_; }
     [[nodiscard]] bool publication_h() const noexcept { return publication_h_; }
     [[nodiscard]] bool borrowed_financial() const noexcept { return borrowed_financial_; }
+
+private:
+    friend class NativePaidExtentCharge;
+    friend class NativePaidExtentRef;
+    friend class NativeReceiptWithWitness;
+    friend class NativeOwnerReceipts;
+    friend class GeometryOwnerGraphEditor;
+    [[nodiscard]] bool live() const noexcept;
+    [[nodiscard]] bool same_owner_fact(const NativeReceiptFact&) const noexcept;
+    [[nodiscard]] bool same_origin_fact(const NativeReceiptFact&) const noexcept;
+    const void* address_ = nullptr;
+    const void* origin_address_ = nullptr;
+    // Identity fact only. The actual allocator keeps its domain alive.
+    const void* state_address_ = nullptr;
+    std::weak_ptr<const void> owner_, origin_;
+    std::size_t bytes_ = 0, charge_snapshot_ = 0;
+    std::uint8_t kind_ = 0, proof_ = 0;
+    enum class FixedOwner : std::uint8_t { None, Envelope, State, Counter, Mirror };
+    FixedOwner fixed_owner_ = FixedOwner::None;
+    bool direct_h_ = true, borrowed_financial_ = false, publication_h_ = false;
+};
+
+class NativePaidExtentCharge : public NativeReceiptFact
+{
+public:
+    NativePaidExtentCharge() = default;
+    [[nodiscard]] bool valid() const;
+    [[nodiscard]] bool matches(std::uint8_t kind, const std::shared_ptr<const void>&, std::size_t bytes) const;
     [[nodiscard]] const void* financial_address() const noexcept { return financial_address_; }
     [[nodiscard]] bool same_financial_control(const NativePaidExtentCharge&) const noexcept;
     [[nodiscard]] bool same_physical_origin(const NativePaidExtentCharge& other) const noexcept
@@ -104,6 +147,8 @@ public:
     [[nodiscard]] static NativePaidExtentCharge buffer(const NativeActualBufferProof&);
 
 private:
+    friend class NativePaidExtentRef;
+    friend class NativeReceiptWithWitness;
     friend class NativeGeometryAccounting;
     friend class GeometryAllocationOwnerAccess;
     friend class GeometryOwnerGraphEditor;
@@ -131,32 +176,89 @@ private:
     [[nodiscard]] NativePaidExtentCharge with_weak_observations(
         const NativeWeakOwnerObservation& physical, const NativeWeakOwnerObservation& financial) const;
     [[nodiscard]] NativePaidExtentCharge as_borrowed_financial() const;
-    [[nodiscard]] bool same_owner_fact(const NativePaidExtentCharge&) const noexcept;
-    [[nodiscard]] bool same_origin_fact(const NativePaidExtentCharge&) const noexcept;
     [[nodiscard]] bool same_receipt_fact(const NativePaidExtentCharge&) const noexcept;
+    [[nodiscard]] bool compact() const noexcept;
+    [[nodiscard]] bool native_witness_only() const noexcept;
+    [[nodiscard]] static NativePaidExtentCharge restore(const NativeReceiptWithWitness&) noexcept;
+    explicit NativePaidExtentCharge(const NativeReceiptFact& fact) noexcept : NativeReceiptFact(fact) {}
     static NativePaidExtentCharge made(std::uint8_t, const std::shared_ptr<const void>&, std::size_t,
         const std::shared_ptr<const geometry_detail::NativeAllocationState>&);
-    const void* address_ = nullptr;
-    const void* origin_address_ = nullptr;
-    std::weak_ptr<const void> owner_, origin_;
     std::shared_ptr<const void> lease_pin_;
     std::weak_ptr<const void> financial_observation_;
     NativeWeakOwnerObservation physical_fixed_, financial_fixed_;
     const void* financial_address_ = nullptr;
-    bool direct_h_ = true, borrowed_financial_ = false, publication_h_ = false;
     FinancialProjector financial_projector_ = nullptr;
     FinancialInspector financial_inspector_ = nullptr;
     FinancialValidator financial_validator_ = nullptr;
-    // Identity fact only, never dereferenced or retained. The actual allocator
-    // and owning object keep their domain alive; a proof creates no extra pin.
-    const void* state_address_ = nullptr;
     std::weak_ptr<const geometry_detail::NativeRetainedExtent> profile_;
     std::weak_ptr<const geometry_detail::NativeConstructorStorage> storage_;
-    std::size_t bytes_ = 0, storage_bytes_ = 0, storage_revision_ = 0, charge_snapshot_ = 0;
+    std::size_t storage_bytes_ = 0, storage_revision_ = 0;
     std::uint64_t revision_ = 0;
-    std::uint8_t kind_ = 0, proof_ = 0;
-    enum class FixedOwner : std::uint8_t { None, Envelope, State, Counter, Mirror };
-    FixedOwner fixed_owner_ = FixedOwner::None;
+};
+
+/** Constructor, buffer, and retained-profile proofs all observe one exact
+ * native envelope. Only the storage/profile cases need a second weak control. */
+class NativeReceiptWithWitness : public NativeReceiptFact
+{
+public:
+    NativeReceiptWithWitness() = default;
+    NativeReceiptWithWitness(const NativeReceiptWithWitness&) noexcept = default;
+    NativeReceiptWithWitness& operator=(const NativeReceiptWithWitness&) noexcept = default;
+
+private:
+    friend class NativePaidExtentCharge;
+    friend class NativePaidExtentRef;
+    explicit NativeReceiptWithWitness(const NativePaidExtentCharge&) noexcept;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> envelope_;
+    std::variant<std::monostate, std::weak_ptr<const geometry_detail::NativeRetainedExtent>,
+        std::weak_ptr<const geometry_detail::NativeConstructorStorage>> validation_;
+    std::size_t storage_revision_ = 0;
+};
+
+/** Borrows an immutable receipt or an edit block while its owner is held. */
+class NativePaidExtentRef
+{
+public:
+    NativePaidExtentRef() noexcept = default;
+    NativePaidExtentRef(const NativePaidExtentCharge* value) noexcept
+    {
+        if (value && !value->compact()) receipt_ = value;
+        else receipt_ = static_cast<const NativeReceiptFact*>(value);
+    }
+
+    [[nodiscard]] explicit operator bool() const noexcept
+    { return std::visit([](const auto* receipt) { return receipt != nullptr; }, receipt_); }
+    [[nodiscard]] const NativeReceiptFact& fact() const noexcept
+    { return std::visit([](const auto* receipt) -> const NativeReceiptFact& { return *receipt; }, receipt_); }
+    [[nodiscard]] const NativePaidExtentCharge* proof() const noexcept
+    {
+        const auto* entry = std::get_if<const NativePaidExtentCharge*>(&receipt_);
+        return entry ? *entry : nullptr;
+    }
+    [[nodiscard]] const NativeReceiptWithWitness* stored_witness() const noexcept
+    {
+        const auto* entry = std::get_if<const NativeReceiptWithWitness*>(&receipt_);
+        return entry ? *entry : nullptr;
+    }
+    [[nodiscard]] bool has_native_witness() const noexcept;
+    [[nodiscard]] NativeReceiptWithWitness native_witness() const noexcept;
+    [[nodiscard]] const void* financial_address() const noexcept;
+    [[nodiscard]] bool has_financial_pin() const noexcept;
+    [[nodiscard]] bool has_lifetime_children() const noexcept;
+    [[nodiscard]] bool valid() const;
+    [[nodiscard]] bool same_receipt_fact(NativePaidExtentRef) const noexcept;
+    [[nodiscard]] bool same_physical_origin(NativePaidExtentRef other) const noexcept
+    { return fact().same_owner_fact(other.fact()) && fact().same_origin_fact(other.fact()); }
+    [[nodiscard]] NativePaidExtentCharge value() const noexcept;
+
+private:
+    friend struct paid_extent_detail::Row;
+    friend struct paid_extent_detail::LeafWitnesses;
+    friend class geometry_demand::ReceiptEdits;
+    friend class NativePaidOwnerAuthority;
+    explicit NativePaidExtentRef(const NativeReceiptFact& fact) noexcept : receipt_(&fact) {}
+    explicit NativePaidExtentRef(const NativeReceiptWithWitness& value) noexcept : receipt_(&value) {}
+    std::variant<const NativeReceiptFact*, const NativeReceiptWithWitness*, const NativePaidExtentCharge*> receipt_{};
 };
 /** Closed lazy source-coverage certificate. Source roots may own it;
  * native outputs retain detached subset receipts, never this membership root. */
@@ -209,7 +311,7 @@ public:
     enum class Action : std::uint8_t { Record, Retain, Retire, RetireIfRecorded };
     struct Edit
     {
-        const NativePaidExtentCharge* charge = nullptr;
+        NativePaidExtentRef charge;
         Action action = Action::Record;
         std::size_t sequence = 0;
     };
@@ -217,9 +319,13 @@ public:
     [[nodiscard]] bool empty() const noexcept;
     [[nodiscard]] bool same_root(const NativeOwnerReceipts&) const noexcept;
     [[nodiscard]] bool contains(const NativePaidExtentCharge&) const;
-    [[nodiscard]] bool contains_any(const NativePaidExtentCharge&) const;
-    [[nodiscard]] bool contains_direct_h(const NativePaidExtentCharge&) const;
-    [[nodiscard]] bool contains_publication_h(const NativePaidExtentCharge&) const;
+    [[nodiscard]] bool contains_any(NativePaidExtentRef) const;
+    [[nodiscard]] bool contains_direct_h(NativePaidExtentRef) const;
+    [[nodiscard]] bool contains_publication_h(NativePaidExtentRef) const;
+    [[nodiscard]] bool contains_any(const NativePaidExtentCharge& charge) const { return contains_any(&charge); }
+    [[nodiscard]] bool contains_direct_h(const NativePaidExtentCharge& charge) const { return contains_direct_h(&charge); }
+    [[nodiscard]] bool contains_publication_h(const NativePaidExtentCharge& charge) const
+    { return contains_publication_h(&charge); }
     [[nodiscard]] bool source_only() const noexcept;
     [[nodiscard]] NativeOwnerReceipts recorded(const NativePaidExtentCharge&, geometry_demand::Admission) const;
     [[nodiscard]] NativeOwnerReceipts retained(const NativePaidExtentCharge&, geometry_demand::Admission) const;
@@ -230,6 +336,9 @@ public:
      * subsequent consumption of the sorted batch. */
     [[nodiscard]] NativeOwnerReceipts edited(std::span<Edit>, geometry_demand::Admission,
         std::span<const geometry_demand::OwnerRecord> owner_changes = {}) const;
+    /** Reuse the consumed edit slots for the first/last key transitions. */
+    [[nodiscard]] NativeOwnerReceipts edited_with_presence(std::span<Edit>, geometry_demand::Admission,
+        std::span<const Edit>& presence) const;
     struct Sink
     {
         void* context;
@@ -238,6 +347,12 @@ public:
     void visit_owner(std::uint8_t kind, const std::shared_ptr<const void>&, Sink) const;
     void visit(Sink) const;
     void visit_added(const NativeOwnerReceipts&, Sink, geometry_demand::PageWork* = nullptr) const;
+    struct BorrowedSink
+    {
+        void* context;
+        void (*visit)(void*, NativePaidExtentRef, std::size_t references);
+    };
+    void visit_added_refs(const NativeOwnerReceipts&, BorrowedSink, geometry_demand::PageWork* = nullptr) const;
     void visit_administration(geometry_demand::MetadataSink) const;
     void visit_native_administration_delta(const NativeOwnerReceipts&, geometry_demand::NativeAdministrationSink,
         geometry_demand::PageWork* = nullptr) const;
@@ -249,9 +364,9 @@ private:
         const geometry_demand::OwnerEdits&) const;
     template<class Owners, class Find>
     [[nodiscard]] NativeOwnerReceipts edited_with(std::span<Edit>, geometry_demand::Admission,
-        const Owners& owner_changes, const Find&) const;
+        const Owners& owner_changes, const Find&, std::span<const Edit>* presence = nullptr) const;
     enum class Category { Any, DirectH, PublicationH };
-    [[nodiscard]] bool contains_category(const NativePaidExtentCharge&, Category) const;
+    [[nodiscard]] bool contains_category(NativePaidExtentRef, Category) const;
     struct State;
     std::shared_ptr<const State> state_;
 };

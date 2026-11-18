@@ -97,13 +97,14 @@ void GeometryOwnerGraphEditor::Impl::edit_paid(const NativePaidExtentCharge& cha
     if (fixed)
     {
         const auto previous = std::find_if(recent_fixed_receipts.begin(), recent_fixed_receipts.end(),
-            [&](const NativePaidExtentCharge* value)
+            [&](const NativeReceiptFact* value)
             {
                 return value && value->fixed_owner_ == charge.fixed_owner_ &&
                        value->publication_h() == charge.publication_h() &&
                        value->state_address_ == charge.state_address_ &&
                        value->charge_snapshot_ == charge.charge_snapshot_ &&
-                       value->same_receipt_fact(charge);
+                       value->bytes() == charge.bytes() && value->same_owner_fact(charge) &&
+                       value->same_origin_fact(charge);
             });
         if (previous != recent_fixed_receipts.end())
         {
@@ -120,7 +121,7 @@ void GeometryOwnerGraphEditor::Impl::edit_paid(const NativePaidExtentCharge& cha
     {
         std::move_backward(recent_fixed_receipts.begin(), std::prev(recent_fixed_receipts.end()),
             recent_fixed_receipts.end());
-        recent_fixed_receipts.front() = paid_edits->rows().back().charge;
+        recent_fixed_receipts.front() = &paid_edits->rows().back().charge.fact();
     }
     paid_reference_edits |= action != Action::Record;
 }
