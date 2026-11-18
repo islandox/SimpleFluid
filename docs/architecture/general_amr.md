@@ -1667,7 +1667,8 @@ Owning key maps are available through `export_adaptive_native_publication()`
 with explicit admission for the copies. Publication results retain the physical
 owners they use, with separate accounting for scalar routes and library map
 allowances. Their receipts carry exact weak source and result observations.
-The explicit General VoF draft and FrozenNative paths retain their existing
+Hierarchy-backed adaptive state and initial General VoF balancing consume the
+view. The explicit General VoF draft and FrozenNative paths retain their existing
 verification and ownership contracts.
 
 Mixed import retains only needed original-root join capsules, including aliases

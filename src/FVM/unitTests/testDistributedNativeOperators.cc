@@ -2,10 +2,12 @@
  * @brief Actual native FVM caches after distributed owner migration/adaptation.
  */
 #include "FVM/Operators.hh"
+#include "geometry/mesh/AMR/AdaptiveGeometrySnapshotAccess.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "geometry/mesh/AMR/DistributedCartesianKernel.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
+#include "geometry/mesh/AMR/NativePublicationSession.hh"
 #include "geometry/unitTests/polyhedral_amr_helpers.hh"
 #include "utils/testing_environment.hh"
 #include <Tpetra_Core.hpp>
@@ -19,38 +21,86 @@ namespace
 using namespace SimpleFluid;
 using namespace SimpleFluid::Meshes;
 using LO = DefaultTpetraTypes::local_ordinal_type;
+namespace D = SimpleFluid::Meshes::AMR::adaptive_detail;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 void expect_gradient_and_flux(const SP<const MeshHandle<>>& mesh, VectorCellFieldStored<>& gradient)
 {
+    const auto comm = mesh->owned_cell_map()->getComm();
     const MeshUtils::Vec3 expected{2, -.75, .4};
     // FVM writes owned storage; overlap values require an explicit import.
-    for (std::size_t c = 0; c < mesh->num_owned_cells(); ++c)
-        EXPECT_NEAR((gradient.value(LO(c)) - expected).norm(), 0, 2e-10);
+    D::collective(*comm,
+        [&]
+        {
+            for (std::size_t c = 0; c < mesh->num_owned_cells(); ++c)
+                EXPECT_NEAR((gradient.value(LO(c)) - expected).norm(), 0, 2e-10);
+        });
     gradient.sync_ghosts();
-    for (std::size_t c = 0; c < mesh->num_cells(); ++c)
-        EXPECT_NEAR((gradient.local_value(LO(c)) - expected).norm(), 0, 2e-10);
+    D::collective(*comm,
+        [&]
+        {
+            for (std::size_t c = 0; c < mesh->num_cells(); ++c)
+                EXPECT_NEAR((gradient.local_value(LO(c)) - expected).norm(), 0, 2e-10);
+        });
     ScalarFaceFieldStored<> flux(mesh, "linear_velocity_integrated_flux");
     std::array<double, 2> local{}, global{};
-    for (std::size_t f = 0; f < mesh->num_owned_faces(); ++f)
-    {
-        const auto face = LO(f);
-        const auto value = mesh->face_centroid(face).dot(mesh->face_area_vector(face));
-        flux.set_owned_value(face, value);
-        if (mesh->is_exterior_face(face))
-            local[1] += value;
-    }
+    D::collective(*comm,
+        [&]
+        {
+            for (std::size_t f = 0; f < mesh->num_owned_faces(); ++f)
+            {
+                const auto face = LO(f);
+                const auto value = mesh->face_centroid(face).dot(mesh->face_area_vector(face));
+                flux.set_owned_value(face, value);
+                if (mesh->is_exterior_face(face))
+                    local[1] += value;
+            }
+        });
     flux.sync_ghosts();
-    const auto divergence = FVM::cell_divergence_from_fluxes<DefaultTpetraTypes>(*mesh, flux);
-    ASSERT_EQ(divergence.size(), mesh->num_owned_cells());
-    for (std::size_t c = 0; c < divergence.size(); ++c)
-    {
-        const auto volume = mesh->cell_volume(LO(c));
-        local[0] += volume;
-        EXPECT_NEAR(divergence[c] * volume, 3 * volume, 2e-10 * volume);
-    }
-    Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 2, local.data(), global.data());
+    D::collective(*comm,
+        [&]
+        {
+            const auto divergence = FVM::cell_divergence_from_fluxes<DefaultTpetraTypes>(*mesh, flux);
+            if (divergence.size() != mesh->num_owned_cells())
+                throw std::invalid_argument("Native flux divergence must have one row per owned cell.");
+            for (std::size_t c = 0; c < divergence.size(); ++c)
+            {
+                const auto volume = mesh->cell_volume(LO(c));
+                local[0] += volume;
+                EXPECT_NEAR(divergence[c] * volume, 3 * volume, 2e-10 * volume);
+            }
+        });
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 2, local.data(), global.data());
     EXPECT_GT(global[0], 0);
     EXPECT_NEAR(global[1], 3 * global[0], 2e-10 * global[0]);
+}
+void check_native_operators(const SP<const MeshHandle<>>& mesh)
+{
+    const auto comm = mesh->owned_cell_map()->getComm();
+    ScalarCellFieldStored<> scalar(mesh, "native_linear");
+    VectorCellFieldStored<> gradient(mesh, "native_gradient");
+    auto linear = [](MeshUtils::Vec3 p) { return 1 + 2 * p.x - .75 * p.y + .4 * p.z; };
+    D::collective(*comm,
+        [&]
+        {
+            for (std::size_t c = 0; c < mesh->num_owned_cells(); ++c)
+                scalar.set_owned_value(LO(c), linear(mesh->cell_centroid(LO(c))));
+        });
+    scalar.sync_ghosts();
+    D::collective(*comm,
+        [&]
+        {
+            for (std::size_t c = 0; c < mesh->num_cells(); ++c)
+                EXPECT_DOUBLE_EQ(scalar.local_value(LO(c)), linear(mesh->cell_centroid(LO(c))));
+            auto boundary = [&](int b, std::size_t i)
+            { return linear(mesh->face_centroid(mesh->boundary_face_batch(b).face_lids.at(i))); };
+            auto condition = [&](int b, std::size_t i)
+            { return BoundaryCondition{BoundaryConditionType::Dirichlet, boundary(b, i)}; };
+            FVM::CellGradientCache<DefaultTpetraTypes, MeshHandle<>> cache(mesh);
+            FVM::cell_gradient(scalar, condition, boundary, gradient, cache);
+        });
+    expect_gradient_and_flux(mesh, gradient);
+    EXPECT_EQ(mesh->connectivity_storage_bytes(), 0u);
+    EXPECT_FALSE(mesh->has_materialized_indexer());
 }
 struct Source
 {
@@ -61,49 +111,54 @@ Source detached(unsigned family)
 {
     auto comm = Tpetra::getDefaultComm();
     ::SimpleFluid::Meshes::AMR::AdaptiveBootstrap bootstrap;
-    if (family == 0)
-    {
-        ::SimpleFluid::Meshes::AMR::AMRGrid grid;
-        grid.block_cells = {2, 2, 2};
-        grid.max_level = 2;
-        auto source = std::make_shared<::SimpleFluid::Meshes::AMR::CartesianAMR>(grid);
-        std::weak_ptr<const MultiRegionMesh> weak = source->geometry();
-        std::vector<std::uint64_t> owned;
-        if (comm->getRank() == 0)
-            for (std::uint64_t i = 0; i < 8; ++i)
-                owned.push_back(i);
-        bootstrap = source->detach_owned(owned, {'n', 'a', 't', 'i', 'v', 'e'});
-        source.reset();
-        EXPECT_TRUE(weak.expired());
-    }
-    else if (family == 1)
-    {
-        ::SimpleFluid::Meshes::AMR::ExtrudedAMRGrid grid;
-        grid.xy_nodes = {{.1, .1, 0}, {.3, .1, 0}, {.3, .3, 0}, {.1, .3, 0}};
-        grid.base_cells = {{0, 1, 2, 3}};
-        grid.boundaries = {{0, 1, "wall"}, {1, 2, "wall"}, {2, 3, "wall"}, {3, 0, "wall"}};
-        grid.z_edges = {.1, .3, .5};
-        auto source = std::make_shared<::SimpleFluid::Meshes::AMR::ExtrudedAMR>(grid);
-        std::weak_ptr<const MultiRegionMesh> weak = source->geometry();
-        std::vector<std::uint64_t> owned;
-        if (comm->getRank() == 0)
-            owned = {0, 1};
-        bootstrap = source->detach_owned(owned, {'n', 'a', 't', 'i', 'v', 'e'});
-        source.reset();
-        EXPECT_TRUE(weak.expired());
-    }
-    else
-    {
-        auto source = std::make_shared<::SimpleFluid::Meshes::AMR::PolyhedralAMR>(test::polyhedral_grid());
-        std::weak_ptr<const MultiRegionMesh> weak = source->geometry();
-        std::vector<std::uint64_t> owned;
-        if (comm->getRank() == 0)
-            owned = {0, 1};
-        bootstrap = source->detach_owned(owned, {'n', 'a', 't', 'i', 'v', 'e'});
-        source.reset();
-        EXPECT_TRUE(weak.expired());
-    }
-    auto descriptor = bootstrap.kernel->descriptor();
+    ::SimpleFluid::Meshes::AMR::AdaptiveBytes descriptor;
+    D::collective(*comm,
+        [&]
+        {
+            if (family == 0)
+            {
+                ::SimpleFluid::Meshes::AMR::AMRGrid grid;
+                grid.block_cells = {2, 2, 2};
+                grid.max_level = 2;
+                auto source = std::make_shared<::SimpleFluid::Meshes::AMR::CartesianAMR>(grid);
+                std::weak_ptr<const MultiRegionMesh> weak = source->geometry();
+                std::vector<std::uint64_t> owned;
+                if (comm->getRank() == 0)
+                    for (std::uint64_t i = 0; i < 8; ++i)
+                        owned.push_back(i);
+                bootstrap = source->detach_owned(owned, {'n', 'a', 't', 'i', 'v', 'e'});
+                source.reset();
+                EXPECT_TRUE(weak.expired());
+            }
+            else if (family == 1)
+            {
+                ::SimpleFluid::Meshes::AMR::ExtrudedAMRGrid grid;
+                grid.xy_nodes = {{.1, .1, 0}, {.3, .1, 0}, {.3, .3, 0}, {.1, .3, 0}};
+                grid.base_cells = {{0, 1, 2, 3}};
+                grid.boundaries = {{0, 1, "wall"}, {1, 2, "wall"}, {2, 3, "wall"}, {3, 0, "wall"}};
+                grid.z_edges = {.1, .3, .5};
+                auto source = std::make_shared<::SimpleFluid::Meshes::AMR::ExtrudedAMR>(grid);
+                std::weak_ptr<const MultiRegionMesh> weak = source->geometry();
+                std::vector<std::uint64_t> owned;
+                if (comm->getRank() == 0)
+                    owned = {0, 1};
+                bootstrap = source->detach_owned(owned, {'n', 'a', 't', 'i', 'v', 'e'});
+                source.reset();
+                EXPECT_TRUE(weak.expired());
+            }
+            else
+            {
+                auto source = std::make_shared<::SimpleFluid::Meshes::AMR::PolyhedralAMR>(test::polyhedral_grid());
+                std::weak_ptr<const MultiRegionMesh> weak = source->geometry();
+                std::vector<std::uint64_t> owned;
+                if (comm->getRank() == 0)
+                    owned = {0, 1};
+                bootstrap = source->detach_owned(owned, {'n', 'a', 't', 'i', 'v', 'e'});
+                source.reset();
+                EXPECT_TRUE(weak.expired());
+            }
+            descriptor = bootstrap.kernel->descriptor();
+        });
     return {std::make_shared<const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy>(
                 std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm),
         std::move(descriptor)};
@@ -139,23 +194,7 @@ std::shared_ptr<const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy> 
         moved = std::move(native);
     }
     const auto mesh = moved.mesh;
-    ScalarCellFieldStored<> scalar(mesh, "native_linear");
-    VectorCellFieldStored<> gradient(mesh, "native_gradient");
-    auto linear = [](MeshUtils::Vec3 p) { return 1 + 2 * p.x - .75 * p.y + .4 * p.z; };
-    for (std::size_t c = 0; c < mesh->num_owned_cells(); ++c)
-        scalar.set_owned_value(LO(c), linear(mesh->cell_centroid(LO(c))));
-    scalar.sync_ghosts();
-    for (std::size_t c = 0; c < mesh->num_cells(); ++c)
-        EXPECT_DOUBLE_EQ(scalar.local_value(LO(c)), linear(mesh->cell_centroid(LO(c))));
-    auto boundary = [&](int b, std::size_t i)
-    { return linear(mesh->face_centroid(mesh->boundary_face_batch(b).face_lids[i])); };
-    auto condition = [&](int b, std::size_t i)
-    { return BoundaryCondition{BoundaryConditionType::Dirichlet, boundary(b, i)}; };
-    FVM::CellGradientCache<DefaultTpetraTypes, MeshHandle<>> cache(mesh);
-    FVM::cell_gradient(scalar, condition, boundary, gradient, cache);
-    expect_gradient_and_flux(mesh, gradient);
-    EXPECT_EQ(mesh->connectivity_storage_bytes(), 0u);
-    EXPECT_FALSE(mesh->has_materialized_indexer());
+    check_native_operators(mesh);
     int local_empty = mesh->num_owned_cells() == 0, empty = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
     EXPECT_EQ(empty, std::max(0, comm->getSize() - 2));
@@ -166,6 +205,57 @@ std::shared_ptr<const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy> 
 TEST(DistributedNativeOperators, CartesianActualOwnerMigrationAndRefinementUseFvmGradientCache)
 {
     (void) exercise(detached(0), true);
+}
+TEST(DistributedNativeOperators, QualifiedCartesianPublicationFeedsNativeGradientAndFlux)
+{
+    namespace A = SimpleFluid::Meshes::AMR;
+    const auto source = detached(0);
+    const auto& comm = *source.hierarchy->communicator();
+    const auto publication = A::publish_adaptive_native(*source.hierarchy, A::native_publication_schema(*source.hierarchy));
+    SP<const MeshHandle<>> mesh;
+    Teuchos::RCP<const DefaultTpetraTypes::map_type> map;
+    D::collective(comm,
+        [&]
+        {
+            mesh = publication.mesh();
+            if (!mesh)
+                throw std::invalid_argument("Qualified native operator publication has no MeshHandle.");
+            map = mesh->owned_cell_map();
+            if (publication.key_registry_storage().owns_key_maps ||
+                !D::NativePublicationSession::receipt_matches(D::NativePublicationSession::capture(*source.hierarchy),
+                    publication.partition(), map))
+                throw std::invalid_argument("Native operator fixture requires the qualified Cartesian result.");
+        });
+    const auto before_bind = D::GeometrySnapshotAccess::pipeline_geometry_statistics().constructions;
+    const auto bound = source.hierarchy->with_partition(publication.partition(), map);
+    EXPECT_EQ(D::GeometrySnapshotAccess::pipeline_geometry_statistics().constructions, before_bind);
+    EXPECT_EQ(bound->native_partition(), publication.partition());
+    const auto oracle = A::assemble_adaptive_native(*source.hierarchy, source.descriptor);
+    D::collective(comm,
+        [&]
+        {
+            if (!oracle.mesh || !oracle.partition)
+                throw std::invalid_argument("Full native verification has no operator mesh or partition.");
+            const auto& plan = publication.partition()->plan();
+            const auto& reference = oracle.partition->plan();
+            if (plan.cell_ids() != reference.cell_ids() || plan.face_ids() != reference.face_ids() ||
+                plan.node_ids() != reference.node_ids())
+                throw std::invalid_argument("Qualified native operator routes differ from full verification.");
+            EXPECT_EQ(bound->global_cells(), 8u);
+            EXPECT_EQ(mesh->num_owned_cells(), comm.getRank() == 0 ? 8u : 0u);
+            for (std::size_t c = 0; c < mesh->num_cells(); ++c)
+            {
+                EXPECT_EQ(mesh->cell_centroid(LO(c)), oracle.mesh->cell_centroid(LO(c)));
+                EXPECT_DOUBLE_EQ(mesh->cell_volume(LO(c)), oracle.mesh->cell_volume(LO(c)));
+            }
+            for (std::size_t f = 0; f < mesh->num_faces(); ++f)
+            {
+                EXPECT_EQ(mesh->face_centroid(LO(f)), oracle.mesh->face_centroid(LO(f)));
+                EXPECT_EQ(mesh->face_area_vector(LO(f)), oracle.mesh->face_area_vector(LO(f)));
+                EXPECT_EQ(mesh->is_exterior_face(LO(f)), oracle.mesh->is_exterior_face(LO(f)));
+            }
+        });
+    check_native_operators(mesh);
 }
 TEST(DistributedNativeOperators, ExactDecimalProductRetainsNativeMetricsAndFvmCacheAcrossMigration)
 {
@@ -194,11 +284,17 @@ TEST(DistributedNativeOperators, TypedOwnedMapBindingRejectsReorderedAndForeignG
     auto reordered = Teuchos::rcp(new Pack::map_type(
         Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(), Teuchos::arrayViewFromVector(gids), GO{}, comm));
     EXPECT_THROW(bound->with_partition(publication.partition, reordered), std::invalid_argument);
-    if (comm->getRank() == 0)
-    {
-        std::reverse(gids.begin(), gids.end());
-        gids.back() = GO(source.hierarchy->global_cells());
-    }
+    D::collective(*comm,
+        [&]
+        {
+            if (comm->getRank() == 0)
+            {
+                if (gids.empty())
+                    throw std::invalid_argument("Foreign map fixture requires a rank-zero owned GID.");
+                std::reverse(gids.begin(), gids.end());
+                gids.back() = GO(source.hierarchy->global_cells());
+            }
+        });
     auto foreign = Teuchos::rcp(new Pack::map_type(
         Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(), Teuchos::arrayViewFromVector(gids), GO{}, comm));
     EXPECT_THROW(bound->with_partition(publication.partition, foreign), std::invalid_argument);
@@ -294,19 +390,27 @@ TEST(DistributedNativeOperators, DifferentReceiversRequestPartialProductRunsWith
     EXPECT_EQ(bound->global_cells(), 56u);
     const auto mesh = publication.mesh;
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellKey> requested_full;
-    for (std::size_t c = mesh->num_owned_cells(); c < mesh->num_cells(); ++c)
-        requested_full.push_back(publication.local_keys.at(mesh->cell_global_id(LO(c))));
+    D::collective(*comm,
+        [&]
+        {
+            for (std::size_t c = mesh->num_owned_cells(); c < mesh->num_cells(); ++c)
+                requested_full.push_back(publication.local_keys.at(mesh->cell_global_id(LO(c))));
+        });
     const auto original_owners = hierarchy->lookup_cells(requested_full);
     std::size_t from_zero = 0, min_z = 8, max_z = 0;
-    for (std::size_t i = 0; i < requested_full.size(); ++i)
-        if (original_owners[i].owner == 0)
+    D::collective(*comm,
+        [&]
         {
-            ++from_zero;
-            const auto z =
-                std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(requested_full[i].ancestry).axial.root;
-            min_z = std::min(min_z, std::size_t(z));
-            max_z = std::max(max_z, std::size_t(z));
-        }
+            for (std::size_t i = 0; i < requested_full.size(); ++i)
+                if (original_owners.at(i).owner == 0)
+                {
+                    ++from_zero;
+                    const auto z =
+                        std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(requested_full[i].ancestry).axial.root;
+                    min_z = std::min(min_z, std::size_t(z));
+                    max_z = std::max(max_z, std::size_t(z));
+                }
+        });
     if (comm->getRank() == 1 || (comm->getSize() > 2 && comm->getRank() == 2))
     {
         EXPECT_GT(from_zero, 0u);
@@ -322,15 +426,23 @@ TEST(DistributedNativeOperators, DifferentReceiversRequestPartialProductRunsWith
     ScalarCellFieldStored<> scalar(mesh, "subset_linear");
     VectorCellFieldStored<> gradient(mesh, "subset_gradient");
     const auto linear = [](MeshUtils::Vec3 p) { return 2 * p.x - .75 * p.y + .4 * p.z; };
-    for (std::size_t c = 0; c < mesh->num_owned_cells(); ++c)
-        scalar.set_owned_value(LO(c), linear(mesh->cell_centroid(LO(c))));
+    D::collective(*comm,
+        [&]
+        {
+            for (std::size_t c = 0; c < mesh->num_owned_cells(); ++c)
+                scalar.set_owned_value(LO(c), linear(mesh->cell_centroid(LO(c))));
+        });
     scalar.sync_ghosts();
-    auto boundary = [&](int b, std::size_t i)
-    { return linear(mesh->face_centroid(mesh->boundary_face_batch(b).face_lids[i])); };
-    auto condition = [&](int b, std::size_t i)
-    { return BoundaryCondition{BoundaryConditionType::Dirichlet, boundary(b, i)}; };
-    FVM::CellGradientCache<DefaultTpetraTypes, MeshHandle<>> cache(mesh);
-    FVM::cell_gradient(scalar, condition, boundary, gradient, cache);
+    D::collective(*comm,
+        [&]
+        {
+            auto boundary = [&](int b, std::size_t i)
+            { return linear(mesh->face_centroid(mesh->boundary_face_batch(b).face_lids.at(i))); };
+            auto condition = [&](int b, std::size_t i)
+            { return BoundaryCondition{BoundaryConditionType::Dirichlet, boundary(b, i)}; };
+            FVM::CellGradientCache<DefaultTpetraTypes, MeshHandle<>> cache(mesh);
+            FVM::cell_gradient(scalar, condition, boundary, gradient, cache);
+        });
     expect_gradient_and_flux(mesh, gradient);
     EXPECT_EQ(mesh->connectivity_storage_bytes(), 0u);
     EXPECT_FALSE(mesh->has_materialized_indexer());

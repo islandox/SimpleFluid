@@ -2,6 +2,7 @@
  * @brief Source-pinned named state transactions over actual sparse native maps.
  */
 #include "FVM/DistributedAdaptiveState.hh"
+#include "FVM/details/AdaptiveNativePublicationAdapter.hh"
 #include "FVM/details/DistributedAMROverlap.hh"
 #include "FVM/details/ProtocolTags.hh"
 #include "geometry/VoFWireProtocol.hh"
@@ -56,7 +57,7 @@ struct DistributedAdaptiveState::Data
     std::shared_ptr<const Hierarchy> hierarchy;
     std::shared_ptr<const ::SimpleFluid::Meshes::AMR::FrozenNativeModel> frozen;
     AdaptiveStateOptions options;
-    ::SimpleFluid::Meshes::AMR::AdaptiveNativePublication native;
+    details::AdaptiveNativePublicationAdapter native;
     std::vector<Key> order;
     std::vector<AdaptiveHistoryFrame> histories;
     ::SimpleFluid::Meshes::AMR::AdaptiveBytes schema;
@@ -515,8 +516,9 @@ DistributedAdaptiveState::DistributedAdaptiveState(std::shared_ptr<const Hierarc
         });
     agree_schema(data->schema, comm, hierarchy->options().byte_budget);
     data->collective_id = new_state_id(comm);
-    data->native = ::SimpleFluid::Meshes::AMR::assemble_adaptive_native(
-        *hierarchy, hierarchy->configuration_descriptor(), data->options.additional_full_ghosts);
+    data->native =
+        details::AdaptiveNativePublicationAdapter(::SimpleFluid::Meshes::AMR::publish_adaptive_native(*hierarchy,
+            ::SimpleFluid::Meshes::AMR::native_publication_schema(*hierarchy), data->options.additional_full_ghosts));
     data->hierarchy = hierarchy->with_partition(data->native.partition, data->native.mesh->owned_cell_map());
     ::SimpleFluid::Meshes::AMR::adaptive_detail::collective(*comm,
         [&]
@@ -897,8 +899,8 @@ DistributedAdaptiveState::Plan DistributedAdaptiveState::migrate(
         plan.migration_wire_bytes_ = 0;
         return plan;
     }
-    auto native = ::SimpleFluid::Meshes::AMR::assemble_adaptive_native(
-        *candidate, candidate->configuration_descriptor(), data_->options.additional_full_ghosts);
+    details::AdaptiveNativePublicationAdapter native(::SimpleFluid::Meshes::AMR::publish_adaptive_native(*candidate,
+        ::SimpleFluid::Meshes::AMR::native_publication_schema(*candidate), data_->options.additional_full_ghosts));
     auto bound = candidate->with_partition(native.partition, native.mesh->owned_cell_map());
     bound = hierarchy.apply(migration, bound);
     auto incoming = exchange_owner_packets(packets, comm, limit);
@@ -1061,8 +1063,8 @@ DistributedAdaptiveState::Plan DistributedAdaptiveState::plan_adaptation(
                     throw std::invalid_argument(
                         "Topology remap requires qualified target reconstruction for every history.");
         });
-    auto native = ::SimpleFluid::Meshes::AMR::assemble_adaptive_native(
-        *candidate, candidate->configuration_descriptor(), target_additional_full_ghosts);
+    details::AdaptiveNativePublicationAdapter native(::SimpleFluid::Meshes::AMR::publish_adaptive_native(
+        *candidate, ::SimpleFluid::Meshes::AMR::native_publication_schema(*candidate), target_additional_full_ghosts));
     auto bound = candidate->with_partition(native.partition, native.mesh->owned_cell_map());
     bound = data_->hierarchy->apply(geometry_plan, bound);
     std::shared_ptr<Data> next;
@@ -1130,14 +1132,18 @@ AdaptiveStateStorage DistributedAdaptiveState::storage() const
                                            data_->histories.capacity() * sizeof(AdaptiveHistoryFrame) +
                                            data_->options.additional_full_ghosts.capacity() * sizeof(Key);
     for (const auto& key : data_->order)
-        report.state_metadata_estimate_bytes += ::SimpleFluid::Meshes::AMR::encode_adaptive_key(key).size();
-    report.native_registry_estimate_bytes =
-        data_->native.owned_gids.size() * (sizeof(std::pair<const Key, std::uint64_t>) + 4 * sizeof(void*)) +
-        data_->native.local_keys.size() * (sizeof(std::pair<const std::uint64_t, Key>) + 4 * sizeof(void*));
-    for (const auto& [key, gid] : data_->native.owned_gids)
-        report.native_registry_estimate_bytes += ::SimpleFluid::Meshes::AMR::encode_adaptive_key(key).size();
-    for (const auto& [gid, key] : data_->native.local_keys)
-        report.native_registry_estimate_bytes += ::SimpleFluid::Meshes::AMR::encode_adaptive_key(key).size();
+        report.state_metadata_estimate_bytes += ::SimpleFluid::Meshes::AMR::encoded_adaptive_key_size(key);
+    report.native_registry_estimate_bytes = data_->native.key_registry.scalar_route_bytes;
+    if (data_->native.key_registry.owns_key_maps)
+    {
+        report.native_registry_estimate_bytes +=
+            data_->native.owned_gids.size() * (sizeof(std::pair<const Key, std::uint64_t>) + 4 * sizeof(void*)) +
+            data_->native.local_keys.size() * (sizeof(std::pair<const std::uint64_t, Key>) + 4 * sizeof(void*));
+        for (const auto& [key, gid] : data_->native.owned_gids)
+            report.native_registry_estimate_bytes += ::SimpleFluid::Meshes::AMR::encoded_adaptive_key_size(key);
+        for (const auto& [gid, key] : data_->native.local_keys)
+            report.native_registry_estimate_bytes += ::SimpleFluid::Meshes::AMR::encoded_adaptive_key_size(key);
+    }
     for (const auto& [name, field] : data_->fields)
         report.state_metadata_estimate_bytes += sizeof(decltype(data_->fields)::value_type) + 4 * sizeof(void*) +
                                                 name.first.capacity() + name.second.capacity();

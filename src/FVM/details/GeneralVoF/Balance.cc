@@ -376,12 +376,11 @@ GeneralVoFBalanceResult plan_initial_partition(std::shared_ptr<const GeneralVoF>
                     "Native initial migration bytes differ from exact prepacked application bytes.");
         });
     auto raw = hierarchy.apply(migration);
-    AMR::AdaptiveBytes descriptor;
-    wire::collective(*comm, [&] { descriptor = raw->configuration_descriptor(); });
-    auto native = AMR::assemble_adaptive_native(*raw, descriptor);
+    const auto schema = AMR::native_publication_schema(*raw);
+    auto native = AMR::publish_adaptive_native(*raw, schema);
     std::shared_ptr<const GeneralVoF::Hierarchy> native_bound;
     wire::collective(
-        *comm, [&] { native_bound = raw->with_partition(native.partition, native.mesh->owned_cell_map()); });
+        *comm, [&] { native_bound = raw->with_partition(native.partition(), native.mesh()->owned_cell_map()); });
     auto bound = hierarchy.apply(migration, std::move(native_bound));
     result.native_migration_seconds = maximum(elapsed(migration_start), *comm);
     const auto phase_start = Clock::now();
