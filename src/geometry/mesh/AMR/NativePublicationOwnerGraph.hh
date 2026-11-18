@@ -5,15 +5,9 @@
 #include "geometry/PLIC/details/GeometryOwnerGraph.hh"
 #include "geometry/PLIC/details/NativeGeometryAccounting.hh"
 #include "geometry/details/NativeSchemaOwner.hh"
-#include "geometry/details/NativeConstructorOwnerSink.hh"
-namespace SimpleFluid::Meshes
-{
-struct NativeFragmentDescriptor;
-class NativeFragmentRecord;
-}
+#include "geometry/mesh/NativeFragmentAccess.hh"
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
-class NativeSourceSubsetCoverage;
 class SIMPLEFLUID_LOCAL NativePublicationOwnerGraph
 {
 public:

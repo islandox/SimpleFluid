@@ -169,6 +169,11 @@ std::shared_ptr<const ExplicitRegionProvider> ExplicitRegionProvider::from_certi
 PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> ExplicitRegionProvider::certified_cell_geometry(
     std::size_t cell) const
 {
+    if (d_native_source)
+    {
+        native_cell_check(cell);
+        return d_native_source->geometry;
+    }
     if (!d_cell_certificates.empty())
         return d_cell_certificates.at(cell);
     if (!d_construction)
@@ -179,6 +184,12 @@ PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> ExplicitRegionProvider::certif
 }
 PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> ExplicitRegionProvider::atomic_cell_geometry(std::size_t cell) const
 {
+    if (d_native_source)
+    {
+        native_cell_check(cell);
+        return d_native_source->geometry;
+    }
+
     if (!d_cell_certificates.empty())
     {
         std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> faces;
@@ -201,6 +212,12 @@ PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> ExplicitRegionProvider::atomic
 }
 PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> ExplicitRegionProvider::certified_face_geometry(std::size_t face) const
 {
+    if (d_native_source)
+    {
+        native_face_check(face);
+        return d_native_source->geometry->face_geometry(face);
+    }
+
     if (!d_face_certificates.empty())
         return d_face_certificates.at(face);
     return d_construction ? d_construction->face_geometry(face) : PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>{};
@@ -218,6 +235,11 @@ real_t ExplicitRegionProvider::native_area_magnitude(Vec3 vector)
 }
 real_t ExplicitRegionProvider::face_area(std::size_t face) const
 {
+    if (d_native_source)
+    {
+        native_face_check(face);
+        return d_native_source->geometry->face_geometry(face)->area().as_double();
+    }
     if (!d_face_certificates.empty())
         return d_face_certificates.at(face)->area().as_double();
     return d_construction ? d_construction->face_area(face) : native_area_magnitude(d_faces.at(face).area_vector);
@@ -245,5 +267,42 @@ std::size_t ExplicitRegionProvider::construction_storage_bytes() const
         }
     }
     return bytes + allocations.payload_bytes();
+}
+const ExplicitRegionProvider::NativeSourceCompatibility& ExplicitRegionProvider::source_compatibility() const
+{
+    if (!d_native_source)
+        throw std::invalid_argument("No native source-cell compatibility export.");
+    std::call_once(d_native_export_once,
+        [&]
+        {
+            auto output = std::make_shared<NativeSourceCompatibility>();
+            Cell cell;
+            cell.id = 0;
+            cell.type = MeshUtils::CellType::POLYHEDRON;
+            cell.volume = cell_volume(0);
+            cell.centroid = cell_centroid(0);
+            for (const auto f : cell_faces(0))
+                cell.faces.push_back(f);
+            for (const auto n : cell_nodes(0))
+                cell.nodes.push_back(n);
+            output->cells.emplace(0, std::move(cell));
+            for (std::size_t f = 0; f < d_layout.faces; ++f)
+            {
+                Face face;
+                face.id = f;
+                face.owner = 0;
+                face.neighbor = UnstructuredMesh::invalid_ordinal;
+                face.centroid = face_centroid(f);
+                face.area_vector = face_area_vector(f);
+                face.boundary = UnstructuredMesh::invalid_boundary_id;
+                for (const auto n : face_nodes(f))
+                    face.nodes.push_back(n);
+                output->faces.emplace(f, std::move(face));
+            }
+            for (std::size_t n = 0; n < d_layout.nodes; ++n)
+                output->nodes.emplace(n, node_coordinates(n));
+            d_native_export = std::move(output);
+        });
+    return *d_native_export;
 }
 } // namespace SimpleFluid::Meshes

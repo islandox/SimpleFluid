@@ -16,6 +16,7 @@
 #include "DistributedAdaptiveClosureRecords.hh"
 #include "DistributedAdaptiveIncidence.hh"
 #include "IncidencePhysicalOwners.hh"
+#include "AdaptiveSubfaceSnapshot.hh"
 #include "NativeSourceOwnerStore.hh"
 #include "PersistentContactGroups.hh"
 #include "PersistentContactTraces.hh"
@@ -3477,6 +3478,57 @@ PLIC::details::GeometryNativeAdministration DistributedAdaptiveContactHalo::sour
 {
     return impl_->physical_owners ? impl_->physical_owners->source_administration() :
         PLIC::details::GeometryNativeAdministration{};
+}
+NativeContactSourceCoverage DistributedAdaptiveContactHalo::source_coverage(
+    const geometry_detail::NativeConstructionAdmission& admission)
+{
+    const auto& arena = impl_->arena;
+    const auto& mirror = admission.state()->mirror.owner;
+    if (!impl_->ready || !impl_->evaluated || impl_->native_source_floors_sealed || !arena ||
+        !impl_->physical_owners || !impl_->incidence ||
+        mirror.get() != arena.get() || mirror.owner_before(arena) || arena.owner_before(mirror))
+        throw std::invalid_argument("Contact source funding requires a completed private halo and live admission.");
+    auto& residency = *impl_->physical_owners;
+    if (const auto& old = impl_->incidence->subface_snapshot(); old && old->origin() != arena.get())
+        impl_->incidence->complete_native_subface_rebind(impl_->context);
+    const auto& snapshot = impl_->incidence->subface_snapshot();
+    if (!snapshot || snapshot->origin() != arena.get() || !snapshot->has_native_index_admission())
+        throw std::invalid_argument("Contact source funding lacks its actual native subface snapshot and index.");
+    if (!residency.maintains_legacy_scope() || current_fork_overlap_bytes())
+        throw std::invalid_argument("Contact source funding lacks its finalized legacy import scope.");
+    if (residency.unfunded_source_owners())
+        throw std::invalid_argument("Native contact source retains a dependency without concrete allocation finance.");
+    const auto point_floor = residency.inherited_point_floor_bytes();
+    const auto point_scope = residency.funded_point_scope();
+    if (point_floor && !impl_->incidence->admits_inherited_point_scope(point_scope, point_floor))
+        throw std::invalid_argument("Native contact source lacks its exact inherited point-pool precharge.");
+    NativeContactSourceCoverage result;
+    result.owners = NativeSourceOwnerStore::single(residency.source_owners());
+    result.paid = residency.source_paid_receipts();
+    result.side_indexes = residency.source_side_indexes();
+    using persistent_ordered_detail::checked_sum;
+    const auto snapshot_bytes = checked_sum(snapshot->charged_bytes(),
+        checked_sum(snapshot->index_bytes(), snapshot->exclusive_payload_bytes()));
+    result.projected_admission_bytes = checked_sum(residency.legacy_members().payload_bytes(), snapshot_bytes);
+    const auto cover = [&](const auto& owners, const auto& transfer)
+    {
+        if (!owners.payload_bytes()) return std::shared_ptr<const NativeSourceCoverage>{};
+        auto floor = geometry_detail::NativeAllocationEnvelopeAccess::make<ContactExternalResidencyLease>(
+            admission, external_residency_lease());
+        transfer(*floor.owner);
+        return NativeSourceOwnerStore::manifest_coverage(NativeSourceOwnerStore::single(owners),
+            std::move(floor.owner), admission, snapshot->context().topology, std::move(floor.envelope));
+    };
+    result.coverage[0] = cover(residency.inherited_members(),
+        [&](auto& floor)
+        {
+            residency.transfer_inherited_members(floor, point_floor);
+            if (point_floor) impl_->incidence->disown_inherited_point_scope(point_scope, point_floor);
+        });
+    result.coverage[1] = cover(snapshot->inherited_legacy_owners(),
+        [&](auto& floor) { impl_->incidence->transfer_subface_inherited_scope(floor); });
+    impl_->native_source_floors_sealed = true;
+    return result;
 }
 ContactExternalResidencyLease DistributedAdaptiveContactHalo::external_residency_lease() const
 {

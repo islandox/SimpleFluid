@@ -11,6 +11,19 @@ namespace SimpleFluid::Meshes
 {
 using std::uint8_t;
 using NativeFragmentBytes = std::vector<char>;
+class NativeFragmentOrigin;
+class NativeFragmentAccess;
+/** Publicly defaultable opaque slot preserves aggregate initialization. A
+ * copied slot is harmless: its issuer binds the original descriptor control. */
+class NativeFragmentProvenance
+{
+public:
+    NativeFragmentProvenance() = default;
+
+private:
+    friend class NativeFragmentAccess;
+    std::shared_ptr<const NativeFragmentOrigin> origin_;
+};
 /** Immutable through shared_ptr<const>. Slots are canonical whole-byte parts:
  * Cartesian: topology + three axes; ConstructedProduct: topology base, constructed base,
  * axial values, axial selection. The view holds name/layers/aliases/run address.
@@ -26,6 +39,7 @@ struct NativeFragmentDescriptor
     Kind kind = Kind::Cartesian;
     std::vector<std::shared_ptr<const NativeFragmentBytes>> parts;
     NativeFragmentBytes view;
+    NativeFragmentProvenance provenance;
 };
 /** Transaction/hierarchy-local cache, never a process-global strong registry. */
 class NativeFragmentCache

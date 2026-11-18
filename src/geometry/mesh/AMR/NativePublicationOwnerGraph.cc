@@ -1,5 +1,6 @@
 #include "geometry/mesh/AMR/NativePublicationOwnerGraph.hh"
 #include "geometry/details/NativeAllocationGraph.hh"
+#include "geometry/mesh/AMR/NativeSourceOwnerStore.hh"
 #include <limits>
 #include <stdexcept>
 
@@ -55,6 +56,27 @@ void NativePublicationOwnerGraph::Context::geometry(
 {
     auto& c = *static_cast<Context*>(raw);
     c.graph.geometry(geometry, c.retain);
+}
+void NativePublicationOwnerGraph::Context::coverage(
+    void* raw, const std::shared_ptr<const NativeSourceSubsetCoverage>& coverage)
+{
+    auto& c = *static_cast<Context*>(raw);
+    NativeSourceOwnerStore::record_subset(coverage, c.graph, c.retain);
+    NativeSourceOwnerStore::project_subset(coverage, c.graph, c.retain, c.accounting);
+}
+void NativePublicationOwnerGraph::descriptor(const std::shared_ptr<const NativeFragmentDescriptor>& descriptor,
+    PLIC::details::GeometryOwnerGraphEditor& graph, bool retain, bool prepaid,
+    PLIC::details::NativeGeometryAccounting* accounting)
+{
+    Context context(graph, retain, prepaid, accounting);
+    NativeFragmentAccess::visit_descriptor(descriptor, context.sink, Context::identity, Context::geometry, Context::coverage);
+}
+void NativePublicationOwnerGraph::fragment(const std::shared_ptr<const NativeFragmentRecord>& record,
+    PLIC::details::GeometryOwnerGraphEditor& graph, bool retain, bool prepaid,
+    PLIC::details::NativeGeometryAccounting* accounting)
+{
+    Context context(graph, retain, prepaid, accounting);
+    NativeFragmentAccess::visit(record, context.sink, Context::identity, Context::geometry, Context::coverage);
 }
 void NativePublicationOwnerGraph::validate_state(
     const std::shared_ptr<const geometry_detail::NativeAllocationState>& state)

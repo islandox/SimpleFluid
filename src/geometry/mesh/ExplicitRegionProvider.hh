@@ -5,14 +5,21 @@
 
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/details/NativeConstructorOwnerSink.hh"
 #include "geometry/mesh/MeshRegion.hh"
 #include "geometry/mesh/UnstructuredMesh.hh"
 #include <cmath>
 #include <map>
+#include <mutex>
 #include <set>
 
 namespace SimpleFluid::Meshes
 {
+namespace AMR::adaptive_detail
+{
+class NativeSparseAccess;
+class NativeSourceSubsetCoverage;
+}
 /**
  * The layout describes the global region, while records contain only visible
  * entities. Face adjacency always contains native global cell IDs, including
@@ -45,6 +52,41 @@ public:
     /** @brief Resident node coordinate keyed by its native global ordinal. */
     struct Node { ID id{}; Vec3 point{}; };
 
+    /** Private one-source-cell storage. Original exact geometry is immutable;
+     * only its native ordinal topology is produced, once per source proof. */
+    struct NativeSourceCell
+    {
+        geometry_detail::NativeConstructorStorageOwner metadata;
+        std::shared_ptr<const AMR::adaptive_detail::NativeSourceSubsetCoverage> coverage;
+        PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry;
+        std::vector<ID> offsets, loops;
+        std::vector<PLIC::PointIdentity<ArithmeticMode::Ordinary>> points;
+        double volume = 0;
+        Vec3 centroid{};
+        std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> allocation;
+    };
+    class NativeSourceKey
+    {
+        friend class AMR::adaptive_detail::NativeSparseAccess;
+        NativeSourceKey() = default;
+
+    public:
+        NativeSourceKey(const NativeSourceKey&) = default;
+    };
+    ExplicitRegionProvider(NativeSourceKey, std::shared_ptr<const NativeSourceCell> source)
+        : d_native_source(std::move(source))
+    {
+        if (!d_native_source || !d_native_source->geometry || !d_native_source->allocation ||
+            !d_native_source->allocation->authentic_owner(d_native_source->allocation) ||
+            !d_native_source->allocation->matches(d_native_source))
+            throw std::invalid_argument("Unsealed native source-cell storage.");
+        d_layout = {};
+        d_layout.family = RegionLayout::Family::Explicit;
+        d_layout.cells = 1;
+        d_layout.faces = d_native_source->offsets.size() - 1;
+        d_layout.nodes = d_native_source->points.size();
+        d_layout.template_identity = d_native_source.get();
+    }
     ExplicitRegionProvider(RegionLayout layout, std::vector<Cell> cells,
                            std::vector<Face> faces, std::vector<Node> nodes,
                            std::map<int, std::string> boundaries)
@@ -160,8 +202,11 @@ public:
         std::map<ID, PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>> cell_certificates,
         std::map<ID, PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> face_certificates,
         const std::map<ID, PLIC::PointIdentity<ArithmeticMode::Ordinary>>& node_certificates);
-    bool has_construction() const noexcept { return bool(d_construction) || !d_cell_certificates.empty(); }
-    bool has_local_certificates() const noexcept { return !d_cell_certificates.empty(); }
+    bool has_construction() const noexcept
+    {
+        return bool(d_native_source) || bool(d_construction) || !d_cell_certificates.empty();
+    }
+    bool has_local_certificates() const noexcept { return bool(d_native_source) || !d_cell_certificates.empty(); }
     const std::shared_ptr<const PLIC::PolyhedralComplex<ArithmeticMode::Ordinary>>& construction() const noexcept
     {
         return d_construction;
@@ -173,19 +218,120 @@ public:
     RegionLayout layout() const { return d_layout; }
     const void* storage_identity() const { return this; }
     std::uint64_t geometry_epoch() const noexcept { return 0; }
-    EntityRange<ID> cell_faces(size_t c) const { return range(d_cells.at(c).faces); }
-    EntityRange<ID> cell_nodes(size_t c) const { return range(d_cells.at(c).nodes); }
-    EntityRange<ID> face_nodes(size_t f) const { return range(d_faces.at(f).nodes); }
-    ID owner_cell(size_t f) const { return d_faces.at(f).owner; }
-    ID neighbor_cell(size_t f) const { return d_faces.at(f).neighbor; }
-    MeshUtils::CellType cell_type(size_t c) const { return d_cells.at(c).type; }
-    real_t cell_volume(size_t c) const { return d_cells.at(c).volume; }
-    Vec3 cell_centroid(size_t c) const { return d_cells.at(c).centroid; }
+    EntityRange<ID> cell_faces(size_t c) const
+    {
+        if (d_native_source)
+        {
+            native_cell_check(c);
+            return ordinal_range(d_layout.faces);
+        }
+        return range(d_cells.at(c).faces);
+    }
+    EntityRange<ID> cell_nodes(size_t c) const
+    {
+        if (d_native_source)
+        {
+            native_cell_check(c);
+            return ordinal_range(d_layout.nodes);
+        }
+        return range(d_cells.at(c).nodes);
+    }
+    EntityRange<ID> face_nodes(size_t f) const
+    {
+        if (d_native_source)
+        {
+            native_face_check(f);
+            return {this, f, d_native_source->offsets[f + 1] - d_native_source->offsets[f],
+                [](const void* p, size_t f, size_t i)
+                {
+                    const auto& s = *static_cast<const ExplicitRegionProvider*>(p)->d_native_source;
+                    return s.loops.at(s.offsets[f] + i);
+                }};
+        }
+        return range(d_faces.at(f).nodes);
+    }
+    ID owner_cell(size_t f) const
+    {
+        if (d_native_source)
+        {
+            native_face_check(f);
+            return 0;
+        }
+        return d_faces.at(f).owner;
+    }
+    ID neighbor_cell(size_t f) const
+    {
+        if (d_native_source)
+        {
+            native_face_check(f);
+            return UnstructuredMesh::invalid_ordinal;
+        }
+        return d_faces.at(f).neighbor;
+    }
+    MeshUtils::CellType cell_type(size_t c) const
+    {
+        if (d_native_source)
+        {
+            native_cell_check(c);
+            return MeshUtils::CellType::POLYHEDRON;
+        }
+        return d_cells.at(c).type;
+    }
+    real_t cell_volume(size_t c) const
+    {
+        if (d_native_source)
+        {
+            native_cell_check(c);
+            return d_native_source->volume;
+        }
+        return d_cells.at(c).volume;
+    }
+    Vec3 cell_centroid(size_t c) const
+    {
+        if (d_native_source)
+        {
+            native_cell_check(c);
+            return d_native_source->centroid;
+        }
+        return d_cells.at(c).centroid;
+    }
     real_t face_area(size_t f) const;
-    Vec3 face_centroid(size_t f) const { return d_faces.at(f).centroid; }
-    Vec3 face_area_vector(size_t f) const { return d_faces.at(f).area_vector; }
-    Vec3 node_coordinates(size_t n) const { return d_nodes.at(n); }
-    int boundary_id(size_t f) const { return d_faces.at(f).boundary; }
+    Vec3 face_centroid(size_t f) const
+    {
+        if (d_native_source)
+        {
+            native_face_check(f);
+            return d_native_source->geometry->face_geometry(f)->centroid();
+        }
+        return d_faces.at(f).centroid;
+    }
+    Vec3 face_area_vector(size_t f) const
+    {
+        if (d_native_source)
+        {
+            native_face_check(f);
+            return d_native_source->geometry->face_geometry(f)->area_vector();
+        }
+        return d_faces.at(f).area_vector;
+    }
+    Vec3 node_coordinates(size_t n) const
+    {
+        if (d_native_source)
+        {
+            const auto p = PLIC::point_display<ArithmeticMode::Ordinary>(d_native_source->points.at(n));
+            return {p[0], p[1], p[2]};
+        }
+        return d_nodes.at(n);
+    }
+    int boundary_id(size_t f) const
+    {
+        if (d_native_source)
+        {
+            native_face_check(f);
+            return UnstructuredMesh::invalid_boundary_id;
+        }
+        return d_faces.at(f).boundary;
+    }
     std::vector<int> boundary_batch_ids() const
     {
         std::vector<int> result;
@@ -193,18 +339,28 @@ public:
         return result;
     }
     const std::string& boundary_batch_name(int b) const { return d_boundaries.at(b); }
-    size_t resident_cells() const noexcept { return d_cells.size(); }
-    size_t resident_faces() const noexcept { return d_faces.size(); }
-    size_t resident_nodes() const noexcept { return d_nodes.size(); }
-    bool has_face(ID face) const noexcept { return d_faces.contains(face); }
-    const std::map<ID, Cell>& cell_records() const noexcept { return d_cells; }
-    const std::map<ID, Face>& face_records() const noexcept { return d_faces; }
-    const std::map<ID, Vec3>& node_records() const noexcept { return d_nodes; }
+    size_t resident_cells() const noexcept { return d_native_source ? 1 : d_cells.size(); }
+    size_t resident_faces() const noexcept { return d_native_source ? d_layout.faces : d_faces.size(); }
+    size_t resident_nodes() const noexcept { return d_native_source ? d_layout.nodes : d_nodes.size(); }
+    bool has_face(ID face) const noexcept { return d_native_source ? face < d_layout.faces : d_faces.contains(face); }
+    const std::map<ID, Cell>& cell_records() const { return d_native_source ? source_compatibility().cells : d_cells; }
+    const std::map<ID, Face>& face_records() const { return d_native_source ? source_compatibility().faces : d_faces; }
+    const std::map<ID, Vec3>& node_records() const { return d_native_source ? source_compatibility().nodes : d_nodes; }
     const std::map<int, std::string>& boundary_names() const noexcept { return d_boundaries; }
     std::array<real_t, 2> axial_bounds() const noexcept
     {
         std::array<real_t, 2> result{std::numeric_limits<real_t>::infinity(),
                                   -std::numeric_limits<real_t>::infinity()};
+        if (d_native_source)
+        {
+            for (const auto& identity : d_native_source->points)
+            {
+                const auto p = PLIC::point_display<ArithmeticMode::Ordinary>(identity);
+                result[0] = std::min(result[0], p[2]);
+                result[1] = std::max(result[1], p[2]);
+            }
+            return result;
+        }
         for (const auto& [id, point] : d_nodes)
         {
             result[0] = std::min(result[0], point.z);
@@ -215,6 +371,12 @@ public:
     MeshStorageReport storage_report() const
     {
         MeshStorageReport report;
+        if (d_native_source)
+        {
+            report.topology = d_native_source->metadata.owner->exclusive_bytes();
+            report.objects = sizeof(NativeSourceCell);
+            return report;
+        }
         report.topology = d_cells.size() * sizeof(Cell) + d_faces.size() * sizeof(Face);
         for (const auto& [id, c] : d_cells)
             report.topology += (c.faces.capacity() + c.nodes.capacity()) * sizeof(ID);
@@ -227,6 +389,32 @@ public:
         return report;
     }
 private:
+    friend class AMR::adaptive_detail::NativeSparseAccess;
+    struct NativeSourceCompatibility
+    {
+        std::map<ID, Cell> cells;
+        std::map<ID, Face> faces;
+        std::map<ID, Vec3> nodes;
+    };
+    const NativeSourceCompatibility& source_compatibility() const;
+    mutable std::once_flag d_native_export_once;
+    mutable std::shared_ptr<const NativeSourceCompatibility> d_native_export;
+    std::shared_ptr<const NativeSourceCell> d_native_source;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> d_native_allocation;
+    void native_cell_check(size_t c) const
+    {
+        if (c)
+            throw std::out_of_range("Native source-cell ordinal.");
+    }
+    void native_face_check(size_t f) const
+    {
+        if (f >= d_layout.faces)
+            throw std::out_of_range("Native source-face ordinal.");
+    }
+    EntityRange<ID> ordinal_range(size_t count) const
+    {
+        return {this, 0, count, [](const void*, size_t, size_t i) { return ID(i); }};
+    }
     static bool supported(MeshUtils::CellType type)
     {
         return type == MeshUtils::CellType::HEXAHEDRON || type == MeshUtils::CellType::TRIPRISM

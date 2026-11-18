@@ -5,7 +5,10 @@
 #include "geometry/PLIC/details/NativeCellCodecAccess.hh"
 #include "geometry/PLIC/details/NativePlanarOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryRetentionCensus.hh"
+#include "geometry/mesh/AMR/NativeSourceCoverage.hh"
 #include "geometry/mesh/AMR/NativeSourceOwnerStore.hh"
+#include "geometry/mesh/AMR/ContactPhysicalResidency.hh"
+#include "geometry/mesh/AMR/AdaptiveSubfaceSnapshot.hh"
 #include "pipeline_allocation_operators.inc"
 #include "pipeline_allocation_trace.hh"
 #include <cstdint>
@@ -690,6 +693,41 @@ TEST(NativeGeometryAccounting, RealHolderCensusMatchesIndependentRawRequestsAndF
     EXPECT_EQ(pipeline_trace::summary().all_live, 0u);
 }
 namespace A = SimpleFluid::Meshes::AMR::adaptive_detail;
+struct PhysicalSourceFixture
+{
+    std::shared_ptr<A::Budget> body_arena = std::make_shared<A::Budget>(A::Budget{cap});
+    std::shared_ptr<SimpleFluid::Meshes::NativeFragmentDescriptor> descriptor =
+        std::make_shared<SimpleFluid::Meshes::NativeFragmentDescriptor>();
+    SimpleFluid::Meshes::AMR::AdaptiveLeaf leaf;
+    A::AdaptiveLeafBodyUsage body;
+    std::size_t physical_bytes = 0;
+    PhysicalSourceFixture()
+    {
+        descriptor->view.assign(71, 'g');
+        descriptor->parts.push_back(std::make_shared<const SimpleFluid::Meshes::AMR::AdaptiveBytes>(127, 's'));
+        physical_bytes = sizeof(*descriptor) + descriptor->view.capacity() +
+            descriptor->parts.capacity() * sizeof(descriptor->parts[0]) +
+            sizeof(*descriptor->parts.front()) + descriptor->parts.front()->capacity();
+        leaf.key = {0, SimpleFluid::Meshes::AMR::ConvexCellAncestry{1, {}}};
+        leaf.native_recipe = descriptor;
+        A::AdaptiveLeafBodyDelta delta(body_arena);
+        delta.record(std::span(&leaf, 1), true);
+        body = delta.apply({}).usage;
+    }
+};
+struct RealFloor
+{
+    std::shared_ptr<A::Budget> arena = std::make_shared<A::Budget>(A::Budget{cap});
+    std::shared_ptr<std::size_t> total = std::make_shared<std::size_t>(0);
+    std::shared_ptr<A::ContactExternalResidencyLease> floor =
+        std::make_shared<A::ContactExternalResidencyLease>(arena, total);
+    explicit RealFloor(std::size_t bytes) { floor->resize(bytes); }
+};
+struct SourceUnionFrame
+{
+    A::NativeSourceOwnerStore store;
+    D::GeometryOwnerUnion owners;
+};
 TEST(NativeGeometryAccounting, TypedEnvelopeFirstAndLastAreIndependentOfFlatScalarPins)
 {
     auto arena = std::make_shared<A::Budget>(A::Budget{cap});
@@ -917,6 +955,46 @@ TEST(NativeGeometryAccounting, PaidReceiptBatchChecksReferenceOrderAndReducesPag
     EXPECT_THROW((void) batch.edited(invalid, demand), SimpleFluid::PLIC::GeometryError);
     EXPECT_TRUE(batch.contains(charge));
 }
+SourceUnionFrame source_union_frame(const SourceUnionFrame& previous, const PhysicalSourceFixture& source,
+    RealFloor& floor, pipeline_trace::Phase phase, std::size_t revision)
+{
+    const auto previous_phase = pipeline_trace::phase;
+    pipeline_trace::phase = phase;
+    struct Restore { pipeline_trace::Phase phase; ~Restore() { pipeline_trace::phase = phase; } } restore{previous_phase};
+    const auto counter = N::NativeConstructionCounterAccess::create<Counter>(cap, 0,
+        A::NativeSourceOwnerStore::mirror(floor.arena));
+    const N::NativeConstructionAdmission admission(counter);
+    const auto coverage = A::NativeSourceOwnerStore::body_coverage(source.body, A::AdaptiveLeafBodyRole::Leaf,
+        floor.floor, admission, revision);
+    std::array<D::OwnerManifestPair, 4> components;
+    components[0] = source.body.owners();
+    SourceUnionFrame result;
+    result.store = A::NativeSourceOwnerStore::assemble(previous.store, std::move(components), admission, nullptr,
+        {source.body.administration(), {}}, coverage);
+    SimpleFluid::PLIC::GeometryAllocationLedger ordinary, bounded;
+    std::size_t cursor = 0;
+    D::GeometryAllocationOwnerAccess::begin_native_bookkeeping(ordinary, admission, cursor, cap);
+    D::GeometryAllocationOwnerAccess::begin_native_bookkeeping(bounded, admission, cursor, cap);
+    result.owners = result.store.replace_in(previous.store, previous.owners, ordinary, bounded, cursor, cap);
+    return result;
+}
+void expect_raw_origin(const SourceUnionFrame& frame, const RealFloor& floor, pipeline_trace::Phase phase,
+    std::size_t group_bytes)
+{
+    // Every allocation during a phase uses that real arena's admitted allocator.
+    // Original physical source/floor fixtures predate capture. The only
+    // explicit nonallocator credit is the actual group and documented scalar
+    // arena upper extent; no production owner visitor computes this oracle.
+    const auto raw = pipeline_trace::summary();
+    const auto native = raw.phase[static_cast<unsigned>(phase)].live;
+    const auto scalar = native ? sizeof(A::Budget) + 4 * sizeof(void*) : 0;
+    const auto paid = frame.owners.native_paid_bytes(floor.arena);
+    const auto direct = frame.owners.direct_h_paid_bytes(floor.arena);
+    const pipeline_trace::Pause pause;
+    EXPECT_FALSE(pipeline_trace::overflow.load());
+    EXPECT_EQ(paid, native + scalar + group_bytes);
+    EXPECT_EQ(direct, native + scalar);
+}
 TEST(NativeGeometryAccounting, OriginEditsKeepNonzeroTotalsAcrossByteBoundaries)
 {
     using Assignment = D::NativePaidOriginTotals::Assignment;
@@ -936,6 +1014,441 @@ TEST(NativeGeometryAccounting, OriginEditsKeepNonzeroTotalsAcrossByteBoundaries)
     EXPECT_EQ(old.bytes(arenas[0]), 3016u);
     EXPECT_EQ(old.bytes(arenas[1]), 120u);
     EXPECT_EQ(old.bytes(arenas[2]), 0u);
+}
+TEST(NativeGeometryAccounting, MirroredUnionAndUnchangedMembershipArenaSwitchMatchIndependentRawOrigins)
+{
+    PhysicalSourceFixture source;
+    RealFloor first(source.physical_bytes), second(source.physical_bytes), third(source.physical_bytes);
+    ASSERT_EQ(source.body.payload_bytes(), source.physical_bytes);
+    SourceUnionFrame current;
+    const Trace trace;
+    current = source_union_frame({}, source, first, pipeline_trace::Phase::Candidate, 1);
+    expect_raw_origin(current, first, pipeline_trace::Phase::Candidate, source.physical_bytes);
+    const auto old_membership = current.store.binding().source_group();
+    auto old_group = *old_membership;
+    auto next = source_union_frame(current, source, second, pipeline_trace::Phase::Directory, 2);
+    {
+        std::size_t visits = 0;
+        const auto& next_group = *next.store.binding().source_group();
+        next_group.visit_delta(old_group, {&visits, [](void* raw, auto, const auto&, auto, bool)
+            { ++*static_cast<std::size_t*>(raw); }});
+        const pipeline_trace::Pause pause;
+        EXPECT_TRUE(next_group.same_membership(old_group));
+        EXPECT_EQ(visits, 0u);
+    }
+    old_group = {};
+    // Preserve three real generations first. Their original arena categories
+    // remain independently valid; equal membership/bytes cannot change origin.
+    auto newest = source_union_frame(next, source, third, pipeline_trace::Phase::Transport, 3);
+    {
+        const pipeline_trace::Pause pause;
+        EXPECT_NO_THROW(current.store.require_current());
+        EXPECT_NO_THROW(next.store.require_current());
+        EXPECT_NO_THROW(newest.store.require_current());
+    }
+    current = {};
+    next = {};
+    newest.store = {};
+    first.floor.reset();
+    second.floor.reset();
+    third.floor.reset();
+    {
+        const auto raw = pipeline_trace::summary();
+        const pipeline_trace::Pause pause;
+        EXPECT_EQ(raw.phase[static_cast<unsigned>(pipeline_trace::Phase::Candidate)].live, 0u);
+        EXPECT_EQ(raw.phase[static_cast<unsigned>(pipeline_trace::Phase::Directory)].live, 0u);
+    }
+    expect_raw_origin(newest, first, pipeline_trace::Phase::Candidate, 0);
+    expect_raw_origin(newest, second, pipeline_trace::Phase::Directory, 0);
+    expect_raw_origin(newest, third, pipeline_trace::Phase::Transport, source.physical_bytes);
+    {
+        const pipeline_trace::Pause pause;
+        const auto foreign = std::shared_ptr<const void>(third.arena.get(), [](const void*) {});
+        EXPECT_THROW((void) newest.owners.native_paid_bytes(foreign), std::exception);
+        EXPECT_THROW((void) newest.owners.direct_h_paid_bytes(foreign), std::exception);
+    }
+    newest = {};
+    const pipeline_trace::Pause pause;
+    EXPECT_EQ(pipeline_trace::summary().all_live, 0u);
+}
+TEST(NativeGeometryAccounting, SharedAndCopiedReceiptLeavesKeepExactDetachedPinEdgesAfterStructuralRelease)
+{
+    PhysicalSourceFixture source;
+    RealFloor floor(source.physical_bytes);
+    std::vector<std::byte> probe_storage(4 * 1024 * 1024);
+    const auto selected = [&]
+    {
+        G::OwnerRecord result;
+        source.body.owners().owners[0].visit([&](const auto& row) { if (!result.owner) result = row; });
+        return result;
+    }();
+    ASSERT_TRUE(selected.owner);
+    D::NativeOwnerReceipts base, alias, copied;
+    std::weak_ptr<const A::NativeSourceOwnerCoverage> weak_finance;
+    std::weak_ptr<const A::NativeSourceCoverage> weak_source;
+    const Trace trace;
+    {
+        const auto counter = N::NativeConstructionCounterAccess::create<Counter>(cap, 0,
+            A::NativeSourceOwnerStore::mirror(floor.arena));
+        const N::NativeConstructionAdmission admission(counter);
+        auto group = A::NativeSourceOwnerStore::body_coverage(source.body, A::AdaptiveLeafBodyRole::Leaf,
+            floor.floor, admission, 1);
+        weak_source = group;
+        A::NativeSourceCoverageBroker broker;
+        std::shared_ptr<const A::NativeSourceSubsetCoverage> subset;
+        {
+            A::NativeSourceCoverageTransaction transaction(broker, admission);
+            subset = transaction.collect(group, std::span(&selected, 1));
+            transaction.prepare();
+            transaction.commit();
+        }
+        weak_finance = subset->owners().front();
+        {
+            std::size_t cursor = 0;
+            D::GeometryOwnerGraphEditor capture({}, 0, cursor, cap, nullptr, nullptr, admission.state());
+            A::NativeSourceOwnerStore::record_subset(subset, capture);
+            // A receipt can be independently retained after its structural
+            // subset wrapper disappears. It pins only the selected token.
+            (void) capture.finish();
+            base = capture.paid_receipts();
+        }
+        alias = base;
+        std::size_t work = 0;
+        const G::Admission demand{&work, [](void* raw, std::size_t bytes)
+            { *static_cast<std::size_t*>(raw) += bytes; }, nullptr, admission.state()};
+        copied = base.recorded(D::NativePaidExtentCharge::state(admission.state()), demand);
+        {
+            const pipeline_trace::Pause pause;
+            EXPECT_TRUE(base.same_root(alias));
+            EXPECT_FALSE(base.same_root(copied));
+        }
+        G::GeometryOwnerManifest physical;
+        const auto edit = [&](const D::NativeOwnerReceipts& input, bool retain)
+        {
+            std::size_t cursor = 0;
+            D::GeometryOwnerGraphEditor graph(physical, 0, cursor, cap, nullptr, nullptr, admission.state());
+            struct Context { D::GeometryOwnerGraphEditor& graph; bool retain; } context{graph, retain};
+            const auto sink = G::MetadataSink{&context,
+                [](void* raw, const auto& owner, std::size_t payload, std::size_t)
+                { auto& context = *static_cast<Context*>(raw); return context.graph.external(owner, payload, context.retain); },
+                [](void* raw, const auto& owner, std::size_t bytes)
+                { auto& context = *static_cast<Context*>(raw); return context.graph.external(owner, bytes, context.retain); }}
+                .with_financial(graph, retain);
+            input.visit_administration(sink);
+            physical = graph.finish();
+        };
+        edit(base, true);
+        edit(alias, true);
+        edit(copied, true);
+        {
+            const auto finance = weak_finance.lock();
+            const pipeline_trace::Pause pause;
+            ASSERT_TRUE(finance);
+            EXPECT_EQ(physical.references(0, D::GeometryOwnerGraphEditor::external_kind(), finance), 2u);
+        }
+        edit(base, false); // shared receipt header still has another root hold
+        {
+            const auto finance = weak_finance.lock();
+            const pipeline_trace::Pause pause;
+            EXPECT_EQ(physical.references(0, D::GeometryOwnerGraphEditor::external_kind(), finance), 2u);
+        }
+        edit(copied, false);
+        {
+            const auto finance = weak_finance.lock();
+            const pipeline_trace::Pause pause;
+            EXPECT_EQ(physical.references(0, D::GeometryOwnerGraphEditor::external_kind(), finance), 1u);
+        }
+        edit(alias, false);
+        {
+            const pipeline_trace::Pause pause;
+            EXPECT_EQ(physical.owner_count(), 0u);
+        }
+        // Reverse removal order exercises the other shared frontier.
+        edit(base, true); edit(alias, true); edit(copied, true);
+        edit(alias, false); edit(base, false); edit(copied, false);
+        {
+            const pipeline_trace::Pause pause;
+            EXPECT_EQ(physical.owner_count(), 0u);
+        }
+        subset.reset();
+        group.reset();
+        broker = {};
+        floor.floor.reset();
+        {
+            const pipeline_trace::Pause pause;
+            EXPECT_TRUE(weak_source.expired());
+            EXPECT_FALSE(weak_finance.expired());
+            EXPECT_EQ(*floor.total, selected.bytes);
+        }
+        weak_source.reset(); // release its actual shared control tail before raw comparison
+        D::retention::ProbeScratch scratch(probe_storage);
+        const std::array roots{D::retention::root(base), D::retention::root(alias), D::retention::root(copied)};
+        const auto report = D::retention::inspect_retention(roots, {}, scratch);
+        const auto raw = pipeline_trace::summary();
+        const auto scalar_profiles = sizeof(A::Budget) + sizeof(std::size_t) + 8 * sizeof(void*);
+        const pipeline_trace::Pause pause;
+        ASSERT_TRUE(report.complete()) << report.detail;
+        EXPECT_EQ(report.owner_union.bytes, raw.all_live + scalar_profiles);
+    }
+    base = {}; alias = {}; copied = {};
+    {
+        const pipeline_trace::Pause pause;
+        EXPECT_TRUE(weak_finance.expired());
+        EXPECT_EQ(*floor.total, 0u);
+    }
+    weak_finance.reset();
+    const pipeline_trace::Pause pause;
+    EXPECT_EQ(pipeline_trace::summary().all_live, 0u);
+}
+TEST(NativeGeometryAccounting, EmptyRemovalDoesNotCreditLiveOutsideOutputAndCanReAddTheSamePhysicalSource)
+{
+    PhysicalSourceFixture source;
+    RealFloor floor(source.physical_bytes);
+    SourceUnionFrame current;
+    N::NativeTrackedOwner<std::array<std::byte, 20>> outside;
+    const Trace trace;
+    current = source_union_frame({}, source, floor, pipeline_trace::Phase::Candidate, 1);
+    {
+        const auto counter = N::NativeConstructionCounterAccess::create<Counter>(cap, 0,
+            A::NativeSourceOwnerStore::mirror(floor.arena));
+        const N::NativeConstructionAdmission admission(counter);
+        outside = N::NativeAllocationEnvelopeAccess::make<std::array<std::byte, 20>>(admission);
+    }
+    const auto remove_all = [&](SourceUnionFrame& frame)
+    {
+        const auto counter = N::NativeConstructionCounterAccess::create<Counter>(cap, 0,
+            A::NativeSourceOwnerStore::mirror(floor.arena));
+        const N::NativeConstructionAdmission admission(counter);
+        SimpleFluid::PLIC::GeometryAllocationLedger ordinary, bounded;
+        std::size_t cursor = 0;
+        D::GeometryAllocationOwnerAccess::begin_native_bookkeeping(ordinary, admission, cursor, cap);
+        D::GeometryAllocationOwnerAccess::begin_native_bookkeeping(bounded, admission, cursor, cap);
+        A::NativeSourceOwnerStore empty;
+        auto owners = empty.replace_in(frame.store, frame.owners, ordinary, bounded, cursor, cap);
+        frame = {std::move(empty), std::move(owners)};
+    };
+    remove_all(current);
+    remove_all(current);
+    {
+        const pipeline_trace::Pause pause;
+        EXPECT_EQ(current.owners.resident_bytes(), 0u);
+        EXPECT_EQ(current.owners.native_paid_bytes(floor.arena), 0u);
+        EXPECT_EQ(current.owners.direct_h_paid_bytes(floor.arena), 0u);
+        EXPECT_GT(floor.arena->used, source.physical_bytes);
+        EXPECT_TRUE(outside.owner);
+    }
+    current = source_union_frame(current, source, floor, pipeline_trace::Phase::Directory, 2);
+    {
+        const auto direct = current.owners.direct_h_paid_bytes(floor.arena);
+        const auto total = current.owners.native_paid_bytes(floor.arena);
+        const pipeline_trace::Pause pause;
+        EXPECT_EQ(total - direct, source.physical_bytes);
+        EXPECT_NO_THROW(current.store.require_current());
+    }
+    remove_all(current);
+    outside = {};
+    floor.floor.reset();
+    const pipeline_trace::Pause pause;
+    EXPECT_EQ(pipeline_trace::summary().all_live, 0u);
+}
+TEST(NativeGeometryAccounting, ReceiptIndexExactPeakAndOneByteShortPreserveAcceptedRootAndFunding)
+{
+    PhysicalSourceFixture source;
+    RealFloor floor(source.physical_bytes);
+    G::OwnerRecord selected;
+    source.body.owners().owners[0].visit([&](const auto& row) { if (!selected.owner) selected = row; });
+    const auto counter = N::NativeConstructionCounterAccess::create<Counter>(cap, 0,
+        A::NativeSourceOwnerStore::mirror(floor.arena));
+    const N::NativeConstructionAdmission admission(counter);
+    auto group = A::NativeSourceOwnerStore::body_coverage(source.body, A::AdaptiveLeafBodyRole::Leaf,
+        floor.floor, admission, 1);
+    A::NativeSourceCoverageBroker broker;
+    std::shared_ptr<const A::NativeSourceSubsetCoverage> subset;
+    {
+        A::NativeSourceCoverageTransaction transaction(broker, admission);
+        subset = transaction.collect(group, std::span(&selected, 1));
+        transaction.prepare(); transaction.commit();
+    }
+    D::NativeOwnerReceipts accepted;
+    {
+        std::size_t cursor = 0;
+        D::GeometryOwnerGraphEditor graph({}, 0, cursor, cap, nullptr, nullptr, admission.state());
+        A::NativeSourceOwnerStore::record_subset(subset, graph);
+        (void) graph.finish(); accepted = graph.paid_receipts();
+    }
+    const auto original = accepted;
+    const auto token = subset->owners().front();
+    const auto floor_bytes = floor.floor->bytes(), arena_used = floor.arena->used, leased = *floor.total;
+    const auto baseline = admission.counters().used;
+    const auto charge = D::NativePaidExtentCharge::state(admission.state());
+    std::size_t work = 0;
+    const G::Admission demand{&work, [](void* raw, std::size_t bytes)
+        { *static_cast<std::size_t*>(raw) += bytes; }, nullptr, admission.state()};
+    counter.owner()->peak = baseline;
+    {
+        const auto pilot = accepted.recorded(charge, demand);
+        ASSERT_FALSE(pilot.same_root(accepted));
+    }
+    const auto required = counter.owner()->peak - baseline;
+    ASSERT_GT(required, 0u);
+    ASSERT_EQ(admission.counters().used, baseline);
+    counter.owner()->limit = baseline + required - 1;
+    EXPECT_THROW((void) accepted.recorded(charge, demand), std::exception);
+    EXPECT_TRUE(accepted.same_root(original));
+    EXPECT_EQ(admission.counters().used, baseline);
+    EXPECT_EQ(floor.floor->bytes(), floor_bytes);
+    EXPECT_EQ(floor.arena->used, arena_used);
+    EXPECT_EQ(*floor.total, leased);
+    EXPECT_TRUE(token->matches(selected.key.kind, selected.owner, selected.bytes));
+    counter.owner()->limit = baseline + required;
+    const auto exact = accepted.recorded(charge, demand);
+    EXPECT_FALSE(exact.same_root(accepted));
+    EXPECT_LE(admission.counters().used, counter.owner()->limit);
+    EXPECT_TRUE(accepted.same_root(original));
+}
+TEST(NativeGeometryAccounting, RealIntrinsicAndExternalSubsetCategoriesDeduplicateTheSamePhysicalOwner)
+{
+    auto arena = std::make_shared<A::Budget>(A::Budget{cap});
+    std::vector<std::size_t> slots{0, 2, 4};
+    std::size_t transferred = slots.capacity() * sizeof(slots[0]);
+    const auto ring_body_bytes = sizeof(A::SharedSubfaceRing) + transferred;
+    arena->add(transferred);
+    auto ring = A::SharedSubfaceRing::transfer(slots, *arena, arena, transferred);
+    ASSERT_EQ(transferred, 0u);
+    const auto ring_bytes = ring->charged_bytes();
+    auto total = std::make_shared<std::size_t>(0);
+    auto floor = std::make_shared<A::ContactExternalResidencyLease>(arena, total);
+    floor->resize(ring_body_bytes);
+    SourceUnionFrame frame;
+    const Trace trace;
+    {
+        const auto counter = N::NativeConstructionCounterAccess::create<Counter>(cap, 0,
+            A::NativeSourceOwnerStore::mirror(arena));
+        const N::NativeConstructionAdmission admission(counter);
+        const G::OwnerRecord selected{
+            {0, D::GeometryOwnerGraphEditor::external_kind(), ring.get()}, ring, ring_body_bytes, 1};
+        // First detach a genuinely pre-admitted legacy body floor. The
+        // selected manifest authenticates the original ring before a native
+        // contact graph has registered its independent intrinsic receipt.
+        std::size_t membership_cursor = 0;
+        D::GeometryOwnerGraphEditor membership({}, 0, membership_cursor, cap, nullptr, nullptr, admission.state());
+        membership.owner(selected, true);
+        auto coverage = A::NativeSourceOwnerStore::manifest_coverage(
+            A::NativeSourceOwnerStore::single(membership.finish()), floor, admission, 1);
+        A::NativeSourceCoverageBroker broker;
+        std::shared_ptr<const A::NativeSourceSubsetCoverage> subset;
+        {
+            A::NativeSourceCoverageTransaction transaction(broker, admission);
+            subset = transaction.collect(coverage, std::span(&selected, 1));
+            transaction.prepare(); transaction.commit();
+        }
+        auto contact = std::make_unique<A::ContactPhysicalResidency>(arena);
+        contact->retain(A::ContactPhysicalResidency::Role::SubfaceRing, ring, ring_bytes, ring->origin());
+        auto contact_owners = A::NativeSourceOwnerStore::single(contact->source_owners());
+        {
+            const pipeline_trace::Pause pause;
+            ASSERT_TRUE(contact->source_owners().admits(0, selected.key.kind, selected.owner, ring_body_bytes));
+            EXPECT_LT(ring_body_bytes, ring_bytes);
+            EXPECT_GT(contact_owners.payload_bytes(), ring_bytes);
+            ASSERT_EQ(subset->bytes(), ring_body_bytes);
+            EXPECT_EQ(floor->bytes(), 0u);
+        }
+        {
+            // An actual same-arena intrinsic receipt funds a new selection.
+            // Use a fresh broker to exercise current collection independently
+            // of the outstanding legacy lease and test both categories below.
+            A::NativeSourceCoverageBroker current;
+            A::NativeSourceCoverageTransaction transaction(current, admission);
+            const auto redundant =
+                transaction.collect(coverage, std::span(&selected, 1), &contact->source_paid_receipts());
+            transaction.prepare(); transaction.commit();
+            const pipeline_trace::Pause pause;
+            EXPECT_TRUE(redundant->owners().empty());
+            EXPECT_EQ(floor->bytes(), 0u);
+            EXPECT_EQ(*total, ring_body_bytes);
+        }
+        std::array<D::NativeOwnerReceipts, 4> receipts;
+        // Contact administration has this exact receipt root as a live
+        // input. The detached floor has its own receipt root and its own
+        // lifetime. Preserve both actual inputs when composing the source.
+        receipts[0] = contact->source_paid_receipts();
+        {
+            std::size_t cursor = 0;
+            D::GeometryOwnerGraphEditor graph({}, 0, cursor, cap, nullptr, nullptr, admission.state());
+            A::NativeSourceOwnerStore::record_subset(subset, graph);
+            (void) graph.finish();
+            receipts[1] = graph.paid_receipts();
+        }
+        std::size_t direct = 0, external = 0;
+        struct Categories { std::size_t& direct; std::size_t& external; const void* ring; }
+            categories{direct, external, ring.get()};
+        for (const auto& component : receipts)
+            component.visit({&categories, [](void* raw, const D::NativePaidExtentCharge& charge, std::size_t)
+                {
+                    auto& context = *static_cast<Categories*>(raw);
+                    if (charge.owner_address() == context.ring)
+                        ++(charge.direct_h() ? context.direct : context.external);
+                }});
+        {
+            const pipeline_trace::Pause pause;
+            EXPECT_EQ(direct, 1u);
+            EXPECT_EQ(external, 1u);
+        }
+        {
+            using Receipts = D::NativeOwnerReceipts;
+            Receipts both = receipts[0];
+            std::size_t memory = 0;
+            const G::Admission demand{&memory, [](void* raw, std::size_t bytes)
+                { *static_cast<std::size_t*>(raw) += bytes; }, nullptr, admission.state()};
+            struct Project { Receipts& both; G::Admission demand; } projection{both, demand};
+            receipts[1].visit({&projection, [](void* raw, const D::NativePaidExtentCharge& charge, std::size_t)
+                {
+                    auto& p = *static_cast<Project*>(raw);
+                    p.both = p.both.retained(charge, p.demand);
+                }});
+            auto removed = selected;
+            removed.references = 0;
+            auto pruned = both.edited({}, demand, std::span(&removed, 1));
+            const pipeline_trace::Pause pause;
+            for (const auto& input : {receipts[0], receipts[1]})
+                input.visit({&pruned, [](void* raw, const auto& receipt, std::size_t)
+                    {
+                        if (receipt.financial_address())
+                            EXPECT_FALSE(static_cast<const Receipts*>(raw)->contains(receipt));
+                    }});
+        }
+        std::array<D::OwnerManifestPair, 4> components;
+        components[0] = std::move(contact_owners);
+        frame.store = A::NativeSourceOwnerStore::assemble({}, std::move(components), admission, nullptr, {contact->source_administration(), {}}, coverage, {}, std::move(receipts));
+        {
+            SimpleFluid::PLIC::GeometryAllocationLedger ordinary, bounded;
+            std::size_t cursor = 0;
+            D::GeometryAllocationOwnerAccess::begin_native_bookkeeping(ordinary, admission, cursor, cap);
+            D::GeometryAllocationOwnerAccess::begin_native_bookkeeping(bounded, admission, cursor, cap);
+            frame.owners = frame.store.replace_in({}, {}, ordinary, bounded, cursor, cap);
+        }
+        contact.reset(); subset.reset(); broker = {}; coverage.reset();
+        // The SourceRoot now owns the real component sidecar and its exact
+        // financial token; no controller or structural subset wrapper remains.
+    }
+    frame.store = {};
+    floor.reset();
+    const auto raw = pipeline_trace::summary();
+    const auto direct_paid = frame.owners.direct_h_paid_bytes(arena);
+    const auto all_paid = frame.owners.native_paid_bytes(arena);
+    {
+        const pipeline_trace::Pause pause;
+        EXPECT_EQ(frame.owners.native_group_covered_bytes(arena), 0u);
+        EXPECT_EQ(all_paid, direct_paid);
+        EXPECT_EQ(direct_paid, raw.all_live + ring_bytes + sizeof(A::Budget) + 4 * sizeof(void*));
+    }
+    frame = {};
+    {
+        const pipeline_trace::Pause pause;
+        EXPECT_EQ(*total, 0u);
+    }
+    const pipeline_trace::Pause pause;
+    EXPECT_EQ(pipeline_trace::summary().all_live, 0u);
 }
 TEST(NativeGeometryAccounting, ActualAdmittedCellAndFaceMatchFullGraphIndependentCensusRawAndWeakTails)
 {

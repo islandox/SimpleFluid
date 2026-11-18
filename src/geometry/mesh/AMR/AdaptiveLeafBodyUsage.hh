@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "geometry/mesh/AMR/AdaptiveLeafPages.hh"
+#include "geometry/PLIC/details/GeometryOwnerUnion.hh"
 
 #include <map>
 
@@ -21,9 +22,22 @@ class AdaptiveLeafBodyUsage
 
 public:
     AdaptiveLeafBodyUsage() = default;
+    [[nodiscard]] const PLIC::details::OwnerManifestPair& owners() const noexcept { return owners_; }
+    [[nodiscard]] const PLIC::details::NativeOwnerReceipts& paid_receipts() const noexcept { return paid_; }
+    /** Detached control for exactly one immutable leaf/family membership. */
+    [[nodiscard]] const auto& membership_control() const noexcept { return membership_; }
+    [[nodiscard]] const PLIC::details::GeometryNativeAdministration& administration() const noexcept { return administration_; }
     [[nodiscard]] std::size_t payload_bytes() const noexcept;
     [[nodiscard]] std::size_t leaf_payload_bytes() const noexcept;
     [[nodiscard]] std::size_t storage_bytes() const noexcept;
+    [[nodiscard]] std::size_t projected_bytes() const;
+    /** Exact canonical graph/control lookup; no diagnostic owner enumeration. */
+    [[nodiscard]] bool same_membership(const AdaptiveLeafBodyUsage&) const noexcept;
+    void project_administration(PLIC::details::GeometryOwnerGraphEditor&, bool retain) const;
+    void visit_role_delta(const AdaptiveLeafBodyUsage& previous, AdaptiveLeafBodyRole,
+        PLIC::details::NativePaidExtentGroup::MemberSink) const;
+    [[nodiscard]] std::optional<AdaptiveLeafBodyRole> physical_role(
+        std::uint8_t kind, const std::shared_ptr<const void>&, std::size_t bytes) const;
     /** Borrow exact index object payload, excluding control/admission allowance. */
     void visit_storage(const std::function<void(const void*, std::size_t)>&) const;
 
@@ -32,6 +46,10 @@ private:
     friend class AdaptiveLeafBodyDelta;
     explicit AdaptiveLeafBodyUsage(NodePtr root) : root_(std::move(root)) {}
     NodePtr root_;
+    PLIC::details::OwnerManifestPair owners_;
+    PLIC::details::NativeOwnerReceipts paid_;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> membership_;
+    PLIC::details::GeometryNativeAdministration administration_;
 };
 
 /** Page-local additions and retirements accumulated during a private edit.
@@ -68,10 +86,12 @@ private:
     struct Counts
     {
         std::size_t payload, inserted = 0, retired = 0;
+        std::weak_ptr<const void> control;
     };
 
     std::shared_ptr<Budget> arena_;
     std::map<Key, Counts> changes_;
+    std::vector<std::pair<std::span<const AdaptiveLeaf>, bool>> projections_;
     std::size_t charged_ = 0;
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail
