@@ -560,6 +560,7 @@ AdaptiveNativePublicationView NativeSparseAssembler::publish(const DistributedAd
         {
             session.stage_numbering(numbering);
             session.stage_result(data, data->payload->mesh->owned_cell_map());
+            const PipelineNativeOwnerScope audit(PipelineNativeOwnerStage::Output, operation.geometry_accounting());
             data->proof_root = NativePublicationOutputGraph::make(data->payload, data->allocation,
                 operation.previous_native_root(), operation.geometry_accounting());
             operation.stage_native_result(data->proof_root);

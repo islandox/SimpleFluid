@@ -8,7 +8,6 @@
 #include "geometry/PLIC/details/NativePaidExtent.hh"
 #include <array>
 #include <exception>
-#include <map>
 #include <optional>
 #include <span>
 #include <vector>
@@ -115,14 +114,12 @@ private:
         NativePaidExtentCharge::FinancialProjector, NativePaidExtentCharge::FinancialInspector,
         NativePaidExtentCharge::FinancialValidator, bool retain = true,
         const NativeWeakOwnerObservation& physical = {}, const NativeWeakOwnerObservation& financial = {});
-    // Bounded mutation scratch belongs to the caller's stack, never heap Impl.
-    // Larger changes use charged maps/vectors without changing the protocol.
+    // Bounded dependency traversal scratch belongs to the caller's stack.
     struct PendingOwner
     {
         std::uint8_t kind = 0;
         std::shared_ptr<const void> owner;
     };
-    std::array<geometry_demand::OwnerRecord, geometry_demand::leaf_capacity> rows_{};
     std::array<PendingOwner, geometry_demand::leaf_capacity> pending_{};
     struct Impl
     {
@@ -135,19 +132,13 @@ private:
         std::shared_ptr<const geometry_detail::NativeAllocationState> native_administration;
         NativeOwnerReceipts paid;
 
-        std::span<geometry_demand::OwnerRecord> rows;
         std::span<PendingOwner> inline_pending;
-        std::size_t row_count = 0, pending_count = 0;
+        geometry_demand::OwnerEdits edits{channel, native_administration};
+        std::size_t pending_count = 0;
         Impl* partner = nullptr;
         std::size_t* cross_payload_bytes = nullptr;
 
         geometry_detail::NativeAdministrationVector<PendingOwner> pending;
-        using KeyLess = geometry_demand::OwnerKeyLess;
-        geometry_detail::NativeAdministrationMap<geometry_demand::OwnerKey, geometry_demand::OwnerRecord, KeyLess>
-            overlay;
-        std::array<geometry_demand::TypedOwnerReference, 8> inline_typed{};
-        std::size_t typed_size = 0;
-        geometry_detail::NativeAdministrationMap<geometry_demand::OwnerKey, std::size_t, KeyLess> typed_overlay;
         bool separate_direct_edges = false;
         bool adding = true, failed = false, finished = false, credited_predecessor = false;
         std::size_t financial_projection_depth = 0;
@@ -162,14 +153,17 @@ private:
         };
         geometry_demand::Admission admission();
         std::optional<geometry_demand::ReceiptEdits> paid_edits;
+        std::array<const NativePaidExtentCharge*, 8> recent_fixed_receipts{};
         bool paid_reference_edits = false;
         void edit_paid(const NativePaidExtentCharge&, NativeOwnerReceipts::Action = NativeOwnerReceipts::Action::Record);
         template<class Kind> std::size_t references(Kind, const std::shared_ptr<const void>&, std::size_t bytes) const;
+        [[nodiscard]] geometry_demand::OwnerEdits::Edit& stage_owner(
+            std::uint8_t kind, const std::shared_ptr<const void>&, std::size_t bytes);
+        bool apply_edge(geometry_demand::OwnerEdits::Edit&, bool retain, bool prepaid, std::size_t references);
 
         template<class Kind>
         bool edge(Kind, const std::shared_ptr<const void>&, std::size_t bytes, bool retain, bool prepaid = false,
             std::size_t references = 1);
-        [[nodiscard]] std::size_t typed_references(const geometry_demand::OwnerKey&) const;
         struct TypedTransition { bool owner, children; };
         TypedTransition typed_edge(allocation_detail::Kind, const std::shared_ptr<const void>&, std::size_t bytes,
             bool retain, bool prepaid, std::size_t references = 1);

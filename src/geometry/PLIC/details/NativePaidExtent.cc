@@ -560,6 +560,36 @@ NativeOwnerReceipts NativeOwnerReceipts::retired(
 NativeOwnerReceipts NativeOwnerReceipts::edited(std::span<Edit> edits, geometry_demand::Admission admission,
     std::span<const geometry_demand::OwnerRecord> owner_changes) const
 {
+    return edited_with(edits, admission, owner_changes,
+        [&](const NativePaidExtentCharge& key) -> const geometry_demand::OwnerRecord*
+        {
+            const auto pos = std::lower_bound(owner_changes.begin(), owner_changes.end(), key,
+                [](const auto& row, const auto& charge)
+                {
+                    return row.key.kind < charge.kind() || (row.key.kind == charge.kind() &&
+                        std::less<const void*>{}(row.key.address, charge.owner_address()));
+                });
+            if (pos != owner_changes.end() && pos->key.kind == key.kind() && pos->key.address == key.owner_address())
+                return &*pos;
+            return nullptr;
+        });
+}
+NativeOwnerReceipts NativeOwnerReceipts::edited_graph(std::span<Edit> edits, geometry_demand::Admission admission,
+    const geometry_demand::OwnerEdits& owner_changes) const
+{
+    const auto owners = owner_changes | std::views::transform(
+        [](const auto& edit) -> const geometry_demand::OwnerRecord& { return edit.row; });
+    return edited_with(edits, admission, owners,
+        [&](const NativePaidExtentCharge& key) -> const geometry_demand::OwnerRecord*
+        {
+            const auto* edit = owner_changes.find({owner_changes.channel(), key.kind(), key.owner_address()});
+            return edit ? &edit->row : nullptr;
+        });
+}
+template<class Owners, class Find>
+NativeOwnerReceipts NativeOwnerReceipts::edited_with(std::span<Edit> edits, geometry_demand::Admission admission,
+    const Owners& owner_changes, const Find& find_owner) const
+{
     using namespace paid_extent_detail;
     for (std::size_t i = 0; i != edits.size(); ++i)
     {
@@ -656,25 +686,20 @@ NativeOwnerReceipts NativeOwnerReceipts::edited(std::span<Edit> edits, geometry_
         } while (end != edits.size() && !less(key, *edits[end].charge));
         if (row.references != (old ? old->references : 0))
         {
-            const auto owner = std::lower_bound(owner_changes.begin(), owner_changes.end(), key,
-                [&](const auto& change, const auto& charge)
-                {
-                    return change.key.kind < charge.kind() || (change.key.kind == charge.kind() &&
-                        std::less<const void*>{}(change.key.address, charge.owner_address()));
-                });
-            if (owner != owner_changes.end() && !owner->references && owner->key.kind == key.kind() &&
-                owner->key.address == key.owner_address())
+            const auto* owner = find_owner(key);
+            if (owner && !owner->references)
                 check_removed_control(*row.charge, *owner); // Already covered by the last-owner pass.
             else
                 rows[count++] = std::move(row);
         }
         begin = end;
     }
+    const auto explicit_changes = count;
     visit_removed([&](const Row& row) { rows[count++] = {&row.charge, 0}; });
     if (!count)
         return *this;
     auto changes = rows.first(count);
-    if (!owner_changes.empty())
+    if (count != explicit_changes)
         std::sort(changes.begin(), changes.end(), less);
     const auto input = std::span<const RowChange>(changes);
     auto root = accepted ? Pages(admission).patched_from(accepted, input,

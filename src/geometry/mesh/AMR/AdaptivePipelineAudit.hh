@@ -3,6 +3,8 @@
 #pragma once
 #include <cstddef>
 
+namespace SimpleFluid::PLIC::details { class NativeGeometryAccounting; }
+
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 enum class PipelinePhase : unsigned
@@ -43,11 +45,20 @@ enum class PipelineWork : unsigned
 };
 using PipelineWorkObserver = void (*)(void*, PipelineWork, std::size_t) noexcept;
 using PipelinePhaseObserver = void (*)(void*, PipelinePhase) noexcept;
+enum class PipelineNativeOwnerStage { Output, Source, Union };
+struct PipelineNativeOwnerAdmission
+{
+    std::size_t live, peak, cumulative, limit;
+    std::size_t index_spent, index_limit;
+};
+using PipelineNativeOwnerObserver =
+    void (*)(void*, PipelineNativeOwnerStage, bool entering, PipelineNativeOwnerAdmission) noexcept;
 struct PipelineObserver
 {
     void* context = nullptr;
     PipelinePhaseObserver enter = nullptr;
     PipelineWorkObserver work = nullptr;
+    PipelineNativeOwnerObserver native_owner = nullptr;
 };
 /** Registration belongs to the calling thread. Nested registrations and phases
  * restore their predecessors during stack unwinding. No callback may allocate. */
@@ -62,5 +73,21 @@ public:
 
 private:
     PipelinePhase previous_;
+};
+
+/** Samples the operation's live counter (including its prefix) and the
+ * independent cumulative index cursor at the boundaries of owner staging. */
+class PipelineNativeOwnerScope
+{
+public:
+    PipelineNativeOwnerScope(PipelineNativeOwnerStage, PLIC::details::NativeGeometryAccounting&) noexcept;
+    PipelineNativeOwnerScope(const PipelineNativeOwnerScope&) = delete;
+    PipelineNativeOwnerScope& operator=(const PipelineNativeOwnerScope&) = delete;
+    ~PipelineNativeOwnerScope();
+
+private:
+    void observe(bool entering) const noexcept;
+    PipelineNativeOwnerStage stage_;
+    PLIC::details::NativeGeometryAccounting& accounting_;
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

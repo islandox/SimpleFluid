@@ -2,7 +2,10 @@
  * Expectations follow the explicit pointer members in FixtureNode, not exports.
  */
 #include "geometry/PLIC/details/GeometryOwnerGraph.hh"
+#include <algorithm>
 #include <gtest/gtest.h>
+#include <map>
+#include <vector>
 namespace
 {
 namespace P = SimpleFluid::PLIC;
@@ -179,4 +182,84 @@ TEST(GeometryOwnerGraph, ImmutableManifestBranchAllocatesOnlyItsTwoChildSlots)
     });
     EXPECT_EQ(child_buffers, 1u);
     EXPECT_EQ(payload, root.metadata_payload_bytes());
+}
+
+TEST(GeometryOwnerGraph, PagedEditFoldsCancelledEdgesAndSharesDistantLeaves)
+{
+    constexpr auto changed = 2 * G::leaf_capacity;
+    std::vector<std::shared_ptr<const FixtureNode>> owners(2 * changed), cancelled(changed);
+    for (auto* rows : {&owners, &cancelled})
+        for (auto& owner : *rows)
+            owner = std::make_shared<const FixtureNode>();
+    std::sort(owners.begin(), owners.end(), [](const auto& a, const auto& b)
+        { return std::less<const void*>{}(a.get(), b.get()); });
+    std::size_t startup = 0;
+    Editor initial({}, 0, startup, graph_limit);
+    for (const auto& owner : owners)
+        edge(initial, owner, true);
+    const auto accepted = initial.finish();
+    const auto leaves = [](const auto& manifest)
+    {
+        std::map<const void*, const void*> result;
+        manifest.visit_borrowed_dependencies({nullptr, [](void*, const void*, const void*, std::size_t) { return true; }},
+            {&result, [](void* raw, const void* page, const G::OwnerRecord& row)
+                { static_cast<decltype(result)*>(raw)->emplace(row.owner.get(), page); }});
+        return result;
+    };
+    const auto before = leaves(accepted);
+    const auto update = [&](std::size_t& used, std::size_t cap, P::details::GeometryOwnerGraphWork* work = nullptr)
+    {
+        Editor edit(accepted, 0, used, cap, nullptr, work);
+        for (std::size_t i = 0; i != changed; ++i)
+        {
+            const auto slot = (37 * i) % changed;
+            edge(edit, cancelled[i], true);
+            edge(edit, owners[slot], slot % 7 != 0);
+        }
+        for (const auto& owner : cancelled)
+            edge(edit, owner, false);
+        return edit.finish();
+    };
+    constexpr std::size_t prefix = 37;
+    std::size_t measured = prefix;
+    P::details::GeometryOwnerGraphWork work;
+    const auto second = update(measured, graph_limit, &work);
+    EXPECT_EQ(work.dependency_entries, 2 * changed);
+    EXPECT_EQ(work.edge_visits, 3 * changed);
+    const auto after = leaves(second);
+    std::size_t physical = 0, edges = 0;
+    for (std::size_t i = 0; i != owners.size(); ++i)
+    {
+        const auto count = i >= changed ? 1u : i % 7 == 0 ? 0u : 2u;
+        EXPECT_EQ(references(second, owners[i]), count);
+        EXPECT_EQ(references(accepted, owners[i]), 1u);
+        physical += count != 0;
+        edges += count;
+        if (i >= changed)
+            EXPECT_EQ(before.at(owners[i].get()), after.at(owners[i].get()));
+    }
+    EXPECT_EQ(second.owner_count(), physical);
+    EXPECT_EQ(second.physical_edge_count(), edges);
+    EXPECT_EQ(second.payload_bytes(), physical * sizeof(FixtureNode));
+    for (const auto& owner : cancelled)
+        EXPECT_EQ(references(second, owner), 0u);
+
+    std::size_t short_used = prefix;
+    EXPECT_THROW((void) update(short_used, measured - 1), P::GeometryError);
+    EXPECT_GT(short_used, prefix);
+    EXPECT_EQ(leaves(accepted), before);
+    std::size_t exact = prefix;
+    EXPECT_EQ(update(exact, measured).physical_edge_count(), edges);
+    EXPECT_EQ(exact, measured);
+
+    // Wide cancelling edits still pay for their physical scratch while the
+    // third generation keeps the accepted index and every retained control.
+    Editor no_change(second, 0, exact, graph_limit);
+    for (const auto& owner : cancelled)
+    {
+        edge(no_change, owner, true);
+        edge(no_change, owner, false);
+    }
+    EXPECT_TRUE(no_change.finish().same_root(second));
+    EXPECT_GT(exact, measured);
 }

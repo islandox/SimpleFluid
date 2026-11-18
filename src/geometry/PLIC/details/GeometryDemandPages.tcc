@@ -10,6 +10,8 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <optional>
+#include <ranges>
 #include <span>
 #include <type_traits>
 #include <utility>
@@ -316,12 +318,19 @@ public:
     template<class Source, class Keep>
     [[nodiscard]] Ptr patched_from(const Ptr& old, std::span<const Source> changes, const Keep& keep) const
     {
-        if (changes.empty())
+        return patched_range(old, changes.begin(), changes.end(), keep);
+    }
+
+    /** A forward range may borrow records directly from ordered edit pages. */
+    template<std::forward_iterator Iterator, class Keep>
+    [[nodiscard]] Ptr patched_range(const Ptr& old, Iterator first, Iterator last, const Keep& keep) const
+    {
+        if (first == last)
             return old;
-        for (std::size_t index = 1; index < changes.size(); ++index)
-            if (!Less{}(changes[index - 1], changes[index]))
+        for (auto previous = first, at = std::next(first); at != last; previous = at++)
+            if (!Less{}(*previous, *at))
                 throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry batch keys are not strictly ordered.");
-        auto roots = patch_rewrite(old, changes, keep, true);
+        auto roots = patch_rewrite(old, first, last, keep, true);
         while (roots.size() > 1)
             roots = pack_many_branches(roots);
         if (roots.empty())
@@ -658,12 +667,13 @@ private:
             node->subtree_owned_admission_bytes = bool(admission_.native);
         return node;
     }
-    template<class Source> [[nodiscard]] Ptr leaf(std::span<Source> values) const
+    template<class Range> [[nodiscard]] Ptr leaf(const Range& values) const
     {
         auto node = allocate();
         reserve(node->rows, values.size());
         node->bytes = checked_sum(node->bytes, values.size() * sizeof(Row));
-        node->rows.assign(values.begin(), values.end());
+        for (const auto& value : values)
+            node->rows.emplace_back(value);
         node->maximum = &node->rows.back();
         node->size = values.size();
         for (const auto& row : node->rows)
@@ -824,127 +834,132 @@ private:
         }
         return result;
     }
-    template<class Source, class Keep>
-    geometry_detail::NativeAdministrationVector<Ptr> patch_rewrite(
-        const Ptr& old, std::span<const Source> changes, const Keep& keep, bool root = false) const
+    using PageBuffer = geometry_detail::NativeAdministrationVector<Ptr>;
+
+    template<class Iterator, class Keep>
+    PageBuffer patch_leaf(const Ptr& old, Iterator first, Iterator last, const Keep& keep) const
+    {
+        using Source = std::iter_value_t<Iterator>;
+        using Slot = std::conditional_t<stack_safe_default<Source>, Source, std::optional<Source>>;
+        // Once a full leaf has a half-leaf successor, it can be sealed.
+        // Keep the final tail available so it can share rows with its predecessor.
+        std::array<Slot, leaf_capacity + leaf_capacity / 2> pending{};
+        std::size_t size = 0;
+        PageBuffer result(admission_.allocator<Ptr>());
+        const auto read = [](const Slot& slot) -> const Source&
+        {
+            if constexpr (stack_safe_default<Source>)
+                return slot;
+            else
+                return *slot;
+        };
+        const auto emit = [&](std::size_t count)
+        {
+            if (result.size() == result.capacity())
+            {
+                const auto capacity = result.capacity();
+                reserve(result, capacity ? checked_sum(capacity, capacity) : 1);
+            }
+            result.push_back(leaf(std::span(pending).first(count) | std::views::transform(read)));
+            std::move(pending.begin() + count, pending.begin() + size, pending.begin());
+            size -= count;
+        };
+        const auto append = [&](const auto& value)
+        {
+            pending[size++] = Source(value);
+            if (size == pending.size())
+                emit(leaf_capacity);
+        };
+        const auto accepted = old ? std::span<const Row>(old->rows) : std::span<const Row>{};
+        auto left = accepted.begin();
+        for (; first != last; ++first)
+        {
+            while (left != accepted.end() && Less{}(*left, *first))
+                append(*left++);
+            const bool present = left != accepted.end() && !Less{}(*first, *left);
+            if (present)
+                ++left;
+            if (keep(*first))
+                append(*first);
+            else if (!present)
+                throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry batch removes an absent row.");
+        }
+        while (left != accepted.end())
+            append(*left++);
+        if (size > leaf_capacity)
+            emit(size / 2);
+        if (size)
+            emit(size);
+        if (old)
+            retire(*old);
+        return result;
+    }
+
+    template<class Iterator, class Keep>
+    PageBuffer patch_rewrite(const Ptr& old, Iterator first, Iterator last, const Keep& keep, bool root = false) const
     {
         if (work_)
             ++work_->visited_pages;
         if (!old || old->leaf())
-        {
-            const std::span<const Row> accepted = old ? std::span<const Row>(old->rows) : std::span<const Row>{};
-            // A bounded edit may replace/retire many old rows while leaving
-            // <=64 final rows. Compute that exact result before allocating:
-            // accepted.size()+changes.size() is only a loose scratch upper bound.
-            std::conditional_t<stack_safe_default<Source>, std::array<Source, leaf_capacity>, std::array<std::byte, 0>>
-                inline_rows{};
-            std::array<unsigned char, leaf_capacity> disposition{};
-            geometry_detail::NativeAdministrationVector<Source> heap_rows(admission_.allocator<Source>());
-            std::span<const Source> rows;
-            const auto merge = [&](const auto& keep_row, const auto& append)
-            {
-                std::size_t left = 0, right = 0;
-                while (left < accepted.size() || right < changes.size())
-                {
-                    if (right == changes.size() || (left < accepted.size() && Less{}(accepted[left], changes[right])))
-                        append(accepted[left++]);
-                    else
-                    {
-                        const bool present = left < accepted.size() && !Less{}(changes[right], accepted[left]);
-                        if (present)
-                            ++left;
-                        if (keep_row(right))
-                            append(changes[right]);
-                        else if (!present)
-                            throw GeometryError(
-                                GeometryErrorCode::InvalidInput, "Geometry batch removes an absent row.");
-                        ++right;
-                    }
-                }
-            };
-            if constexpr (stack_safe_default<Source>)
-            {
-                if (changes.size() <= leaf_capacity)
-                {
-                    // Preserve one predicate evaluation per changed row, even
-                    // when a caller supplies a stateful observation predicate.
-                    for (std::size_t index = 0; index < changes.size(); ++index)
-                        disposition[index] = static_cast<bool>(keep(changes[index]));
-                    const auto kept = [&](std::size_t index) { return disposition[index] != 0; };
-                    std::size_t count = 0;
-                    merge(kept, [&](const Source&) { ++count; });
-                    if (count <= leaf_capacity)
-                    {
-                        std::size_t at = 0;
-                        merge(kept, [&](const Source& value) { inline_rows[at++] = value; });
-                        rows = std::span<const Source>(inline_rows).first(count);
-                    }
-                    else
-                    {
-                        reserve(heap_rows, count);
-                        merge(kept, [&](const Source& value) { heap_rows.push_back(value); });
-                        rows = heap_rows;
-                    }
-                }
-                else
-                {
-                    reserve(heap_rows, checked_sum(accepted.size(), changes.size()));
-                    merge([&](std::size_t index) { return keep(changes[index]); },
-                        [&](const Source& value) { heap_rows.push_back(value); });
-                    rows = heap_rows;
-                }
-            }
-            else
-            {
-                // Preserve the generic non-default-constructible Row contract.
-                reserve(heap_rows, checked_sum(accepted.size(), changes.size()));
-                merge([&](std::size_t index) { return keep(changes[index]); },
-                    [&](const Source& value) { heap_rows.push_back(value); });
-                rows = heap_rows;
-            }
-            if (old)
-                retire(*old);
-            geometry_detail::NativeAdministrationVector<Ptr> result(admission_.allocator<Ptr>());
-            const auto groups = ceiling(rows.size(), leaf_capacity);
-            reserve(result, groups);
-            std::size_t offset = 0;
-            for (std::size_t group = 0; group < groups; ++group)
-            {
-                const auto count = group_size(rows.size(), groups, group);
-                result.push_back(leaf(rows.subspan(offset, count)));
-                offset += count;
-            }
-            return result;
-        }
-        geometry_detail::NativeAdministrationVector<Ptr> children(admission_.allocator<Ptr>());
-        reserve(children, checked_sum(old->children.size(), changes.size()));
-        std::size_t cursor = 0;
+            return patch_leaf(old, first, last, keep);
+
+        std::array<PageBuffer, branch_capacity> replacements;
+        std::array<bool, branch_capacity> changed{};
+        std::size_t count = 0;
         for (std::size_t index = 0; index < old->children.size(); ++index)
         {
             const auto& child = old->children[index];
-            auto end = cursor;
+            auto end = first;
             if (index + 1 == old->children.size())
-                end = changes.size();
+                end = last;
             else
-                while (end < changes.size() && !Less{}(*child->maximum, changes[end]))
+                while (end != last && !Less{}(*child->maximum, *end))
                     ++end;
-            if (cursor == end)
-                children.push_back(child);
+            if (first == end)
+                ++count;
             else
             {
-                const auto replacement = patch_rewrite(child, changes.subspan(cursor, end - cursor), keep);
-                children.insert(children.end(), replacement.begin(), replacement.end());
+                changed[index] = true;
+                replacements[index] = patch_rewrite(child, first, end, keep);
+                count = checked_sum(count, replacements[index].size());
             }
-            cursor = end;
+            first = end;
         }
+
+        // Size branch scratch from the actual surviving and split pages.
+        // An edit concentrated in one child can contribute thousands of rows
+        // but only the resulting page pointers enter the parent.
+        std::array<Ptr, branch_capacity> local;
+        PageBuffer overflow(admission_.allocator<Ptr>());
+        std::span<Ptr> children;
+        if (count <= local.size())
+            children = std::span(local).first(count);
+        else
+        {
+            reserve(overflow, count);
+            overflow.resize(count);
+            children = overflow;
+        }
+        auto out = children.begin();
+        for (std::size_t index = 0; index < old->children.size(); ++index)
+            if (changed[index])
+            {
+                auto& pages = replacements[index];
+                out = std::move(pages.begin(), pages.end(), out);
+                PageBuffer().swap(pages);
+            }
+            else
+                *out++ = old->children[index];
+
         retire(*old);
-        const auto balanced = rebalance(std::span(children));
+        const auto balanced = rebalance(children);
         if (root && balanced.size() == 1)
         {
-            // Only the root may lose a level. Reuse the charged child buffer
-            // rather than allocating a unary branch that is immediately retired.
-            children.resize(1);
-            return children;
+            // Only the root may lose a level.
+            PageBuffer result(admission_.allocator<Ptr>());
+            reserve(result, 1);
+            result.push_back(std::move(children.front()));
+            return result;
         }
         return pack_many_branches(balanced);
     }

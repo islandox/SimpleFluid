@@ -573,3 +573,41 @@ TEST(GeometryDemandPages, BatchedEditsKeepNonzeroPredicatesAcrossByteBoundaries)
         EXPECT_EQ(Pages::at(accepted, index), accepted_rows[index]);
     }
 }
+
+TEST(GeometryDemandPages, ClusteredBatchAdmitsPagePointersWithoutASecondRowInventory)
+{
+    constexpr std::size_t inserted = 4096;
+    std::vector<OrderRow> rows, changes;
+    for (std::size_t i = 0; i != 3 * G::leaf_capacity; ++i)
+        rows.push_back({1, i, inserted + 1 + i});
+    for (std::size_t i = 0; i != inserted; ++i)
+        changes.push_back({1, i, i + 1});
+    changes.push_back({0, 0, rows.front().key}); // Retire the former first row.
+    Counter initial;
+    const auto accepted = Keys(initial.admission()).build(rows);
+    ASSERT_EQ(accepted->children.size(), 3u);
+    Counter edited;
+    G::PageWork work;
+    std::size_t predicates = 0;
+    const auto result = Keys(edited.admission(), &work).patched(accepted, changes,
+        [&](const OrderRow& row) { ++predicates; return row.generation != 0; });
+    ASSERT_TRUE(result);
+    EXPECT_EQ(predicates, changes.size());
+    EXPECT_EQ(result->size, inserted + rows.size() - 1);
+    for (std::size_t i = 0; i != inserted; ++i)
+        EXPECT_EQ(Keys::at(result, i).key, i + 1);
+    for (std::size_t i = 1; i != rows.size(); ++i)
+        EXPECT_EQ(Keys::at(result, inserted + i - 1).key, rows[i].key);
+
+    std::size_t shared = 0;
+    Keys::visit_pages(result, [&](const auto& page)
+    {
+        shared += page == accepted->children[1] || page == accepted->children[2];
+        EXPECT_LE(page->occupancy(), page->leaf() ? G::leaf_capacity : G::branch_capacity);
+        if (page != result)
+            EXPECT_GE(page->occupancy(), page->leaf() ? G::leaf_capacity / 2 : G::branch_capacity / 2);
+    });
+    EXPECT_EQ(shared, 2u);
+    ASSERT_GE(edited.used, work.copied_bytes);
+    EXPECT_LT(edited.used - work.copied_bytes, inserted * sizeof(OrderRow) / 2);
+}

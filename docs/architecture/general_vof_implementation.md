@@ -251,6 +251,17 @@ than passed through the provider mapping again. Compact rows still use the
 provider's original construction path. Publication-derived representations do
 not replace provider-input cache entries.
 
+Native publication stages the output manifest, source manifest, and their paired
+owner-union replacement before committing. Each arithmetic channel stages one
+ordered row per touched physical owner, with its original and final total and
+typed reference counts. The first block lives in the editor and overflow blocks
+are admitted before allocation. Receipt cleanup reads those rows while they still
+include owners that entered and left the transaction. The manifest consumes only
+changed counts and shares untouched index pages. The leaf merge uses a bounded
+row window and admits branch scratch from the child pages the edit actually
+produces. Actual allocations retire with their owners. Cumulative index charges
+remain spent on success or rejection.
+
 Ordinary procedural Cartesian cells retain a shared source context and a catalog
 slot. Its immutable base owns the evaluated source axes, compact interval
 selectors and original support facts. Canonical support slots are indexed by

@@ -896,6 +896,86 @@ TEST(NativeGeometryAccounting, TypedManifestReservationIncludesBorrowedMetadataA
     EXPECT_LE(split_borrows.nodes, split.metadata_owner_count_bound());
     EXPECT_LE(used - split_before, Editor::edit_byte_bound(full, 6, 2, 2));
 }
+
+TEST(NativeGeometryAccounting, PagedOwnerEditsPreserveFlatTypedAndWeakReceiptLifetimes)
+{
+    auto arena = std::make_shared<A::Budget>(A::Budget{cap});
+    const N::NativeConstructionAdmission admission(
+        N::NativeConstructionCounterAccess::create<Counter>(cap, 0, A::NativeSourceOwnerStore::mirror(arena)));
+    constexpr std::size_t group = G::leaf_capacity + 8;
+    std::array<N::NativeTrackedOwner<unsigned char>, 2 * group> targets;
+    for (auto& target : targets)
+        target = N::NativeAllocationEnvelopeAccess::make<unsigned char>(admission);
+    const auto state = admission.state();
+    const auto witness = D::NativePaidExtentCharge::counter(state).detached_source_observation();
+    ASSERT_TRUE(witness);
+    const auto kind = D::GeometryOwnerGraphEditor::external_kind();
+    std::size_t used = 0;
+    D::GeometryOwnerGraphEditor initial({}, 0, used, cap, nullptr, nullptr, state);
+    initial.weak_observation(witness, true);
+    initial.native_fixed(targets.front().envelope, true);
+    const auto receipt_scratch = admission.statistics().actual_cumulative;
+    for (std::size_t repeat = 0; repeat != 2 * group; ++repeat)
+    {
+        initial.native_fixed(targets.front().envelope, true);
+        initial.native_fixed(targets.front().envelope, false);
+    }
+    EXPECT_EQ(admission.statistics().actual_cumulative, receipt_scratch);
+    initial.native_fixed(targets.front().envelope, false);
+    for (const auto& target : std::span(targets).first(group))
+        initial.native_fixed(target.envelope, true);
+    const auto first = initial.finish();
+    const auto first_paid = initial.paid_receipts();
+    D::GeometryOwnerGraphEditor edit(first, 0, used, cap, nullptr, nullptr, state, &first_paid);
+    for (std::size_t i = 0; i != group; ++i)
+    {
+        const auto& old = targets[i].envelope;
+        const auto& next = targets[group + i].envelope;
+        edit.native_fixed(next, true);
+        if (i % 2 == 0)
+            edit.native_fixed(next, false);
+        if (i % 3 == 0)
+            edit.external(old, old->fixed_allocation_bytes(), true);
+        if (i % 3 != 2)
+            edit.native_fixed(old, false);
+    }
+    const auto second = edit.finish();
+    const auto second_paid = edit.paid_receipts();
+    // Each remaining typed envelope owns five State fields. The shared
+    // State and the weak Counter witness retain three Counter and five arena
+    // fields in total. A flat envelope holds no child edges.
+    constexpr auto active = group / 3 + group / 2;
+    constexpr auto flat = group / 3;
+    EXPECT_EQ(first.typed_owner_count(), group + 2);
+    EXPECT_EQ(second.typed_owner_count(), active + 2);
+    EXPECT_EQ(second.references(0, kind, state), 5 * active);
+    EXPECT_EQ(second.references(0, kind, state->counter_owner), 3u);
+    EXPECT_EQ(second.references(0, kind, arena), 5u);
+    EXPECT_EQ(second.physical_edge_count(), flat + 6 * active + 8);
+    D::GeometryOwnerGraphEditor retire(second, 0, used, cap, nullptr, nullptr, state, &second_paid);
+    for (std::size_t i = 0; i != group; ++i)
+    {
+        const auto& old = targets[i].envelope;
+        const auto& next = targets[group + i].envelope;
+        EXPECT_TRUE(first_paid.contains(D::NativePaidExtentCharge::fixed(old)));
+        EXPECT_EQ(second_paid.contains(D::NativePaidExtentCharge::fixed(old)), i % 3 != 1);
+        EXPECT_EQ(second_paid.contains(D::NativePaidExtentCharge::fixed(next)), i % 2 != 0);
+        EXPECT_EQ(second.references(0, kind, old), i % 3 != 1 ? 1u : 0u);
+        EXPECT_EQ(second.references(0, kind, next), i % 2 != 0 ? 1u : 0u);
+        if (i % 3 == 0)
+            retire.external(old, old->fixed_allocation_bytes(), false);
+        if (i % 3 == 2)
+            retire.native_fixed(old, false);
+        if (i % 2 != 0)
+            retire.native_fixed(next, false);
+    }
+    retire.weak_observation(witness, false);
+    EXPECT_EQ(retire.finish().owner_count(), 0u);
+    EXPECT_TRUE(retire.paid_receipts().empty());
+    EXPECT_EQ(first.references(0, kind, state), 5 * group);
+    EXPECT_EQ(second.references(0, kind, state), 5 * active);
+}
+
 TEST(NativeGeometryAccounting, PaidReceiptBatchChecksReferenceOrderAndReducesPageCopies)
 {
     auto arena = std::make_shared<A::Budget>(A::Budget{cap});

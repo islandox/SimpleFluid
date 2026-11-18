@@ -3,6 +3,7 @@
 #include "geometry/PLIC/details/GeometryOwnerUnion.hh"
 #include <limits>
 #include <map>
+#include <string>
 namespace SimpleFluid::PLIC::details
 {
 std::size_t OwnerManifestPair::logical_payload_bytes() const
@@ -376,7 +377,9 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
     const auto charge_work = [&](std::size_t bytes)
     {
         if (used > limit || bytes > limit - used)
-            exhausted("Native administration work budget is exhausted.");
+            throw GeometryError(GeometryErrorCode::ResourceLimit,
+                "Native administration work budget is exhausted: used=" + std::to_string(used) +
+                    " request=" + std::to_string(bytes) + " limit=" + std::to_string(limit) + ".");
         if (state)
             state->record_ledger_work(bytes);
         used += bytes;

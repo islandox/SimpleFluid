@@ -23,6 +23,7 @@ namespace geometry_demand
 struct Admission;
 struct MetadataSink;
 struct NativeAdministrationSink;
+class OwnerEdits;
 struct OwnerRecord;
 struct PageWork;
 } // namespace geometry_demand
@@ -243,6 +244,12 @@ public:
     [[nodiscard]] std::size_t metadata_admission_bytes() const noexcept;
 
 private:
+    friend class GeometryOwnerGraphEditor;
+    [[nodiscard]] NativeOwnerReceipts edited_graph(std::span<Edit>, geometry_demand::Admission,
+        const geometry_demand::OwnerEdits&) const;
+    template<class Owners, class Find>
+    [[nodiscard]] NativeOwnerReceipts edited_with(std::span<Edit>, geometry_demand::Admission,
+        const Owners& owner_changes, const Find&) const;
     enum class Category { Any, DirectH, PublicationH };
     [[nodiscard]] bool contains_category(const NativePaidExtentCharge&, Category) const;
     struct State;

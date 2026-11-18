@@ -5601,6 +5601,24 @@ void record_pipeline_work(PipelineWork work, std::size_t count) noexcept
     if (pipeline_observer.work)
         pipeline_observer.work(pipeline_observer.context, work, count);
 }
+PipelineNativeOwnerScope::PipelineNativeOwnerScope(
+    PipelineNativeOwnerStage stage, PLIC::details::NativeGeometryAccounting& accounting) noexcept
+    : stage_(stage), accounting_(accounting)
+{
+    observe(true);
+}
+PipelineNativeOwnerScope::~PipelineNativeOwnerScope()
+{
+    observe(false);
+}
+void PipelineNativeOwnerScope::observe(bool entering) const noexcept
+{
+    if (!pipeline_observer.native_owner)
+        return;
+    const auto counters = accounting_.admission().counters();
+    pipeline_observer.native_owner(pipeline_observer.context, stage_, entering,
+        {counters.used, counters.peak, counters.cumulative, counters.limit, accounting_.cursor(), accounting_.limit()});
+}
 PipelinePhase switch_pipeline_phase(PipelinePhase next) noexcept
 {
     const auto previous = pipeline_phase;
@@ -5889,19 +5907,25 @@ void NativePublicationOperation::prepare_commit(NativePublicationSession& sessio
         session.inputs_.cache != inputs_.cache || !session.result_ || !session.receipt_)
         throw std::logic_error("Native operation/session result is incomplete or foreign.");
     session.recheck(*hierarchy_);
-    accepted_union_.import_subset(accepted_source_.binding(), accounting_->ordinary(), accounting_->bounded(),
-        accounting_->cursor(), accounting_->limit());
-    staged_source_ = NativeSourceOwnerStore::assemble(accepted_source_, accepted_source_.components(),
-        *admission_, &*accounting_, session.indexes_, accepted_source_.input_administration(), {}, {}, {}, {}, {},
-        NativeSourcePublicationValues{inputs_.cache->allocation, session.receipt_, accepted_source_.bound_input(),
-            accepted_source_.observations(), coverage_tx_->staged_broker()});
-    const std::array replacements{
-        PLIC::details::GeometryOwnerUnion::Replacement{&accepted_native_.binding(), &staged_native_.binding()},
-        PLIC::details::GeometryOwnerUnion::Replacement{&accepted_source_.binding(), &staged_source_.binding()}};
-    staged_union_ = accepted_union_.staged(replacements, accounting_->ordinary(), accounting_->bounded(),
-        accounting_->cursor(), accounting_->limit());
-    staged_native_.certify(staged_union_, accounting_->ordinary(), accounting_->bounded(),
-        accounting_->cursor(), accounting_->limit());
+    {
+        const PipelineNativeOwnerScope audit(PipelineNativeOwnerStage::Source, *accounting_);
+        accepted_union_.import_subset(accepted_source_.binding(), accounting_->ordinary(), accounting_->bounded(),
+            accounting_->cursor(), accounting_->limit());
+        staged_source_ = NativeSourceOwnerStore::assemble(accepted_source_, accepted_source_.components(),
+            *admission_, &*accounting_, session.indexes_, accepted_source_.input_administration(), {}, {}, {}, {}, {},
+            NativeSourcePublicationValues{inputs_.cache->allocation, session.receipt_, accepted_source_.bound_input(),
+                accepted_source_.observations(), coverage_tx_->staged_broker()});
+    }
+    {
+        const PipelineNativeOwnerScope audit(PipelineNativeOwnerStage::Union, *accounting_);
+        const std::array replacements{
+            PLIC::details::GeometryOwnerUnion::Replacement{&accepted_native_.binding(), &staged_native_.binding()},
+            PLIC::details::GeometryOwnerUnion::Replacement{&accepted_source_.binding(), &staged_source_.binding()}};
+        staged_union_ = accepted_union_.staged(replacements, accounting_->ordinary(), accounting_->bounded(),
+            accounting_->cursor(), accounting_->limit());
+        staged_native_.certify(staged_union_, accounting_->ordinary(), accounting_->bounded(),
+            accounting_->cursor(), accounting_->limit());
+    }
     const std::lock_guard geometry_lock(cache_->mutex);
     const std::lock_guard publication_lock(inputs_.cache->mutex);
     if (cache_->commit_token || inputs_.cache->commit_token || cache_->revision != cache_revision_ ||

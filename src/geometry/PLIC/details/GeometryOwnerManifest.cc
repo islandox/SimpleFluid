@@ -5,6 +5,7 @@
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryDemandPages.tcc"
 #include <limits>
+#include <ranges>
 
 namespace SimpleFluid::PLIC::details::geometry_demand
 {
@@ -104,6 +105,87 @@ std::size_t typed_edit_nodes(std::size_t keys, std::size_t height)
 } // namespace
 template<> inline constexpr bool stack_safe_default<TypedOwnerReference> = true;
 template<> inline constexpr bool native_flag_in_owned_admission<TypedOwnerReference> = true;
+
+std::size_t OwnerEdits::Page::lower_bound(const OwnerKey& key) const
+{
+    return std::lower_bound(rows.begin(), rows.begin() + size, key,
+        [](const Edit& edit, const OwnerKey& value) { return OwnerKeyLess{}(edit.row.key, value); }) - rows.begin();
+}
+OwnerEdits::OwnerEdits(std::uint8_t channel, const std::shared_ptr<const geometry_detail::NativeAllocationState>& native)
+    : pages_(OwnerKeyLess{}, geometry_detail::NativeAdministrationAllocator<Directory::value_type>(native)),
+      channel_(channel)
+{
+}
+const OwnerEdits::Edit* OwnerEdits::find(const OwnerKey& key) const
+{
+    const auto next = pages_.upper_bound(key);
+    const auto& page = next == pages_.begin() ? first_ : std::prev(next)->second;
+    const auto at = page.lower_bound(key);
+    return at < page.size && page.rows[at].row.key == key ? &page.rows[at] : nullptr;
+}
+OwnerEdits::Edit* OwnerEdits::find(const OwnerKey& key)
+{
+    return const_cast<Edit*>(std::as_const(*this).find(key));
+}
+OwnerEdits::Edit& OwnerEdits::insert(Edit edit, const Admission& admission)
+{
+    const auto next = pages_.upper_bound(edit.row.key);
+    auto* page = next == pages_.begin() ? &first_ : &std::prev(next)->second;
+    auto at = page->lower_bound(edit.row.key);
+    if (page->size == leaf_capacity)
+    {
+        // An ordered append starts a new rightmost page without splitting
+        // its full predecessor. Interior insertions split at the midpoint.
+        const auto split = at == leaf_capacity && next == pages_.end() ? leaf_capacity : leaf_capacity / 2;
+        const auto key = split == leaf_capacity ? edit.row.key : page->rows[split].row.key;
+        admission.charge(1, sizeof(Directory::value_type) + 4 * sizeof(void*));
+        // Allocate before moving any records from the accepted edit set.
+        auto& right = pages_.try_emplace(next, key)->second;
+        std::move(page->rows.begin() + split, page->rows.end(), right.rows.begin());
+        right.size = leaf_capacity - split;
+        page->size = split;
+        if (!OwnerKeyLess{}(edit.row.key, key))
+        {
+            page = &right;
+            at -= split;
+        }
+    }
+    std::move_backward(page->rows.begin() + at, page->rows.begin() + page->size, page->rows.begin() + page->size + 1);
+    ++page->size;
+    return page->rows[at] = std::move(edit);
+}
+std::size_t OwnerEdits::byte_bound(std::size_t keys)
+{
+    // A split leaves two half-full pages. Only the rightmost page may hold
+    // fewer rows, and the first page is independently provided on the stack.
+    if (keys <= leaf_capacity)
+        return 0;
+    return bound_product(std::min(keys - leaf_capacity, (keys - 1) / (leaf_capacity / 2)),
+        sizeof(Directory::value_type) + 4 * sizeof(void*));
+}
+void OwnerEdits::clear() noexcept
+{
+    for (auto& row : std::span(first_.rows).first(first_.size))
+        row = {};
+    first_.size = 0;
+    pages_.clear();
+}
+OwnerEdits::Iterator& OwnerEdits::Iterator::operator++() noexcept
+{
+    if (++index_ == page_->size)
+    {
+        index_ = 0;
+        page_ = next_ == end_ ? nullptr : &(next_++)->second;
+    }
+    return *this;
+}
+OwnerEdits::Iterator OwnerEdits::Iterator::operator++(int) noexcept
+{
+    const auto previous = *this;
+    ++*this;
+    return previous;
+}
+
 struct GeometryOwnerManifest::State
 {
     Pages::Ptr root;
@@ -157,6 +239,43 @@ struct GeometryOwnerManifest::State
         const auto bytes = sizeof(State) + (admission.native ? metadata_control_bytes(owner) : 0);
         admission.created(owner, bytes, bytes + (admission.native ? 0 : control_bytes));
         return owner;
+    }
+
+    template<class Primary, class Roles>
+    static GeometryOwnerManifest patched(const GeometryOwnerManifest& accepted, Primary&& primary, Roles&& roles,
+        Admission admission, PageWork* work)
+    {
+        const auto& previous = accepted.state_;
+        if (primary.empty() && roles.empty())
+            return accepted;
+        auto typed = TypedPages(admission, work).patched_range(previous ? previous->typed() : nullptr,
+            roles.begin(), roles.end(), [](const auto& row) { return row.references != 0; });
+        GeometryOwnerManifest result;
+        if (primary.empty())
+        {
+            if (!previous)
+                throw GeometryError(GeometryErrorCode::InvalidInput, "Typed references lack a physical geometry owner.");
+            admission.charge(1, sizeof(State) + control_bytes);
+            result.state_ = previous->inline_row() ? created(previous->single(), admission, std::move(typed)) :
+                                                     created(previous->root, admission, std::move(typed));
+            return result;
+        }
+        Pages pages(admission, work);
+        Pages::Ptr old;
+        if (previous)
+            old = previous->inline_row() ? pages.build(std::span(&previous->single(), 1)) : previous->root;
+        auto root = pages.patched_range(old, primary.begin(), primary.end(),
+            [](const OwnerRecord& row) { return row.references != 0; });
+        if (!root)
+        {
+            if (typed)
+                throw GeometryError(GeometryErrorCode::InvalidInput, "Retired geometry manifest still has typed owners.");
+            return result;
+        }
+        admission.charge(1, sizeof(State) + control_bytes);
+        result.state_ = root->size == 1 && !typed ? created(Pages::at(root, 0), admission) :
+                                                   created(std::move(root), admission, std::move(typed));
+        return result;
     }
 };
 bool GeometryOwnerManifest::same_root(const GeometryOwnerManifest& other) const noexcept
@@ -384,11 +503,6 @@ std::size_t GeometryOwnerManifest::batch_edit_byte_bound(std::size_t changed_key
     }
     return bytes;
 }
-GeometryOwnerManifest GeometryOwnerManifest::edited(
-    std::span<const OwnerRecord> changes, Admission admission, PageWork* work, PageWork* lookup_work) const
-{
-    return edited_typed(changes, {}, admission, work, lookup_work);
-}
 std::size_t GeometryOwnerManifest::typed_references(const OwnerKey& owner_key, PageWork* work) const
 {
     const TypedOwnerReference key{owner_key};
@@ -396,60 +510,34 @@ std::size_t GeometryOwnerManifest::typed_references(const OwnerKey& owner_key, P
         [&](const auto& value) { return TypedLess{}(value, key); }, work);
     return row && row->key == owner_key ? row->references : 0;
 }
-GeometryOwnerManifest GeometryOwnerManifest::edited_typed(std::span<const OwnerRecord> changes,
-    std::span<const TypedOwnerReference> type_changes, Admission admission, PageWork* work, PageWork* lookup_work) const
+GeometryOwnerManifest GeometryOwnerManifest::edited(
+    std::span<const OwnerRecord> changes, Admission admission, PageWork* work, PageWork* lookup_work) const
 {
-    if (changes.empty() && type_changes.empty())
-        return *this;
     for (const auto& row : changes)
     {
-        (void) lookup(row.key.channel, row.key.kind, row.owner);
         if (row.key.address != row.owner.get() || row.bytes == std::numeric_limits<std::size_t>::max())
             throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry batch row has an unusable address or size.");
         const auto references = this->references(row.key.channel, row.key.kind, row.owner, lookup_work);
         if ((!references && !row.references) ||
             (references && !admits(row.key.channel, row.key.kind, row.owner, row.bytes, lookup_work)))
             throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry batch row changes its immutable owner.");
-        if (!type_changes.empty() || (state_ && state_->typed()))
-        {
-            const TypedOwnerReference wanted{row.key};
-            const auto found = std::lower_bound(type_changes.begin(), type_changes.end(), wanted, TypedLess{});
-            const auto count = found != type_changes.end() && found->key == wanted.key ? found->references :
-                typed_references(wanted.key, lookup_work);
-            if (count > row.references)
-                throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry batch retires a live typed owner.");
-        }
+        if (typed_references(row.key, lookup_work) > row.references)
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry batch retires a live typed owner.");
     }
-    auto typed = TypedPages(admission, work).patched(state_ ? state_->typed() : nullptr, type_changes,
-        [](const auto& row) { return row.references != 0; });
-    if (changes.empty())
-    {
-        if (!state_)
-            throw GeometryError(GeometryErrorCode::InvalidInput, "Typed references lack a physical geometry owner.");
-        admission.charge(1, sizeof(State) + control_bytes);
-        GeometryOwnerManifest result;
-        result.state_ = state_->inline_row() ? State::created(state_->single(), admission, std::move(typed)) :
-                                             State::created(state_->root, admission, std::move(typed));
-        return result;
-    }
-    Pages::Ptr accepted;
-    if (state_)
-        accepted = state_->inline_row() ? Pages(admission, work).build(std::span(&state_->single(), 1)) : state_->root;
-    const auto root =
-        Pages(admission, work).patched(accepted, changes, [](const OwnerRecord& row) { return row.references != 0; });
-    if (!root)
-    {
-        if (typed)
-            throw GeometryError(GeometryErrorCode::InvalidInput, "Retired geometry manifest still has typed owners.");
-        return {};
-    }
-    admission.charge(1, sizeof(State) + control_bytes);
-    GeometryOwnerManifest result;
-    if (root->size == 1 && !typed)
-        result.state_ = State::created(Pages::at(root, 0), admission, std::move(typed));
-    else
-        result.state_ = State::created(root, admission, std::move(typed));
-    return result;
+    return State::patched(*this, changes, std::span<const TypedOwnerReference>{}, admission, work);
+}
+GeometryOwnerManifest GeometryOwnerManifest::edited_graph(const OwnerEdits& edits, Admission admission, PageWork* work) const
+{
+    // The graph authenticated each touched row when it entered the edit set.
+    // Include only the final differences. Receipts consume the unfiltered set
+    // first so a new owner that was also retired can discard its staged credit.
+    auto primary = edits | std::views::filter([](const OwnerEdits::Edit& edit)
+        { return edit.row.references != edit.accepted; }) |
+        std::views::transform([](const OwnerEdits::Edit& edit) -> const OwnerRecord& { return edit.row; });
+    auto roles = edits | std::views::filter([](const OwnerEdits::Edit& edit) { return edit.typed != edit.accepted_typed; }) |
+        std::views::transform([](const OwnerEdits::Edit& edit)
+            { return TypedOwnerReference{edit.row.key, edit.typed}; });
+    return State::patched(*this, primary, roles, admission, work);
 }
 GeometryOwnerManifest GeometryOwnerManifest::retained(std::uint8_t channel, std::uint8_t kind,
     std::shared_ptr<const void> owner, std::size_t bytes, Admission admission, PageWork* work) const

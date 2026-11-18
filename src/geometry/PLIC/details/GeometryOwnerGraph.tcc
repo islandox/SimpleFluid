@@ -12,6 +12,8 @@
 #include "geometry/details/NativeAllocationGraph.hh"
 #include <algorithm>
 #include <exception>
+#include <iterator>
+#include <string>
 #include <tuple>
 
 namespace SimpleFluid::PLIC::details
@@ -53,7 +55,9 @@ geometry_demand::Admission GeometryOwnerGraphEditor::Impl::admission()
         {
             auto& self = *static_cast<Impl*>(raw);
             if (self.used > self.limit || bytes > self.limit - self.used)
-                allocation_detail::exhausted("Geometry owner graph index budget is exhausted.");
+                throw GeometryError(GeometryErrorCode::ResourceLimit,
+                    "Geometry owner graph index budget is exhausted: used=" + std::to_string(self.used) +
+                        " request=" + std::to_string(bytes) + " limit=" + std::to_string(self.limit) + ".");
             if (self.native_administration)
                 self.native_administration->record_ledger_work(bytes);
             self.used += bytes;
@@ -85,8 +89,39 @@ void GeometryOwnerGraphEditor::Impl::edit_paid(const NativePaidExtentCharge& cha
     }
     if (action == Action::Record && !paid_reference_edits && paid.contains(charge))
         return;
-    if (!paid_edits) paid_edits.emplace(admission());
+    // Record is idempotent between reference edits. Fixed receipts have
+    // immutable eligibility and often repeat for a shared State or keeper.
+    // Borrow the staged charge, which stays in its block through sealing.
+    const bool fixed = action == Action::Record && charge.proof_ == 1 &&
+                       charge.fixed_owner_ != NativePaidExtentCharge::FixedOwner::None;
+    if (fixed)
+    {
+        const auto previous = std::find_if(recent_fixed_receipts.begin(), recent_fixed_receipts.end(),
+            [&](const NativePaidExtentCharge* value)
+            {
+                return value && value->fixed_owner_ == charge.fixed_owner_ &&
+                       value->publication_h() == charge.publication_h() &&
+                       value->state_address_ == charge.state_address_ &&
+                       value->charge_snapshot_ == charge.charge_snapshot_ &&
+                       value->same_receipt_fact(charge);
+            });
+        if (previous != recent_fixed_receipts.end())
+        {
+            std::rotate(recent_fixed_receipts.begin(), previous, std::next(previous));
+            return;
+        }
+    }
+    else if (action != Action::Record)
+        recent_fixed_receipts.fill(nullptr);
+    if (!paid_edits)
+        paid_edits.emplace(admission());
     paid_edits->append(charge, action);
+    if (fixed)
+    {
+        std::move_backward(recent_fixed_receipts.begin(), std::prev(recent_fixed_receipts.end()),
+            recent_fixed_receipts.end());
+        recent_fixed_receipts.front() = paid_edits->rows().back().charge;
+    }
     paid_reference_edits |= action != Action::Record;
 }
 template<class Kind>
@@ -94,70 +129,54 @@ std::size_t GeometryOwnerGraphEditor::Impl::references(
     Kind kind, const std::shared_ptr<const void>& owner, std::size_t bytes) const
 {
     const auto key = static_cast<std::uint8_t>(kind);
-    const geometry_demand::OwnerKey lookup{channel, key, owner.get()};
-    const geometry_demand::OwnerRecord* found = nullptr;
-    for (std::size_t index = 0; index < row_count; ++index)
-        if (rows[index].key.channel == channel && rows[index].key.kind == key && rows[index].key.address == owner.get())
-        {
-            found = &rows[index];
-            break;
-        }
-    if (!found)
-        if (const auto row = overlay.find(lookup); row != overlay.end())
-            found = &row->second;
-    if (found)
+    if (const auto* found = edits.find({channel, key, owner.get()}))
     {
-        if (found->bytes != bytes || owner.owner_before(found->owner) || found->owner.owner_before(owner))
+        if (found->row.bytes != bytes || owner.owner_before(found->row.owner) || found->row.owner.owner_before(owner))
             throw GeometryError(GeometryErrorCode::InvalidInput, "Paired graph owner changes control or size.");
-        return found->references;
+        return found->row.references;
     }
     const auto count = result.references(channel, key, owner, work ? &work->lookup : nullptr);
     if (count && !result.admits(channel, key, owner, bytes, work ? &work->lookup : nullptr))
         throw GeometryError(GeometryErrorCode::InvalidInput, "Paired graph owner changes immutable size.");
     return count;
 }
+geometry_demand::OwnerEdits::Edit& GeometryOwnerGraphEditor::Impl::stage_owner(
+    std::uint8_t kind, const std::shared_ptr<const void>& owner, std::size_t bytes)
+{
+    const geometry_demand::OwnerKey key{channel, kind, owner.get()};
+    if (auto* found = edits.find(key))
+    {
+        if (found->row.bytes != bytes || owner.owner_before(found->row.owner) || found->row.owner.owner_before(owner))
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry graph owner changes controls or bytes.");
+        return *found;
+    }
+    auto* lookup = work ? &work->lookup : nullptr;
+    const auto references = result.references(channel, kind, owner, lookup);
+    if (bytes == std::numeric_limits<std::size_t>::max() ||
+        (references && !result.admits(channel, kind, owner, bytes, lookup)))
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry graph owner has an invalid or changed extent.");
+    const auto typed = references ? result.typed_references(key, lookup) : 0;
+    auto& staged = edits.insert({{key, owner, bytes, references}, references, typed, typed}, admission());
+    if (work)
+        ++work->dependency_entries;
+    return staged;
+}
 template<class Kind>
 bool GeometryOwnerGraphEditor::Impl::edge(Kind kind, const std::shared_ptr<const void>& owner, std::size_t bytes,
     bool retain, bool prepaid, std::size_t references)
 {
-    if (!owner || !references)
-        return false;
+    return owner && references &&
+           apply_edge(stage_owner(static_cast<std::uint8_t>(kind), owner, bytes), retain, prepaid, references);
+}
+bool GeometryOwnerGraphEditor::Impl::apply_edge(
+    geometry_demand::OwnerEdits::Edit& edit, bool retain, bool prepaid, std::size_t references)
+{
     if (work)
         work->edge_visits = allocation_detail::add(work->edge_visits, references);
-    const auto key = static_cast<std::uint8_t>(kind);
-    const geometry_demand::OwnerKey owner_key{channel, key, owner.get()};
-    geometry_demand::OwnerRecord* record_pointer = nullptr;
-    for (std::size_t index = 0; index < row_count; ++index)
-        if (rows[index].key.channel == channel && rows[index].key.kind == key && rows[index].key.address == owner.get())
-        {
-            record_pointer = &rows[index];
-            break;
-        }
-    if (!record_pointer)
-        if (const auto found = overlay.find(owner_key); found != overlay.end())
-            record_pointer = &found->second;
-    if (!record_pointer)
-    {
-        const auto references = result.references(channel, key, owner, work ? &work->lookup : nullptr);
-        if (references && !result.admits(channel, key, owner, bytes, work ? &work->lookup : nullptr))
-            throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry graph owner size changed.");
-        geometry_demand::OwnerRecord value{owner_key, owner, bytes, references};
-        if (row_count < rows.size())
-        {
-            record_pointer = &rows[row_count++];
-            *record_pointer = std::move(value);
-        }
-        else
-        {
-            admission().charge(1, sizeof(typename decltype(overlay)::value_type) + 4 * sizeof(void*));
-            record_pointer = &overlay.emplace(owner_key, std::move(value)).first->second;
-        }
-        if (work)
-            ++work->dependency_entries;
-    }
-    auto& record = *record_pointer;
-    if (record.bytes != bytes || owner.owner_before(record.owner) || record.owner.owner_before(owner))
-        throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry graph owner changes controls or bytes.");
+    auto& record = edit.row;
+    const auto& owner = record.owner;
+    const auto bytes = record.bytes;
+    const auto kind = record.key.kind;
     bool transition = false;
     if (retain)
     {
@@ -170,8 +189,8 @@ bool GeometryOwnerGraphEditor::Impl::edge(Kind kind, const std::shared_ptr<const
             if (ledger)
             {
                 GeometryAllocationOwnerAccess::admit_graph_owner(
-                    *ledger, channel, key, owner, bytes, used, limit, prepaid);
-                edit_paid(GeometryAllocationOwnerAccess::paid_charge(*ledger, channel, key, owner, bytes));
+                    *ledger, channel, kind, owner, bytes, used, limit, prepaid);
+                edit_paid(GeometryAllocationOwnerAccess::paid_charge(*ledger, channel, kind, owner, bytes));
             }
         }
     }
@@ -180,7 +199,7 @@ bool GeometryOwnerGraphEditor::Impl::edge(Kind kind, const std::shared_ptr<const
         if (references > record.references)
             throw GeometryError(GeometryErrorCode::InvalidInput, "Retired geometry graph owner is absent.");
         record.references -= references;
-        if (record.references < typed_references(owner_key))
+        if (record.references < edit.typed)
             throw GeometryError(GeometryErrorCode::InvalidInput, "Flat graph retirement consumes a typed owner.");
         transition = record.references == 0;
         if (transition && work)
@@ -199,36 +218,16 @@ bool GeometryOwnerGraphEditor::Impl::edge(Kind kind, const std::shared_ptr<const
     }
     return transition;
 }
-std::size_t GeometryOwnerGraphEditor::Impl::typed_references(const geometry_demand::OwnerKey& key) const
-{
-    for (const auto& row : std::span(inline_typed).first(typed_size))
-        if (row.key == key) return row.references;
-    if (const auto found = typed_overlay.find(key); found != typed_overlay.end()) return found->second;
-    return result.typed_references(key, work ? &work->lookup : nullptr);
-}
 GeometryOwnerGraphEditor::Impl::TypedTransition GeometryOwnerGraphEditor::Impl::typed_edge(
     allocation_detail::Kind kind, const std::shared_ptr<const void>& owner, std::size_t bytes, bool retain,
     bool prepaid, std::size_t references)
 {
-    const geometry_demand::OwnerKey key{channel, static_cast<std::uint8_t>(kind), owner.get()};
-    const auto previous = typed_references(key);
+    auto& edit = stage_owner(static_cast<std::uint8_t>(kind), owner, bytes);
+    const auto previous = edit.typed;
     if (!retain && references > previous)
         throw GeometryError(GeometryErrorCode::InvalidInput, "Retired typed geometry edge is absent.");
-    const auto next = retain ? allocation_detail::add(previous, references) : previous - references;
-    auto rows = std::span(inline_typed).first(typed_size);
-    const auto local = std::find_if(rows.begin(), rows.end(), [&](const auto& row) { return row.key == key; });
-    if (local != rows.end())
-        local->references = next;
-    else if (const auto old = typed_overlay.find(key); old != typed_overlay.end())
-        old->second = next;
-    else if (typed_size < inline_typed.size())
-        inline_typed[typed_size++] = {key, next};
-    else
-    {
-        admission().charge(1, sizeof(decltype(typed_overlay)::value_type) + 4 * sizeof(void*));
-        typed_overlay.emplace(key, next);
-    }
-    return {edge(kind, owner, bytes, retain, prepaid, references), retain ? previous == 0 : next == 0};
+    edit.typed = retain ? allocation_detail::add(previous, references) : previous - references;
+    return {apply_edge(edit, retain, prepaid, references), retain ? previous == 0 : edit.typed == 0};
 }
 bool GeometryOwnerGraphEditor::Impl::direct_edge(
     allocation_detail::Kind kind, const std::shared_ptr<const void>& owner, std::size_t bytes, bool retain, bool prepaid)
@@ -452,17 +451,12 @@ GeometryOwnerGraphEditor::GeometryOwnerGraphEditor(geometry_demand::GeometryOwne
     const NativeOwnerReceipts* previous_paid)
     : state_{std::move(accepted), channel, used, limit, ledger, work,
           ledger ? GeometryAllocationOwnerAccess::native_state(*ledger) : std::move(native_administration),
-          previous_paid ? *previous_paid : NativeOwnerReceipts{}, rows_, pending_}
+          previous_paid ? *previous_paid : NativeOwnerReceipts{}, pending_}
 {
     try
     {
         const auto native = impl_->native_administration;
         impl_->pending = decltype(impl_->pending)(geometry_detail::NativeAdministrationAllocator<PendingOwner>(native));
-        impl_->overlay = decltype(impl_->overlay)(
-            Impl::KeyLess{}, geometry_detail::NativeAdministrationAllocator<
-                                 std::pair<const geometry_demand::OwnerKey, geometry_demand::OwnerRecord>>(native));
-        impl_->typed_overlay = decltype(impl_->typed_overlay)(Impl::KeyLess{},
-            geometry_detail::NativeAdministrationAllocator<decltype(impl_->typed_overlay)::value_type>(native));
         if (channel > 1 || used > limit)
             throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid geometry owner graph arithmetic channel.");
         if (const auto existing = impl_->result.uniform_channel(work ? &work->lookup : nullptr);
@@ -517,10 +511,8 @@ std::size_t GeometryOwnerGraphEditor::edit_byte_bound(
 {
     using namespace allocation_detail;
     const auto excess = edges > geometry_demand::leaf_capacity ? edges - geometry_demand::leaf_capacity : 0;
-    auto bytes = product(excess, sizeof(typename decltype(Impl::overlay)::value_type) + 4 * sizeof(void*));
-    // Above the inline frontier, final rows need one contiguous charged buffer.
-    if (excess)
-        bytes = add(bytes, product(edges, sizeof(geometry_demand::OwnerRecord)));
+    // Touched rows include cancelling edits that will never enter an index.
+    auto bytes = geometry_demand::OwnerEdits::byte_bound(edges);
     // Account each full allocation in geometric vector growth, including the
     // previous buffer that remains live during reserve; no guessed multiplier.
     std::size_t capacity = 1, pending_slots = 0;
@@ -534,13 +526,6 @@ std::size_t GeometryOwnerGraphEditor::edit_byte_bound(
         pending_slots = add(pending_slots, capacity);
     }
     bytes = add(bytes, product(pending_slots, sizeof(PendingOwner)));
-    constexpr auto inline_roles = std::tuple_size_v<decltype(Impl::inline_typed)>;
-    if (typed_keys > inline_roles)
-    {
-        const auto entry = sizeof(decltype(Impl::typed_overlay)::value_type) + 4 * sizeof(void*);
-        bytes = add(bytes, product(typed_keys - inline_roles, entry));
-        bytes = add(bytes, product(typed_keys, sizeof(geometry_demand::TypedOwnerReference)));
-    }
     bytes = add(bytes, accepted.batch_edit_byte_bound(changed_keys, typed_keys));
     // Each newly allocated index node/State produces at most one payload map
     // row and one metadata-credit registry row. Both are charged before insert.
@@ -815,94 +800,13 @@ void GeometryOwnerGraphEditor::record_subset_charge(std::uint8_t kind, const std
 geometry_demand::GeometryOwnerManifest GeometryOwnerGraphEditor::finish()
 {
     const Impl::Call call(*impl_);
-    const auto accepted_references = [&](const geometry_demand::OwnerRecord& row)
-    {
-        return impl_->result.references(row.key.channel, row.key.kind, row.owner,
-            impl_->work ? &impl_->work->lookup : nullptr);
-    };
-    const auto changed = [&](const auto& row) { return !row.references || accepted_references(row) != row.references; };
-    const auto less = [](const auto& first, const auto& second) { return Impl::KeyLess{}(first.key, second.key); };
-    const auto publish = [&](std::span<geometry_demand::OwnerRecord> changes)
-    {
-        const auto admission = impl_->admission();
-        auto receipts = impl_->paid_edits ? impl_->paid_edits->rows() : std::span<NativeOwnerReceipts::Edit>{};
-        impl_->paid = impl_->paid.edited(receipts, admission, changes);
-        impl_->paid_edits.reset();
-        // A body that both entered and left this edit has no accepted row to
-        // delete, but it could have staged receipts to forget.
-        const auto end = std::remove_if(changes.begin(), changes.end(),
-            [&](const auto& row) { return !row.references && !accepted_references(row); });
-        const auto update = [&](std::span<geometry_demand::TypedOwnerReference> roles)
-        {
-            const auto last = std::remove_if(roles.begin(), roles.end(), [&](const auto& role)
-                {
-                    return impl_->result.typed_references(role.key, impl_->work ? &impl_->work->lookup : nullptr) ==
-                           role.references;
-                });
-            roles = roles.first(last - roles.begin());
-            std::sort(roles.begin(), roles.end(), [](const auto& a, const auto& b)
-                { return Impl::KeyLess{}(a.key, b.key); });
-            impl_->result = impl_->result.edited_typed(changes.first(end - changes.begin()), roles, admission,
-                impl_->work ? &impl_->work->index : nullptr, impl_->work ? &impl_->work->lookup : nullptr);
-        };
-        auto local_roles = std::span(impl_->inline_typed).first(impl_->typed_size);
-        if (impl_->typed_overlay.empty())
-            update(local_roles);
-        else
-        {
-            const auto count = allocation_detail::add(local_roles.size(), impl_->typed_overlay.size());
-            using Row = geometry_demand::TypedOwnerReference;
-            geometry_detail::NativeAdministrationVector<Row> roles(admission.allocator<Row>());
-            admission.charge(count, sizeof(Row));
-            roles.reserve(count);
-            if (roles.capacity() != count)
-                allocation_detail::exhausted("Typed geometry reference scratch capacity is unqualified.");
-            roles.insert(roles.end(), local_roles.begin(), local_roles.end());
-            for (const auto& [key, references] : impl_->typed_overlay)
-                roles.push_back({key, references});
-            update(roles);
-        }
-    };
-    if (impl_->overlay.empty())
-    {
-        // Compact and sort the caller's existing bounded buffer; no final heap
-        // row allocation is needed for the common <=64 touched-owner edit.
-        std::size_t count = 0;
-        for (std::size_t index = 0; index < impl_->row_count; ++index)
-            if (changed(impl_->rows[index]))
-            {
-                if (count != index)
-                    impl_->rows[count] = std::move(impl_->rows[index]);
-                ++count;
-            }
-        auto values = impl_->rows.first(count);
-        std::sort(values.begin(), values.end(), less);
-        publish(values);
-    }
-    else
-    {
-        const auto total = allocation_detail::add(impl_->row_count, impl_->overlay.size());
-        impl_->admission().charge(total, sizeof(geometry_demand::OwnerRecord));
-        geometry_detail::NativeAdministrationVector<geometry_demand::OwnerRecord> changes(
-            impl_->admission().allocator<geometry_demand::OwnerRecord>());
-        changes.reserve(total);
-        if (changes.capacity() != total)
-            allocation_detail::exhausted("Geometry graph final row capacity is unqualified.");
-        for (std::size_t index = 0; index < impl_->row_count; ++index)
-            if (changed(impl_->rows[index]))
-                changes.push_back(impl_->rows[index]);
-        for (const auto& [key, row] : impl_->overlay)
-            if (changed(row))
-                changes.push_back(row);
-        std::sort(changes.begin(), changes.end(), less);
-        publish(changes);
-    }
-    for (auto& row : impl_->rows.first(impl_->row_count))
-        row = {};
-    impl_->row_count = 0;
-    impl_->overlay.clear();
-    impl_->typed_size = 0;
-    impl_->typed_overlay.clear();
+    const auto admission = impl_->admission();
+    auto receipts = impl_->paid_edits ? impl_->paid_edits->rows() : std::span<NativeOwnerReceipts::Edit>{};
+    impl_->paid = impl_->paid.edited_graph(receipts, admission, impl_->edits);
+    impl_->recent_fixed_receipts.fill(nullptr);
+    impl_->paid_edits.reset();
+    impl_->result = impl_->result.edited_graph(impl_->edits, admission, impl_->work ? &impl_->work->index : nullptr);
+    impl_->edits.clear();
     if (impl_->ledger && impl_->credited_predecessor && impl_->result.owner_count())
         GeometryOwnerImportAccess::certify_constructed(*impl_->ledger, impl_->result, impl_->used, impl_->limit);
     impl_->finished = true;

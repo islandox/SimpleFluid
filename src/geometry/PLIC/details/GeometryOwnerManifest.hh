@@ -5,6 +5,7 @@
 #include "geometry/PLIC/details/GeometryDemandPages.hh"
 #include <cstdint>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <span>
@@ -48,6 +49,70 @@ struct TypedOwnerReference
 // no allocation and cannot throw. Its copies also preserve shared controls.
 template<> inline constexpr bool stack_safe_default<OwnerRecord> = true;
 template<> inline constexpr bool native_flag_in_owned_admission<OwnerRecord> = true;
+
+/** Private mutation rows. A touched key stays here until the graph and its
+ * receipt root have consumed the same final reference counts. */
+class OwnerEdits
+{
+public:
+    struct Edit
+    {
+        OwnerRecord row;
+        std::size_t accepted = 0;
+        std::size_t typed = 0, accepted_typed = 0;
+    };
+
+private:
+    struct Page
+    {
+        std::array<Edit, leaf_capacity> rows;
+        std::size_t size = 0;
+        [[nodiscard]] std::size_t lower_bound(const OwnerKey&) const;
+    };
+    // A directory key is the immutable lower bound of its page. All keys
+    // before the first directory entry belong to the stack page.
+    using Directory = geometry_detail::NativeAdministrationMap<OwnerKey, Page, OwnerKeyLess>;
+    Page first_{};
+    Directory pages_;
+    std::uint8_t channel_;
+
+public:
+    explicit OwnerEdits(std::uint8_t, const std::shared_ptr<const geometry_detail::NativeAllocationState>&);
+    [[nodiscard]] const Edit* find(const OwnerKey&) const;
+    [[nodiscard]] Edit* find(const OwnerKey&);
+    [[nodiscard]] std::uint8_t channel() const noexcept { return channel_; }
+    Edit& insert(Edit, const Admission&);
+    void clear() noexcept;
+    [[nodiscard]] static std::size_t byte_bound(std::size_t keys);
+
+    class Iterator
+    {
+    public:
+        using value_type = Edit;
+        using difference_type = std::ptrdiff_t;
+        using iterator_category = std::forward_iterator_tag;
+        using pointer = const Edit*;
+        using reference = const Edit&;
+
+        Iterator() = default;
+        [[nodiscard]] reference operator*() const noexcept { return page_->rows[index_]; }
+        [[nodiscard]] pointer operator->() const noexcept { return &**this; }
+        Iterator& operator++() noexcept;
+        Iterator operator++(int) noexcept;
+        bool operator==(const Iterator& other) const noexcept
+        { return page_ == other.page_ && index_ == other.index_; }
+
+    private:
+        friend class OwnerEdits;
+        Iterator(const Page& page, const Directory& pages) noexcept
+            : page_(page.size ? &page : nullptr), next_(pages.begin()), end_(pages.end()) {}
+        const Page* page_ = nullptr;
+        std::size_t index_ = 0;
+        Directory::const_iterator next_, end_;
+    };
+    [[nodiscard]] Iterator begin() const noexcept { return {first_, pages_}; }
+    [[nodiscard]] Iterator end() const noexcept { return {}; }
+};
 
 /** Contains only immutable physical owner pins and shared index pages.
  * A caller constructing an accepted snapshot controls when the returned root
@@ -142,8 +207,7 @@ public:
 private:
     friend class SimpleFluid::PLIC::details::GeometryOwnerGraphEditor;
     [[nodiscard]] std::size_t typed_references(const OwnerKey&, PageWork* = nullptr) const;
-    [[nodiscard]] GeometryOwnerManifest edited_typed(std::span<const OwnerRecord>, std::span<const TypedOwnerReference>,
-        Admission, PageWork*, PageWork*) const;
+    [[nodiscard]] GeometryOwnerManifest edited_graph(const OwnerEdits&, Admission, PageWork*) const;
     struct State;
     std::shared_ptr<const State> state_;
 };
