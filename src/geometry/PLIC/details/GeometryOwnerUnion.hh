@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <span>
 namespace SimpleFluid::Meshes::AMR
 {
 struct AdaptiveGeometrySnapshotCache;
@@ -141,6 +142,14 @@ public:
     [[nodiscard]] GeometryOwnerUnion staged(const GeometryOwnerRootBinding* retire,
         const GeometryOwnerRootBinding* retain, GeometryAllocationLedger&, GeometryAllocationLedger&, std::size_t& used,
         std::size_t limit, GeometryOwnerUnionWork* = nullptr) const;
+    struct Replacement
+    {
+        const GeometryOwnerRootBinding* retire;
+        const GeometryOwnerRootBinding* retain;
+    };
+    /** Apply one complete replacement to the physical and financial owner indexes. */
+    [[nodiscard]] GeometryOwnerUnion staged(std::span<const Replacement>, GeometryAllocationLedger&,
+        GeometryAllocationLedger&, std::size_t& used, std::size_t limit, GeometryOwnerUnionWork* = nullptr) const;
     void import(GeometryAllocationLedger&, GeometryAllocationLedger&, std::size_t& used, std::size_t limit) const;
     void import_subset(const GeometryOwnerRootBinding&, GeometryAllocationLedger&, GeometryAllocationLedger&,
         std::size_t& used, std::size_t limit) const;

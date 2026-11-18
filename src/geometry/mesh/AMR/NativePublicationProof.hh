@@ -118,13 +118,8 @@ public:
 private:
     friend class NativePublicationSession;
     friend class NativePublicationOperation;
-    /** All allocations/imports happen in staging. The caller installs both this
-     * successor and the returned global union only after collective success.
-     */
-    [[nodiscard]] PLIC::details::GeometryOwnerUnion stage(std::shared_ptr<const NativePublicationRoot>,
-        const PLIC::details::GeometryOwnerUnion&, PLIC::GeometryAllocationLedger&, PLIC::GeometryAllocationLedger&,
-        std::size_t& used, std::size_t limit, NativeGeometryRootStore& successor,
-        PLIC::details::GeometryOwnerUnionWork* = nullptr) const;
+    /** Pin the completed output and its exact binding for the union edit. */
+    [[nodiscard]] static NativeGeometryRootStore staged(std::shared_ptr<const NativePublicationRoot>);
     void swap(NativeGeometryRootStore&) noexcept;
     std::shared_ptr<const NativePublicationRoot> root_;
     PLIC::details::GeometryOwnerRootBinding binding_;

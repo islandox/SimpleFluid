@@ -16,6 +16,18 @@ struct OwnerKey
 {
     std::uint8_t channel = 0, kind = 0;
     const void* address = nullptr;
+    bool operator==(const OwnerKey&) const = default;
+};
+struct OwnerKeyLess
+{
+    bool operator()(const OwnerKey& a, const OwnerKey& b) const noexcept
+    {
+        if (a.channel != b.channel)
+            return a.channel < b.channel;
+        if (a.kind != b.kind)
+            return a.kind < b.kind;
+        return std::less<const void*>{}(a.address, b.address);
+    }
 };
 struct OwnerRecord
 {
@@ -29,7 +41,7 @@ struct OwnerRecord
  * The matching physical row owns and authenticates the shared control. */
 struct TypedOwnerReference
 {
-    const void* address = nullptr;
+    OwnerKey key;
     std::size_t references = 0;
 };
 // OwnerRecord defaults only zero scalars and an empty shared_ptr; it performs
@@ -129,7 +141,7 @@ public:
 
 private:
     friend class SimpleFluid::PLIC::details::GeometryOwnerGraphEditor;
-    [[nodiscard]] std::size_t typed_references(const void* address, PageWork* = nullptr) const;
+    [[nodiscard]] std::size_t typed_references(const OwnerKey&, PageWork* = nullptr) const;
     [[nodiscard]] GeometryOwnerManifest edited_typed(std::span<const OwnerRecord>, std::span<const TypedOwnerReference>,
         Admission, PageWork*, PageWork*) const;
     struct State;

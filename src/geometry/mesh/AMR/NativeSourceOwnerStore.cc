@@ -203,6 +203,11 @@ NativeSourceOwnerStore NativeSourceOwnerStore::assemble(const NativeSourceOwnerS
         previous.root_ ? &previous.root_->paid : nullptr);
     PLIC::details::GeometryOwnerGraphEditor bounded(previous.owners().owners[1], 1, cursor, limit,
         accounting ? &accounting->bounded() : nullptr, nullptr, admission.state());
+    // Component manifests contribute flat allocation pins. A publication
+    // proof can also visit the same convex, planar and identity owners
+    // directly. Its first and last geometry edges own their own child walks.
+    ordinary.distinguish_geometry_references();
+    bounded.distinguish_geometry_references();
     ordinary.pair_with(bounded, overlap);
     ordinary.native_fixed(tracked.envelope, true, bool(accounting));
     // Closed typed financial receipts travel with their actual component roots.
@@ -321,7 +326,7 @@ void NativeSourceOwnerStore::leaf(const AdaptiveLeaf& row, PLIC::details::Geomet
     NativePublicationOwnerGraph::descriptor(row.native_recipe, graph, retain, prepaid, accounting);
     part(row.join_recipe);
     if (row.factor_recipe && !NativeAdaptivePayloadAccess::factor(row.factor_recipe, context.sink) &&
-        graph.external(row.factor_recipe, sizeof(AdaptiveFactorRecipe), retain, prepaid))
+        graph.external_with_children(row.factor_recipe, sizeof(AdaptiveFactorRecipe), retain, prepaid))
     {
         part(row.factor_recipe->root);
         part(row.factor_recipe->base);

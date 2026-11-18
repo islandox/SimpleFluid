@@ -192,24 +192,14 @@ void NativeGeometryRootStore::certify(const PLIC::details::GeometryOwnerUnion& u
     if (root_)
         union_owners.import_subset(binding_, ordinary, bounded, used, limit);
 }
-PLIC::details::GeometryOwnerUnion NativeGeometryRootStore::stage(std::shared_ptr<const NativePublicationRoot> root,
-    const PLIC::details::GeometryOwnerUnion& union_owners, PLIC::GeometryAllocationLedger& ordinary,
-    PLIC::GeometryAllocationLedger& bounded, std::size_t& used, std::size_t limit, NativeGeometryRootStore& successor,
-    PLIC::details::GeometryOwnerUnionWork* work) const
+NativeGeometryRootStore NativeGeometryRootStore::staged(std::shared_ptr<const NativePublicationRoot> root)
 {
-    if (&successor == this)
-        throw std::invalid_argument("Native proof staging may not mutate its accepted root store.");
     NativeGeometryRootStore candidate;
     candidate.root_ = std::move(root);
     if (candidate.root_)
         candidate.binding_ = PLIC::details::GeometryOwnerRootBinding(
             candidate.root_, 0, candidate.root_->owners(), &candidate.root_->paid_receipts());
-    auto staged_union = union_owners.staged(binding_ ? &binding_ : nullptr,
-        candidate.binding_ ? &candidate.binding_ : nullptr, ordinary, bounded, used, limit, work);
-    if (candidate.root_)
-        staged_union.import_subset(candidate.binding_, ordinary, bounded, used, limit);
-    successor.swap(candidate);
-    return staged_union;
+    return candidate;
 }
 void NativeGeometryRootStore::swap(NativeGeometryRootStore& other) noexcept
 {

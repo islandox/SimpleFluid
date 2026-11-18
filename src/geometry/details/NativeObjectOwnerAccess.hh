@@ -89,13 +89,14 @@ public:
         return value->envelope;
     }
     template<class U>
-    static bool visit_children(const std::shared_ptr<U>& owner, const NativeConstructorOwnerSink& sink)
+    static bool visit_children(
+        const std::shared_ptr<U>& owner, const NativeConstructorOwnerSink& sink, bool branch = false)
     {
         const auto* value = receipt(owner);
         if (!value)
             return false;
         sink.fixed(value->envelope);
-        sink.storage(value->destroy.storage);
+        sink.storage(value->destroy.storage, branch);
         return true;
     }
 };

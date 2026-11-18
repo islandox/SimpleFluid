@@ -80,7 +80,7 @@ struct NativeConstructorOwnerSink
             throw std::invalid_argument("Native owner lacks exact allocation envelope.");
         fixed_edge(context, envelope);
     }
-    void storage(const NativeConstructorStorageOwner& value) const
+    void storage(const NativeConstructorStorageOwner& value, bool branch = false) const
     {
         if (!value.owner)
         {
@@ -91,10 +91,10 @@ struct NativeConstructorOwnerSink
         if (storage_receipt)
             storage_receipt(context, value);
         fixed(value.envelope); // Parallel shared field in the containing owner.
-        storage_reference(value.owner, value.envelope);
+        storage_reference(value.owner, value.envelope, branch);
     }
     void storage_reference(const std::shared_ptr<NativeConstructorStorage>& owner,
-        const std::shared_ptr<const NativeAllocationEnvelope>& envelope) const
+        const std::shared_ptr<const NativeAllocationEnvelope>& envelope, bool branch = false) const
     {
         if (owner)
         {
@@ -102,7 +102,8 @@ struct NativeConstructorOwnerSink
             if (storage_receipt)
                 storage_receipt(context, NativeConstructorStorageOwner{owner, envelope});
         }
-        if (owner && edge(owner, NativeConstructorOwnerKind::Storage, owner->exclusive_bytes()))
+        if (owner && (branch ? structural(owner, NativeConstructorOwnerKind::Storage, owner->exclusive_bytes())
+                             : edge(owner, NativeConstructorOwnerKind::Storage, owner->exclusive_bytes())))
         {
             if (!state_edge)
                 throw std::invalid_argument("Native owner visitor lacks detached state projection.");

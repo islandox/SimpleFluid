@@ -4,7 +4,6 @@
 #include "geometry/PLIC/details/GeometryOwnerManifest.hh"
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryDemandPages.tcc"
-#include "geometry/PLIC/details/GeometryOwnerGraph.hh"
 #include <limits>
 
 namespace SimpleFluid::PLIC::details::geometry_demand
@@ -15,11 +14,7 @@ struct OwnerLess
 {
     bool operator()(const OwnerRecord& a, const OwnerRecord& b) const noexcept
     {
-        if (a.key.channel != b.key.channel)
-            return a.key.channel < b.key.channel;
-        if (a.key.kind != b.key.kind)
-            return a.key.kind < b.key.kind;
-        return std::less<const void*>{}(a.key.address, b.key.address);
+        return OwnerKeyLess{}(a.key, b.key);
     }
 };
 // The immutable index owns only its current child slots. Mutations build
@@ -28,7 +23,7 @@ using Pages = OrderedPages<OwnerRecord, OwnerLess, true>;
 struct TypedLess
 {
     bool operator()(const TypedOwnerReference& a, const TypedOwnerReference& b) const noexcept
-    { return std::less<const void*>{}(a.address, b.address); }
+    { return OwnerKeyLess{}(a.key, b.key); }
 };
 using TypedPages = OrderedPages<TypedOwnerReference, TypedLess, true>;
 OwnerRecord lookup(std::uint8_t channel, std::uint8_t kind, const std::shared_ptr<const void>& owner)
@@ -394,12 +389,12 @@ GeometryOwnerManifest GeometryOwnerManifest::edited(
 {
     return edited_typed(changes, {}, admission, work, lookup_work);
 }
-std::size_t GeometryOwnerManifest::typed_references(const void* address, PageWork* work) const
+std::size_t GeometryOwnerManifest::typed_references(const OwnerKey& owner_key, PageWork* work) const
 {
-    const TypedOwnerReference key{address};
+    const TypedOwnerReference key{owner_key};
     const auto* row = TypedPages::lower_bound(state_ ? state_->typed() : nullptr,
         [&](const auto& value) { return TypedLess{}(value, key); }, work);
-    return row && row->address == address ? row->references : 0;
+    return row && row->key == owner_key ? row->references : 0;
 }
 GeometryOwnerManifest GeometryOwnerManifest::edited_typed(std::span<const OwnerRecord> changes,
     std::span<const TypedOwnerReference> type_changes, Admission admission, PageWork* work, PageWork* lookup_work) const
@@ -415,13 +410,12 @@ GeometryOwnerManifest GeometryOwnerManifest::edited_typed(std::span<const OwnerR
         if ((!references && !row.references) ||
             (references && !admits(row.key.channel, row.key.kind, row.owner, row.bytes, lookup_work)))
             throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry batch row changes its immutable owner.");
-        if (row.key.kind == GeometryOwnerGraphEditor::external_kind() &&
-            (!type_changes.empty() || (state_ && state_->typed())))
+        if (!type_changes.empty() || (state_ && state_->typed()))
         {
-            const TypedOwnerReference wanted{row.key.address};
+            const TypedOwnerReference wanted{row.key};
             const auto found = std::lower_bound(type_changes.begin(), type_changes.end(), wanted, TypedLess{});
-            const auto count = found != type_changes.end() && found->address == wanted.address ? found->references :
-                typed_references(wanted.address, lookup_work);
+            const auto count = found != type_changes.end() && found->key == wanted.key ? found->references :
+                typed_references(wanted.key, lookup_work);
             if (count > row.references)
                 throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry batch retires a live typed owner.");
         }
@@ -537,7 +531,7 @@ GeometryOwnerManifest GeometryOwnerManifest::retired(std::uint8_t channel, std::
             throw GeometryError(GeometryErrorCode::InvalidInput, "Retired geometry owner is absent.");
         row = accepted;
         row.references -= references;
-        if (kind == GeometryOwnerGraphEditor::external_kind() && row.references < typed_references(owner.get(), work))
+        if (row.references < typed_references(row.key, work))
             throw GeometryError(GeometryErrorCode::InvalidInput, "Flat retirement consumes a typed geometry reference.");
         GeometryOwnerManifest result;
         if (row.references)
@@ -552,7 +546,7 @@ GeometryOwnerManifest GeometryOwnerManifest::retired(std::uint8_t channel, std::
         throw GeometryError(GeometryErrorCode::InvalidInput, "Retired geometry owner is absent.");
     row = *accepted;
     row.references -= references;
-    if (kind == GeometryOwnerGraphEditor::external_kind() && row.references < typed_references(owner.get(), work))
+    if (row.references < typed_references(row.key, work))
         throw GeometryError(GeometryErrorCode::InvalidInput, "Flat retirement consumes a typed geometry reference.");
     auto root = Pages(admission, work).edit(state_->root, row, row.references ? &row : nullptr, true);
     GeometryOwnerManifest result;

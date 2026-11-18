@@ -1,6 +1,11 @@
+#include "geometry/details/NativeObjectOwnerAccess.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/AMR/NativePublicationOwnerGraph.hh"
+#include "geometry/mesh/AMR/NativeSourceOwnerStore.hh"
+#include "geometry/mesh/NativeDescriptorCodecAccess.hh"
+#include <array>
 #include <gtest/gtest.h>
+#include <span>
 
 namespace
 {
@@ -106,4 +111,91 @@ TEST(NativePublicationOwnerGraph, FlatFragmentDescriptorPinDoesNotSuppressRecipe
     Editor typed_retire(typed, 0, used, cap);
     D::NativePublicationOwnerGraph::descriptor(descriptor, typed_retire, false);
     EXPECT_EQ(typed_retire.finish().owner_count(), 0u);
+}
+
+TEST(NativePublicationOwnerGraph, AdmittedAdaptivePartsRetireIndependentlyOfFlatComponentPins)
+{
+    namespace A = SimpleFluid::Meshes::AMR;
+    namespace Mesh = SimpleFluid::Meshes;
+    using Editor = P::details::GeometryOwnerGraphEditor;
+    using Bytes = G::NativeObjectOwnerAccess<A::AdaptiveBytes>;
+    using Factor = G::NativeObjectOwnerAccess<A::AdaptiveFactorRecipe>;
+    using Descriptor = G::NativeObjectOwnerAccess<Mesh::NativeFragmentDescriptor>;
+    auto counter = G::NativeConstructionCounterAccess::create<D::Budget>(cap);
+    const G::NativeConstructionAdmission admission(counter);
+    const auto legacy = std::make_shared<Mesh::OrthogonalCartesian3D>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{.1, .3, .5}, {-1, 2}, {3, 5}}});
+    Mesh::NativeFragmentCache cache;
+    const auto source = Mesh::extract_native_fragment(Mesh::native_region("legacy_static", legacy), cache);
+    const auto descriptor = Mesh::NativeDescriptorCodecAccess::decode(
+        Mesh::encode_native_fragment_descriptor(*source), admission);
+    ASSERT_EQ(descriptor->parts.size(), 1u);
+    const auto& root = descriptor->parts.front();
+    const std::array<char, 512> axis_bytes{'z'};
+    const auto axis = Bytes::make(admission);
+    Bytes::storage(axis.owner).owner->copy(*axis.owner, std::span<const char>(axis_bytes));
+    const auto factor = Factor::make_without_buffers(admission);
+    factor.owner->root = root;
+    factor.owner->base = root;
+    factor.owner->axis = axis.owner;
+    A::AdaptiveLeaf leaf;
+    leaf.native_recipe = descriptor;
+    leaf.factor_recipe = factor.owner;
+    leaf.join_recipe = root;
+
+    std::size_t used = 0;
+    Editor build_component({}, 0, used, cap);
+    D::NativeSourceOwnerStore::leaf(leaf, build_component, true);
+    const auto component = build_component.finish();
+    const auto kind = Editor::external_kind();
+    ASSERT_EQ(component.payload_bytes(), counter.owner()->used);
+    EXPECT_EQ(component.references(0, kind, root), 4u);
+    EXPECT_EQ(component.references(0, kind, Bytes::envelope(root)), 1u);
+    EXPECT_EQ(component.references(0, kind, Bytes::storage(root).owner), 1u);
+    EXPECT_EQ(component.references(0, kind, factor.owner), 1u);
+    EXPECT_EQ(component.references(0, kind, descriptor), 1u);
+    EXPECT_EQ(component.references(0, kind, Descriptor::storage(descriptor).owner), 1u);
+
+    const auto project_flat = [&](Editor& graph, bool retain)
+    {
+        struct Projection { Editor& graph; bool retain; } projection{graph, retain};
+        component.visit_records({&projection, [](void* raw, const M::OwnerRecord& row)
+            {
+                const auto& p = *static_cast<const Projection*>(raw);
+                p.graph.owner(row, p.retain);
+            }});
+    };
+    Editor build_both({}, 0, used, cap);
+    project_flat(build_both, true);
+    D::NativeSourceOwnerStore::leaf(leaf, build_both, true);
+    const auto both = build_both.finish();
+    EXPECT_EQ(both.payload_bytes(), component.payload_bytes());
+
+    for (const bool flat_first : {true, false})
+    {
+        SCOPED_TRACE(flat_first);
+        Editor first(both, 0, used, cap);
+        if (flat_first)
+            project_flat(first, false);
+        else
+            D::NativeSourceOwnerStore::leaf(leaf, first, false);
+        const auto survivor = first.finish();
+        EXPECT_EQ(survivor.payload_bytes(), component.payload_bytes());
+        EXPECT_EQ(survivor.owner_count(), component.owner_count());
+        struct Comparison { const M::GeometryOwnerManifest& survivor; bool component_left; }
+            comparison{survivor, !flat_first};
+        component.visit_records({&comparison, [](void* raw, const M::OwnerRecord& row)
+            {
+                const auto& c = *static_cast<const Comparison*>(raw);
+                EXPECT_EQ(c.survivor.references(row.key.channel, row.key.kind, row.owner),
+                    c.component_left ? 1u : row.references);
+            }});
+
+        Editor second(survivor, 0, used, cap);
+        if (flat_first)
+            D::NativeSourceOwnerStore::leaf(leaf, second, false);
+        else
+            project_flat(second, false);
+        EXPECT_EQ(second.finish().owner_count(), 0u);
+    }
 }

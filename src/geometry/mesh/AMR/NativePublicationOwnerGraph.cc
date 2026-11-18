@@ -16,6 +16,11 @@ NativePublicationOwnerGraph::Context::Context(PLIC::details::GeometryOwnerGraphE
         auto& c = *static_cast<Context*>(raw);
         return c.graph.external(owner, bytes, c.retain, c.prepaid);
     };
+    sink.branch_edge = [](void* raw, const auto& owner, geometry_detail::NativeConstructorOwnerKind, std::size_t bytes)
+    {
+        auto& c = *static_cast<Context*>(raw);
+        return c.graph.external_with_children(owner, bytes, c.retain, c.prepaid);
+    };
     sink.fixed_edge = [](void* raw, const auto& envelope)
     {
         auto& c = *static_cast<Context*>(raw);
@@ -69,12 +74,6 @@ void NativePublicationOwnerGraph::descriptor(const std::shared_ptr<const NativeF
     PLIC::details::NativeGeometryAccounting* accounting)
 {
     Context context(graph, retain, prepaid, accounting);
-    context.sink.branch_edge =
-        [](void* raw, const auto& owner, geometry_detail::NativeConstructorOwnerKind, std::size_t bytes)
-        {
-            auto& value = *static_cast<Context*>(raw);
-            return value.graph.external_with_children(owner, bytes, value.retain, value.prepaid);
-        };
     NativeFragmentAccess::visit_descriptor(descriptor, context.sink, Context::identity, Context::geometry, Context::coverage);
 }
 void NativePublicationOwnerGraph::fragment(const std::shared_ptr<const NativeFragmentRecord>& record,

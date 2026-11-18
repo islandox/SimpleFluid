@@ -14,8 +14,8 @@ public:
         if (!value || !Access::admitted(value))
             return false;
         if (sink.semantic(
-                value, geometry_detail::NativeConstructorOwnerKind::ConstructionValues, Access::envelope(value)))
-            Access::visit_children(value, sink);
+                value, geometry_detail::NativeConstructorOwnerKind::ConstructionValues, Access::envelope(value), true))
+            Access::visit_children(value, sink, true);
         return true;
     }
     static bool factor(const std::shared_ptr<const AdaptiveFactorRecipe>& value,
@@ -24,9 +24,9 @@ public:
         using Access = geometry_detail::NativeObjectOwnerAccess<AdaptiveFactorRecipe>;
         if (!value || !Access::admitted(value))
             return false;
-        if (!sink.semantic(value, geometry_detail::NativeConstructorOwnerKind::NativeMesh, Access::envelope(value)))
+        if (!sink.semantic(value, geometry_detail::NativeConstructorOwnerKind::NativeMesh, Access::envelope(value), true))
             return true;
-        Access::visit_children(value, sink);
+        Access::visit_children(value, sink, true);
         for (const auto& part : {value->root, value->base, value->axis})
             if (part && !bytes(part, sink))
                 sink.edge(part, geometry_detail::NativeConstructorOwnerKind::ConstructionValues,

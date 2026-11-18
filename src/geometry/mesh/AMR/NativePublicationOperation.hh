@@ -24,7 +24,6 @@ public:
     { return accepted_native_.root(); }
     [[nodiscard]] NativeSourceCoverageTransaction& source_coverage_transaction() noexcept { return *coverage_tx_; }
     void prepare_source_coverage();
-    void stage_source(NativeSourceOwnerStore);
     void stage_native_result(std::shared_ptr<const NativePublicationRoot>);
     /** All throwing work, including lease growth and revision-token acquisition,
      * is finished before the caller's final collective agreement. */
@@ -46,7 +45,7 @@ private:
     std::optional<ContactExternalResidencyLease> growth_;
     std::optional<ContactExternalResidencyLease::PreparedTransfer> transfer_;
     std::uint64_t cache_revision_ = 0, publication_revision_ = 0;
-    bool source_staged_ = false, native_staged_ = false, token_ = false, committed_ = false;
+    bool token_ = false, committed_ = false;
 };
 [[nodiscard]] inline NativePublicationOperation begin_native_operation(const DistributedAdaptiveHierarchy& h)
 {

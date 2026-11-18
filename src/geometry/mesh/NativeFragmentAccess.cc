@@ -1,4 +1,5 @@
 #include "geometry/mesh/NativeFragmentAccess.hh"
+#include "geometry/mesh/AMR/NativeAdaptivePayloadAccess.hh"
 #include "geometry/details/NativeObjectOwnerAccess.hh"
 #include "geometry/PLIC/details/ExtrudedConstructionAccess.hh"
 #include "geometry/details/NativeAllocationGraph.hh"
@@ -403,19 +404,10 @@ void NativeFragmentAccess::visit_descriptor(const std::shared_ptr<const NativeFr
     if (!transition)
         return;
     if (native)
-        DescriptorAccess::visit_children(descriptor, sink);
+        DescriptorAccess::visit_children(descriptor, sink, true);
     for (const auto& part : descriptor->parts)
-        if (part)
-        {
-            using PartAccess = geometry_detail::NativeObjectOwnerAccess<NativeFragmentBytes>;
-            if (PartAccess::admitted(part))
-            {
-                if (sink.semantic(part, Kind::ConstructionValues, PartAccess::envelope(part)))
-                    PartAccess::visit_children(part, sink);
-            }
-            else
-                sink.edge(part, Kind::ConstructionValues, sizeof(*part) + part->capacity());
-        }
+        if (part && !AMR::adaptive_detail::NativeAdaptivePayloadAccess::bytes(part, sink))
+            sink.edge(part, Kind::ConstructionValues, sizeof(*part) + part->capacity());
     visit_origin(descriptor, sink, identity, geometry, coverage);
 }
 void NativeFragmentAccess::visit_origin(const std::shared_ptr<const NativeFragmentDescriptor>& descriptor,

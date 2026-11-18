@@ -96,6 +96,9 @@ private:
      * hold this allocation without visiting its children. */
     bool external_with_children(
         const std::shared_ptr<const void>&, std::size_t bytes, bool retain, bool prepaid = false);
+    /** Aggregate roots can import flat component records and also visit
+     * direct semantic owners of the same physical controls. */
+    void distinguish_geometry_references() noexcept { impl_->separate_direct_edges = true; }
 
     friend class SimpleFluid::Meshes::AMR::adaptive_detail::NativeSourceOwnerStore;
     friend class SimpleFluid::Meshes::AMR::adaptive_detail::NativePublicationOperation;
@@ -139,15 +142,13 @@ private:
         std::size_t* cross_payload_bytes = nullptr;
 
         geometry_detail::NativeAdministrationVector<PendingOwner> pending;
-        struct KeyLess
-        {
-            bool operator()(const geometry_demand::OwnerKey&, const geometry_demand::OwnerKey&) const noexcept;
-        };
+        using KeyLess = geometry_demand::OwnerKeyLess;
         geometry_detail::NativeAdministrationMap<geometry_demand::OwnerKey, geometry_demand::OwnerRecord, KeyLess>
             overlay;
         std::array<geometry_demand::TypedOwnerReference, 8> inline_typed{};
         std::size_t typed_size = 0;
-        geometry_detail::NativeAdministrationMap<const void*, std::size_t, std::less<const void*>> typed_overlay;
+        geometry_detail::NativeAdministrationMap<geometry_demand::OwnerKey, std::size_t, KeyLess> typed_overlay;
+        bool separate_direct_edges = false;
         bool adding = true, failed = false, finished = false, credited_predecessor = false;
         std::size_t financial_projection_depth = 0;
         std::size_t last_counter = 0;
@@ -168,10 +169,12 @@ private:
         template<class Kind>
         bool edge(Kind, const std::shared_ptr<const void>&, std::size_t bytes, bool retain, bool prepaid = false,
             std::size_t references = 1);
-        [[nodiscard]] std::size_t typed_references(const void*) const;
+        [[nodiscard]] std::size_t typed_references(const geometry_demand::OwnerKey&) const;
         struct TypedTransition { bool owner, children; };
-        TypedTransition typed_edge(const std::shared_ptr<const void>&, std::size_t bytes, bool retain, bool prepaid,
-            std::size_t references = 1);
+        TypedTransition typed_edge(allocation_detail::Kind, const std::shared_ptr<const void>&, std::size_t bytes,
+            bool retain, bool prepaid, std::size_t references = 1);
+        bool direct_edge(allocation_detail::Kind, const std::shared_ptr<const void>&, std::size_t bytes,
+            bool retain, bool prepaid = false);
         template<class Kind, class T> void push(Kind, const std::shared_ptr<const T>&, std::size_t&, std::size_t);
         [[nodiscard]] static bool source_base_children(bool transition) noexcept { return transition; }
         void native_typed_receipt(allocation_detail::Kind, const std::shared_ptr<const void>&,

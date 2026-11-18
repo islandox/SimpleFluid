@@ -189,6 +189,43 @@ TEST(GeometryOwnerUnion, ExactCapOneByteShortPoisonRetryKeepAcceptedValueAndCont
     matches(apply(retry0, retry1, retry, needed), std::array{second});
     EXPECT_EQ(retry, needed);
 }
+TEST(GeometryOwnerUnion, TwoRootReplacementMatchesIndependentCensusAndRejectsShortCapAtomically)
+{
+    ASSERT_EQ(Tpetra::getDefaultComm()->getSize(), 1);
+    const auto hierarchy = source();
+    std::vector<const A::AdaptiveLeaf*> rows;
+    for (const auto& row : hierarchy->owned_leaves()) rows.push_back(&row);
+    const std::array old_roots{acquire(*hierarchy, std::array{rows[0], rows[1]}),
+        acquire(*hierarchy, std::array{rows[2], rows[3]})};
+    const std::array new_roots{acquire(*hierarchy, std::array{rows[2], rows[4]}),
+        acquire(*hierarchy, std::array{rows[0], rows[5]})};
+    using Access = A::adaptive_detail::GeometrySnapshotAccess;
+    const auto a = Access::owner_binding(old_roots[0]), b = Access::owner_binding(old_roots[1]);
+    const auto c = Access::owner_binding(new_roots[0]), d = Access::owner_binding(new_roots[1]);
+    const std::array install{D::GeometryOwnerUnion::Replacement{nullptr, &a},
+        D::GeometryOwnerUnion::Replacement{nullptr, &b}};
+    const std::array replace{D::GeometryOwnerUnion::Replacement{&a, &c},
+        D::GeometryOwnerUnion::Replacement{&b, &d}};
+    P::GeometryAllocationLedger setup0, setup1;
+    std::size_t setup = 0;
+    const auto accepted = D::GeometryOwnerUnion{}.staged(install, setup0, setup1, setup, cap);
+    matches(accepted, old_roots);
+
+    P::GeometryAllocationLedger measure0, measure1;
+    std::size_t needed = 0;
+    const auto next = accepted.staged(replace, measure0, measure1, needed, cap);
+    matches(next, new_roots);
+    EXPECT_EQ(next.generation(), accepted.generation() + 1);
+    P::GeometryAllocationLedger short0, short1;
+    std::size_t short_used = 0;
+    ASSERT_GT(needed, 0u);
+    EXPECT_THROW((void) accepted.staged(replace, short0, short1, short_used, needed - 1), P::GeometryError);
+    matches(accepted, old_roots);
+    P::GeometryAllocationLedger exact0, exact1;
+    std::size_t exact = 0;
+    matches(accepted.staged(replace, exact0, exact1, exact, needed), new_roots);
+    EXPECT_EQ(exact, needed);
+}
 TEST(GeometryOwnerUnion, PersistentSubsetNeverPinsUnrelatedSourceRootOrIssuerUnion)
 {
     auto one = source(), two = source();

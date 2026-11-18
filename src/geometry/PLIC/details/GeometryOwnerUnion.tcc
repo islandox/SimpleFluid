@@ -905,33 +905,51 @@ GeometryOwnerUnion GeometryOwnerUnion::staged(const GeometryOwnerRootBinding* re
     GeometryAllocationLedger& bounded_ledger, std::size_t& used, std::size_t limit,
     GeometryOwnerUnionWork* measured) const
 {
+    const std::array replacements{Replacement{retire, retain}};
+    return staged(replacements, ordinary_ledger, bounded_ledger, used, limit, measured);
+}
+GeometryOwnerUnion GeometryOwnerUnion::staged(std::span<const Replacement> replacements,
+    GeometryAllocationLedger& ordinary_ledger, GeometryAllocationLedger& bounded_ledger, std::size_t& used,
+    std::size_t limit, GeometryOwnerUnionWork* measured) const
+{
     try
     {
         GeometryOwnerAdmissionPair pair(ordinary_ledger, bounded_ledger);
         if (generation_ == std::numeric_limits<std::uint64_t>::max())
             allocation_detail::exhausted("Owner union generation overflows.");
+        for (const auto& replacement : replacements)
+            if (replacement.retire && *replacement.retire)
+                validate(*replacement.retire);
         import(ordinary_ledger, bounded_ledger, used, limit);
-        if (retire && *retire)
-            validate(*retire);
         GeometryOwnerUnion result = *this;
-        if (retire && *retire)
+        for (const auto& replacement : replacements)
+        {
+            const auto* retire = replacement.retire;
+            if (!retire || !*retire) continue;
             result.edit_sources(*retire, false);
-        if (retain && *retain)
-            result.edit_sources(*retain, true);
-        if (retire && *retire && retire->group_)
-        {
-            if (source_group_ != retire->group_ || source_group_header_.get() != retire->header_.get() ||
-                source_group_header_.owner_before(retire->header_) || retire->header_.owner_before(source_group_header_))
-                throw GeometryError(GeometryErrorCode::InvalidInput, "Retired source group is outside its exact root.");
-            result.source_group_header_.reset();
-            result.source_group_ = nullptr;
+            if (retire->group_)
+            {
+                if (result.source_group_ != retire->group_ ||
+                    result.source_group_header_.get() != retire->header_.get() ||
+                    result.source_group_header_.owner_before(retire->header_) ||
+                    retire->header_.owner_before(result.source_group_header_))
+                    throw GeometryError(GeometryErrorCode::InvalidInput, "Retired source group is outside its exact root.");
+                result.source_group_header_.reset();
+                result.source_group_ = nullptr;
+            }
         }
-        if (retain && *retain && retain->group_)
+        for (const auto& replacement : replacements)
         {
-            if (result.source_group_)
-                throw GeometryError(GeometryErrorCode::InvalidInput, "Owner union has two unrelated source groups.");
-            result.source_group_header_ = retain->header_;
-            result.source_group_ = retain->group_;
+            const auto* retain = replacement.retain;
+            if (!retain || !*retain) continue;
+            result.edit_sources(*retain, true);
+            if (retain->group_)
+            {
+                if (result.source_group_)
+                    throw GeometryError(GeometryErrorCode::InvalidInput, "Owner union has two unrelated source groups.");
+                result.source_group_header_ = retain->header_;
+                result.source_group_ = retain->group_;
+            }
         }
         GeometryOwnerUnionWork local;
         auto& work = measured ? *measured : local;
@@ -970,8 +988,8 @@ GeometryOwnerUnion GeometryOwnerUnion::staged(const GeometryOwnerRootBinding* re
         // Replacements traverse source-pruned receipt deltas; unchanged owners
         // retain their exact origin/lease facts without reissuing N rows.
         const NativeOwnerReceipts empty_receipts;
-        const auto& old_receipts = retire && *retire && retire->paid_ ? *retire->paid_ : empty_receipts;
-        const auto& new_receipts = retain && *retain && retain->paid_ ? *retain->paid_ : empty_receipts;
+        const auto receipts = [&](const GeometryOwnerRootBinding* binding) -> const NativeOwnerReceipts&
+        { return binding && *binding && binding->paid_ ? *binding->paid_ : empty_receipts; };
         geometry_demand::ReceiptEdits receipt_edits(admission);
         struct PaidEdits
         {
@@ -985,8 +1003,12 @@ GeometryOwnerUnion GeometryOwnerUnion::staged(const GeometryOwnerRootBinding* re
                 context.edits.append_borrowed(value, context.retain ? NativeOwnerReceipts::Action::Retain :
                     NativeOwnerReceipts::Action::RetireIfRecorded);
         };
-        new_receipts.visit_added(old_receipts, {&paid_add, paid_edit}, &work.native_administration);
-        old_receipts.visit_added(new_receipts, {&paid_remove, paid_edit}, &work.native_administration);
+        for (const auto& replacement : replacements)
+            receipts(replacement.retain).visit_added(
+                receipts(replacement.retire), {&paid_add, paid_edit}, &work.native_administration);
+        for (const auto& replacement : replacements)
+            receipts(replacement.retire).visit_added(
+                receipts(replacement.retain), {&paid_remove, paid_edit}, &work.native_administration);
         owner_union_detail::ControlEdits controls{controls_, admission};
         const auto refs = [&](GeometryOwnerGraphEditor& editor, const geometry_demand::OwnerRecord& row)
         {
@@ -1072,10 +1094,12 @@ GeometryOwnerUnion GeometryOwnerUnion::staged(const GeometryOwnerRootBinding* re
                         }});
             }
         };
-        if (retain && *retain)
-            edit(*retain, true);
-        if (retire && *retire)
-            edit(*retire, false);
+        for (const auto& replacement : replacements)
+            if (replacement.retain && *replacement.retain)
+                edit(*replacement.retain, true);
+        for (const auto& replacement : replacements)
+            if (replacement.retire && *replacement.retire)
+                edit(*replacement.retire, false);
         result.paid_body_[0] = result.paid_body_[0].edited(receipt_edits.rows(), admission);
         receipt_edits.clear();
         result.owners_ = OwnerManifestPair::sealed({ordinary.finish(), bounded.finish()}, overlap);

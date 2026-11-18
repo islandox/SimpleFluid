@@ -24,15 +24,6 @@ bool geometry_demand::MetadataSink::project_native_state(
     financial_graph->native_state(state, financial_retain);
     return true;
 }
-bool GeometryOwnerGraphEditor::Impl::KeyLess::operator()(
-    const geometry_demand::OwnerKey& a, const geometry_demand::OwnerKey& b) const noexcept
-{
-    if (a.channel != b.channel)
-        return a.channel < b.channel;
-    if (a.kind != b.kind)
-        return a.kind < b.kind;
-    return std::less<const void*>{}(a.address, b.address);
-}
 GeometryOwnerGraphEditor::Impl::Call::Call(Impl& value) : editor(value)
 {
     if (editor.failed || editor.finished)
@@ -189,7 +180,7 @@ bool GeometryOwnerGraphEditor::Impl::edge(Kind kind, const std::shared_ptr<const
         if (references > record.references)
             throw GeometryError(GeometryErrorCode::InvalidInput, "Retired geometry graph owner is absent.");
         record.references -= references;
-        if (key == external_kind() && record.references < typed_references(owner.get()))
+        if (record.references < typed_references(owner_key))
             throw GeometryError(GeometryErrorCode::InvalidInput, "Flat graph retirement consumes a typed owner.");
         transition = record.references == 0;
         if (transition && work)
@@ -208,36 +199,45 @@ bool GeometryOwnerGraphEditor::Impl::edge(Kind kind, const std::shared_ptr<const
     }
     return transition;
 }
-std::size_t GeometryOwnerGraphEditor::Impl::typed_references(const void* address) const
+std::size_t GeometryOwnerGraphEditor::Impl::typed_references(const geometry_demand::OwnerKey& key) const
 {
     for (const auto& row : std::span(inline_typed).first(typed_size))
-        if (row.address == address) return row.references;
-    if (const auto found = typed_overlay.find(address); found != typed_overlay.end()) return found->second;
-    return result.typed_references(address, work ? &work->lookup : nullptr);
+        if (row.key == key) return row.references;
+    if (const auto found = typed_overlay.find(key); found != typed_overlay.end()) return found->second;
+    return result.typed_references(key, work ? &work->lookup : nullptr);
 }
 GeometryOwnerGraphEditor::Impl::TypedTransition GeometryOwnerGraphEditor::Impl::typed_edge(
-    const std::shared_ptr<const void>& owner, std::size_t bytes, bool retain, bool prepaid, std::size_t references)
+    allocation_detail::Kind kind, const std::shared_ptr<const void>& owner, std::size_t bytes, bool retain,
+    bool prepaid, std::size_t references)
 {
-    const auto address = owner.get();
-    const auto previous = typed_references(address);
+    const geometry_demand::OwnerKey key{channel, static_cast<std::uint8_t>(kind), owner.get()};
+    const auto previous = typed_references(key);
     if (!retain && references > previous)
         throw GeometryError(GeometryErrorCode::InvalidInput, "Retired typed geometry edge is absent.");
     const auto next = retain ? allocation_detail::add(previous, references) : previous - references;
     auto rows = std::span(inline_typed).first(typed_size);
-    const auto local = std::find_if(rows.begin(), rows.end(), [address](const auto& row) { return row.address == address; });
+    const auto local = std::find_if(rows.begin(), rows.end(), [&](const auto& row) { return row.key == key; });
     if (local != rows.end())
         local->references = next;
-    else if (const auto old = typed_overlay.find(address); old != typed_overlay.end())
+    else if (const auto old = typed_overlay.find(key); old != typed_overlay.end())
         old->second = next;
     else if (typed_size < inline_typed.size())
-        inline_typed[typed_size++] = {address, next};
+        inline_typed[typed_size++] = {key, next};
     else
     {
         admission().charge(1, sizeof(decltype(typed_overlay)::value_type) + 4 * sizeof(void*));
-        typed_overlay.emplace(address, next);
+        typed_overlay.emplace(key, next);
     }
-    return {edge(allocation_detail::Kind::ExternalOwner, owner, bytes, retain, prepaid, references),
-        retain ? previous == 0 : next == 0};
+    return {edge(kind, owner, bytes, retain, prepaid, references), retain ? previous == 0 : next == 0};
+}
+bool GeometryOwnerGraphEditor::Impl::direct_edge(
+    allocation_detail::Kind kind, const std::shared_ptr<const void>& owner, std::size_t bytes, bool retain, bool prepaid)
+{
+    if (!owner)
+        return false;
+    if (separate_direct_edges)
+        return typed_edge(kind, owner, bytes, retain, prepaid).children;
+    return edge(kind, owner, bytes, retain, prepaid);
 }
 template<class Kind, class T>
 void GeometryOwnerGraphEditor::Impl::push(Kind kind, const std::shared_ptr<const T>& owner, std::size_t&, std::size_t)
@@ -275,13 +275,14 @@ bool GeometryOwnerGraphEditor::Impl::native_state(
             GeometryAllocationOwnerAccess::authorize_native_state(*ledger, owner);
     }
     const bool paid = prepaid || owner->used_counter == &used;
-    const auto transition = typed_edge(owner, owner->allocation_admission_bytes, retain, paid, references);
+    const auto kind = allocation_detail::Kind::ExternalOwner;
+    const auto transition = typed_edge(kind, owner, owner->allocation_admission_bytes, retain, paid, references);
     if (transition.children)
     {
         const auto keeper_bytes = owner->mirror.owner_proof.bytes();
         if (owner->mirror.owner)
             edge(allocation_detail::Kind::ExternalOwner, owner->mirror.owner, keeper_bytes, retain, paid, 2);
-        if (typed_edge(owner->counter_owner, counter_bytes, retain, paid, 2).children && owner->mirror.owner)
+        if (typed_edge(kind, owner->counter_owner, counter_bytes, retain, paid, 2).children && owner->mirror.owner)
             edge(allocation_detail::Kind::ExternalOwner, owner->mirror.owner, keeper_bytes, retain, paid, 2);
     }
     return transition.owner;
@@ -309,7 +310,8 @@ void GeometryOwnerGraphEditor::Impl::native_object_children(
     if (!storage.owner) return;
     native_fixed(storage.envelope, adding, false);
     const bool prepaid = storage.owner->admission().state()->used_counter == &used;
-    if (edge(allocation_detail::Kind::ExternalOwner, storage.owner, storage.owner->exclusive_bytes(), adding, prepaid))
+    if (direct_edge(
+            allocation_detail::Kind::ExternalOwner, storage.owner, storage.owner->exclusive_bytes(), adding, prepaid))
         native_state(storage.owner->admission().state(), adding, false);
 }
 bool GeometryOwnerGraphEditor::Impl::native_fixed(
@@ -326,7 +328,8 @@ bool GeometryOwnerGraphEditor::Impl::native_fixed(
     const auto& state = owner->state();
     (void) geometry_detail::NativeAllocationGraphAccess::validate_state(state);
     const bool paid = prepaid || state->used_counter == &used;
-    const auto transition = typed_edge(owner, owner->fixed_allocation_bytes(), retain, paid);
+    const auto transition = typed_edge(allocation_detail::Kind::ExternalOwner, owner, owner->fixed_allocation_bytes(),
+        retain, paid);
     if (transition.children)
         native_state(state, retain, paid, 5);
     return transition.owner;
@@ -342,7 +345,7 @@ bool GeometryOwnerGraphEditor::Impl::weak_observation(const NativeWeakOwnerObser
     {
         if (!scalar->keeper)
             return edge(kind, scalar->owner, scalar->bytes, retain);
-        const auto transition = typed_edge(scalar->owner, scalar->bytes, retain, false);
+        const auto transition = typed_edge(kind, scalar->owner, scalar->bytes, retain, false);
         // The witness owns its own keeper. The Counter control owns two
         // additional keeper edges through its installed allocator and deleter.
         edge(kind, scalar->keeper, scalar->keeper_bytes, retain, false, transition.children ? 3 : 1);
@@ -352,7 +355,7 @@ bool GeometryOwnerGraphEditor::Impl::weak_observation(const NativeWeakOwnerObser
     {
         if (retain)
             edit_paid(NativePaidExtentCharge::contact_fixed(value));
-        const auto transition = typed_edge(contact->owner, contact->bytes, retain, false);
+        const auto transition = typed_edge(kind, contact->owner, contact->bytes, retain, false);
         // The witness and the actual installed group each hold a keeper.
         edge(kind, contact->keeper, contact->keeper_bytes, retain, false, transition.children ? 2 : 1);
         return transition.owner;
@@ -376,7 +379,7 @@ void GeometryOwnerGraphEditor::Impl::retain_identity(
                 GeometryAllocationOwnerAccess::authorize_native_storage(
                     *ledger, admitted->storage().owner, admitted->storage().envelope);
             }
-            if (!edge(allocation_detail::Kind::IdentityPayload, owner, bytes, adding))
+            if (!direct_edge(allocation_detail::Kind::IdentityPayload, owner, bytes, adding))
                 break;
             if (admitted)
             {
@@ -393,7 +396,7 @@ void GeometryOwnerGraphEditor::Impl::retain_identity(
                             std::static_pointer_cast<const geometry_detail::NativeConstructorStorage>(child);
                         paid = storage->admission().state()->used_counter == &self.used;
                     }
-                    return self.edge(allocation_detail::Kind::ExternalOwner, child, count, self.adding, paid);
+                    return self.direct_edge(allocation_detail::Kind::ExternalOwner, child, count, self.adding, paid);
                 };
                 sink.fixed_edge = [](void* raw, const auto& fixed)
                 {
@@ -439,7 +442,7 @@ template<ArithmeticMode Mode> void GeometryOwnerGraphEditor::Impl::drain(bool re
         const allocation_detail::Item item{static_cast<allocation_detail::Kind>(value.kind), std::move(value.owner)};
         allocation_detail::visit_geometry_owner<Mode>(*this, item, used, limit,
             [&](const allocation_detail::Item& value, std::size_t bytes, std::size_t&, std::size_t)
-            { return edge(value.kind, value.owner, bytes, adding); });
+            { return direct_edge(value.kind, value.owner, bytes, adding); });
     }
 }
 
@@ -458,7 +461,7 @@ GeometryOwnerGraphEditor::GeometryOwnerGraphEditor(geometry_demand::GeometryOwne
         impl_->overlay = decltype(impl_->overlay)(
             Impl::KeyLess{}, geometry_detail::NativeAdministrationAllocator<
                                  std::pair<const geometry_demand::OwnerKey, geometry_demand::OwnerRecord>>(native));
-        impl_->typed_overlay = decltype(impl_->typed_overlay)(std::less<const void*>{},
+        impl_->typed_overlay = decltype(impl_->typed_overlay)(Impl::KeyLess{},
             geometry_detail::NativeAdministrationAllocator<decltype(impl_->typed_overlay)::value_type>(native));
         if (channel > 1 || used > limit)
             throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid geometry owner graph arithmetic channel.");
@@ -560,7 +563,7 @@ bool GeometryOwnerGraphEditor::external_with_children(
     const std::shared_ptr<const void>& owner, std::size_t bytes, bool retain, bool prepaid)
 {
     const Impl::Call call(*impl_);
-    return owner && impl_->typed_edge(owner, bytes, retain, prepaid).children;
+    return owner && impl_->typed_edge(allocation_detail::Kind::ExternalOwner, owner, bytes, retain, prepaid).children;
 }
 bool GeometryOwnerGraphEditor::owner(const geometry_demand::OwnerRecord& row, bool retain, bool prepaid)
 {
@@ -665,7 +668,7 @@ void GeometryOwnerGraphEditor::planar(const PlanarFacePtr<ArithmeticMode::Ordina
     if (native)
         impl_->native_typed_receipt(allocation_detail::Kind::PlanarWrapper, owner,
             NativePlanarOwnerAccess::wrapper_envelope(owner), {}, impl_->used, impl_->limit);
-    if (!impl_->edge(allocation_detail::Kind::PlanarWrapper, owner, native ? 0 : sizeof(*owner), retain))
+    if (!impl_->direct_edge(allocation_detail::Kind::PlanarWrapper, owner, native ? 0 : sizeof(*owner), retain))
         return;
     if (native)
         impl_->native_object_children(NativePlanarOwnerAccess::wrapper_envelope(owner), {}, impl_->used, impl_->limit);
@@ -674,7 +677,8 @@ void GeometryOwnerGraphEditor::planar(const PlanarFacePtr<ArithmeticMode::Ordina
         impl_->native_typed_receipt(allocation_detail::Kind::PlanarPayload, payload,
             NativePlanarOwnerAccess::payload_envelope(owner), NativePlanarOwnerAccess::storage(owner),
             impl_->used, impl_->limit);
-    if (impl_->edge(allocation_detail::Kind::PlanarPayload, payload, native ? 0 : owner->exclusive_storage_bytes(), retain))
+    if (impl_->direct_edge(
+            allocation_detail::Kind::PlanarPayload, payload, native ? 0 : owner->exclusive_storage_bytes(), retain))
     {
         if (native)
             impl_->native_object_children(NativePlanarOwnerAccess::payload_envelope(owner),
@@ -832,12 +836,12 @@ geometry_demand::GeometryOwnerManifest GeometryOwnerGraphEditor::finish()
         {
             const auto last = std::remove_if(roles.begin(), roles.end(), [&](const auto& role)
                 {
-                    return impl_->result.typed_references(role.address, impl_->work ? &impl_->work->lookup : nullptr) ==
+                    return impl_->result.typed_references(role.key, impl_->work ? &impl_->work->lookup : nullptr) ==
                            role.references;
                 });
             roles = roles.first(last - roles.begin());
             std::sort(roles.begin(), roles.end(), [](const auto& a, const auto& b)
-                { return std::less<const void*>{}(a.address, b.address); });
+                { return Impl::KeyLess{}(a.key, b.key); });
             impl_->result = impl_->result.edited_typed(changes.first(end - changes.begin()), roles, admission,
                 impl_->work ? &impl_->work->index : nullptr, impl_->work ? &impl_->work->lookup : nullptr);
         };
@@ -854,8 +858,8 @@ geometry_demand::GeometryOwnerManifest GeometryOwnerGraphEditor::finish()
             if (roles.capacity() != count)
                 allocation_detail::exhausted("Typed geometry reference scratch capacity is unqualified.");
             roles.insert(roles.end(), local_roles.begin(), local_roles.end());
-            for (const auto& [address, references] : impl_->typed_overlay)
-                roles.push_back({address, references});
+            for (const auto& [key, references] : impl_->typed_overlay)
+                roles.push_back({key, references});
             update(roles);
         }
     };

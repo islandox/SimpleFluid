@@ -5097,11 +5097,8 @@ NativePublicationOperation::NativePublicationOperation(const DistributedAdaptive
             throw std::invalid_argument("Native source accounting is absent or publication is in progress.");
         (void) cache_->root_bytes();
         accepted_union_ = cache_->owner_union;
-        staged_union_ = accepted_union_;
         accepted_source_ = cache_->source_store;
         accepted_native_ = cache_->native_store;
-        staged_source_ = accepted_source_;
-        staged_native_ = accepted_native_;
         partition_ = cache_->source_partition;
         // H changes when native outputs outside this current union retire.
         // Only exact canonical direct-H extents inside U may leave that scalar
@@ -5134,39 +5131,31 @@ void NativePublicationOperation::prepare_source_coverage()
         throw std::logic_error("Source coverage transaction is absent or already locked.");
     coverage_tx_->prepare();
 }
-void NativePublicationOperation::stage_source(NativeSourceOwnerStore source)
-{
-    if (token_ || source_staged_)
-        throw std::logic_error("Native source root was already staged or locked.");
-    auto next = source.replace_in(accepted_source_, staged_union_, *accounting_);
-    staged_source_.swap(source);
-    staged_union_ = std::move(next);
-    source_staged_ = true;
-}
 void NativePublicationOperation::stage_native_result(std::shared_ptr<const NativePublicationRoot> root)
 {
-    if (token_ || native_staged_ || !root)
+    if (token_ || staged_native_.root() || !root)
         throw std::logic_error("Native output root was already staged, locked or absent.");
-    staged_union_ = accepted_native_.stage(std::move(root), staged_union_, accounting_->ordinary(),
-        accounting_->bounded(), accounting_->cursor(), accounting_->limit(), staged_native_);
-    native_staged_ = true;
+    staged_native_ = NativeGeometryRootStore::staged(std::move(root));
 }
 void NativePublicationOperation::prepare_commit(NativePublicationSession& session)
 {
-    if (!native_staged_ || token_ || session.admission_.state() != admission_->state() ||
+    if (!staged_native_.root() || token_ || session.admission_.state() != admission_->state() ||
         session.inputs_.cache != inputs_.cache || !session.result_ || !session.receipt_)
         throw std::logic_error("Native operation/session result is incomplete or foreign.");
     session.recheck(*hierarchy_);
-    if (!source_staged_)
-    {
-        accepted_union_.import_subset(accepted_source_.binding(), accounting_->ordinary(), accounting_->bounded(),
-            accounting_->cursor(), accounting_->limit());
-        auto source = NativeSourceOwnerStore::assemble(accepted_source_, accepted_source_.components(),
-            *admission_, &*accounting_, session.indexes_, accepted_source_.input_administration(), {}, {}, {}, {}, {},
-            NativeSourcePublicationValues{inputs_.cache->allocation, session.receipt_, accepted_source_.bound_input(),
-                accepted_source_.observations(), coverage_tx_->staged_broker()});
-        stage_source(std::move(source));
-    }
+    accepted_union_.import_subset(accepted_source_.binding(), accounting_->ordinary(), accounting_->bounded(),
+        accounting_->cursor(), accounting_->limit());
+    staged_source_ = NativeSourceOwnerStore::assemble(accepted_source_, accepted_source_.components(),
+        *admission_, &*accounting_, session.indexes_, accepted_source_.input_administration(), {}, {}, {}, {}, {},
+        NativeSourcePublicationValues{inputs_.cache->allocation, session.receipt_, accepted_source_.bound_input(),
+            accepted_source_.observations(), coverage_tx_->staged_broker()});
+    const std::array replacements{
+        PLIC::details::GeometryOwnerUnion::Replacement{&accepted_native_.binding(), &staged_native_.binding()},
+        PLIC::details::GeometryOwnerUnion::Replacement{&accepted_source_.binding(), &staged_source_.binding()}};
+    staged_union_ = accepted_union_.staged(replacements, accounting_->ordinary(), accounting_->bounded(),
+        accounting_->cursor(), accounting_->limit());
+    staged_native_.certify(staged_union_, accounting_->ordinary(), accounting_->bounded(),
+        accounting_->cursor(), accounting_->limit());
     const std::lock_guard geometry_lock(cache_->mutex);
     const std::lock_guard publication_lock(inputs_.cache->mutex);
     if (cache_->commit_token || inputs_.cache->commit_token || cache_->revision != cache_revision_ ||
