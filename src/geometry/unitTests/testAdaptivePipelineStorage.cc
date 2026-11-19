@@ -42,9 +42,11 @@ using AllocationDomain = SimpleFluid::geometry_detail::AllocationDomain;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 inline std::array<std::size_t, static_cast<unsigned>(D::PipelineWork::Count)> pipeline_work{};
 constexpr std::size_t ample = 256 * 1024 * 1024;
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
 constexpr std::array domain_names{"unattributed", "leaf_pages", "family_storage", "contact_halo", "geometry_snapshot",
     "owner_union", "native_publication", "external_third_party"};
 static_assert(domain_names.size() == static_cast<std::size_t>(AllocationDomain::Count));
+#endif
 constexpr std::array phase_names{"candidate", "transport", "directory", "native_publication", "native_cell_routes"};
 constexpr std::array work_names{"active_leaf_callback_visits", "leased_directory_wire_keys", "numeric_output_rows",
     "cell_geometry_requests", "surface_batch_requests", "exact_cell_shell_calls", "native_materialization_requests",
@@ -119,6 +121,7 @@ GenerationObservation observe_generation(const State& state)
         });
     return result;
 }
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
 /** Observe the implementation's actual rebound type without setting a domain. */
 struct RequestedExtents
 {
@@ -163,6 +166,7 @@ template<class T, AllocationDomain Domain> struct ObservedDomainAllocator
         return account == other.account && requested == other.requested;
     }
 };
+#endif
 std::vector<A::AdaptiveBytes> encoded(const State& source)
 {
     std::vector<A::AdaptiveBytes> rows;
@@ -490,12 +494,13 @@ void report(std::string prefix, const pipeline_trace::Summary& value)
     record_property(prefix + "_retained_requested_cpp_allocations", std::to_string(value.retained_allocations));
     record_property(prefix + "_all_live_requested_cpp_bytes", std::to_string(value.all_live));
     record_property(prefix + "_all_live_requested_cpp_allocations", std::to_string(value.live_allocations));
-    record_property(prefix + "_unattributed_live_requested_cpp_bytes", std::to_string(value.unattributed_live_bytes));
-    record_property(
-        prefix + "_unattributed_live_requested_cpp_allocations", std::to_string(value.unattributed_live_allocations));
     record_property(prefix + "_retained_stream_phase_bytes", std::to_string(value.retained_streaming_bytes));
     record_property(prefix + "_all_live_requested_cpp_peak", std::to_string(value.all_peak));
     record_property(prefix + "_incremental_live_requested_cpp_peak", std::to_string(value.incremental_peak));
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
+    record_property(prefix + "_unattributed_live_requested_cpp_bytes", std::to_string(value.unattributed_live_bytes));
+    record_property(
+        prefix + "_unattributed_live_requested_cpp_allocations", std::to_string(value.unattributed_live_allocations));
     std::size_t live = 0;
     for (std::size_t i = 0; i != domain_names.size(); ++i)
     {
@@ -511,6 +516,7 @@ void report(std::string prefix, const pipeline_trace::Summary& value)
     EXPECT_EQ(live, value.all_live);
     EXPECT_EQ(
         value.domain[static_cast<std::size_t>(AllocationDomain::Unattributed)].live, value.unattributed_live_bytes);
+#endif
     for (std::size_t i = 0; i != pipeline_trace::phases; ++i)
     {
         record_property(prefix + "_phase_" + phase_names[i] + "_requests", std::to_string(value.phase[i].allocations));
@@ -523,7 +529,8 @@ TEST(AdaptivePipelineStorage, WholePipelineBaselineReportsExistingWork)
 {
     record_property("plic_mesh_domain_matches_calling_image",
         Access::pipeline_geometry_statistics_domain() == SimpleFluid::PLIC::geometry_statistics_domain() ? "1" : "0");
-    record_property("allocation_attribution_scope", "allocation_time_domains_requested_cpp_bytes");
+    record_property("allocation_attribution_scope",
+        SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT ? "allocation_time_domains_requested_cpp_bytes" : "disabled");
     record_property("scaling_gate_status", "baseline_observation_only_future_stage6_unqualified");
     for (const auto provider : F::providers)
     {
@@ -882,6 +889,7 @@ TEST(AdaptivePipelineStorage, AllocationOwnerWorkCountsActualEnumerationAndPreAd
 
 TEST(AdaptivePipelineStorage, DomainAllocatorCountsExactReboundNodeAndControlBytes)
 {
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     using SimpleFluid::geometry_detail::AllocationAccount;
     using Value = std::pair<const int, int>;
     using Nodes = ObservedDomainAllocator<Value, AllocationDomain::LeafPages>;
@@ -935,10 +943,14 @@ TEST(AdaptivePipelineStorage, DomainAllocatorCountsExactReboundNodeAndControlByt
     EXPECT_EQ(released.domain[static_cast<std::size_t>(AllocationDomain::GeometrySnapshot)].deallocations,
         controls.allocations);
     EXPECT_FALSE(pipeline_trace::overflow.load());
+#else
+    GTEST_SKIP() << "Requires allocation auditing.";
+#endif
 }
 
 TEST(AdaptivePipelineStorage, PlainAllocationRemainsUnattributedBesideDomainStorage)
 {
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     using Allocator = SimpleFluid::geometry_detail::DomainAllocator<std::uint64_t, AllocationDomain::FamilyStorage>;
     struct Nested
     {
@@ -972,6 +984,9 @@ TEST(AdaptivePipelineStorage, PlainAllocationRemainsUnattributedBesideDomainStor
     EXPECT_EQ(released.unattributed_live_allocations, 0u);
     EXPECT_EQ(released.unattributed_live_bytes, 0u);
     EXPECT_FALSE(pipeline_trace::overflow.load());
+#else
+    GTEST_SKIP() << "Requires allocation auditing.";
+#endif
 }
 
 TEST(AdaptivePipelineStorage, DomainSharedAliasesAndWeakControlRetireAtTheirActualLifetimes)
@@ -986,32 +1001,47 @@ TEST(AdaptivePipelineStorage, DomainSharedAliasesAndWeakControlRetireAtTheirActu
     std::shared_ptr<char> alias(owner, &owner->payload[17]);
     std::weak_ptr<Object> weak = owner;
     const auto captured = pipeline_trace::summary();
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     const auto domain = static_cast<std::size_t>(AllocationDomain::GeometrySnapshot);
-    const auto extent = captured.domain[domain].live;
+#endif
+    const auto extent = captured.all_live;
     {
         const pipeline_trace::Pause pause;
         EXPECT_GT(extent, sizeof(Object));
+        EXPECT_EQ(captured.live_allocations, 1u);
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
         EXPECT_EQ(captured.domain[domain].allocations, 1u);
-        EXPECT_EQ(captured.all_live, extent);
+        EXPECT_EQ(captured.domain[domain].live, extent);
         EXPECT_EQ(captured.unattributed_live_bytes, 0u);
+#endif
     }
     owner.reset();
     {
+        const auto retained = pipeline_trace::summary();
         const pipeline_trace::Pause pause;
         EXPECT_FALSE(weak.expired());
-        EXPECT_EQ(pipeline_trace::summary().domain[domain].live, extent);
+        EXPECT_EQ(retained.all_live, extent);
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
+        EXPECT_EQ(retained.domain[domain].live, extent);
+#endif
     }
     alias.reset();
     {
+        const auto retained = pipeline_trace::summary();
         const pipeline_trace::Pause pause;
         EXPECT_TRUE(weak.expired());
-        EXPECT_EQ(pipeline_trace::summary().domain[domain].live, extent);
+        EXPECT_EQ(retained.all_live, extent);
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
+        EXPECT_EQ(retained.domain[domain].live, extent);
+#endif
     }
     weak.reset();
     const auto released = pipeline_trace::summary();
     const pipeline_trace::Pause pause;
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     EXPECT_EQ(released.domain[domain].live, 0u);
     EXPECT_EQ(released.domain[domain].deallocations, 1u);
+#endif
     EXPECT_EQ(released.all_live, 0u);
     EXPECT_FALSE(pipeline_trace::overflow.load());
 }
@@ -1019,24 +1049,32 @@ TEST(AdaptivePipelineStorage, DomainSharedAliasesAndWeakControlRetireAtTheirActu
 TEST(AdaptivePipelineStorage, FixturePauseDoesNotHideWorkerAllocationsOrCrossThreadRelease)
 {
     using Memory = SimpleFluid::geometry_detail::DomainAllocator<std::uint64_t, AllocationDomain::ContactHalo>;
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     SimpleFluid::geometry_detail::AllocationAccount account;
+    Memory allocator(account);
+#else
+    Memory allocator;
+#endif
     const TraceLifetime trace;
     std::uint64_t* buffer = nullptr;
     {
         const pipeline_trace::Pause fixture;
-        std::thread worker([&] { buffer = Memory(account).allocate(13); });
+        std::thread worker([&] { buffer = allocator.allocate(13); });
         worker.join();
     }
     const auto captured = pipeline_trace::summary();
-    Memory(account).deallocate(buffer, 13);
+    allocator.deallocate(buffer, 13);
     const auto released = pipeline_trace::summary();
     const pipeline_trace::Pause pause;
+    EXPECT_EQ(captured.all_live, released.all_live + 13 * sizeof(*buffer));
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     constexpr auto domain = static_cast<std::size_t>(AllocationDomain::ContactHalo);
     EXPECT_EQ(captured.domain[domain].live, 13 * sizeof(*buffer));
     EXPECT_EQ(captured.domain[domain].allocations, 1u);
     EXPECT_EQ(released.domain[domain].live, 0u);
     EXPECT_EQ(released.domain[domain].deallocations, 1u);
     EXPECT_EQ(account.statistics().live, 0u);
+#endif
 }
 
 TEST(AdaptivePipelineStorage, DomainEpochsPreserveLiveExtentsAndAllocationTimePhase)
@@ -1052,14 +1090,19 @@ TEST(AdaptivePipelineStorage, DomainEpochsPreserveLiveExtentsAndAllocationTimePh
     }
     pipeline_trace::next_epoch();
     const auto retained = pipeline_trace::summary();
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     const auto domain = static_cast<std::size_t>(AllocationDomain::ContactHalo);
+#endif
     const auto directory = static_cast<std::size_t>(pipeline_trace::Phase::Directory);
     {
         const pipeline_trace::Pause pause;
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
         EXPECT_EQ(retained.domain[domain].live, 4 * sizeof(std::uint64_t));
         EXPECT_EQ(retained.domain[domain].peak, retained.domain[domain].live);
         EXPECT_EQ(retained.domain[domain].allocations, 0u);
         EXPECT_EQ(retained.domain[domain].bytes, 0u);
+#endif
+        EXPECT_EQ(retained.all_live, 4 * sizeof(std::uint64_t));
         EXPECT_EQ(retained.shared_allocations, 1u);
         EXPECT_EQ(retained.shared_bytes, retained.all_live);
         EXPECT_EQ(retained.retained_bytes, 0u);
@@ -1071,9 +1114,13 @@ TEST(AdaptivePipelineStorage, DomainEpochsPreserveLiveExtentsAndAllocationTimePh
         const auto coexist = pipeline_trace::summary();
         {
             const pipeline_trace::Pause pause;
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
             EXPECT_EQ(coexist.domain[domain].live, 6 * sizeof(std::uint64_t));
             EXPECT_EQ(coexist.domain[domain].bytes, 2 * sizeof(std::uint64_t));
             EXPECT_EQ(coexist.domain[domain].allocations, 1u);
+#endif
+            EXPECT_EQ(coexist.all_live, 6 * sizeof(std::uint64_t));
+            EXPECT_EQ(coexist.retained_bytes, 2 * sizeof(std::uint64_t));
             EXPECT_EQ(coexist.shared_allocations, 1u);
             EXPECT_EQ(coexist.retained_allocations, 1u);
             EXPECT_EQ(coexist.retained_bytes + coexist.shared_bytes, coexist.all_live);
@@ -1082,8 +1129,11 @@ TEST(AdaptivePipelineStorage, DomainEpochsPreserveLiveExtentsAndAllocationTimePh
         const auto old_released = pipeline_trace::summary();
         {
             const pipeline_trace::Pause pause;
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
             EXPECT_EQ(old_released.domain[domain].live, 2 * sizeof(std::uint64_t));
             EXPECT_EQ(old_released.domain[domain].deallocations, 1u);
+#endif
+            EXPECT_EQ(old_released.all_live, 2 * sizeof(std::uint64_t));
             EXPECT_EQ(old_released.phase[directory].live, 0u);
             EXPECT_EQ(old_released.phase[directory].deallocations, 1u);
             EXPECT_EQ(old_released.shared_allocations, 0u);
@@ -1093,7 +1143,9 @@ TEST(AdaptivePipelineStorage, DomainEpochsPreserveLiveExtentsAndAllocationTimePh
     const auto released = pipeline_trace::summary();
     const pipeline_trace::Pause pause;
     EXPECT_EQ(released.all_live, 0u);
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     EXPECT_EQ(released.domain[domain].deallocations, 2u);
     EXPECT_EQ(released.unattributed_live_bytes, 0u);
+#endif
     EXPECT_FALSE(pipeline_trace::overflow.load());
 }

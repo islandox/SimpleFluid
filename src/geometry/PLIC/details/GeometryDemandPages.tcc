@@ -664,6 +664,7 @@ private:
         }
         try
         {
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
             if (!values.capacity())
             {
                 // Empty concrete buffers invoke only the upstream allocator.
@@ -671,7 +672,10 @@ private:
                 values.reserve(count);
             }
             else
+#endif
+            {
                 values.reserve(count);
+            }
         }
         catch (...)
         {

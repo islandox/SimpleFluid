@@ -2,12 +2,14 @@
 #include "geometry/details/NativeAllocationGraph.hh"
 #include "geometry/details/NativeConstructionAdmission.hh"
 #include "geometry/details/NativeConstructorStorage.hh"
+#include "native_lifetime_extent.hh"
 #include "pipeline_allocation_operators.inc"
 #include "pipeline_allocation_trace.hh"
 #include <cstdint>
 #include <gtest/gtest.h>
 namespace
 {
+using pipeline_trace::raw_extent_live;
 namespace N = SimpleFluid::geometry_detail;
 constexpr std::size_t cap = 4 * 1024 * 1024;
 struct Counter
@@ -32,13 +34,6 @@ struct alignas(128) Aligned
 {
     std::array<std::byte, 128> bytes{};
 };
-bool raw_extent_live(const void* address, std::size_t bytes)
-{
-    for (const auto& entry : pipeline_trace::table)
-        if (entry.live && entry.address == address && entry.bytes == bytes)
-            return true;
-    return false;
-}
 void raw_live_matches(const N::NativeConstructionAdmission& admission)
 {
     const auto raw = pipeline_trace::summary();

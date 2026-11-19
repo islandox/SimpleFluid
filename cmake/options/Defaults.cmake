@@ -5,6 +5,20 @@ include_guard(GLOBAL)
 # Features and instrumentation.
 option(SIMPLEFLUID_ENABLE_COVERAGE
        "Build with compiler coverage instrumentation" OFF)
+set(SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT "AUTO" CACHE STRING
+    "Enable AMR heap attribution (AUTO enables it in Debug only, ON or OFF applies to all configurations)")
+set_property(CACHE SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT PROPERTY STRINGS AUTO ON OFF)
+if(SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT STREQUAL "AUTO")
+    set(SIMPLEFLUID_ALLOCATION_AUDIT_ENABLED "$<CONFIG:Debug>")
+elseif(SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT STREQUAL "ON")
+    set(SIMPLEFLUID_ALLOCATION_AUDIT_ENABLED 1)
+elseif(SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT STREQUAL "OFF")
+    set(SIMPLEFLUID_ALLOCATION_AUDIT_ENABLED 0)
+else()
+    message(FATAL_ERROR
+        "SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT must be AUTO, ON, or OFF; "
+        "got '${SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT}'")
+endif()
 option(SIMPLEFLUID_BUILD_BENCHMARKS
        "Build performance and solver-regression benchmarks" ON)
 option(SIMPLEFLUID_BUILD_DOCS

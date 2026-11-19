@@ -8,12 +8,19 @@ if(SIMPLEFLUID_ENABLE_NOX)
     add_compile_definitions(SIMPLEFLUID_ENABLE_NOX=1)
 endif()
 
+# Apply the same header mode to every in-tree target, including PCH producers.
+set(simplefluid_allocation_audit_definition
+    "$<$<COMPILE_LANGUAGE:CXX>:SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT=${SIMPLEFLUID_ALLOCATION_AUDIT_ENABLED}>")
+add_compile_definitions("${simplefluid_allocation_audit_definition}")
+
 # Shared build policy is defined once, before component directories consume it.
 include("${PROJECT_SOURCE_DIR}/cmake/Build.cmake")
 include("${PROJECT_SOURCE_DIR}/cmake/Testing.cmake")
 simplefluid_add_precompiled_headers()
 
 add_subdirectory(dataclass)
+# Core is the common dependency of the mesh and higher-level components.
+target_compile_definitions(SimpleFluidCore INTERFACE "${simplefluid_allocation_audit_definition}")
 add_subdirectory(io)
 add_subdirectory(parallel)
 add_subdirectory(geometry)

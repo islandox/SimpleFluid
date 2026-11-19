@@ -4,7 +4,9 @@
 /** Test-only requested C++ allocation trace. No tracing callback allocates.
  * C/MPI/MPFR malloc traffic and allocator RSS remain outside this instrument. */
 #pragma once
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
 #include "geometry/details/AllocationDomainScope.hh"
+#endif
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -16,8 +18,10 @@
 
 namespace pipeline_trace
 {
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
 using SimpleFluid::geometry_detail::AllocationDomain;
 inline constexpr std::size_t domains = static_cast<unsigned>(AllocationDomain::Count);
+#endif
 enum class Phase : unsigned
 {
     Candidate,
@@ -39,14 +43,19 @@ struct Entry
     std::uint64_t serial = 0, epoch = 0;
     Phase phase = Phase::Candidate;
     unsigned membership = 0;
-    AllocationDomain domain = AllocationDomain::Unattributed;
     bool live = false, used = false;
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
+    AllocationDomain domain = AllocationDomain::Unattributed;
+#endif
 };
 struct Summary
 {
     std::array<Totals, phases> phase{}, retained_phase{};
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     std::array<Totals, domains> domain{};
-    std::size_t live_allocations = 0, unattributed_live_allocations = 0, unattributed_live_bytes = 0;
+    std::size_t unattributed_live_allocations = 0, unattributed_live_bytes = 0;
+#endif
+    std::size_t live_allocations = 0;
     std::size_t all_live = 0, all_peak = 0, incremental_peak = 0, retained_allocations = 0, retained_bytes = 0;
     std::size_t retained_streaming_bytes = 0, shared_allocations = 0, shared_bytes = 0;
 };
@@ -58,7 +67,9 @@ inline std::atomic_flag lock = ATOMIC_FLAG_INIT;
 inline std::atomic<bool> recording = false, overflow = false;
 inline std::uint64_t serial = 0, epoch = 0;
 inline std::array<Totals, phases> totals{};
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
 inline std::array<Totals, domains> domain_totals{};
+#endif
 inline std::size_t all_live = 0, all_peak = 0, baseline_live = 0;
 inline thread_local Phase phase = Phase::Candidate;
 inline thread_local bool paused = false;
@@ -91,15 +102,19 @@ inline void allocated(const void* value, std::size_t bytes) noexcept
         auto& entry = table[position];
         if (entry.live)
             continue;
-        const auto domain = SimpleFluid::geometry_detail::allocation_domain_slot();
-        entry = {value, bytes, ++serial, epoch, phase, 0, domain, true, true};
-        for (auto* count : {&totals[static_cast<unsigned>(phase)], &domain_totals[static_cast<unsigned>(domain)]})
+        entry = {value, bytes, ++serial, epoch, phase, 0, true, true};
+        const auto record = [bytes](Totals& count)
         {
-            ++count->allocations;
-            count->bytes += bytes;
-            count->live += bytes;
-            count->peak = std::max(count->peak, count->live);
-        }
+            ++count.allocations;
+            count.bytes += bytes;
+            count.live += bytes;
+            count.peak = std::max(count.peak, count.live);
+        };
+        record(totals[static_cast<unsigned>(phase)]);
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
+        entry.domain = SimpleFluid::geometry_detail::allocation_domain_slot();
+        record(domain_totals[static_cast<unsigned>(entry.domain)]);
+#endif
         all_live += bytes;
         all_peak = all_peak > all_live ? all_peak : all_live;
         return;
@@ -122,9 +137,11 @@ inline void freed(const void* value) noexcept
             auto& count = totals[static_cast<unsigned>(entry.phase)];
             count.live -= entry.bytes;
             ++count.deallocations;
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
             auto& domain = domain_totals[static_cast<unsigned>(entry.domain)];
             domain.live -= entry.bytes;
             ++domain.deallocations;
+#endif
             all_live -= entry.bytes;
             entry.live = false;
             return;
@@ -148,7 +165,9 @@ inline void begin(std::size_t capacity = slots)
     ordered_size = 0;
     serial = epoch = 0;
     totals = {};
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     domain_totals = {};
+#endif
     all_live = all_peak = baseline_live = 0;
     overflow.store(false);
     paused = false;
@@ -167,7 +186,9 @@ inline void next_epoch()
         }
     };
     reset_epoch(totals);
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     reset_epoch(domain_totals);
+#endif
     all_peak = baseline_live = all_live;
 }
 inline Summary summary()
@@ -175,7 +196,9 @@ inline Summary summary()
     const Guard guard;
     Summary result;
     result.phase = totals;
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     result.domain = domain_totals;
+#endif
     result.all_live = all_live;
     result.all_peak = all_peak;
     result.incremental_peak = all_peak - baseline_live;
@@ -184,11 +207,13 @@ inline Summary summary()
         if (!entry.live)
             continue;
         ++result.live_allocations;
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
         if (entry.domain == AllocationDomain::Unattributed)
         {
             ++result.unattributed_live_allocations;
             result.unattributed_live_bytes += entry.bytes;
         }
+#endif
         if (entry.epoch == epoch)
         {
             ++result.retained_allocations;

@@ -6,6 +6,19 @@ pointer is not an allocation domain. Do not tag a whole project constructor: pla
 visible as escapes. Only an actual upstream allocator call, or a narrow third-party constructor, sets the thread-local
 domain. Nested scopes restore the previous value on return or exception.
 
+`SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT` is a CMake cache string. The default, `AUTO`, enables attribution only for
+`Debug`; `Release` and `RelWithDebInfo` build without it. Set `-DSIMPLEFLUID_ENABLE_ALLOCATION_AUDIT=ON` to investigate
+escapes in an optimized build, or `OFF` to disable it even in Debug. The selection is per build configuration;
+all translation units using these internal types must agree on the setting.
+
+When disabled, both domain allocator types are aliases of `std::allocator`. There is no account pointer, default
+account, mutex, TLS lookup, compiler fence, or test bridge. An explicit `AllocationAccount(limit)` is an audit-only
+test utility, not a production budget; it is unavailable rather than silently ignoring a supplied limit. Native
+admission, contact arena budgets, paid receipts, and their rejection and lifetime tests remain active. The test-only
+raw heap interposer can still check physical extents and phases without recording allocation domains.
+The native lifetime test looks up addresses in a separate translation unit so an optimizing caller cannot fold the
+lookup to false on the assumption that a freshly allocated pointer cannot already appear in the interposer table.
+
 | Storage | Attribution and admission |
 | --- | --- |
 | Leaf pages, saved families and their ordered pages | Rebind a domain allocator for private buffers, tree nodes and shared controls. Preserve the public record and range types. |

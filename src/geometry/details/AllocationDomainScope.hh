@@ -1,9 +1,11 @@
 #pragma once
 #include "utils/export_helper.hh"
-#include <atomic>
 #include <cstdint>
 #include <memory>
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
+#include <atomic>
 #include <utility>
+#endif
 
 namespace SimpleFluid::geometry_detail
 {
@@ -20,6 +22,7 @@ enum class AllocationDomain : std::uint8_t
     Count
 };
 
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
 #if defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
 extern "C" __attribute__((weak, visibility("default"))) AllocationDomain* simplefluid_test_allocation_domain() noexcept;
 #endif
@@ -54,17 +57,30 @@ private:
     AllocationDomain& slot_;
     AllocationDomain previous_;
 };
-
-template<class T> SIMPLEFLUID_LOCAL T* domain_allocate(AllocationDomain domain, std::size_t count)
+#else
+class SIMPLEFLUID_LOCAL AllocationDomainScope
 {
+public:
+    AllocationDomainScope() = default;
+    explicit constexpr AllocationDomainScope(AllocationDomain) noexcept {}
+};
+#endif
+
+template<class T> SIMPLEFLUID_LOCAL T* domain_allocate([[maybe_unused]] AllocationDomain domain, std::size_t count)
+{
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     const AllocationDomainScope scope(domain);
+#endif
     return std::allocator<T>{}.allocate(count);
 }
 
 template<class T>
-SIMPLEFLUID_LOCAL void domain_deallocate(AllocationDomain domain, T* address, std::size_t count) noexcept
+SIMPLEFLUID_LOCAL void domain_deallocate(
+    [[maybe_unused]] AllocationDomain domain, T* address, std::size_t count) noexcept
 {
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     const AllocationDomainScope scope(domain);
+#endif
     std::allocator<T>{}.deallocate(address, count);
 }
 } // namespace SimpleFluid::geometry_detail

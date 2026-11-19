@@ -390,13 +390,17 @@ private:
         charge.add(checked_product(count, sizeof(Value)));
         // Page and build buffers are empty here. Keep the scope to the
         // upstream buffer request; row construction happens after it returns.
-        if constexpr (allocation_domain<Less> == geometry_detail::AllocationDomain::Unattributed)
-            values.reserve(count);
-        else
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
+        if constexpr (allocation_domain<Less> != geometry_detail::AllocationDomain::Unattributed)
         {
             if (!values.empty() || values.capacity())
                 throw std::logic_error("Ordered page reserve requires a fresh buffer.");
             const geometry_detail::AllocationDomainScope scope(allocation_domain<Less>);
+            values.reserve(count);
+        }
+        else
+#endif
+        {
             values.reserve(count);
         }
         if (values.capacity() != count)

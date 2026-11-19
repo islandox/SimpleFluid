@@ -21,7 +21,8 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
   if(TEST_NAME MATCHES "^testAdaptivePipeline(Storage|Scaling)$" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_link_options(${TEST_NAME} PRIVATE "LINKER:--export-dynamic-symbol=simplefluid_test_allocation_domain")
+    target_link_options(${TEST_NAME} PRIVATE
+      "$<${SIMPLEFLUID_ALLOCATION_AUDIT_ENABLED}:LINKER:--export-dynamic-symbol=simplefluid_test_allocation_domain>")
   endif()
   if(TEST_NAME STREQUAL "testMeshTraverse")
     target_sources(${TEST_NAME} PRIVATE
@@ -31,6 +32,9 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
         mesh_traverse/LayeredCases.cc
         mesh_traverse/LayeredIncidenceCases.cc
         mesh_traverse/StructuredIncidenceCases.cc)
+  endif()
+  if(TEST_NAME STREQUAL "testNativeAdmissionLifetime")
+    target_sources(${TEST_NAME} PRIVATE native_lifetime_extent.cc)
   endif()
   target_link_libraries(${TEST_NAME} SimpleFluid::Mesh GTest::gtest_main)
   simplefluid_configure_test_executable(${TEST_NAME})

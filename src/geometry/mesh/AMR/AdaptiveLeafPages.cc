@@ -52,7 +52,7 @@ template<class T> struct ScratchAllocator
 {
     using value_type = T;
     Budget* arena;
-    geometry_detail::DomainAllocator<T, geometry_detail::AllocationDomain::LeafPages> memory;
+    [[no_unique_address]] geometry_detail::DomainAllocator<T, geometry_detail::AllocationDomain::LeafPages> memory;
 
     explicit ScratchAllocator(Budget& budget) noexcept : arena(&budget) {}
     template<class U> ScratchAllocator(const ScratchAllocator<U>& other) noexcept

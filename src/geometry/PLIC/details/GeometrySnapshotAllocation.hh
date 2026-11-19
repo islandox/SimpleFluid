@@ -21,13 +21,14 @@ template<class T, class... Args> SIMPLEFLUID_LOCAL std::shared_ptr<T> geometry_s
 template<class T, class Allocator>
 SIMPLEFLUID_LOCAL void geometry_snapshot_reserve(std::vector<T, Allocator>& values, std::size_t count)
 {
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     if (!values.capacity())
     {
         const geometry_detail::AllocationDomainScope domain(geometry_detail::AllocationDomain::GeometrySnapshot);
-        values.reserve(count);
+        return values.reserve(count);
     }
-    else
-        values.reserve(count);
+#endif
+    values.reserve(count);
 }
 static_assert(std::is_empty_v<GeometrySnapshotAllocator<std::byte>>);
 static_assert(sizeof(GeometrySnapshotVector<std::byte>) == sizeof(std::vector<std::byte>));

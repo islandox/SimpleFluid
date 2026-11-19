@@ -1,13 +1,18 @@
 #pragma once
 #include "geometry/details/AllocationDomainScope.hh"
+#include <type_traits>
+#include <utility>
+#include <vector>
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
 #include <algorithm>
 #include <limits>
 #include <mutex>
 #include <new>
-#include <vector>
+#endif
 
 namespace SimpleFluid::geometry_detail
 {
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
 struct SIMPLEFLUID_LOCAL AllocationStatistics
 {
     std::size_t live = 0, peak = 0, allocations = 0, deallocations = 0;
@@ -127,8 +132,17 @@ public:
 private:
     AllocationAccount* account_ = &domain_account<Domain>;
 };
+#else
+template<class T, AllocationDomain> using DomainAllocator = std::allocator<T>;
+template<class T, AllocationDomain> using FixedDomainAllocator = std::allocator<T>;
+#endif
 
 template<class T, AllocationDomain Domain> using DomainVector = std::vector<T, DomainAllocator<T, Domain>>;
+
+#if !SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
+static_assert(std::is_empty_v<AllocationDomainScope> && std::is_trivial_v<AllocationDomainScope>);
+static_assert(sizeof(DomainVector<int, AllocationDomain::LeafPages>) == sizeof(std::vector<int>));
+#endif
 
 template<AllocationDomain Domain, class T, class... Args>
 SIMPLEFLUID_LOCAL std::shared_ptr<T> domain_shared(Args&&... args)

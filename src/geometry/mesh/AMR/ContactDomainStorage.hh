@@ -22,6 +22,7 @@ using ContactMap = std::map<Key, Value, Less, ContactAllocator<std::pair<const K
 template<class Key, class Less = std::less<Key>>
 using ContactSet = std::set<Key, Less, ContactAllocator<Key>>;
 
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
 template<class T> struct SIMPLEFLUID_LOCAL ContactArrayDelete
 {
     std::size_t count = 0;
@@ -49,9 +50,25 @@ template<class T> SIMPLEFLUID_LOCAL ContactArray<T> contact_array(std::size_t co
     }
     return ContactArray<T>(values, ContactArrayDelete<T>{count});
 }
+#else
+template<class T> using ContactArray = std::unique_ptr<T[]>;
+template<class T> SIMPLEFLUID_LOCAL ContactArray<T> contact_array(std::size_t count)
+{
+    return count ? std::make_unique<T[]>(count) : nullptr;
+}
+#endif
 
 /** Construct outside the allocator's scope, including for private constructors.
  * Keep the allocating state through both the body and shared-control lifetimes. */
+template<class T> struct SIMPLEFLUID_LOCAL ContactObjectDelete
+{
+    [[no_unique_address]] ContactAllocator<T> memory;
+    void operator()(T* value) noexcept
+    {
+        std::destroy_at(value);
+        memory.deallocate(value, 1);
+    }
+};
 template<class T, class Construct> SIMPLEFLUID_LOCAL std::shared_ptr<T> contact_shared_object(Construct&& construct)
 {
     ContactAllocator<T> memory;
@@ -65,11 +82,7 @@ template<class T, class Construct> SIMPLEFLUID_LOCAL std::shared_ptr<T> contact_
         memory.deallocate(body, 1);
         throw;
     }
-    auto destroy = [memory](T* value) mutable
-    {
-        std::destroy_at(value);
-        memory.deallocate(value, 1);
-    };
+    ContactObjectDelete<T> destroy{memory};
 #if defined(__GLIBCXX__)
     static_assert(sizeof(std::_Sp_counted_deleter<T*, decltype(destroy), ContactAllocator<T>,
                       __gnu_cxx::__default_lock_policy>) <= 128,

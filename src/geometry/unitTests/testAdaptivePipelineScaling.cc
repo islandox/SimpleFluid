@@ -51,13 +51,17 @@ using WorkCounts = std::array<std::size_t, static_cast<unsigned>(Work::Count)>;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 constexpr std::size_t pipeline_budget = 512 * 1024 * 1024;
 using AllocationDomain = geometry_detail::AllocationDomain;
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
 constexpr std::array domain_names{"unattributed", "leaf_pages", "family_storage", "contact_halo", "geometry_snapshot",
     "owner_union", "native_publication", "external_third_party"};
 static_assert(domain_names.size() == static_cast<std::size_t>(AllocationDomain::Count));
+#endif
 
-void report_domains(const pipeline_trace::Summary& memory, const Teuchos::Comm<int>& comm, std::string_view phase)
+void check_memory(const pipeline_trace::Summary& memory, [[maybe_unused]] const Teuchos::Comm<int>& comm,
+    [[maybe_unused]] std::string_view phase)
 {
     const pipeline_trace::Pause pause;
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     std::size_t live = 0;
     for (std::size_t i = 0; i < domain_names.size(); ++i)
     {
@@ -72,6 +76,7 @@ void report_domains(const pipeline_trace::Summary& memory, const Teuchos::Comm<i
     EXPECT_EQ(live, memory.all_live);
     EXPECT_EQ(
         memory.domain[static_cast<std::size_t>(AllocationDomain::Unattributed)].live, memory.unattributed_live_bytes);
+#endif
     EXPECT_EQ(memory.retained_allocations + memory.shared_allocations, memory.live_allocations);
     EXPECT_EQ(memory.retained_bytes + memory.shared_bytes, memory.all_live);
 }
@@ -174,7 +179,7 @@ public:
                 result.count(Work::NativeSourceProofIssue), result.count(Work::NativeIncidenceProofIssue),
                 result.count(Work::LeafRowDereference), result.count(Work::OrderedPageCreated),
                 result.count(Work::WireSentBytes), result.count(Work::WireReceivedBytes));
-            report_domains(memory, comm_, phase);
+            check_memory(memory, comm_, phase);
             constexpr std::array names{"output", "source", "union"};
             for (std::size_t slot = 0; slot < names.size(); ++slot)
             {
@@ -684,7 +689,7 @@ State move_leaf(Trace& trace, const State& source, const A::AdaptiveCellKey& key
 
 /** Generation lifetimes and shared pages are independent of allocation domains. */
 void release_generations(BoundPublication& first, BoundPublication& second, const BoundPublication& third,
-    std::span<const AllocationDomain> required_domains = {})
+    [[maybe_unused]] std::span<const AllocationDomain> required_domains = {})
 {
     const pipeline_trace::Pause pause;
     ASSERT_TRUE(first.hierarchy && second.hierarchy && third.hierarchy);
@@ -699,15 +704,20 @@ void release_generations(BoundPublication& first, BoundPublication& second, cons
     }
     const auto before = pipeline_trace::summary();
     const auto& comm = *third.hierarchy->communicator();
-    report_domains(before, comm, "retained_ABC");
+    check_memory(before, comm, "retained_ABC");
     std::fprintf(stdout,
         "AMR_PIPELINE_GENERATIONS rank=%d ranks=%d A_cells=%llu B_cells=%llu C_cells=%llu "
-        "live_allocations=%zu live_bytes=%zu unattributed_allocations=%zu unattributed_bytes=%zu "
+        "live_allocations=%zu live_bytes=%zu "
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
+        "unattributed_allocations=%zu unattributed_bytes=%zu "
+#endif
         "current_map_profile=%zu\n",
         comm.getRank(), comm.getSize(), static_cast<unsigned long long>(first.hierarchy->global_cells()),
         static_cast<unsigned long long>(second.hierarchy->global_cells()),
         static_cast<unsigned long long>(third.hierarchy->global_cells()), before.live_allocations, before.all_live,
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
         before.unattributed_live_allocations, before.unattributed_live_bytes,
+#endif
         third.view.storage().required_maps_estimate);
     std::weak_ptr<const A::DistributedAdaptiveHierarchy> old = first.hierarchy, middle = second.hierarchy;
     const std::weak_ptr<const A::AdaptiveLeafLayout> old_layout = first.hierarchy->leaf_layout();
@@ -724,13 +734,15 @@ void release_generations(BoundPublication& first, BoundPublication& second, cons
         EXPECT_FALSE(page.control.expired());
     const auto after = pipeline_trace::summary();
     EXPECT_LE(after.all_live, before.all_live);
-    report_domains(after, comm, "retained_C");
+    check_memory(after, comm, "retained_C");
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     for (const auto domain : required_domains)
     {
         const auto index = static_cast<std::size_t>(domain);
         EXPECT_GT(before.domain[index].live, 0u) << domain_names[index] << " with A/B/C live";
         EXPECT_GT(after.domain[index].live, 0u) << domain_names[index] << " with only C live";
     }
+#endif
 }
 
 std::uint64_t box_trial(std::size_t size, F::Fixture (*factory)(std::size_t, int, int))
@@ -964,6 +976,7 @@ TEST(AdaptivePipelineScaling, RetainedAllocationDomainsAcrossThreePublications)
     // The Cartesian mark refines its block into eight child blocks.
     EXPECT_EQ(third.hierarchy->global_cells(), 8 * cells_per_block);
     EXPECT_EQ(third.hierarchy->owned_leaves().size(), owns_block ? 8 * cells_per_block : 0u);
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     // The refined owner keeps leaf pages and saved families, a contact snapshot,
     // a geometry cache with its owner index, and the native publication payload.
     constexpr std::array required_domains{AllocationDomain::LeafPages, AllocationDomain::FamilyStorage,
@@ -971,6 +984,9 @@ TEST(AdaptivePipelineScaling, RetainedAllocationDomainsAcrossThreePublications)
         AllocationDomain::NativePublication};
     release_generations(first, second, third,
         owns_block ? std::span<const AllocationDomain>{required_domains} : std::span<const AllocationDomain>{});
+#else
+    release_generations(first, second, third);
+#endif
 }
 
 struct IncidenceHistory
@@ -1236,6 +1252,7 @@ TEST(AdaptivePipelineScaling, SmallFullPublicationOracle)
 
 TEST(AdaptivePipelineScaling, FundedAllocatorRejectsExhaustedAccountAndUpstreamBadAlloc)
 {
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     using Allocator = geometry_detail::DomainAllocator<std::uint64_t, AllocationDomain::NativePublication>;
     constexpr std::size_t old_bytes = 8 * sizeof(std::uint64_t), new_bytes = 16 * sizeof(std::uint64_t);
     for (const bool inject_upstream_failure : {false, true})
@@ -1336,10 +1353,14 @@ TEST(AdaptivePipelineScaling, FundedAllocatorRejectsExhaustedAccountAndUpstreamB
         EXPECT_EQ(released.unattributed_live_bytes, baseline.unattributed_live_bytes);
         EXPECT_FALSE(pipeline_trace::overflow.load());
     }
+#else
+    GTEST_SKIP() << "Requires allocation auditing.";
+#endif
 }
 
 TEST(AdaptivePipelineScaling, FundedSharedControlRetiresWhenConstructionThrowsBadAlloc)
 {
+#if SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT
     struct Rejected
     {
         Rejected() { throw std::bad_alloc(); }
@@ -1372,6 +1393,9 @@ TEST(AdaptivePipelineScaling, FundedSharedControlRetiresWhenConstructionThrowsBa
     EXPECT_EQ(captured.all_live, 0u);
     EXPECT_EQ(captured.unattributed_live_bytes, 0u);
     EXPECT_FALSE(pipeline_trace::overflow.load());
+#else
+    GTEST_SKIP() << "Requires allocation auditing.";
+#endif
 }
 
 TEST(AdaptivePipelineScaling, CollectiveRejectionPreservesAcceptedGraphs)

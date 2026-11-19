@@ -24,13 +24,17 @@ std::shared_ptr<typename ContactPointGroups<H>::Readers> ContactPointGroups<H>::
         arena->used -= bytes;
         throw;
     }
-    return std::shared_ptr<Readers>(readers,
-        [arena, memory](Readers* value) mutable
+    struct Release
+    {
+        std::shared_ptr<Budget> arena;
+        [[no_unique_address]] ContactObjectDelete<Readers> destroy;
+        void operator()(Readers* value) noexcept
         {
-            std::destroy_at(value);
-            memory.deallocate(value, 1);
+            destroy(value);
             arena->used -= bytes;
-        }, memory);
+        }
+    };
+    return std::shared_ptr<Readers>(readers, Release{arena, {memory}}, memory);
 }
 template<class H>
 ContactPointGroups<H>::ContactPointGroups(std::shared_ptr<Budget> arena, H hash)
