@@ -231,7 +231,7 @@ set(simplefluid_forbidden_api_patterns
     "SimpleFluid::LiquidMassInventory<.*>[ ]*::speciesMassClosureTolerance[(]"
     "^SimpleFluid::Reacting::(LowMachMixtureSolver|LowMachPressureEquation|ReactingMixtureCoupler)::Implementation::"
     "^SimpleFluid::Reacting::ReactingMixtureCoupler::Trial::Data::"
-    "^SimpleFluid::Reacting::LowMachMixtureSolver::(require_controller|release_controller|preview_impl|preview_planar_impl|capture_accepted_geometry|restore_accepted_after_motion)[(]"
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::(require_controller|release_controller|preview_impl|preview_planar_impl|preview_ale_with_qbmm_sources|capture_accepted_geometry|restore_accepted_after_motion|rollback_failed_planar_restore|checkpoint_state|prepare_qbmm_publication|serialize_qbmm_restart_impl|restore_qbmm_restart_impl)[(]"
     "^SimpleFluid::Reacting::LowMachPressureEquation::project_impl[(]"
     "^SimpleFluid::Reacting::source_stage_detail::"
     "^SimpleFluid::Reacting::history_detail::"
@@ -264,7 +264,7 @@ set(simplefluid_forbidden_api_patterns
     "SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::(momentum_transport_flux|temperature_transport_flux|temperature_transport_state|initialize_primary_state|refresh_geometry_dependent_models|append_material_feedback_fields|append_solution_fields|refresh_physical_models|refresh_material_feedback|initialize_reacting_gas_state|update_void_fraction_models|active_alpha_g_field|active_alpha_l_field|ensure_scalar_void_fraction_model|step_planar_ale|validate_step_coupling|validate_coupling_checkpoint|coupling_configuration_signature)[(]"
     "SimpleFluid::IncompressibleIsothermalSolver<.*>[ ]*::(isothermal_momentum_equation|isothermal_velocity_boundary_cache|isothermal_pressure_face_flux_workspace|isothermal_coupled_pressure_velocity_solver|stored_material_properties|stored_turbulence_model|solution_writer)[(]"
     "PhysicalModelTag"
-    "SimpleFluid::PlanarALEMeshMotion<.*>[ ]*::(detect_family|current_axis_edges|geometry_edge_coordinates|geometry_motion_available|geometry_motion_owned|claim_geometry_motion|release_geometry_motion|replace_axis_edges|candidate_axis_edges|candidate_geometry_edges|capture_cell_volumes|capture_face_centroids|validate_collective_construction|validate_collective_trial|validate_collective_transaction|compute_trial_state|rollback_impl|reset_stationary_state)[(]"
+    "SimpleFluid::PlanarALEMeshMotion<.*>[ ]*::(detect_family|current_axis_edges|geometry_edge_coordinates|geometry_edges_match|geometry_motion_available|geometry_motion_owned|claim_geometry_motion|release_geometry_motion|replace_axis_edges|candidate_axis_edges|candidate_geometry_edges|capture_cell_volumes|capture_face_centroids|validate_collective_construction|validate_collective_trial|validate_collective_transaction|stage_restart_geometry|swap_restart_axis_update|begin_trial_impl|compute_trial_state|rollback_impl|reset_stationary_state|reset_stationary_diagnostics)[(]"
     "^SimpleFluid::MeshHandle<.*>[ ]*::(require_mesh|checked_local|checked_global_ids|local_output_filename|add_geometry_cell_data|collect_vtu_points|write_vtu|legacy_vtu_topology|orthogonal_vtu_topology|semi_structured_vtu_topology|unstructured_vtu_topology|geometry_cell_lid|geometry_face_lid|visit_geometry_cell|visit_geometry_face|adjacent_cell|cell_local_id|face_local_id|initialize_orthogonal|initialize_semi_structured|initialize_contiguous_native_maps|initialize_unstructured|initialize_stk|initialize_serial|initialize_cells|initialize_faces|initialize_indexer|initialize_cell_faces|materialize_legacy_indexer|initialize_boundary_batches|make_map|create_maps|check_cell|check_face|visit_indexed_cell|visit_indexed_face|geometry_to_local_cell|geometry_to_local_face)[(]"
     "SimpleFluid::VesselVolumeMap::boundAndEvaluate[(]"
     "SimpleFluid::(ConstantAreaVesselVolumeMap|TabulatedVesselVolumeMap)::(volumeBelowInRange|areaAtInRange|levelForVolumeInRange|heightSegment|volumeSegment)[(]"
@@ -918,8 +918,8 @@ simplefluid_require_reacting_api(
 simplefluid_require_reacting_api(
     "^${qbmm_ns}advance_qbmm_population[(]${qbmm_schema} const&, ${qbmm_ns}CellSpeciesState const&, ${qbmm_ns}QbmmCellView, ${qbmm_ns}QbmmEventBatch const&[)]$" 1)
 
-# Four Q2 solver entry points for explicit migration and fixed-partition restart.
-set(simplefluid_qbmm_state_public_symbol_budget 5)
+# Q2 initialization, migration and fixed-mesh restart, plus four Q7a restart entry points.
+set(simplefluid_qbmm_state_public_symbol_budget 9)
 set(qbmm_flow "${qbmm_ns}LowMachMixtureSolver")
 simplefluid_require_reacting_api(
     "^${qbmm_flow}::initialize_qbmm[(]${qbmm_flow}::State, ${qbmm_flow}::QbmmInitialization const&, ${simplefluid_stage3_controller_pointer}[)]$" 1)
@@ -930,6 +930,13 @@ simplefluid_require_reacting_api(
 simplefluid_require_reacting_api("^${qbmm_flow}::serialize_qbmm_restart[(][)] const$" 1)
 simplefluid_require_reacting_api(
     "^${qbmm_flow}::restore_qbmm_restart[(]${simplefluid_stage3_std}span<${simplefluid_stage3_std}byte const, [0-9]+u?l*>, ${simplefluid_stage3_controller_pointer}[)]$" 1)
+simplefluid_require_reacting_api(
+    "^${qbmm_flow}::serialize_qbmm_restart[(]${simplefluid_native_ale_motion} const&, ${simplefluid_reacting_string_view_pattern}, ${simplefluid_stage3_size}[)] const$" 1)
+simplefluid_require_reacting_api(
+    "^${qbmm_flow}::restore_qbmm_restart[(]${simplefluid_stage3_std}span<${simplefluid_stage3_std}byte const, [0-9]+u?l*>, ${simplefluid_native_ale_motion}&, ${simplefluid_reacting_string_view_pattern}, ${simplefluid_stage3_size}, ${simplefluid_stage3_controller_pointer}[)]$" 1)
+simplefluid_require_reacting_api("^${qbmm_ns}ReactingMixtureCoupler::serialize_qbmm_restart[(][)] const$" 1)
+simplefluid_require_reacting_api(
+    "^${qbmm_ns}ReactingMixtureCoupler::restore_qbmm_restart[(]${simplefluid_stage3_std}span<${simplefluid_stage3_std}byte const, [0-9]+u?l*>[)]$" 1)
 
 # Q3 retains the raw accepted atom receipts and compiles their final thermal allocations.
 set(simplefluid_qbmm_source_public_symbol_budget 2)

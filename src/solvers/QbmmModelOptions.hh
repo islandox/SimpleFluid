@@ -6,7 +6,7 @@
 
 namespace SimpleFluid::Reacting
 {
-/** The fixed-mesh baseline admits the defaults and explicitly supplied phase slip.
+/** Fixed meshes and supported prescribed planar ALE admit shared carrier and supplied phase slip.
  * Unsupported models reject solver construction collectively, including on ranks without cells.
  * Native phase temperatures, prescribed drift and mesh motion have their own
  * configuration or state checks.

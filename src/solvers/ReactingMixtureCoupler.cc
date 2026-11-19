@@ -8,6 +8,7 @@
 #include "solvers/details/LowMachConditionedThermal.hh"
 #include "solvers/details/LowMachFaceSourceComposition.hh"
 #include "solvers/details/LowMachPopulationSource.hh"
+#include "solvers/details/LowMachQbmmControllerRestart.hh"
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
@@ -33,6 +34,16 @@ void require(bool valid, const char* message)
 {
     if (!valid)
         throw std::invalid_argument(message);
+}
+ReactionLocation source_location(const Solver::SourceStageContext& context, size_t owned_cell)
+{
+    const auto epoch = context.transport.new_geometry_epoch;
+    require(epoch == context.mesh.geometry_epoch(), "Source location belongs to stale trial geometry.");
+    const auto cell = static_cast<Solver::Pack::local_ordinal_type>(owned_cell);
+    const auto geometry_id = context.mesh.cell_geometry_global_id(cell);
+    require(std::in_range<std::uint64_t>(geometry_id), "Canonical source cell identity is not representable.");
+    const auto center = context.mesh.cell_centroid(cell);
+    return {static_cast<std::uint64_t>(geometry_id), epoch, {center.x, center.y, center.z}, owned_cell};
 }
 SpeciesPhase compartment(const MixturePhaseBinding& binding, size_t species)
 {
@@ -267,14 +278,7 @@ struct SourceEngine
                     }
             ReactionEnvironment environment{transport.accepted_time, temperature, liquid.absolute_pressure,
                 liquid_volume, transport.new_control_volumes.at(c), ReactionVolumeClosure::ThermodynamicPredictor};
-            require(transport.new_geometry_epoch == context.mesh.geometry_epoch(),
-                "Reaction source location belongs to stale trial geometry.");
-            const auto local = static_cast<Solver::Pack::local_ordinal_type>(c);
-            const auto geometryCell = context.mesh.cell_geometry_global_id(local);
-            require(std::in_range<std::uint64_t>(geometryCell), "Canonical source cell identity is not representable.");
-            const auto center = context.mesh.cell_centroid(local);
-            environment.location = ReactionLocation{static_cast<std::uint64_t>(geometryCell),
-                transport.new_geometry_epoch, {center.x, center.y, center.z}, c};
+            environment.location = source_location(context, c);
 
             ReactionContext reaction{catalog, initial, environment};
             const auto input =
@@ -513,16 +517,16 @@ struct SourceEngine
                         if (guess.phases[other].thermodynamics->kind() == EOSKind::Gas)
                             gas_volume += phase_volumes[other];
                     const auto& drift = caloric_guess.drift_velocity[p];
-                    const auto inputs = make_qbmm_law_inputs(
-                        family, {quadrature, qbmm_geometry(family, pre, bulk_volume, specific_volume),
-                                    pre.species_moles, bulk_volume, phase_volumes[p], guess.phases[p].absolute_pressure,
-                                    temperature, transport.time_step, gas_volume / bulk_volume,
-                                    qbmm_phase_concentrations(
-                                        guess.phases[options.liquid_phase].moles, phase_volumes[options.liquid_phase]),
-                                    phase_volumes[options.liquid_phase] > 0
-                                        ? std::optional<double>(guess.phases[options.liquid_phase].temperature)
-                                        : std::nullopt,
-                                    {drift.component(0), drift.component(1), drift.component(2)}});
+                    const auto inputs = make_qbmm_law_inputs(family,
+                        {quadrature, qbmm_geometry(family, pre, bulk_volume, specific_volume), pre.species_moles,
+                            bulk_volume, phase_volumes[p], guess.phases[p].absolute_pressure, temperature,
+                            transport.time_step, gas_volume / bulk_volume,
+                            qbmm_phase_concentrations(
+                                guess.phases[options.liquid_phase].moles, phase_volumes[options.liquid_phase]),
+                            phase_volumes[options.liquid_phase] > 0
+                                ? std::optional<double>(guess.phases[options.liquid_phase].temperature)
+                                : std::nullopt,
+                            {drift.component(0), drift.component(1), drift.component(2)}, source_location(context, c)});
                     for (const auto& metadata : declared)
                         if (in_scope(metadata) && metadata.gate == QbmmApplicabilityGate::RejectOutside &&
                             !evaluate_qbmm_applicability(metadata, inputs).gate_passed)
@@ -646,18 +650,9 @@ struct SourceEngine
             FrozenInterphasePlan generic;
             if (options.interphase)
             {
-                require(context.transport.new_geometry_epoch == context.mesh.geometry_epoch(),
-                    "Interphase rate location belongs to stale trial geometry.");
-                const auto local = static_cast<Solver::Pack::local_ordinal_type>(c);
-                const auto geometry_cell = context.mesh.cell_geometry_global_id(local);
-                require(std::in_range<std::uint64_t>(geometry_cell),
-                    "Canonical interphase cell identity is not representable.");
-                const auto center = context.mesh.cell_centroid(local);
-                const ReactionLocation location{static_cast<std::uint64_t>(geometry_cell),
-                    context.transport.new_geometry_epoch, {center.x, center.y, center.z}, c};
                 auto amounts = options.interphase->integrate(
                     {catalog, donors[c], context.transport.cells[c], guess, context.transport.stage, c,
-                        context.transport.time_step, context.transport.accepted_time, location});
+                        context.transport.time_step, context.transport.accepted_time, source_location(context, c)});
                 generic = compile_interphase_plan(options.interphase->configuration, guess.phases, std::move(amounts),
                     raw_energy, raw_declared, phase_parts);
                 for (size_t j = 0; j < generic.amounts.size(); ++j)
@@ -1310,11 +1305,13 @@ struct ReactingMixtureCoupler::Implementation
             motion = std::shared_ptr<Solver::PlanarMotion>(storage, storage->value);
         }
         const bool legacy_compatible =
-            !options.body_acceleration && (!options.qbmm_population || options.qbmm_population->laws.empty()) &&
+            !options.planar_motion && !options.body_acceleration &&
+            (!options.qbmm_population || options.qbmm_population->laws.empty()) &&
             flow->options().qbmm_model.velocity == QbmmModelOptions::Velocity::SharedCarrier &&
             std::ranges::all_of(flow->options().qbmm_families,
                 [](const auto& family) { return !family || family->closure_versions().laws.empty(); });
-        lease.emplace(flow->acquire_controller_for(schema_signature, legacy_compatible, options.body_acceleration));
+        lease.emplace(
+            flow->acquire_controller_for(schema_signature, legacy_compatible, options.body_acceleration, motion.get()));
     }
 
     Diagnostics totals(const std::vector<SpeciesSourceLedger>& ledgers, std::span<const Solver::CellSources> applied,
@@ -1539,6 +1536,7 @@ std::span<const Solver::PhaseFaceTransport> ReactingMixtureCoupler::Trial::owned
 ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
 {
     const auto& mesh = *d->flow->mesh();
+    Solver::require_uniform_advancement(mesh, Solver::AdvancementOperation::ControllerPreview);
     collective_detail::collective_local_validation(mesh, "Reacting mixture timestep",
         [&] { require(std::isfinite(dt) && dt > 0, "Reacting mixture timestep must be positive and finite."); });
     collective_detail::require_uniform_value(mesh, dt, "Reacting mixture timestep");
@@ -1599,11 +1597,17 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
                 },
                 d->options.source_relative_tolerance, d->options.maximum_correctors, d->options.body_acceleration});
         });
-    auto flow_trial =
-        d->motion ? d->flow->preview_ale_with_sources(dt, *d->motion, target_surface, std::move(provider), &*d->lease)
-        : !d->flow->options().qbmm_families.empty()
-            ? d->flow->preview_with_qbmm_sources(dt, std::move(provider), &*d->lease)
-            : d->flow->preview_with_sources(dt, std::move(provider), &*d->lease);
+    const bool has_qbmm = !d->flow->options().qbmm_families.empty();
+    auto flow_trial = [&]
+    {
+        if (d->motion)
+            return has_qbmm ? d->flow->preview_ale_with_qbmm_sources(
+                                  dt, *d->motion, target_surface, std::move(provider), &*d->lease)
+                            : d->flow->preview_ale_with_sources(
+                                  dt, *d->motion, target_surface, std::move(provider), &*d->lease);
+        return has_qbmm ? d->flow->preview_with_qbmm_sources(dt, std::move(provider), &*d->lease)
+                        : d->flow->preview_with_sources(dt, std::move(provider), &*d->lease);
+    }();
     collective_detail::collective_local_validation(mesh, "Reacting mixture immutable source receipt",
         [&]
         {
@@ -1673,8 +1677,10 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
 
 void ReactingMixtureCoupler::commit(const Trial& trial)
 {
+    const auto& mesh = *d->flow->mesh();
+    Solver::require_uniform_advancement(mesh, Solver::AdvancementOperation::ControllerCommit);
     Diagnostics candidate;
-    collective_detail::collective_local_validation(*d->flow->mesh(), "Reacting mixture commit preflight",
+    collective_detail::collective_local_validation(mesh, "Reacting mixture commit preflight",
         [&]
         {
             require(trial.d && trial.d->owner == this && trial.d->revision == d->generation,
@@ -1720,6 +1726,31 @@ void ReactingMixtureCoupler::restore(const Checkpoint& checkpoint)
         d->flow->restore(checkpoint.flow, *d->motion, &*d->lease);
     else
         d->flow->restore(checkpoint.flow, &*d->lease);
+    d->diagnostics = std::move(restored);
+    ++d->generation;
+}
+
+std::vector<std::byte> ReactingMixtureCoupler::serialize_qbmm_restart() const
+{
+    if (!d->motion)
+        return d->flow->serialize_qbmm_restart();
+    const auto& target = *d->options.planar_motion;
+    const Solver::ControllerRestartDiagnostics diagnostics{d->options.mechanism->reactions().size(), &d->diagnostics};
+    return d->flow->serialize_qbmm_restart_impl(d->motion.get(), target.identity, target.revision, &diagnostics);
+}
+
+void ReactingMixtureCoupler::restore_qbmm_restart(std::span<const std::byte> payload)
+{
+    const auto& mesh = *d->flow->mesh();
+    collective_detail::require_uniform_value(mesh, d->generation, "Reacting mixture restart generation");
+    require(d->generation != std::numeric_limits<std::uint64_t>::max(),
+        "Reacting mixture controller generation exhausted.");
+    Diagnostics restored;
+    const auto* target = d->options.planar_motion.get();
+    const Solver::ControllerRestartDiagnostics diagnostics{
+        d->options.mechanism->reactions().size(), nullptr, &restored};
+    d->flow->restore_qbmm_restart_impl(payload, d->motion.get(), target ? std::string_view(target->identity) : "",
+        target ? target->revision : 0, &*d->lease, &diagnostics);
     d->diagnostics = std::move(restored);
     ++d->generation;
 }

@@ -36,6 +36,7 @@ struct QbmmFrozenLawState
     std::optional<std::vector<double>> carrier_liquid_concentration_mol_per_m3;
     std::optional<double> carrier_liquid_temperature_K;
     std::array<double, 3> drift_m_per_s;
+    std::optional<ReactionLocation> location{};
 };
 
 [[nodiscard]] inline QbmmLawInputs make_qbmm_law_inputs(const QbmmPopulationSchema& family, QbmmFrozenLawState frozen)
@@ -55,6 +56,6 @@ struct QbmmFrozenLawState
         frozen.absolute_pressure_pa, absent ? std::nullopt : frozen.temperature_K, frozen.time_step_s, fraction,
         frozen.gas_volume_fraction, qbmm_phase_concentrations(frozen.family_moles, frozen.phase_volume_m3),
         std::move(frozen.carrier_liquid_concentration_mol_per_m3), frozen.carrier_liquid_temperature_K, speed,
-        family.fingerprint(), family.catalog().fingerprint(), family.population()};
+        family.fingerprint(), family.catalog().fingerprint(), family.population(), frozen.location};
 }
 } // namespace SimpleFluid::Reacting

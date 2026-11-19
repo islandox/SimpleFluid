@@ -1,5 +1,5 @@
 /** @file LowMachQbmmRestart.inc
- * @brief Compiled implementation fragment for the versioned fixed-mesh QBMM restart.
+ * @brief Compiled implementation fragment for versioned QBMM restart.
  */
 namespace
 {
@@ -10,8 +10,12 @@ namespace
 // Version 5 adds the exact admitted transport/velocity model stamp and the
 // retained legacy default-only restriction after the controller stamp. A known
 // Fourier uncertainty occupies one optional trailing word before the checksums.
+// Version 6 adds prescribed planar motion: original reference/options/target
+// binding, accepted surface and geometry, the last physical motion interval and absolute wall flux,
+// and accepted aggregate controller diagnostics when available.
 constexpr std::uint64_t qbmm_restart_magic = 0x5453524d4d425153ULL;
-constexpr std::uint64_t qbmm_restart_version = 5;
+constexpr std::uint64_t qbmm_fixed_restart_version = 5;
+constexpr std::uint64_t qbmm_planar_restart_version = 6;
 constexpr size_t restart_word_size = sizeof(std::uint64_t);
 static_assert(sizeof(double) == restart_word_size && std::numeric_limits<double>::is_iec559);
 
@@ -247,6 +251,55 @@ std::uint64_t restart_partition_fingerprint(const Solver::Mesh& mesh)
     return hash.value;
 }
 
+std::uint64_t restart_ordered_maps_fingerprint(const Solver::Mesh& mesh)
+{
+    RestartHash hash;
+    const auto comm = mesh.owned_cell_map()->getComm();
+    hash.word(static_cast<std::uint64_t>(comm->getSize()));
+    hash.word(static_cast<std::uint64_t>(comm->getRank()));
+    for (const auto& map : {mesh.owned_cell_map(), mesh.overlap_cell_map(), mesh.owned_face_map(),
+             mesh.overlap_face_map(), mesh.boundary_face_map()})
+    {
+        hash.word(map->getGlobalNumElements());
+        hash.word(static_cast<std::uint64_t>(map->getIndexBase()));
+        const auto ids = map->getLocalElementList();
+        hash.word(ids.size());
+        for (const auto id : ids)
+            hash.word(static_cast<std::uint64_t>(id));
+    }
+    return hash.value;
+}
+
+std::uint64_t restart_planar_configuration_fingerprint(
+    const Solver::PlanarMotion& motion, std::string_view target_identity, std::uint64_t target_revision)
+{
+    check(!target_identity.empty() && target_revision != 0,
+        "Planar QBMM restart requires an immutable target-law identity and positive revision.");
+    const auto& options = motion.options();
+    RestartHash hash;
+    hash.string(target_identity);
+    hash.word(target_revision);
+    hash.string(motion.mesh_family());
+    hash.word(static_cast<std::uint64_t>(options.axis));
+    for (const auto& edges : motion.reference_geometry_edges())
+    {
+        hash.word(edges.size());
+        for (const auto edge : edges)
+            hash.number(edge);
+    }
+    for (const auto& option : {options.deformation_start_elevation, options.maximum_level_change,
+             options.quality_limits.maximum_growth_ratio, options.quality_limits.maximum_non_orthogonality_degrees,
+             options.quality_limits.maximum_skewness, options.quality_limits.maximum_aspect_ratio})
+    {
+        hash.word(option.has_value());
+        if (option)
+            hash.number(*option);
+    }
+    hash.number(options.gcl_absolute_tolerance);
+    hash.number(options.gcl_relative_tolerance);
+    return hash.value;
+}
+
 std::uint64_t restart_schema_fingerprint(
     const Solver::Options& options, std::span<const std::shared_ptr<const MixtureThermodynamics>> eos)
 {
@@ -351,6 +404,26 @@ void restart_diagnostics(Archive& io, Diagnostics& value, size_t phases, size_t 
         io(value.maximum_shape_transport_residual);
 }
 
+template<class Archive, class Diagnostics>
+void restart_controller_diagnostics(
+    Archive& io, Diagnostics& value, size_t phases, size_t reactions, int flow_correctors)
+{
+    io(value.correctors, value.chemical_heat, value.external_heat, value.transfer_energy, value.external_mass,
+        value.net_thermal_energy);
+    check(value.correctors > 0 && value.correctors == flow_correctors,
+        "QBMM restart reacting and native corrector counts differ.");
+    for (auto* extents : {&value.reaction_extents, &value.forward_reaction_extents, &value.reverse_reaction_extents})
+    {
+        io.diagnostic_vector(*extents, reactions);
+        check(extents->size() == reactions, "QBMM restart controller reaction diagnostic dimensions differ.");
+    }
+    for (auto* numbers : {&value.population_births, &value.population_deaths, &value.population_number_changes})
+    {
+        io.diagnostic_vector(*numbers, phases);
+        check(numbers->size() == phases, "QBMM restart controller population diagnostic dimensions differ.");
+    }
+}
+
 void validate_restart_fourier_uncertainty(const Solver::Diagnostics& statistics)
 {
     if (const auto value = statistics.maximum_fourier_gross_comparison_uncertainty_j)
@@ -401,13 +474,22 @@ void restart_qbmm_balances(Archive& io, std::optional<Solver::QbmmBalances>& bal
         io(entry.second);
 }
 
+struct RestartPlanarWalls
+{
+    size_t axis;
+    double old_cap, time_step;
+};
+
 void validate_restart_physics(const Solver::Mesh& mesh, const Solver::Options& options, const Solver::State& state,
-    std::span<const double> face_flux)
+    std::span<const double> face_flux, std::optional<RestartPlanarWalls> planar = {})
 {
     constexpr double roundoff_factor = 64 * std::numeric_limits<double>::epsilon();
     check(state.thermodynamic_pressure >= options.minimum_pressure &&
               state.thermodynamic_pressure <= options.maximum_pressure,
         "QBMM restart uniform pressure is outside the configured bracket.");
+    std::vector<double> phase_volumes;
+    if (planar)
+        phase_volumes.resize(options.phase_roles.size());
     for (size_t c = 0; c < state.cells.size(); ++c)
     {
         const auto& cell = state.cells[c];
@@ -417,8 +499,9 @@ void validate_restart_physics(const Solver::Mesh& mesh, const Solver::Options& o
         check(absolute_pressure > 0 && absolute_pressure <= std::numeric_limits<double>::max(),
             "QBMM restart absolute pressure is nonphysical.");
         double common_temperature = 0, total_volume = 0, total_mass = 0;
-        for (const auto& phase : cell.phases)
+        for (size_t a = 0; a < cell.phases.size(); ++a)
         {
+            const auto& phase = cell.phases[a];
             check(std::all_of(phase.moles.begin(), phase.moles.end(), [](double moles) { return moles >= 0; }),
                 "QBMM restart contains negative species moles.");
             check(phase.absolute_pressure > 0 &&
@@ -432,6 +515,8 @@ void validate_restart_physics(const Solver::Mesh& mesh, const Solver::Options& o
                 check(phase.internal_energy == 0 && phase.temperature == 0 &&
                           std::all_of(phase.moles.begin(), phase.moles.end(), [](double moles) { return moles == 0; }),
                     "QBMM restart contains energy, temperature or unrepresentable material in an empty phase.");
+                if (planar)
+                    phase_volumes[a] = 0.;
                 continue;
             }
             const auto point =
@@ -453,6 +538,8 @@ void validate_restart_physics(const Solver::Mesh& mesh, const Solver::Options& o
                 "QBMM restart phases do not share a common temperature.");
             total_volume += volume;
             total_mass += mass;
+            if (planar)
+                phase_volumes[a] = volume;
         }
         const double volume = mesh.cell_volume(static_cast<LO>(c));
         check(std::isfinite(total_mass) && total_mass > 0 &&
@@ -461,10 +548,47 @@ void validate_restart_physics(const Solver::Mesh& mesh, const Solver::Options& o
         for (size_t component = 0; component < 3; ++component)
             check(std::isfinite(total_mass * cell.velocity.component(component)),
                 "QBMM restart momentum is unrepresentable.");
+        if (planar)
+            (void) effective_mixture_viscosity(options, cell.phases, phase_volumes, true);
     }
     for (size_t f = 0; f < face_flux.size(); ++f)
-        check(std::isfinite(face_flux[f]) && (!mesh.is_geometry_exterior_face(static_cast<LO>(f)) || face_flux[f] == 0),
-            "QBMM restart face flux is nonfinite or flows through a closed boundary.");
+    {
+        check(std::isfinite(face_flux[f]), "QBMM restart face flux is nonfinite.");
+        const LO face = static_cast<LO>(f);
+        if (!mesh.is_geometry_exterior_face(face))
+            continue;
+        if (planar)
+        {
+            const auto area = mesh.face_area_vector(face);
+            double expected = 0.;
+            if (planar->time_step > 0. && area.component(planar->axis) > 0.)
+            {
+                // The outward upper cap moves along its selected axis. Reuse the native
+                // represented centroid, oriented area and sweep evaluation order.
+                const auto current = mesh.face_centroid(face);
+                auto previous = current;
+                previous.component(planar->axis) = planar->old_cap;
+                expected = (current - previous).dot(area) / planar->time_step;
+            }
+            check(std::isfinite(expected) && face_flux[f] == expected,
+                "QBMM restart exterior flux differs from the accepted planar wall sweep.");
+            for (const auto& drift : state.cells[mesh.owner_cell(face)].drift_velocity)
+                check(drift.dot(area) == 0., "Planar QBMM restart requires zero normal phase drift at moving walls.");
+        }
+        else
+            check(face_flux[f] == 0., "QBMM restart face flux flows through a fixed closed wall.");
+    }
+}
+
+void require_uniform_restart_wall_interval(const Solver::Mesh& mesh, const std::optional<PlanarWallInterval>& interval)
+{
+    collective_detail::require_uniform_value(mesh, int(interval.has_value()), "QBMM restart wall interval presence");
+    if (interval)
+    {
+        collective_detail::require_uniform_value(
+            mesh, interval->old_surface, "QBMM restart previous surface elevation");
+        collective_detail::require_uniform_value(mesh, interval->time_step, "QBMM restart wall interval duration");
+    }
 }
 
 void require_uniform_restart_state(const Solver::Mesh& mesh, const Solver::State& state, std::uint64_t generation)
@@ -478,24 +602,62 @@ void require_uniform_restart_state(const Solver::Mesh& mesh, const Solver::State
 
 std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart() const
 {
+    return serialize_qbmm_restart_impl(nullptr, {}, 0);
+}
+
+std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart(
+    const PlanarMotion& motion, std::string_view target_identity, std::uint64_t target_revision) const
+{
+    return serialize_qbmm_restart_impl(&motion, target_identity, target_revision);
+}
+
+std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const PlanarMotion* motion,
+    std::string_view target_identity, std::uint64_t target_revision,
+    const ControllerRestartDiagnostics* controller_diagnostics) const
+{
     const auto& mesh = *d->mesh;
     const auto& state = d->accepted;
+    const auto version = motion ? qbmm_planar_restart_version : qbmm_fixed_restart_version;
+    collective_detail::require_uniform_value(mesh, version, "QBMM restart encoding version");
     RestartWriter writer;
-    std::uint64_t checksum = 0, model = 0;
+    std::uint64_t checksum = 0, model = 0, motion_configuration = 0, controller_history = 0;
+    double surface = 0;
     const auto signature = d->checkpoint_controller();
+    const auto wall_interval = d->qbmm_publication ? d->qbmm_publication->planar_wall_interval : std::nullopt;
+    if (motion)
+    {
+        collective_detail::collective_local_validation(mesh, "QBMM restart motion authority",
+            [&]
+            {
+                d->validate_planar_controller_authority(*motion);
+                d->validate_planar_checkpoint_provenance(*motion);
+                check(motion->mesh_ptr().get() == d->mesh.get() && !motion->has_active_trial() &&
+                          (!d->accepted_planar_motion || d->accepted_planar_motion == motion->d_authority) &&
+                          !d->active_body_acceleration,
+                    "Planar QBMM restart requires its live idle motion authority and zero supplied body force.");
+                validate_planar_mesh(mesh);
+                motion_configuration =
+                    restart_planar_configuration_fingerprint(*motion, target_identity, target_revision);
+            });
+        collective_detail::require_uniform_value(mesh, motion_configuration, "QBMM restart planar configuration");
+        surface = motion->snapshot().surface_elevation();
+    }
     collective_detail::collective_local_validation(mesh, "QBMM restart encoding",
         [&]
         {
-            check(d->initialized && !d->options.qbmm_families.empty() && d->logical_geometry == 0 &&
+            check(d->initialized && !d->options.qbmm_families.empty() &&
+                      (motion || (d->logical_geometry == 0 && !d->active_controller_motion)) &&
                       d->epoch == mesh_geometry_epoch(mesh),
-                "QBMM restart requires initialized QBMM state on unchanged fixed geometry.");
+                "QBMM restart requires initialized QBMM state on its current accepted geometry.");
             check(d->trial_nonce != 0 && d->trial_nonce != std::numeric_limits<std::uint64_t>::max(),
                 "QBMM restart generation is invalid or exhausted.");
             qbmm_detail::validate_state(d->options, state);
             model = restart_model_code(d->options);
             const auto& catalog = d->eos.front()->catalog();
-            writer(qbmm_restart_magic, qbmm_restart_version, restart_partition_fingerprint(mesh),
-                restart_schema_fingerprint(d->options, d->eos), catalog.fingerprint(),
+            writer(qbmm_restart_magic, version, restart_partition_fingerprint(mesh));
+            if (motion)
+                writer(motion_configuration, restart_ordered_maps_fingerprint(mesh), surface);
+            writer(restart_schema_fingerprint(d->options, d->eos), catalog.fingerprint(),
                 static_cast<std::uint64_t>(d->eos.size()), static_cast<std::uint64_t>(catalog.species().size()),
                 static_cast<std::uint64_t>(mesh.num_owned_cells()), static_cast<std::uint64_t>(mesh.num_owned_faces()),
                 state.thermodynamic_pressure, state.time, state.revision, d->trial_nonce);
@@ -528,11 +690,34 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart() const
             }
             for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
                 writer(d->flux.owned_value(static_cast<LO>(f)));
-            restart_diagnostics(writer, d->diagnostics, d->eos.size(), catalog.species().size(), qbmm_restart_version);
+            if (motion)
+            {
+                check(wall_interval.has_value() == (d->diagnostics.correctors > 0),
+                    "QBMM restart wall interval differs from the accepted planar correctors.");
+                writer(wall_interval.has_value());
+                if (wall_interval)
+                {
+                    check(wall_interval->new_surface == surface,
+                        "QBMM restart last wall interval ends on different accepted geometry.");
+                    writer(wall_interval->old_surface, wall_interval->time_step);
+                }
+            }
+            restart_diagnostics(writer, d->diagnostics, d->eos.size(), catalog.species().size(), version);
             auto balances = d->qbmm_publication ? d->qbmm_publication->balances : std::nullopt;
             restart_qbmm_balances(writer, balances, d->diagnostics, catalog);
             if (balances)
                 writer(d->qbmm_publication->shape_diagnostics_version);
+            if (motion)
+            {
+                const auto start = writer.bytes.size();
+                const auto* saved = controller_diagnostics ? controller_diagnostics->saved : nullptr;
+                const bool has_history = saved && saved->correctors > 0;
+                writer(has_history);
+                if (has_history)
+                    restart_controller_diagnostics(writer, *saved, d->eos.size(),
+                        controller_diagnostics->reaction_count, d->diagnostics.correctors);
+                controller_history = restart_checksum(std::span<const std::byte>{writer.bytes}.subspan(start));
+            }
             validate_restart_fourier_uncertainty(d->diagnostics);
             if (const auto uncertainty = d->diagnostics.maximum_fourier_gross_comparison_uncertainty_j)
                 writer(*uncertainty);
@@ -541,6 +726,11 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart() const
     require_uniform_restart_state(mesh, state, d->trial_nonce);
     require_uniform_restart_configuration(
         mesh, d->options, d->eos, state, signature, model, d->qbmm_legacy_default_only);
+    if (motion)
+    {
+        require_uniform_restart_wall_interval(mesh, wall_interval);
+        collective_detail::require_uniform_value(mesh, controller_history, "QBMM restart controller diagnostics");
+    }
     require_uniform_restart_fourier_uncertainty(mesh, d->diagnostics);
     // The local digest includes the rank and its maps; the collective digest
     // also rejects shards accidentally mixed between different saved images.
@@ -553,6 +743,19 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart() const
 
 void LowMachMixtureSolver::restore_qbmm_restart(std::span<const std::byte> payload, const ControllerLease* controller)
 {
+    restore_qbmm_restart_impl(payload, nullptr, {}, 0, controller);
+}
+
+void LowMachMixtureSolver::restore_qbmm_restart(std::span<const std::byte> payload, PlanarMotion& motion,
+    std::string_view target_identity, std::uint64_t target_revision, const ControllerLease* controller)
+{
+    restore_qbmm_restart_impl(payload, &motion, target_identity, target_revision, controller);
+}
+
+void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> payload, PlanarMotion* motion,
+    std::string_view target_identity, std::uint64_t target_revision, const ControllerLease* controller,
+    const ControllerRestartDiagnostics* controller_diagnostics)
+{
     require_controller(controller);
     const auto& mesh = *d->mesh;
     State candidate;
@@ -561,13 +764,30 @@ void LowMachMixtureSolver::restore_qbmm_restart(std::span<const std::byte> paylo
     std::optional<std::uint64_t> controller_signature;
     std::shared_ptr<const QbmmPublication> publication;
     std::uint64_t version = 0, model = 0, saved_generation = 0, checksum = 0, image_checksum = 0;
+    std::uint64_t accepted_geometry = 0, motion_configuration = 0, controller_history = 0;
+    double surface = 0, old_cap = 0;
+    std::optional<PlanarWallInterval> wall_interval;
     bool legacy_default_only = false;
+    collective_detail::require_uniform_value(mesh, int(motion != nullptr), "QBMM restart receiving geometry mode");
     collective_detail::collective_local_validation(mesh, "QBMM restart decoding",
         [&]
         {
-            check(
-                !d->options.qbmm_families.empty() && d->logical_geometry == 0 && d->epoch == mesh_geometry_epoch(mesh),
-                "QBMM restart target requires QBMM configuration on unchanged fixed geometry.");
+            check(!d->options.qbmm_families.empty() &&
+                      (motion || (d->logical_geometry == 0 && !d->active_controller_motion)) &&
+                      d->epoch == mesh_geometry_epoch(mesh),
+                "QBMM restart target requires QBMM configuration on its current accepted geometry.");
+            if (motion)
+            {
+                d->validate_planar_controller_authority(*motion);
+                check(motion->mesh_ptr().get() == d->mesh.get() && !motion->has_active_trial() &&
+                          (!d->accepted_planar_motion || d->accepted_planar_motion == motion->d_authority) &&
+                          !d->active_body_acceleration &&
+                          d->logical_geometry != std::numeric_limits<std::uint64_t>::max(),
+                    "Planar QBMM restart requires its live idle motion authority and zero supplied body force.");
+                validate_planar_mesh(mesh);
+                motion_configuration =
+                    restart_planar_configuration_fingerprint(*motion, target_identity, target_revision);
+            }
             check(payload.size() >= 2 * restart_word_size, "Truncated QBMM restart checksum.");
             RestartReader end(payload.last(2 * restart_word_size));
             end(checksum, image_checksum);
@@ -576,8 +796,18 @@ void LowMachMixtureSolver::restore_qbmm_restart(std::span<const std::byte> paylo
             RestartReader reader(body);
             reader.expect(qbmm_restart_magic, "Invalid QBMM restart signature.");
             reader(version);
-            check(version >= 1 && version <= qbmm_restart_version, "Unsupported QBMM restart version.");
-            reader.expect(restart_partition_fingerprint(mesh), "QBMM restart mesh geometry or partition differs.");
+            check(
+                motion ? version == qbmm_planar_restart_version : version >= 1 && version <= qbmm_fixed_restart_version,
+                "QBMM restart version is incompatible with the receiving geometry mode.");
+            if (motion)
+            {
+                reader(accepted_geometry);
+                reader.expect(motion_configuration, "QBMM restart reference geometry, options or target law differs.");
+                reader.expect(restart_ordered_maps_fingerprint(mesh), "QBMM restart ordered native maps differ.");
+                reader(surface);
+            }
+            else
+                reader.expect(restart_partition_fingerprint(mesh), "QBMM restart mesh geometry or partition differs.");
             reader.expect(restart_schema_fingerprint(d->options, d->eos), "QBMM restart phase or EOS schema differs.");
             const auto& catalog = d->eos.front()->catalog();
             const auto phases = d->eos.size(), species = catalog.species().size();
@@ -612,7 +842,7 @@ void LowMachMixtureSolver::restore_qbmm_restart(std::span<const std::byte> paylo
                 validate_legacy_restart_model(d->options);
             check(!legacy_default_only || !d->controller_active || d->active_legacy_compatible,
                 "Legacy QBMM restart requires default force and constitutive-law configuration.");
-            check(!d->controller_active || d->active_qbmm_controller == controller_signature,
+            check((!motion && !d->controller_active) || d->active_qbmm_controller == controller_signature,
                 "QBMM restart target has a different or unrecorded coupled source configuration.");
             candidate.qbmm_families.resize(phases);
             for (auto& stamp : candidate.qbmm_families)
@@ -666,10 +896,35 @@ void LowMachMixtureSolver::restore_qbmm_restart(std::span<const std::byte> paylo
             face_flux.resize(faces);
             for (double& rate : face_flux)
                 reader(rate);
+            if (motion)
+            {
+                bool has_interval = false;
+                reader(has_interval);
+                if (has_interval)
+                {
+                    auto& interval = wall_interval.emplace();
+                    interval.new_surface = surface;
+                    reader(interval.old_surface, interval.time_step);
+                    const auto displacement = surface - interval.old_surface;
+                    const auto limit = motion->options().maximum_level_change;
+                    check(interval.time_step > 0. && std::isfinite(displacement) &&
+                              (!limit || std::abs(displacement) <= *limit),
+                        "QBMM restart wall interval has an invalid duration or displacement.");
+                    const auto edges = motion->candidate_axis_edges(interval.old_surface);
+                    check(!edges.empty(), "QBMM restart lacks reference edges for the last wall interval.");
+                    for (size_t i = 0; i < edges.size(); ++i)
+                        check(std::isfinite(edges[i]) && (i == 0 || edges[i] > edges[i - 1]),
+                            "QBMM restart previous wall geometry has nonfinite or unordered edges.");
+                    old_cap = edges.back();
+                }
+            }
             restart_diagnostics(reader, statistics, phases, species, version);
             auto metadata = std::make_shared<QbmmPublication>();
             metadata->origin = QbmmStateOrigin::PortableRestart;
             metadata->archived_generation = saved_generation;
+            metadata->planar_wall_interval = wall_interval;
+            check(!motion || wall_interval.has_value() == (statistics.correctors > 0),
+                "QBMM restart wall interval differs from the accepted planar correctors.");
             if (version >= 4)
             {
                 restart_qbmm_balances(reader, metadata->balances, statistics, catalog);
@@ -688,11 +943,29 @@ void LowMachMixtureSolver::restore_qbmm_restart(std::span<const std::byte> paylo
             if (statistics.correctors > 0)
                 metadata->history = QbmmReceiptHistory::UnavailableAfterPortableRestart;
             publication = std::move(metadata);
-            if (version == 5 && reader.remaining_size() == restart_word_size)
+            auto* restored = controller_diagnostics ? controller_diagnostics->restored : nullptr;
+            if (motion)
+            {
+                const auto before = reader.remaining_size();
+                bool has_history = false;
+                reader(has_history);
+                if (has_history)
+                {
+                    check(controller_signature && restored,
+                        "QBMM restart controller diagnostics require the matching live reacting controller.");
+                    restart_controller_diagnostics(
+                        reader, *restored, phases, controller_diagnostics->reaction_count, statistics.correctors);
+                }
+                controller_history =
+                    restart_checksum(body.subspan(body.size() - before, before - reader.remaining_size()));
+            }
+            if (version >= 5 && reader.remaining_size() == restart_word_size)
                 reader(statistics.maximum_fourier_gross_comparison_uncertainty_j.emplace());
             check(reader.remaining_size() == 0, "Unexpected trailing QBMM restart data.");
             validate_restart_fourier_uncertainty(statistics);
             qbmm_detail::validate_state(d->options, candidate);
+            if (restored)
+                restored->flow = statistics;
         });
     require_uniform_restart_state(mesh, candidate, saved_generation);
     require_uniform_restart_configuration(
@@ -703,10 +976,50 @@ void LowMachMixtureSolver::restore_qbmm_restart(std::span<const std::byte> paylo
     std::uint64_t actual_image_checksum = 0;
     Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &checksum, &actual_image_checksum);
     check(actual_image_checksum == image_checksum, "QBMM restart ranks do not belong to the same saved image.");
-    collective_detail::collective_local_validation(
-        mesh, "QBMM restart physical state", [&] { validate_restart_physics(mesh, d->options, candidate, face_flux); });
-    d->publish_fixed(std::move(candidate), std::move(statistics), face_flux,
-        std::max(d->trial_nonce, saved_generation) + 1, std::move(publication));
+    const auto generation = std::max(d->trial_nonce, saved_generation) + 1;
+    if (motion)
+    {
+        collective_detail::require_uniform_value(mesh, motion_configuration, "QBMM restart planar configuration");
+        collective_detail::require_uniform_value(mesh, surface, "QBMM restart accepted surface elevation");
+        require_uniform_restart_wall_interval(mesh, wall_interval);
+        collective_detail::require_uniform_value(mesh, controller_history, "QBMM restart controller diagnostics");
+        try
+        {
+            motion->stage_restart_geometry(surface);
+            collective_detail::collective_local_validation(mesh, "Planar QBMM restart physical state",
+                [&]
+                {
+                    check(accepted_geometry == restart_partition_fingerprint(mesh),
+                        "QBMM restart accepted planar geometry or ordered partition differs.");
+                    const RestartPlanarWalls walls{static_cast<size_t>(motion->options().axis), old_cap,
+                        wall_interval ? wall_interval->time_step : 0.};
+                    validate_restart_physics(mesh, d->options, candidate, face_flux, walls);
+                });
+            d->refresh_numeric_geometry();
+            d->stage_publication_fields(candidate, face_flux);
+            motion->accept_trial();
+        }
+        catch (...)
+        {
+            const auto failure = std::current_exception();
+            rollback_failed_planar_restore(*motion);
+            std::rethrow_exception(failure);
+        }
+        d->publish_staged_fields();
+        d->accepted = std::move(candidate);
+        d->diagnostics = std::move(statistics);
+        d->qbmm_publication = std::move(publication);
+        d->initialized = true;
+        d->trial_nonce = generation;
+        d->accepted_planar_motion = motion->d_authority;
+        ++d->logical_geometry;
+    }
+    else
+    {
+        collective_detail::collective_local_validation(mesh, "QBMM restart physical state",
+            [&] { validate_restart_physics(mesh, d->options, candidate, face_flux); });
+        d->publish_fixed(std::move(candidate), std::move(statistics), face_flux, generation, std::move(publication));
+    }
     d->accepted_qbmm_controller = controller_signature;
     d->needs_restart_controller = controller_signature.has_value();
     d->qbmm_legacy_default_only = legacy_default_only;

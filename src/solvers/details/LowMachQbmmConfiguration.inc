@@ -9,7 +9,6 @@ std::shared_ptr<const InterphaseConfiguration> configure_qbmm_sources(
         require(!options.qbmm_population, "A QBMM law requires native QBMM family bindings.");
         return thermal;
     }
-    require(!options.planar_motion, "QBMM local sources require a fixed mesh.");
     const auto& catalog = options.mechanism->catalog();
     require(options.phases.size() == families.size(), "QBMM physical and chemical phase layouts differ.");
     if (options.population_events)

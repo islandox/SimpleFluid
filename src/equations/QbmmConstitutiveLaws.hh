@@ -4,6 +4,7 @@
 #pragma once
 
 #include "equations/QbmmMoments.hh"
+#include "equations/ReactionMechanism.hh"
 
 #include <algorithm>
 #include <array>
@@ -158,6 +159,7 @@ struct QbmmLawInputs
     const std::optional<double> slip_speed_m_per_s{};           ///< Supplied common family drift, not carrier speed.
     const std::uint64_t family_fingerprint = 0, catalog_fingerprint = 0;
     const std::string population{}; ///< Stable family identity; quadrature indices carry no material identity.
+    const std::optional<ReactionLocation> location{}; ///< Source-donor centroid, cell identity and geometry epoch.
 };
 
 /** No epsilon volume or concentration exists for an absent phase. */
@@ -316,7 +318,7 @@ struct QbmmSlipEvaluation
         input.absolute_pressure_pa, input.temperature_K, input.time_step_s, input.phase_volume_fraction,
         input.gas_volume_fraction, input.phase_concentration_mol_per_m3, input.carrier_liquid_concentration_mol_per_m3,
         input.carrier_liquid_temperature_K, speed, input.family_fingerprint, input.catalog_fingerprint,
-        input.population};
+        input.population, input.location};
     auto applicability = evaluate_qbmm_applicability(metadata, frozen);
     if (!applicability.gate_passed)
         throw std::invalid_argument(

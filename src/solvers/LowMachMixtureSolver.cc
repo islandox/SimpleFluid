@@ -10,6 +10,7 @@
 #include "equations/EquationValidation.hh"
 #include "equations/VariableDensityMomentumEquation.hh"
 #include "solvers/details/LowMachConditionedThermal.hh"
+#include "solvers/details/LowMachQbmmControllerRestart.hh"
 #include "solvers/details/LowMachQbmmLawInputs.hh"
 #include "solvers/details/LowMachQbmmState.hh"
 #include "solvers/details/LowMachQbmmTransport.hh"
@@ -88,6 +89,35 @@ std::vector<double> fractions(const PhaseThermalState& phase)
         value = n > 0 ? value / n : 0;
     return x;
 }
+
+double effective_mixture_viscosity(const Solver::Options& options, std::span<const PhaseThermalState> phases,
+    std::span<const double> volumes, bool inviscid_required)
+{
+    double viscosity = 0;
+    if (options.mixture_dynamic_viscosity)
+        viscosity = options.mixture_dynamic_viscosity(phases, volumes);
+    else
+    {
+        size_t populated = 0;
+        for (size_t a = 0; a < phases.size(); ++a)
+            if (volumes[a] > 0)
+            {
+                const auto& phase = phases[a];
+                const auto point =
+                    phase.thermodynamics->evaluate(phase.temperature, phase.absolute_pressure, fractions(phase));
+                if (++populated == 1)
+                    viscosity = point.dynamic_viscosity;
+                else
+                    check(point.dynamic_viscosity == 0 && viscosity == 0,
+                        "Multiphase viscous flow requires a supplied mixture-viscosity closure.");
+            }
+    }
+    check(std::isfinite(viscosity) && viscosity >= 0, "Invalid supplied mixture viscosity.");
+    if (inviscid_required)
+        check(viscosity == 0., "Prescribed closed ALE requires an inviscid/slip wall policy.");
+    return viscosity;
+}
+
 double energy_sum(const Solver::CellState& cell)
 {
     double energy = 0;
@@ -251,16 +281,52 @@ CaloricCell recover_enthalpy(const Solver::CellState& transported, std::span<con
 }
 } // namespace
 
+void LowMachMixtureSolver::require_uniform_advancement(const Mesh& mesh, AdvancementOperation operation)
+{
+    collective_detail::require_uniform_value(mesh, static_cast<int>(operation), "Low-Mach advancement operation");
+}
+
+struct SIMPLEFLUID_SOLVERS_LOCAL PlanarWallInterval
+{
+    double old_surface = 0, new_surface = 0, time_step = 0;
+};
+
 struct LowMachMixtureSolver::ALEGeometryCertificate
 {
-    const LowMachMixtureSolver* owner = nullptr;
-    const void* motion_identity = nullptr; // Compared against explicit live authority, never dereferenced.
+    struct OwnerIdentity
+    {
+    };
+    std::shared_ptr<const OwnerIdentity> owner;
+    PlanarMotion::Authority motion_identity;
     const void* geometry_identity = nullptr;
     PlanarMotion::StateSnapshot source;
     std::uint64_t logical_geometry = 0;
+    std::uint64_t old_geometry_epoch = 0, new_geometry_epoch = 0;
     double target_surface = 0, time_step = 0;
     std::vector<double> old_volumes, new_volumes, swept_flux;
     std::vector<Pack::global_ordinal_type> cell_ids, face_ids, cell_geometry_ids, face_geometry_ids;
+
+    void validate_maps(const Mesh& mesh) const
+    {
+        check(geometry_identity == mesh.geometry_identity() && cell_ids.size() == mesh.num_local_cells() &&
+                  cell_geometry_ids.size() == cell_ids.size() && face_ids.size() == mesh.num_faces() &&
+                  face_geometry_ids.size() == face_ids.size(),
+            "Planar geometry certificate maps differ from the live geometry.");
+        for (size_t c = 0; c < cell_ids.size(); ++c)
+        {
+            const LO cell = static_cast<LO>(c);
+            check(
+                cell_ids[c] == mesh.cell_global_id(cell) && cell_geometry_ids[c] == mesh.cell_geometry_global_id(cell),
+                "Planar cell maps changed.");
+        }
+        for (size_t f = 0; f < face_ids.size(); ++f)
+        {
+            const LO face = static_cast<LO>(f);
+            check(
+                face_ids[f] == mesh.face_global_id(face) && face_geometry_ids[f] == mesh.face_geometry_global_id(face),
+                "Planar face maps changed.");
+        }
+    }
 };
 
 struct LowMachMixtureSolver::QbmmPublication
@@ -271,17 +337,20 @@ struct LowMachMixtureSolver::QbmmPublication
     std::uint64_t shape_diagnostics_version = 3; ///< v2 records shape sources, v3 adds shape transport.
     std::shared_ptr<const QbmmIntervalReport> interval;
     std::optional<QbmmBalances> balances;
+    std::optional<PlanarWallInterval> planar_wall_interval;
 };
 
 struct LowMachMixtureSolver::Implementation
 {
     SP<const Mesh> mesh;
+    std::shared_ptr<const ALEGeometryCertificate::OwnerIdentity> planar_owner;
     std::vector<std::shared_ptr<const MixtureThermodynamics>> eos;
     Options options;
     State accepted;
     Diagnostics diagnostics;
     std::shared_ptr<const QbmmPublication> qbmm_publication;
     std::optional<std::uint64_t> active_qbmm_controller, accepted_qbmm_controller;
+    PlanarMotion::Authority active_controller_motion; ///< With a controller stamp, empty denotes fixed geometry.
     std::optional<std::array<double, 3>> active_body_acceleration, accepted_count_only_body_acceleration;
     bool count_only_force_provenance_recorded = false;
     bool needs_restart_controller = false;
@@ -290,6 +359,19 @@ struct LowMachMixtureSolver::Implementation
     std::optional<std::uint64_t> checkpoint_controller() const noexcept
     {
         return active_qbmm_controller ? active_qbmm_controller : accepted_qbmm_controller;
+    }
+    void validate_planar_controller_authority(const PlanarMotion& motion) const
+    {
+        check(!active_qbmm_controller || active_controller_motion == motion.d_authority,
+            "The reacting controller is bound to different geometry or motion authority.");
+        check(active_qbmm_controller || !accepted_qbmm_controller || accepted_planar_motion == motion.d_authority,
+            "Fixed reacting QBMM history requires a configured planar controller before moving replay.");
+    }
+    void validate_planar_checkpoint_provenance(const PlanarMotion& motion) const
+    {
+        check(options.qbmm_families.empty() || diagnostics.correctors == 0 ||
+                  (accepted_planar_motion == motion.d_authority && accepted_qbmm_controller == checkpoint_controller()),
+            "Planar QBMM checkpoint requires an interval accepted by its matching motion and source authority.");
     }
     void clear_initialization_provenance() noexcept
     {
@@ -300,8 +382,9 @@ struct LowMachMixtureSolver::Implementation
         qbmm_legacy_default_only = false;
     }
     std::uint64_t trial_nonce = 0, controller_id = 0, source_invocation = 0;
-    std::uint64_t qbmm_preview_id = 0;
+    std::uint64_t preview_sequence = 0;
     std::uint64_t epoch = 0, logical_geometry = 0;
+    PlanarMotion::Authority accepted_planar_motion; // QBMM only; compared with explicit live authority.
     ScalarField rho, old_rho, mu, mechanical_pressure, old_scalar, scalar, unit, zero, published_rho;
     VectorField u, old_u, pressure_gradient, published_u;
     FaceField flux, trial_flux, mass_flux;
@@ -383,6 +466,7 @@ struct LowMachMixtureSolver::Implementation
                         "dispersed identities must be explicit.");
                 }
                 qbmm_detail::validate_configuration(options, eos);
+                planar_owner = std::make_shared<const ALEGeometryCertificate::OwnerIdentity>();
                 if (!options.qbmm_families.empty())
                     BelosLinearSolver<Pack>::validate_options(options.linear);
                 for (size_t f = 0; f < mesh->num_faces(); ++f)
@@ -596,7 +680,10 @@ struct LowMachMixtureSolver::Implementation
             flux.sync_ghosts();
         }
         else
-            publish_qbmm_fields(state, face_flux);
+        {
+            stage_publication_fields(state, face_flux);
+            publish_staged_fields();
+        }
         accepted = std::move(state);
         diagnostics = std::move(statistics);
         qbmm_publication = std::move(publication);
@@ -605,11 +692,11 @@ struct LowMachMixtureSolver::Implementation
         initialized = true;
         trial_nonce = generation;
     }
-    void publish_qbmm_fields(const State& state, std::span<const double> face_flux)
+    void stage_publication_fields(const State& state, std::span<const double> face_flux)
     {
         // These corrector workspaces are overwritten before the next preview reads them.
         // Keep accepted fields and their public objects intact until all imports succeed.
-        collective_detail::collective_local_validation(*mesh, "Low-Mach fixed field staging",
+        collective_detail::collective_local_validation(*mesh, "Low-Mach field staging",
             [&]
             {
                 check(state.cells.size() == mesh->num_owned_cells() && face_flux.size() == mesh->num_owned_faces(),
@@ -641,7 +728,9 @@ struct LowMachMixtureSolver::Implementation
         pressure_gradient.sync_ghosts();
         old_scalar.sync_ghosts();
         trial_flux.sync_ghosts();
-
+    }
+    void publish_staged_fields() noexcept
+    {
         const auto swap_storage = [](auto& accepted_field, auto& staged_field)
         {
             accepted_field.owned_data().swap(staged_field.owned_data());
@@ -671,7 +760,7 @@ struct LowMachMixtureSolver::Implementation
             typename Factory::WeightedScalarContext{.geometry_cache = &geometry, .ale = ale});
     }
     std::vector<QbmmFaceFlux> transport_qbmm(const State& previous, State& candidate, size_t phase,
-        const FaceField& phase_flux, double dt, Diagnostics& statistics)
+        const FaceField& phase_flux, double dt, Diagnostics& statistics, const FVM::ALEControlVolumeState* ale)
     {
         const size_t species = eos[phase]->catalog().species().size(), cells = previous.cells.size();
         std::vector<std::vector<double>> old_amount, amount;
@@ -688,16 +777,17 @@ struct LowMachMixtureSolver::Implementation
                     old_amount[species + 1][c] = cell.qbmm_shape[phase]->H2;
                     old_amount[species + 2][c] = cell.qbmm_shape[phase]->H3;
                     old_amount[species + 3][c] = cell.phases[phase].internal_energy;
-                    const double trace = transport_consistency_detail::transport_concentration(
-                        old_amount[species][c], mesh->cell_volume(static_cast<LO>(c)));
+                    const double volume = ale ? ale->old_cell_volumes()[c] : mesh->cell_volume(static_cast<LO>(c));
+                    const double trace =
+                        transport_consistency_detail::transport_concentration(old_amount[species][c], volume);
                     old_scalar.set_owned_value(static_cast<LO>(c), trace);
                 }
             });
         old_scalar.sync_ghosts();
         // One native concrete operator owns the complete family, including signed phase energy.
-        const auto system = assemble_phase_transport(phase_flux, dt);
+        const auto system = assemble_phase_transport(phase_flux, dt, ale);
         auto block = transport_consistency_detail::enforce_block(mesh, old_amount, phase_flux, dt, amount,
-            *system.matrix, *system.rhs, options.linear, options.conservation_relative_tolerance, species);
+            *system.matrix, *system.rhs, options.linear, options.conservation_relative_tolerance, species, ale);
         std::array<long double, 2> local_h1{}, global_h1{};
         collective_detail::collective_local_validation(*mesh, "Native represented QBMM transport block",
             [&]
@@ -1354,6 +1444,13 @@ void LowMachMixtureSolver::initialize(State candidate, const ControllerLease* co
 }
 LowMachMixtureSolver::Checkpoint LowMachMixtureSolver::checkpoint() const
 {
+    check(!d->accepted_planar_motion && !d->active_controller_motion,
+        "Moving checkpoint requires its exact live motion authority.");
+    return checkpoint_state();
+}
+
+LowMachMixtureSolver::Checkpoint LowMachMixtureSolver::checkpoint_state() const
+{
     check(d->initialized, "Low-Mach solver is not initialized.");
     Checkpoint saved;
     saved.state = d->accepted;
@@ -1385,7 +1482,8 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, const ControllerLeas
     collective_detail::collective_local_validation(*d->mesh, "Low-Mach checkpoint",
         [&]
         {
-            check(saved.owner == this && !saved.ale_geometry && saved.logical_geometry == d->logical_geometry &&
+            check(saved.owner == this && !saved.ale_geometry && !d->accepted_planar_motion &&
+                      !d->active_controller_motion && saved.logical_geometry == d->logical_geometry &&
                       d->epoch == mesh_geometry_epoch(*d->mesh) &&
                       (d->options.qbmm_families.empty() || saved.geometry_epoch == d->epoch) &&
                       saved.state.cells.size() == d->mesh->num_owned_cells() &&
@@ -1437,12 +1535,14 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, const ControllerLeas
 LowMachMixtureSolver::Trial LowMachMixtureSolver::preview(
     double dt, const std::vector<CellSources>& sources, const ControllerLease* controller)
 {
+    require_uniform_advancement(*d->mesh, AdvancementOperation::Preview);
     return preview_impl(dt, sources, nullptr, controller);
 }
 
 LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_with_sources(
     double dt, std::shared_ptr<const SourceStageProvider> provider, const ControllerLease* controller)
 {
+    require_uniform_advancement(*d->mesh, AdvancementOperation::PreviewWithSources);
     collective_detail::collective_local_validation(*d->mesh, "Source provider ownership",
         [&] { check(bool(provider), "preview_with_sources requires an immutable shared provider."); });
     return preview_impl(dt, {}, std::move(provider), controller);
@@ -1451,6 +1551,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_with_sources(
 LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_with_qbmm_sources(
     double dt, std::shared_ptr<const SourceStageProvider> provider, const ControllerLease* controller)
 {
+    require_uniform_advancement(*d->mesh, AdvancementOperation::PreviewWithQbmmSources);
     return preview_impl(dt, {}, std::move(provider), controller, nullptr, true);
 }
 
@@ -1460,28 +1561,31 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
 {
     std::vector<CellSources> sources;
     const auto& mesh = *d->mesh;
+    const bool has_qbmm = !d->options.qbmm_families.empty();
     require_controller(controller);
     collective_detail::require_uniform_value(mesh, dt, "Low-Mach mixture timestep");
     collective_detail::require_uniform_value(mesh, int(ale != nullptr), "Low-Mach ALE transport selection");
-    if (!d->options.qbmm_families.empty())
+    if (has_qbmm)
         collective_detail::require_uniform_value(mesh, int(coherent_qbmm), "Native QBMM source authority");
     if (ale)
         ale->validate(mesh, dt);
     collective_detail::collective_local_validation(mesh, "Low-Mach mixture step inputs",
         [&]
         {
-            check(!coherent_qbmm || (!d->options.qbmm_families.empty() && controller && provider && !ale),
-                "Coherent QBMM sources require a fixed-mesh QBMM controller and an immutable source provider.");
-            check(d->options.qbmm_families.empty() || (!ale && (!provider || coherent_qbmm)),
-                "Native QBMM requires fixed geometry and the coherent controller for source providers.");
-            check(d->options.qbmm_families.empty() || d->qbmm_preview_id != std::numeric_limits<std::uint64_t>::max(),
-                "QBMM preview identity exhausted.");
+            check(!coherent_qbmm || (has_qbmm && controller && controller->reacting_source_authority && provider),
+                "Coherent QBMM sources require the reacting controller and an immutable source provider.");
+            check(!has_qbmm || !provider || coherent_qbmm,
+                "Native QBMM source providers require the coherent reacting controller.");
+            check(!has_qbmm || ale || !d->accepted_planar_motion,
+                "Accepted moving QBMM state requires a planar preview with live motion authority.");
+            check(!(has_qbmm || ale) || d->preview_sequence != std::numeric_limits<std::uint64_t>::max(),
+                "Low-Mach preview identity exhausted.");
             check(!d->needs_restart_controller || (coherent_qbmm && d->active_qbmm_controller &&
                                                       d->active_qbmm_controller == d->accepted_qbmm_controller),
                 "QBMM restart requires the archived reacting controller before advancement.");
             sources = fixed_sources;
             check(d->initialized && d->epoch == mesh_geometry_epoch(mesh) && std::isfinite(dt) && dt > 0,
-                "Low-Mach step requires initialized current fixed geometry and a positive timestep.");
+                "Low-Mach step requires initialized current geometry and a positive timestep.");
             check(d->accepted.revision != std::numeric_limits<std::uint64_t>::max() &&
                       std::isfinite(d->accepted.time + dt) && d->accepted.time + dt > d->accepted.time,
                 "Low-Mach next clock/revision cannot be represented without overflow or lost advancement.");
@@ -1511,13 +1615,13 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             for (size_t c = 0; c < d->accepted.cells.size(); ++c)
             {
                 qbmm_native_law_detail::validate_drift(d->accepted.cells[c]);
-                qbmm_native_law_detail::validate_transport_gates(
-                    d->options, d->accepted.cells[c], mesh.cell_volume(static_cast<LO>(c)), dt);
+                const double volume = ale ? ale->old_cell_volumes()[c] : mesh.cell_volume(static_cast<LO>(c));
+                qbmm_native_law_detail::validate_transport_gates(d->options, d->accepted.cells[c], volume, dt);
             }
         });
     collective_detail::require_uniform_value(mesh, int(bool(provider)), "Collective source-stage selection");
     // Distinguish coexisting previews even if their clocks and revisions coincide.
-    const auto qbmm_preview_id = d->options.qbmm_families.empty() ? 0 : ++d->qbmm_preview_id;
+    const auto preview_id = has_qbmm || ale ? ++d->preview_sequence : 0;
     SourceStageMetadata stage;
     auto source_options = d->options;
     int maximum_source_evaluations = d->options.maximum_correctors;
@@ -1706,7 +1810,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 if (qbmm_bound || !d->options.use_multi_rhs_transport)
                 {
                     if (qbmm_bound)
-                        qbmm_face_flux[a] = d->transport_qbmm(accepted, trial, a, *phase_flux[a], dt, result);
+                        qbmm_face_flux[a] = d->transport_qbmm(accepted, trial, a, *phase_flux[a], dt, result, ale);
                     else if (d->options.phase_roles[a].role == PhaseRole::DispersedGas)
                     {
                         collective_detail::collective_local_validation(mesh, "Population transport input",
@@ -2650,33 +2754,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     for (size_t c = 0; c < nc; ++c)
                     {
                         const LO cell = static_cast<LO>(c);
-                        double viscosity = 0;
-                        if (d->options.mixture_dynamic_viscosity)
-                            viscosity = d->options.mixture_dynamic_viscosity(trial.cells[c].phases, thermal[c].volumes);
-                        else
-                        {
-                            size_t populated = 0;
-                            for (size_t a = 0; a < np; ++a)
-                                if (thermal[c].volumes[a] > 0)
-                                {
-                                    ++populated;
-                                    const auto& phase = trial.cells[c].phases[a];
-                                    const double value =
-                                        phase.thermodynamics
-                                            ->evaluate(phase.temperature, phase.absolute_pressure, fractions(phase))
-                                            .dynamic_viscosity;
-                                    if (populated == 1)
-                                        viscosity = value;
-                                    else
-                                        check(value == 0 && viscosity == 0,
-                                            "Multiphase viscous flow requires a supplied mixture-viscosity closure.");
-                                }
-                        }
-                        check(std::isfinite(viscosity) && viscosity >= 0, "Invalid supplied mixture viscosity.");
-                        if (ale)
-                            check(viscosity == 0.,
-                                "Initial prescribed closed ALE requires an explicit inviscid/slip wall policy.");
-                        d->mu.set_owned_value(cell, viscosity);
+                        d->mu.set_owned_value(cell, effective_mixture_viscosity(d->options, trial.cells[c].phases,
+                                                        thermal[c].volumes, ale != nullptr));
                     }
                 });
             d->rho.sync_ghosts();
@@ -3092,7 +3171,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 }
             });
         staged.candidate = std::move(trial);
-        staged.qbmm_preview_id = qbmm_preview_id;
+        staged.preview_id = preview_id;
         staged.statistics = std::move(result);
         staged.transport = std::move(last_transport);
         staged.sources = std::move(sources);
@@ -3135,8 +3214,8 @@ LowMachMixtureSolver::ControllerLease LowMachMixtureSolver::acquire_controller()
 {
     return acquire_controller_for({});
 }
-LowMachMixtureSolver::ControllerLease LowMachMixtureSolver::acquire_controller_for(
-    std::string_view signature, bool legacy_compatible, std::optional<Vector> body_acceleration)
+LowMachMixtureSolver::ControllerLease LowMachMixtureSolver::acquire_controller_for(std::string_view signature,
+    bool legacy_compatible, std::optional<Vector> body_acceleration, const PlanarMotion* motion)
 {
     std::optional<std::uint64_t> binding;
     if (!d->options.qbmm_families.empty() && !signature.empty())
@@ -3148,6 +3227,11 @@ LowMachMixtureSolver::ControllerLease LowMachMixtureSolver::acquire_controller_f
     collective_detail::collective_local_validation(*d->mesh, "Low-Mach acquire controller",
         [&]
         {
+            check(!motion || (motion->mesh_ptr().get() == d->mesh.get() && !body_acceleration),
+                "Planar controller requires its exact mutable solver mesh and zero supplied body force.");
+            check(signature.empty() || !d->accepted_planar_motion ||
+                      (motion && d->accepted_planar_motion == motion->d_authority),
+                "An accepted moving QBMM state requires its live planar controller authority.");
             check(!d->needs_restart_controller || binding == d->accepted_qbmm_controller,
                 "QBMM restart requires matching reaction, population and transfer provider metadata.");
             check(!d->qbmm_legacy_default_only || legacy_compatible,
@@ -3162,6 +3246,7 @@ LowMachMixtureSolver::ControllerLease LowMachMixtureSolver::acquire_controller_f
     collective_detail::require_uniform_value(
         *d->mesh, int(d->qbmm_legacy_default_only), "QBMM legacy restart configuration restriction");
     d->active_qbmm_controller = binding;
+    d->active_controller_motion = binding && motion ? motion->d_authority : PlanarMotion::Authority{};
     d->active_body_acceleration = acceleration_components(body_acceleration);
     d->active_legacy_compatible = legacy_compatible;
     d->controller_active = true;
@@ -3177,6 +3262,7 @@ void LowMachMixtureSolver::release_controller(std::uint64_t id) noexcept
     {
         d->controller_active = false;
         d->active_qbmm_controller.reset();
+        d->active_controller_motion.reset();
         d->active_body_acceleration.reset();
         if (d->trial_nonce != std::numeric_limits<std::uint64_t>::max())
             ++d->trial_nonce;
@@ -3207,6 +3293,7 @@ LowMachMixtureSolver::ControllerLease::~ControllerLease()
 }
 void LowMachMixtureSolver::commit(const Trial& trial, const ControllerLease* controller)
 {
+    require_uniform_advancement(*d->mesh, AdvancementOperation::Commit);
     require_controller(controller);
     State candidate;
     Diagnostics statistics;
@@ -3221,19 +3308,11 @@ void LowMachMixtureSolver::commit(const Trial& trial, const ControllerLease* con
             qbmm_detail::validate_state(d->options, trial.candidate);
             candidate = trial.candidate;
             statistics = trial.statistics;
-            if (!d->options.qbmm_families.empty())
-            {
-                auto metadata = std::make_shared<QbmmPublication>();
-                check(trial.qbmm_balances.has_value(), "Native QBMM trial lacks physical report balances.");
-                metadata->balances = trial.qbmm_balances;
-                metadata->history = QbmmReceiptHistory::Available;
-                metadata->interval = qbmm_interval(trial);
-                publication = std::move(metadata);
-            }
+            publication = prepare_qbmm_publication(trial);
         });
     if (!d->options.qbmm_families.empty())
     {
-        collective_detail::require_uniform_value(*d->mesh, trial.qbmm_preview_id, "QBMM collective trial selection");
+        collective_detail::require_uniform_value(*d->mesh, trial.preview_id, "QBMM collective trial selection");
     }
     d->publish_fixed(
         std::move(candidate), std::move(statistics), trial.face_flux, d->trial_nonce + 1, std::move(publication));

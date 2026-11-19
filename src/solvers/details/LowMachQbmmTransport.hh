@@ -61,7 +61,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline BlockResult enforce_block(const SP<const Flow::
     const std::vector<std::vector<double>>& old_amount, const Face& phase_flux, double dt,
     std::vector<std::vector<double>>& amount, const Flow::Pack::matrix_type& matrix,
     const Flow::Pack::vector_type& count_rhs, const LinearSolverOptions& options, double physical_tolerance,
-    size_t species)
+    size_t species, const FVM::ALEControlVolumeState* ale)
 {
     const auto& mesh = *grid;
     const auto comm = mesh.owned_cell_map()->getComm();
@@ -117,7 +117,8 @@ SIMPLEFLUID_SOLVERS_LOCAL inline BlockResult enforce_block(const SP<const Flow::
             for (size_t c = 0; c < cells; ++c)
             {
                 const LO cell = static_cast<LO>(c);
-                volume[c] = mesh.cell_volume(cell);
+                volume[c] = ale ? ale->new_cell_volumes()[c] : mesh.cell_volume(cell);
+                const double old_volume = ale ? ale->old_cell_volumes()[c] : volume[c];
                 Sum outflow;
                 for (const LO face : mesh.faces(cell))
                 {
@@ -128,13 +129,13 @@ SIMPLEFLUID_SOLVERS_LOCAL inline BlockResult enforce_block(const SP<const Flow::
                 denominator[c] = 1 + static_cast<long double>(dt) * outflow.value() / volume[c];
                 if (!(denominator[c] > 0) || !std::isfinite(denominator[c]))
                     throw std::invalid_argument("QBMM common transport row is not representable.");
-                const double history_coefficient = volume[c] / dt;
+                const double history_coefficient = old_volume / dt;
                 for (size_t q = 0; q < channels; ++q)
                 {
                     const double old = old_amount[q][c];
                     if (!std::isfinite(old) || (q + 1 != channels && old < 0))
                         throw std::invalid_argument("QBMM accepted transport channel is invalid.");
-                    const double trace = transport_concentration(old, volume[c]);
+                    const double trace = transport_concentration(old, old_volume);
                     // The native factory supplies the common operator and the count RHS.
                     // Other channels use that same unit-storage BE history construction.
                     const double history = history_coefficient * trace;

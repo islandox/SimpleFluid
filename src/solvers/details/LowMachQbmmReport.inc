@@ -256,7 +256,7 @@ std::shared_ptr<const LowMachMixtureSolver::QbmmIntervalReport> LowMachMixtureSo
 {
     const auto& transport = trial.transport_snapshot();
     auto interval = std::make_shared<QbmmIntervalReport>();
-    interval->preview_id = trial.qbmm_preview_id;
+    interval->preview_id = trial.preview_id;
     interval->transported_from_revision = transport.accepted_revision;
     interval->transported_from_generation = transport.accepted_generation;
     interval->transported_from_time = transport.accepted_time;
@@ -268,6 +268,22 @@ std::shared_ptr<const LowMachMixtureSolver::QbmmIntervalReport> LowMachMixtureSo
     interval->local_receipts = trial.qbmm_cells;
     interval->local_gross_events = trial.gross_events;
     return interval;
+}
+
+std::shared_ptr<const LowMachMixtureSolver::QbmmPublication> LowMachMixtureSolver::prepare_qbmm_publication(
+    const Trial& trial) const
+{
+    if (d->options.qbmm_families.empty())
+        return {};
+    check(trial.qbmm_balances.has_value(), "Native QBMM trial lacks physical report balances.");
+    auto publication = std::make_shared<QbmmPublication>();
+    publication->balances = trial.qbmm_balances;
+    publication->history = QbmmReceiptHistory::Available;
+    publication->interval = qbmm_interval(trial);
+    if (const auto& geometry = trial.ale_geometry)
+        publication->planar_wall_interval =
+            PlanarWallInterval{geometry->source.surface_elevation(), geometry->target_surface, geometry->time_step};
+    return publication;
 }
 
 LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report() const
@@ -291,16 +307,32 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
         [&]
         {
             check(d->initialized && !families.empty() && d->epoch == mesh_geometry_epoch(mesh),
-                "QBMM reports require initialized state on the configured fixed geometry.");
+                "QBMM reports require initialized state on the current accepted geometry.");
             if (trial)
             {
-                check(trial->owner == this && !trial->ale_geometry && trial->nonce == d->trial_nonce &&
-                          trial->base_revision == d->accepted.revision && trial->geometry_epoch == d->epoch &&
+                check(trial->owner == this && trial->nonce == d->trial_nonce &&
+                          trial->base_revision == d->accepted.revision &&
                           trial->logical_geometry == d->logical_geometry && trial->qbmm_balances.has_value(),
                     "QBMM report trial is foreign, stale or belongs to different geometry.");
+                if (const auto& geometry = trial->ale_geometry)
+                {
+                    geometry->validate_maps(mesh);
+                    const auto matches_owned = [&](const auto& saved, const auto& owned)
+                    {
+                        return owned.size() == mesh.num_owned_cells() && saved.size() == mesh.num_local_cells() &&
+                               std::equal(owned.begin(), owned.end(), saved.begin());
+                    };
+                    check(geometry->owner == d->planar_owner && geometry->logical_geometry == d->logical_geometry &&
+                              geometry->old_geometry_epoch == trial->transport.old_geometry_epoch &&
+                              geometry->new_geometry_epoch == trial->geometry_epoch &&
+                              geometry->new_geometry_epoch == trial->transport.new_geometry_epoch &&
+                              matches_owned(geometry->old_volumes, trial->transport.old_control_volumes) &&
+                              matches_owned(geometry->new_volumes, trial->transport.new_control_volumes),
+                        "QBMM retained planar trial report lacks its certified geometry.");
+                }
                 provenance.kind = QbmmStateKind::Trial;
                 provenance.origin = QbmmStateOrigin::Corrector;
-                provenance.preview_id = trial->qbmm_preview_id;
+                provenance.preview_id = trial->preview_id;
                 if (trial->provider)
                     provenance.controller_configuration_signature = d->active_qbmm_controller;
                 report.receipt_history = QbmmReceiptHistory::Available;
@@ -319,7 +351,7 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
     const State& state = trial ? trial->candidate : d->accepted;
     provenance.revision = state.revision;
     provenance.generation = d->trial_nonce;
-    provenance.geometry_epoch = d->epoch;
+    provenance.geometry_epoch = trial ? trial->geometry_epoch : d->epoch;
     provenance.catalog_fingerprint = catalog.fingerprint();
     provenance.time = state.time;
     provenance.thermodynamic_pressure_pa = state.thermodynamic_pressure;

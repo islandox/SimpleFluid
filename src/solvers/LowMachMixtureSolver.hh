@@ -469,7 +469,7 @@ public:
     {
         friend class LowMachMixtureSolver;
         State candidate;
-        std::uint64_t qbmm_preview_id = 0;
+        std::uint64_t preview_id = 0;
         std::vector<std::vector<std::optional<InversionStatus>>> qbmm_validation;
         Diagnostics statistics;
         TransportSnapshot transport;
@@ -571,15 +571,27 @@ public:
     [[nodiscard]] const Options& options() const noexcept;
     [[nodiscard]] const State& state() const noexcept;
     [[nodiscard]] const Diagnostics& diagnostics() const noexcept;
-    /** Collective, read-only QBMM output on the current fixed geometry. A trial must be selected uniformly and
-     * still belong to this solver's accepted generation. Local EOS evaluation or unrepresentable physical
-     * diagnostics can cause a collective report failure.
+    /** Collective, read-only QBMM output on accepted geometry or a retained trial's geometry. A trial must be
+     * selected uniformly and still belong to this solver's accepted generation. Local EOS evaluation or
+     * unrepresentable physical diagnostics can cause a collective report failure.
      */
     [[nodiscard]] QbmmReport qbmm_report() const;
     [[nodiscard]] QbmmReport qbmm_report(const Trial& trial) const;
     /** Collective, partition-local checkpoint encoding for the fixed-mesh QBMM path. */
     [[nodiscard]] std::vector<std::byte> serialize_qbmm_restart() const;
     void restore_qbmm_restart(std::span<const std::byte> payload, const ControllerLease* controller = nullptr);
+    /** Collective portable restart on prescribed planar geometry. The default stamp describes direct numeric targets.
+     * Coupled callers supply the immutable identity and revision of their target law.
+     */
+    [[nodiscard]] std::vector<std::byte> serialize_qbmm_restart(const PlanarMotion& motion,
+        std::string_view target_identity = "SimpleFluid.explicit-planar-target",
+        std::uint64_t target_revision = 1) const;
+    /** Restore with matching original reference geometry, motion options, target stamp, maps and configuration.
+     * The coupled path requires its live controller lease. Restore does not call a target or source law.
+     */
+    void restore_qbmm_restart(std::span<const std::byte> payload, PlanarMotion& motion,
+        std::string_view target_identity = "SimpleFluid.explicit-planar-target", std::uint64_t target_revision = 1,
+        const ControllerLease* controller = nullptr);
     /** Migrate an owner-bound count-only checkpoint on the same live fixed mesh.
      * Preserve the checkpoint's accepted flux and diagnostics while initializing its missing shape.
      * A checkpoint with supplied acceleration requires a receiving controller with the same acceleration.
@@ -598,27 +610,54 @@ public:
     [[nodiscard]] const Traits::vector_cell_type& velocity() const noexcept;
 
 private:
+    enum class AdvancementOperation
+    {
+        Preview,
+        PreviewWithSources,
+        PreviewWithQbmmSources,
+        PreviewPlanar,
+        PreviewPlanarWithSources,
+        PreviewPlanarWithQbmmSources,
+        Commit,
+        CommitPlanar,
+        ControllerPreview,
+        ControllerCommit
+    };
+    SIMPLEFLUID_SOLVERS_LOCAL static void require_uniform_advancement(const Mesh& mesh, AdvancementOperation operation);
+    struct SIMPLEFLUID_SOLVERS_LOCAL ControllerRestartDiagnostics;
+    [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL Checkpoint checkpoint_state() const;
+    [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL std::vector<std::byte> serialize_qbmm_restart_impl(
+        const PlanarMotion* motion, std::string_view target_identity, std::uint64_t target_revision,
+        const ControllerRestartDiagnostics* controller_diagnostics = nullptr) const;
+    SIMPLEFLUID_SOLVERS_LOCAL void restore_qbmm_restart_impl(std::span<const std::byte> payload, PlanarMotion* motion,
+        std::string_view target_identity, std::uint64_t target_revision, const ControllerLease* controller,
+        const ControllerRestartDiagnostics* controller_diagnostics = nullptr);
     SIMPLEFLUID_SOLVERS_LOCAL void supply_qbmm_shape(State& legacy, const QbmmInitialization& initialization) const;
     SIMPLEFLUID_SOLVERS_LOCAL Trial preview_with_qbmm_sources(
         double time_step, std::shared_ptr<const SourceStageProvider> provider, const ControllerLease* controller);
+    SIMPLEFLUID_SOLVERS_LOCAL Trial preview_ale_with_qbmm_sources(double time_step, PlanarMotion& motion,
+        double target_surface, std::shared_ptr<const SourceStageProvider> provider, const ControllerLease* controller);
     SIMPLEFLUID_SOLVERS_LOCAL Trial preview_impl(double time_step, const std::vector<CellSources>& fixed_sources,
         std::shared_ptr<const SourceStageProvider> provider, const ControllerLease* controller,
         const FVM::ALEControlVolumeState* ale = nullptr, bool coherent_qbmm = false);
     SIMPLEFLUID_SOLVERS_LOCAL Trial preview_planar_impl(double time_step, PlanarMotion& motion, double target_surface,
         const std::vector<CellSources>& fixed_sources, std::shared_ptr<const SourceStageProvider> provider,
-        const ControllerLease* controller);
+        const ControllerLease* controller, bool coherent_qbmm = false);
     SIMPLEFLUID_SOLVERS_LOCAL std::shared_ptr<ALEGeometryCertificate> capture_accepted_geometry(
         const PlanarMotion& motion) const;
     SIMPLEFLUID_SOLVERS_LOCAL void restore_accepted_after_motion(
-        PlanarMotion& motion, const PlanarMotion::StateSnapshot& snapshot, std::span<const double> absolute_flux);
-    SIMPLEFLUID_SOLVERS_LOCAL ControllerLease acquire_controller_for(
-        std::string_view signature, bool legacy_compatible = true, std::optional<Vector> body_acceleration = {});
+        PlanarMotion& motion, std::span<const double> absolute_flux);
+    SIMPLEFLUID_SOLVERS_LOCAL void rollback_failed_planar_restore(PlanarMotion& motion);
+    SIMPLEFLUID_SOLVERS_LOCAL ControllerLease acquire_controller_for(std::string_view signature,
+        bool legacy_compatible = true, std::optional<Vector> body_acceleration = {},
+        const PlanarMotion* motion = nullptr);
     SIMPLEFLUID_SOLVERS_LOCAL void require_controller(const ControllerLease* controller) const;
     SIMPLEFLUID_SOLVERS_LOCAL void release_controller(std::uint64_t id) noexcept;
     SIMPLEFLUID_SOLVERS_LOCAL QbmmReport qbmm_report_impl(const Trial* trial) const;
     SIMPLEFLUID_SOLVERS_LOCAL void finalize_qbmm_balances(
         Trial& trial, std::optional<std::span<const SpeciesSourceLedger>> chemistry = std::nullopt) const;
     SIMPLEFLUID_SOLVERS_LOCAL static std::shared_ptr<const QbmmIntervalReport> qbmm_interval(const Trial& trial);
+    SIMPLEFLUID_SOLVERS_LOCAL std::shared_ptr<const QbmmPublication> prepare_qbmm_publication(const Trial& trial) const;
     struct SIMPLEFLUID_SOLVERS_LOCAL Implementation;
     std::unique_ptr<Implementation> d;
 };

@@ -227,6 +227,12 @@ public:
     Diagnostics advance(double time_step);
     [[nodiscard]] Checkpoint checkpoint() const;
     void restore(const Checkpoint& checkpoint);
+    /** Collectively encode a partition-local QBMM image using the configured controller and motion, if present. */
+    [[nodiscard]] std::vector<std::byte> serialize_qbmm_restart() const;
+    /** Collectively restore native QBMM state and archived diagnostics. For native-only images, the controller
+     * corrector count is zero and the source vectors are empty, alongside the restored flow diagnostics.
+     */
+    void restore_qbmm_restart(std::span<const std::byte> payload);
     /** Migrate a native count-only checkpoint using this controller's force configuration and lease. */
     void restore_qbmm_checkpoint(const LowMachMixtureSolver& previous, const LowMachMixtureSolver::Checkpoint& saved,
         const LowMachMixtureSolver::QbmmInitialization& initialization);
