@@ -1,11 +1,12 @@
 # QBMM family kernel and native integration contract
 
-The contract below binds phases Q0 through Q5 of [SF-QBMM-CODE-001](qbmm_reacting_bubbles.md)
+The contract below binds phases Q0 through Q6 of [SF-QBMM-CODE-001](qbmm_reacting_bubbles.md)
 to the SimpleFluid source baseline `0029a93f`. The physical assumptions and moment definitions
 are in [SF-QBMM-MODEL-001](../modeling/qbmm_reacting_bubbles.md). Q1 provides local numerical
 operations. Q2 supplies native state ownership, Q3 couples local population sources to the native corrector,
 Q4 transports each family on the fixed mesh, and Q5 exposes endpoint reporting and the coupled
-numerical release gate.
+numerical release gate. Q6 adds explicitly supplied common family slip, body acceleration and
+application-declared constitutive ranges. None of these options changes the defaults.
 
 ## Source alignment
 
@@ -112,8 +113,8 @@ rank supplies the same configuration and state stamps, including ranks with zero
 bound phase. In each owned cell, the corresponding `qbmm_shape` slot owns H2 and H3. The count
 stays in `phase_numbers` and the material stays in `phases[p].moles`. An absent bound family has
 engaged zero count and shape. An unbound phase has a disengaged shape. Initialization verifies
-the schema stamps, fixed composition, presence and inversion of each block. All phases must
-have exactly zero prescribed drift and the thermal mode must be equilibrium. The native linear
+the schema stamps, fixed composition, presence and inversion of each block. The default velocity
+mode requires exactly zero drift; equilibrium temperature is mandatory in both modes. The native linear
 solver controls, including its stopping tolerance and iteration limit, must agree across ranks.
 
 Count-only input needs an explicit call to `initialize_qbmm`. Each owned cell and bound phase
@@ -121,11 +122,11 @@ specifies a monodisperse assumption or a list of positive atoms that matches the
 and count. The method builds a candidate and enters the normal collective initialization path
 only after migration succeeds everywhere. Existing shape-bearing states use `initialize`.
 
-The native preview supports a moving population on a fixed orthogonal mesh with zero supplied
-phase slip. A local source changing a bound family's material, count or shape requires a coherent Q3 packet
+The native preview supports a moving population on a fixed orthogonal mesh; its zero-slip path
+does not require a supplied velocity model. A local source changing a bound family's material, count or shape requires a coherent Q3 packet
 from the reacting controller. Direct fixed energy inputs and material packets for unbound phases
-pass through the native acceptance gates. ALE, phase and node slip, and higher-order
-moment advection remain outside the admitted transport modes.
+pass through the native acceptance gates. Only Q6's explicit common phase-slip mode
+extends this baseline; ALE, node slip and higher-order moment advection remain excluded.
 
 The transport snapshot owns pre-source shape, count, moles and the family stamps alongside
 the catalog stamp. A trial owns its candidate, the exact integrated source packets, transport
@@ -146,6 +147,9 @@ To migrate an existing count-only solver's private checkpoint, call `restore_qbm
 with its creating solver and the explicit per-cell initialization choices. Both solvers must
 use the same live fixed mesh and compatible phase/catalog/EOS bindings. This path carries
 the checkpoint's accepted clock, diagnostics and face-flux history across the conversion.
+If the count-only checkpoint records a body acceleration, migrate through the
+receiving reacting controller's `restore_qbmm_checkpoint` with the same acceleration.
+Migration cannot silently change or drop the force associated with that history.
 
 `serialize_qbmm_restart()` and `restore_qbmm_restart()` are collective. Each rank writes or reads
 its own versioned little-endian byte buffer, including ranks with no cells. The archive stores
@@ -296,7 +300,8 @@ fraction and an energy-balanced timestep give no empirical validity range for a 
 | Selection | Baseline contract and gate |
 | --- | --- |
 | Native mesh and boundaries | Closed, fixed, supported orthogonal native geometry; common-pressure and equilibrium-temperature EOS. QBMM planar ALE rejects before opening a motion trial. Open-reservoir face transport, moving-mesh remap and interface-resolving evolution have no native QBMM entry point. |
-| Velocity and order | One shared carrier, exactly zero prescribed drift on every phase, transient backward Euler and first-order upwind. `Options::qbmm_model` rejects supplied phase slip, node slip, independent momentum, steady assembly, BDF2 and higher-order advection at construction. |
+| Velocity and order | `SharedCarrier` (zero slip) by default. `SuppliedPhaseSlip` admits a finite prescribed phase velocity relative to the carrier, common to every node in that phase. Both modes require transient backward Euler and first-order upwind. Node slip, independent momentum, steady assembly, BDF2 and higher-order advection reject at construction. |
+| Gravity and applicability | Fixed grid, optional explicit SI acceleration. EOS density alone does not activate gravity. Reported validity ranges belong to supplied laws; satisfying them is not empirical validation. |
 | Family schema | One named fixed-composition family per dispersed gas phase; catalog, family stamp, reference scale and phase ordering agree on all ranks. Variable composition, cross-family coalescence and unmigrated count-only state reject. |
 | Local material and topology | Constructive paired birth, growth, shrinkage, disappearance, coalescence and breakup; transfers may involve the liquid carrier or a declared external reservoir. Declaring either direction of a family-to-background-gas material slot rejects. Generic chemistry, face transport and interphase laws can act on unbound compartments. A legacy number law must name only unbound populations. Selective or unpaired family material returned by a law rejects the preview. |
 | Thermal and pool closures | Common temperature and pressure, zero surface tension. Separate phase or node temperatures, bulk-gas conversion and capillary/surface-energy closures reject. A separate background gas may carry its own inventory. |
@@ -309,7 +314,98 @@ It compares uninterrupted continuation with an owner checkpoint and a portable r
 fresh solver. A separate one-cell configuration exercises collective failure with empty owners.
 The refinement case varies the flow step and the chemistry substep independently.
 
-Q5 qualifies this baseline numerically for the exercised configurations. Q6–Q8 need separate
-transport, momentum, area and energy contracts as applicable. Application claims, including
-terminal rise, dense-gas or high-void closures and natural convection, require case-specific
-physics, resolution studies and independent physical reference data.
+## Q6 supplied slip, force and constitutive contracts
+
+The default `Velocity::SharedCarrier` (also named `ZeroSlip`) requires zero drift.
+Set `Options::qbmm_model.velocity` to `QbmmModelOptions::Velocity::SuppliedPhaseSlip`
+and initialize `CellState::drift_velocity` in m/s, in physical phase order. The field is
+prescribed in space, not a second momentum equation or a terminal-rise prediction. The same
+carrier-plus-drift face flux selects the upwind donor for each family species, H0, H2, H3
+and signed internal energy; H1 is the mass of those species divided by the reference mass.
+Each phase chooses its own donor. In counterflow their material fractions can sum to less
+or more than one. They are **not** normalized. The material-volume packet, not an EOS donor
+volume, supplies `-p*(V_final - V_adv)`. Momentum convection consumes the summed physical
+mass rates in kg/s with unit flux weight. Each family's face receipt retains mass, material
+volume and donor-drift momentum rates alongside its scalar rates.
+
+The face-packet ABI uses binary64 scalars and three-component double vectors, including
+`derived_mass_flux` (kg/s) and `derived_drift_momentum_flux` (kg·m/s²). A finite
+species flux can have a mass equivalent below the smallest representable double: a
+rounded zero in this diagnostic does not erase the species packet. The containing
+`PhaseFaceTransport` records the actual mixture mass and drift-momentum fluxes supplied
+to the native momentum equation. Donor products retain a separate binary exponent and
+use compensated floating-point summation. Applying a drift or an EOS density before
+the final conversion can preserve a representable momentum or material-volume rate
+even when the intermediate phase mass rate would round to zero.
+
+Cell reports separate `carrier_velocity` from `mass_weighted_drift = sum(M_j*w_j)/sum(M_j)`
+and `barycentric_velocity = sum(M_j*(u_c + w_j))/sum(M_j)`. The latter uses accumulated
+absolute phase momentum, not addition of the two rounded report fields. Neither diagnostic
+replaces native carrier storage. `ReactingMixtureOptions::body_acceleration` is an optional spatially uniform
+vector in m/s². Each source-corrector evaluation uses the post-transfer physical mixture mass
+and the actual trial duration to add **one** integrated `M*g*dt` to `CellSources::momentum`.
+The three absolute impulse components are separate gross convergence channels; cancellation
+against reservoir impulses cannot conceal an unconverged body force. There is no heat packet
+for gravity, and neither commit nor restore re-integrates any force or population law.
+On a fixed grid the body-forced pressure reconstruction takes the least-squares gradient
+of interior pressure differences after subtracting the hydrostatic difference
+`0.5*(rho_owner + rho_neighbor)*g·dx`, then adds the local `rho*g`. The pressure
+correction uses the corresponding interior stencil without a fictitious zero-gradient
+wall sample. This balances stratified as well as constant-density columns without
+adding a second force. The mechanical pressure reference is unchanged.
+
+The source corrector keeps positive and negative Fourier heat as separate gross
+channels. For `Q = dt*G*(T_owner - T_neighbor)`, two rounded absolute temperatures
+can be nearly equal. The canonical Fourier adapter uses the midpoint to the preceding
+and following representable value of each temperature, including their different
+distances at powers of two. The corrector matches signed heat packets by canonical
+face before comparing their intervals. An unchanged face cannot lend its uncertainty
+to a neighbor. Any gap between successive intervals must pass the original relative
+tolerance at that face's own scale. The solver reports the maximum
+comparison uncertainty used, in joules. Identical packets need no allowance. At the
+subnormal limit the solver falls back to strict comparison rather than crediting a
+rounded-up bound. This is not an absolute source tolerance: it does
+not change either physical heat packet, authorize offsets on other gross channels, or
+replace the signed energy, caloric or pressure-work checks.
+
+`QbmmClosureVersions::laws` owns ordered, immutable law identities, revisions, units, input
+bases and inclusive SI ranges. Bounds and gating policy enter family compatibility. At a
+source evaluation `QbmmLawInputs` carries the actual timestep, trial thermodynamics, active
+quadrature, equivalent-sphere geometry and physical phase concentrations. Family-gas and
+carrier-liquid concentrations use their respective EOS volumes; absent phases have no
+concentration or temperature. `ReportOnly` reports an out-of-range or missing input;
+`RejectOutside` can fence the evaluation before the law runs. Hard slip and transport-property
+ranges also apply at native preview entry and to the final candidate, even without a source
+provider. Initialization and restore do not invent a duration to evaluate an interval gate.
+Per-family reports distinguish
+applicability from realizability and from `closure_validated`. No built-in correlation,
+chemical identity or range threshold establishes model validity. Supplied rate adapters
+produce integrated events; native material and thermal owners still account for their packets.
+
+Portable version 5 stores the velocity mode, even if all stored drifts are zero. A known
+Fourier comparison bound is retained with its source-corrector diagnostics; missing
+historical bounds remain disengaged rather than being reported as measured zeros. The controller
+signature distinguishes a disabled acceleration from an explicitly supplied vector and binds its
+components. Older streams do not opt into new slip or law metadata. Restart remains restricted
+to the same partition and matching supplied physics, not arbitrary repartitioning.
+The default-only restriction on a legacy image survives subsequent v5 re-encoding.
+
+### Numerical application scope
+
+The counterflow benchmark compares the native face packets and transported extensive
+stocks against a separate backward-Euler solve, including transport into vacuum. Closed
+vertical columns test the mechanical pressure gradient, cell velocity and flux at rest;
+an initially unbalanced column also tests that the force actually builds pressure.
+The heated case is a closed unit-depth cavity with opposing wall powers deposited in
+the adjacent control volumes, internal Fourier heat transfer and a synthetic polydisperse
+population. Gravity-off and reversed-heating controls distinguish buoyancy from slip or
+imposed motion. This is not a no-slip, prescribed-wall-temperature Nusselt benchmark.
+Flow and thermal sensitivity use a common physical horizon: vary grid spacing at fixed
+timestep, then timestep at fixed mesh. Record area and Sauter diameter on those same
+trajectories; a small nonmonotone change does not establish a grid-convergence order.
+
+The homogeneous population comparison refines the bin spacing and the timestep separately
+and compares the fractional area moment against a two-node population initialized with
+the same H0–H3. A separate constant-kernel test checks the bin reference against a discrete
+analytic solution. These tests quantify closure error, not empirical validity of a
+particular growth, collision, breakup, slip or high-void correlation.
