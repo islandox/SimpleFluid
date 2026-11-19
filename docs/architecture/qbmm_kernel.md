@@ -1,6 +1,6 @@
 # QBMM family kernel and native integration contract
 
-The contract below binds phases Q0 through Q7b of [SF-QBMM-CODE-001](qbmm_reacting_bubbles.md)
+The contract below binds phases Q0 through Q7c of [SF-QBMM-CODE-001](qbmm_reacting_bubbles.md)
 to the SimpleFluid source baseline `0029a93f`. The physical assumptions and moment definitions
 are in [SF-QBMM-MODEL-001](../modeling/qbmm_reacting_bubbles.md). Q1 provides local numerical
 operations. Q2 supplies native state ownership, Q3 couples local population sources to the native corrector,
@@ -8,7 +8,8 @@ Q4 transports each family on the fixed mesh, and Q5 exposes endpoint reporting a
 numerical release gate. Q6 adds explicitly supplied common family slip, body acceleration and
 application-declared constitutive ranges. Q7a extends the native transport and reacting controller
 to prescribed planar ALE with the same two velocity modes. Q7b adds first-order kinetic transport
-with node-dependent slip on a fixed, closed Cartesian mesh.
+with node-dependent slip on a fixed, closed Cartesian mesh. Q7c adds common-block linear
+reconstruction and SSPRK(2,2) for shared-carrier families on fixed orthogonal meshes.
 
 ## Source alignment
 
@@ -302,12 +303,12 @@ fraction and an energy-balanced timestep give no empirical validity range for a 
 | Selection | Baseline contract and gate |
 | --- | --- |
 | Native mesh and boundaries | Closed, supported orthogonal native geometry with common pressure and equilibrium temperature. Prescribed fixed-topology planar ALE supports Cartesian X/Y/Z, cylindrical axial Z on a nonperiodic sector, and `SemiStructuredXY_Z` axial Z. Moving geometry requires nonperiodic topology, zero mixture viscosity and native slip walls. General remap, AMR and open-reservoir face transport are outside this capability. |
-| Velocity and order | `SharedCarrier` (zero slip) by default. `SuppliedPhaseSlip` admits a finite prescribed phase velocity relative to the carrier, common to every node in that phase. Both modes use native implicit backward Euler and first-order upwind. On a fixed closed Cartesian mesh, pair `NodeDependentSlip` with `FamilyTransport::KineticEuler`. The background uses transient backward Euler. Independent phase momentum, steady assembly, BDF2 and higher-order advection reject. |
-| Gravity and applicability | Native implicit transport on a fixed grid admits optional SI acceleration. Moving and kinetic controllers require acceleration to be disabled, including when a supplied vector has zero magnitude. Reported validity ranges belong to supplied laws; satisfying them is not empirical validation. |
+| Velocity and order | `NativeImplicit` admits `SharedCarrier` (default) and `SuppliedPhaseSlip`. Fixed closed Cartesian meshes also admit `NodeDependentSlip` with `KineticEuler`. Fixed closed orthogonal Cartesian, native cylindrical and cylindrical `SemiStructuredXY_Z` meshes admit `SharedCarrier` with `RealizableLinearSSPRK2`. The scalar background uses transient backward Euler and upwind. Independent phase momentum, steady assembly, BDF2 and ordinary scalar high-order limiters reject. |
+| Gravity and applicability | Native implicit transport on a fixed grid admits optional SI acceleration. Moving and explicit-family controllers require acceleration to be disabled, including when a supplied vector has zero magnitude. Applicability ranges come from the supplied laws. |
 | Family schema | One named fixed-composition family per dispersed gas phase; catalog, family stamp, reference scale and phase ordering agree on all ranks. Variable composition, cross-family coalescence and unmigrated count-only state reject. |
 | Local material and topology | Constructive paired birth, growth, shrinkage, disappearance, coalescence and breakup; transfers may involve the liquid carrier or a declared external reservoir. Declaring either direction of a family-to-background-gas material slot rejects. Generic chemistry, face transport and interphase laws can act on unbound compartments. A legacy number law must name only unbound populations. Selective or unpaired family material returned by a law rejects the preview. |
 | Thermal and pool closures | Common temperature and pressure, zero surface tension. Separate phase or node temperatures, bulk-gas conversion and capillary/surface-energy closures reject. A separate background gas may carry its own inventory. |
-| Transactions and restart | All owners use a common numerical configuration and controller selection. Commit publishes one retained trial. Rejection preserves accepted canonical state, histories and other compatible previews. Fixed-grid restart supports the original version 1–5 modes and version 7 kinetic images. Moving restart uses version 6 and binds the original and accepted geometry, motion controls, partition, target policy and supplied physics. |
+| Transactions and restart | All owners use a common numerical configuration and controller selection. Commit publishes one retained trial. Rejection preserves accepted canonical state, histories and other compatible previews. Fixed-grid restart supports versions 1–5 under their original modes, version 7 for kinetic Euler and version 8 for realizable linear SSPRK2. Moving restart uses version 6 and binds the original and accepted geometry, motion controls, partition, target policy and supplied physics. |
 
 The release suite follows circulating polydisperse gas across partition faces into exact vacuum,
 combines it with population events, unrelated mole-changing chemistry and heat, and checks the
@@ -589,3 +590,149 @@ retained velocities. Hard instantaneous ranges are checked on these operands dur
 Earlier portable versions require their original model selections. Prescribed planar ALE, supplied
 body acceleration (including explicit zero), SSPRK2 or BDF2, separate temperatures, variable
 composition, bulk-gas conversion and capillarity remain outside the kinetic admission.
+
+## Q7c realizable linear SSPRK(2,2) on fixed meshes
+
+Select `QbmmModelOptions::FamilyTransport::RealizableLinearSSPRK2` with
+`Velocity::SharedCarrier`. The family transport controls are separate from
+`QbmmModelOptions::transport`, which keeps its `ScalarTransportDiscretization` type
+for the transient backward-Euler upwind background. The fixed mesh supplies oriented face
+rates, bulk volumes and physical centroids. Native cylindrical sectors use the volume
+centroid of the sector and the surface centroid of each curved face. A polygonal
+`SemiStructuredXY_Z` cylinder uses the metrics of its extruded polygons. The native
+cylindrical mesh constructor requires a positive inner radius. A closed exterior wall has
+zero transport in both Runge–Kutta stages.
+
+### Donor reconstruction and stage acceptance
+
+Let \(Q_i=(n_s,H_0,H_2,H_3,U)_i\) denote extensive family inventory and
+\(B_i=Q_i/V_i\). At each stage the donor owner gathers neighboring densities from a
+one-ring cell halo. The same geometric stencil acts on each independent component. The
+derived slope of \(H_1\) is \(\sum_s W_s\nabla B_{n_s}/x_*\).
+For face centroid \(r_f\) and cell centroid \(r_i\), put
+\(d_{if}=\nabla B_i\mathbin{\cdot}(r_f-r_i)\). Exterior walls contribute no
+fictitious neighbor stocks. An exactly empty donor uses a zero slope.
+
+For each transporting face, the weighted sum of neighbor displacements must reproduce
+the donor-to-face displacement to roundoff. This admits one-dimensional and planar
+stencils when they determine the active trace. A two-sector annulus with one radial
+cell can have both cell centroids on a line that misses their common angular face
+centroid. Affine fields that agree on that line can differ at the face. A nonzero flux
+across such a face rejects collectively.
+
+For a stage of duration \(h\), define the outgoing fractions and their donor total by
+
+\[
+c_{if}=h[\sigma_{if}\phi_f]_+/V_i,\qquad C_i=\sum_f c_{if}.
+\]
+
+Owners agree on a common substep with \(C_i\le\mathtt{linear\_cfl}\le1/2\).
+The default cap is \(1/2\). Exhausting `maximum_linear_substeps` or losing representable
+time progress rejects the preview. Starting at one, the owner halves one common limiter
+\(\ell_i\) for all components and all outgoing faces, with zero available as the upwind
+fallback. A candidate must certify every outgoing trace **and** the material left behind.
+
+\[
+T_{if}=B_i+\ell_i d_{if},\qquad
+R_i=B_i-\frac{\sum_f c_{if}\ell_i d_{if}}{1-C_i}.
+\]
+
+A certificate checks the species mass relation under the Q1 binary64 policy, exact
+zero for excluded species, exact vacuum, the Q1 inversion with positive support, and
+the signed energy interval \(e_{\min}m\le B_U\le e_{\max}m\). Here
+\(m=\sum_s W_s B_{n_s}\), and the specific-energy bounds come from occupied members
+of the donor stencil. In particular, an unoccupied neighbor contributes no zero-valued
+specific-energy sample. Negative reference energies are valid.
+The bound comparison uses the signed cross-products of extensive energy and
+species-derived mass. It remains meaningful for representable energy stocks whose
+specific energy would underflow a binary64 division.
+Ordering uses the sign of the scaled difference. For independently rounded stocks at
+a bound, the allowed cross-product defect is at most two binary64 epsilons times the
+sum of the two product magnitudes. There is no absolute energy floor.
+
+The implementation represents a trace as \(V_iT_{if}\) and the retained stock as
+\(V_i(1-C_i)R_i\). Both scale factors are strictly positive. Retaining this scale through
+the cone test and packet calculation avoids an independent division and rounding of
+each moment at a rank-one boundary. Species remain authoritative for the mass moment.
+A positive decomposition of a singleton can change its weight while retaining its
+support. A slope that would move that support uses the first-order fallback.
+
+Canonical face owners distribute the certified packets needed by incident cells. A
+forward-Euler stage combines \((1-C_i)R_i\) with
+\(\sum_{f\,\mathrm{in}}h|\phi_f| T_{jf}/V_i\). Each coefficient is
+nonnegative even when the frozen carrier flux has nonzero divergence. SSPRK(2,2) applies
+this operation twice and takes half the starting stock plus half the second forward-Euler
+result. Both stages require certified represented endpoints.
+
+### Physical packets, correctors and restart
+
+Each substep contributes \(h(F^{(1)}+F^{(2)})/2\) to the interval integral. The stages
+carry species, count, both shape moments, signed energy, species-derived mass, material EOS
+volume, pressure coefficients and momentum. The source snapshot and pressure work
+\(-p(W^{final}-W^{adv})\) consume the resulting transport. The corrector freezes its
+carrier flux across both stages and evaluates the coupled sources on the transported
+state. The spatial accuracy qualification concerns this explicit advection operator.
+Whole-step temporal accuracy also depends on the background flow, pressure and source
+integration.
+
+For an interior face with zero frozen carrier rate, both one-sided EOS traces contribute
+half their material-volume coefficient to the pressure derivative. Each side starts at
+the donor's accepted limiter and can reduce its slope to an admissible trace for this
+zero-rate face. An unresolved offset uses the stage-center value. These ties carry
+zero material, energy and momentum.
+
+`owned_phase_transport()` exposes the final corrector's interval-averaged face rates.
+A live trial or its accepted report retains the interval packets. Owner-bound checkpoints
+preserve the accepted interval. Portable version 8 binds the method, algorithm revision,
+CFL and subcycle cap at an accepted step boundary. A new process resumes from canonical
+state and accepted carrier flux on the same partition. It needs a single accepted time
+level. Raw historical face receipts follow the existing portable restart availability policy.
+
+The trial diagnostics, report and available interval expose `family_transport`,
+`linear_substeps`, `linear_stages`, `maximum_linear_cfl`, `maximum_linear_stage_residual`
+and `maximum_linear_step_residual`. The residuals measure the worst cell and channel
+balance over the forward-Euler stages and the substep averages, respectively. They are
+normalized by the configured conservation tolerance and must be at most one.
+
+### Smooth-interior spatial convergence
+
+The prescribed-transport test rotates two positive atom weights at scaled masses 1 and 2
+and a signed energy perturbation through a fixed interval of 0.01. A streamfunction
+sets the face-integrated divergence-free carrier flux and tapers it to zero outside the
+vortex. All three meshes use one axial layer. The native cylindrical sector has curved
+radial faces. The semi-structured sector has straight-sided quadrilaterals in XY.
+Tensor-product Gauss quadrature integrates the analytic initial and rotated final
+densities over each physical cell, using the polar or bilinear Jacobian where appropriate.
+The error is the volume-weighted mean absolute density error. Each reported order is
+the logarithm to base two of successive errors.
+
+| Mesh | Channel | 16 × 16 | 32 × 32 | 64 × 64 | 16 → 32 | 32 → 64 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Cartesian | H0 | 3.474e-05 | 8.771e-06 | 1.979e-06 | 1.986 | 2.148 |
+| Cartesian | H1 | 5.172e-05 | 1.355e-05 | 3.146e-06 | 1.933 | 2.106 |
+| Cartesian | H2 | 8.996e-05 | 2.383e-05 | 5.703e-06 | 1.917 | 2.063 |
+| Cartesian | H3 | 1.713e-04 | 4.484e-05 | 1.098e-05 | 1.933 | 2.030 |
+| Cartesian | species A | 1.293e-05 | 3.387e-06 | 7.866e-07 | 1.933 | 2.106 |
+| Cartesian | species B | 1.940e-05 | 5.080e-06 | 1.180e-06 | 1.933 | 2.106 |
+| Cartesian | U | 1.696e-05 | 4.133e-06 | 9.271e-07 | 2.037 | 2.156 |
+| Cylindrical sector | H0 | 3.501e-05 | 8.777e-06 | 1.923e-06 | 1.996 | 2.190 |
+| Cylindrical sector | H1 | 5.222e-05 | 1.361e-05 | 2.972e-06 | 1.940 | 2.195 |
+| Cylindrical sector | H2 | 9.023e-05 | 2.389e-05 | 5.211e-06 | 1.917 | 2.197 |
+| Cylindrical sector | H3 | 1.705e-04 | 4.487e-05 | 9.844e-06 | 1.926 | 2.188 |
+| Cylindrical sector | species A | 1.306e-05 | 3.403e-06 | 7.431e-07 | 1.940 | 2.195 |
+| Cylindrical sector | species B | 1.958e-05 | 5.105e-06 | 1.115e-06 | 1.940 | 2.195 |
+| Cylindrical sector | U | 1.725e-05 | 4.205e-06 | 9.281e-07 | 2.036 | 2.180 |
+| Polar XY/Z extrusion | H0 | 3.510e-05 | 8.790e-06 | 1.930e-06 | 1.998 | 2.187 |
+| Polar XY/Z extrusion | H1 | 5.233e-05 | 1.363e-05 | 2.981e-06 | 1.941 | 2.193 |
+| Polar XY/Z extrusion | H2 | 9.052e-05 | 2.391e-05 | 5.215e-06 | 1.921 | 2.197 |
+| Polar XY/Z extrusion | H3 | 1.706e-04 | 4.487e-05 | 9.833e-06 | 1.927 | 2.190 |
+| Polar XY/Z extrusion | species A | 1.308e-05 | 3.406e-06 | 7.452e-07 | 1.941 | 2.193 |
+| Polar XY/Z extrusion | species B | 1.962e-05 | 5.110e-06 | 1.118e-06 | 1.941 | 2.193 |
+| Polar XY/Z extrusion | U | 1.723e-05 | 4.206e-06 | 9.287e-07 | 2.035 | 2.179 |
+
+The finest-grid test also advances the same interval in two and four equal steps.
+For the seven requested channels, the largest difference between the one-step and
+two-step solutions is below 2% of the measured one-step spatial error. Each successive
+time refinement must change the solution by less than 5% of that error. The two
+species have different positive mass fractions and molar masses. Their proportional
+errors and the derived first-moment error reflect their fixed composition.
