@@ -9,6 +9,7 @@
 #include "geometry/MeshMotionModel.hh"
 
 #include <array>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -18,6 +19,10 @@ namespace SimpleFluid
 {
 
 template<TpetraTypePack Pack> class PlanarALEMeshMotion;
+namespace Reacting
+{
+class LowMachMixtureSolver;
+}
 
 } // namespace SimpleFluid
 
@@ -82,10 +87,20 @@ public:
     }
 
 private:
+    struct AxisUpdate
+    {
+        ArrReal edges, midpoints, widths;
+        std::array<ArrReal, 2> cylindrical_side_widths;
+    };
+
+    template<class Mesh>
+    SIMPLEFLUID_LOCAL static void swap_axis_update(Mesh& mesh, size_t axis, AxisUpdate& update) noexcept;
+
     template<class Mesh> static bool motion_available(const Mesh& mesh) noexcept
     {
         if constexpr (requires { mesh.supports_axial_motion(); })
-            if (!mesh.supports_axial_motion()) return false;
+            if (!mesh.supports_axial_motion())
+                return false;
         return mesh.d_geometry_state.motion_owner == nullptr;
     }
 
@@ -181,6 +196,11 @@ struct PlanarALEMeshMotionOptions
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class SIMPLEFLUID_PUBLIC_TYPE PlanarALEMeshMotion final : public MeshMotionModel
 {
+    struct SIMPLEFLUID_LOCAL AuthorityIdentity
+    {
+    };
+    using Authority = std::shared_ptr<const AuthorityIdentity>;
+
 public:
     using mesh_type = MeshHandle<Pack>;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -196,8 +216,12 @@ public:
     /** Accepted geometry checkpoint; reference edges and ownership remain fixed. */
     class StateSnapshot
     {
+    public:
+        [[nodiscard]] real_t surface_elevation() const noexcept { return accepted_surface; }
+
+    private:
         friend class PlanarALEMeshMotion;
-        const PlanarALEMeshMotion* owner = nullptr;
+        Authority authority;
         ArrReal axis_edges;
         real_t accepted_surface = {};
         MeshQualityMetrics accepted_quality;
@@ -229,7 +253,14 @@ public:
 
     [[nodiscard]] const PlanarALEMeshMotionOptions& options() const noexcept { return d_options; }
 
+    [[nodiscard]] const std::array<ArrReal, 3>& reference_geometry_edges() const noexcept
+    {
+        return d_reference_geometry_edges;
+    }
+
 private:
+    friend class Reacting::LowMachMixtureSolver;
+
     enum class Family : int
     {
         Unsupported = 0,
@@ -245,9 +276,16 @@ private:
         Rollback = 2
     };
 
+    struct RestartUpdate
+    {
+        Meshes::PlanarALEGeometryAccess::AxisUpdate axis;
+        std::vector<real_t> previous_cell_volumes;
+    };
+
     [[nodiscard]] SIMPLEFLUID_LOCAL Family detect_family() const noexcept;
     [[nodiscard]] SIMPLEFLUID_LOCAL ArrReal current_axis_edges() const;
     [[nodiscard]] SIMPLEFLUID_LOCAL std::array<ArrReal, 3> geometry_edge_coordinates() const;
+    [[nodiscard]] SIMPLEFLUID_LOCAL bool geometry_edges_match(const std::array<ArrReal, 3>& expected) const noexcept;
     [[nodiscard]] SIMPLEFLUID_LOCAL bool geometry_motion_available() const noexcept;
     [[nodiscard]] SIMPLEFLUID_LOCAL bool geometry_motion_owned() const noexcept;
     SIMPLEFLUID_LOCAL void claim_geometry_motion();
@@ -258,15 +296,22 @@ private:
     [[nodiscard]] SIMPLEFLUID_LOCAL std::vector<real_t> capture_cell_volumes() const;
     [[nodiscard]] SIMPLEFLUID_LOCAL std::vector<typename mesh_type::Vec3> capture_face_centroids() const;
     SIMPLEFLUID_LOCAL void validate_collective_construction();
-    SIMPLEFLUID_LOCAL void validate_collective_trial(real_t surface_elevation, real_t time_step) const;
+    SIMPLEFLUID_LOCAL void validate_collective_trial(
+        real_t surface_elevation, real_t time_step, bool enforce_displacement_limit = true) const;
+    /** Stage previously accepted geometry from the reference map without a physical step or displacement cap. */
+    SIMPLEFLUID_LOCAL void stage_restart_geometry(real_t surface_elevation);
+    SIMPLEFLUID_LOCAL void swap_restart_axis_update() noexcept;
+    SIMPLEFLUID_LOCAL void begin_trial_impl(real_t surface_elevation, std::optional<real_t> time_step);
     SIMPLEFLUID_LOCAL void validate_collective_transaction(TransactionAction action) const;
     SIMPLEFLUID_LOCAL void compute_trial_state(
         const std::vector<typename mesh_type::Vec3>& old_face_centroids, real_t time_step);
     SIMPLEFLUID_LOCAL void rollback_impl();
     SIMPLEFLUID_LOCAL void reset_stationary_state();
+    SIMPLEFLUID_LOCAL void reset_stationary_diagnostics() noexcept;
 
     SP<mesh_type> d_mesh;
     PlanarALEMeshMotionOptions d_options;
+    Authority d_authority;
     Family d_family = Family::Unsupported;
     std::string d_family_name;
     std::array<ArrReal, 3> d_reference_geometry_edges;
@@ -274,6 +319,7 @@ private:
     ArrReal d_deformation_weights;
     ArrReal d_pre_trial_axis_edges;
     std::array<ArrReal, 3> d_trial_geometry_edges;
+    std::optional<RestartUpdate> d_restart_update;
     real_t d_reference_surface_elevation = {};
     real_t d_accepted_surface_elevation = {};
     std::uint64_t d_expected_geometry_epoch = 0;

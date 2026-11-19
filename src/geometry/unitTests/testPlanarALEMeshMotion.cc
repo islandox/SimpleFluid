@@ -18,6 +18,7 @@
 #include <map>
 #include <memory>
 #include <numbers>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -205,8 +206,7 @@ TEST(PlanarALEMeshMotionTest, SharedGeometryPublishesOneEpochAndAllowsOneControl
         EXPECT_THROW({ Motion duplicate(alias_handle); }, std::invalid_argument);
         auto independent_geometry = std::make_shared<Cartesian>(*geometry);
         auto independent_handle = std::make_shared<Mesh>(independent_geometry);
-        EXPECT_NE(independent_handle->geometry_identity(),
-                  first_handle->geometry_identity());
+        EXPECT_NE(independent_handle->geometry_identity(), first_handle->geometry_identity());
         EXPECT_NO_THROW({ Motion independent(independent_handle); });
         motion.begin_trial(3.0, 1.0);
         EXPECT_EQ(first_handle->geometry_epoch(), 1U);
@@ -215,6 +215,25 @@ TEST(PlanarALEMeshMotionTest, SharedGeometryPublishesOneEpochAndAllowsOneControl
     }
 
     EXPECT_NO_THROW({ Motion replacement(alias_handle); });
+}
+
+TEST(PlanarALEMeshMotionTest, SnapshotRequiresItsOriginalMotionLifetime)
+{
+    auto geometry =
+        std::make_shared<Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}}});
+    auto mesh = std::make_shared<Mesh>(geometry);
+    std::optional<Motion> motion;
+    motion.emplace(mesh);
+    const auto* address = std::addressof(*motion);
+    const auto previous = motion->snapshot();
+    motion.reset();
+
+    motion.emplace(mesh);
+    ASSERT_EQ(std::addressof(*motion), address);
+    const auto epoch = mesh->geometry_epoch();
+    EXPECT_THROW(motion->restore(previous), std::invalid_argument);
+    EXPECT_EQ(mesh->geometry_epoch(), epoch);
+    EXPECT_NO_THROW(motion->restore(motion->snapshot()));
 }
 
 TEST(PlanarALEMeshMotionTest, ContractingMeshFluxUsesOwnerNormalSigns)

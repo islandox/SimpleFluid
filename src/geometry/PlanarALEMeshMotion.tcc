@@ -5,8 +5,9 @@
 
 #pragma once
 
-#include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/GeometryExecutionGuard.hh"
+#include "geometry/MeshUtils.hh"
+#include "geometry/PlanarALEMeshMotion.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 
@@ -15,6 +16,7 @@
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <new>
 #include <sstream>
 #include <stdexcept>
 #include <type_traits>
@@ -22,6 +24,34 @@
 
 namespace SimpleFluid
 {
+template<class Mesh>
+void Meshes::PlanarALEGeometryAccess::swap_axis_update(Mesh& mesh, size_t axis, AxisUpdate& update) noexcept
+{
+    if constexpr (std::same_as<Mesh, OrthogonalCartesian3D>)
+    {
+        mesh.d_cell_edges[axis].swap(update.edges);
+        mesh.d_cell_centroids[axis].swap(update.midpoints);
+        mesh.d_cell_widths[axis].swap(update.widths);
+        ++mesh.d_geometry_state.epoch;
+    }
+    else if constexpr (std::same_as<Mesh, OrthogonalCylindrial3D>)
+    {
+        mesh.d_cell_edges[Mesh::AXIAL].swap(update.edges);
+        mesh.d_cell_midpoints[Mesh::AXIAL].swap(update.midpoints);
+        mesh.d_cell_widths[Mesh::AXIAL].swap(update.widths);
+        mesh.d_face_area_magnitudes[Mesh::R_FACE][Mesh::AXIAL].swap(update.cylindrical_side_widths[0]);
+        mesh.d_face_area_magnitudes[Mesh::THETA_FACE][Mesh::AXIAL].swap(update.cylindrical_side_widths[1]);
+        ++mesh.d_geometry_state.epoch;
+    }
+    else if constexpr (std::same_as<Mesh, SemiStructuredXY_Z>)
+    {
+        mesh.d_z_edges.swap(update.edges);
+        mesh.d_z_midpoints.swap(update.midpoints);
+        mesh.d_z_widths.swap(update.widths);
+        ++mesh.d_geometry_state.epoch;
+    }
+}
+
 namespace planar_ale_detail
 {
 
@@ -54,6 +84,26 @@ inline bool finite_non_negative(real_t value) noexcept
     return std::isfinite(value) && value >= 0.0;
 }
 
+template<class Comm, class Work> void validate_local_restart(const Comm& comm, const char* context, Work&& work)
+{
+    std::exception_ptr failure;
+    try
+    {
+        std::forward<Work>(work)();
+    }
+    catch (...)
+    {
+        failure = std::current_exception();
+    }
+    const int local_failure = failure ? 1 : 0;
+    int any_failure = 0;
+    Teuchos::reduceAll(comm, Teuchos::REDUCE_MAX, 1, &local_failure, &any_failure);
+    if (failure)
+        std::rethrow_exception(failure);
+    if (any_failure)
+        throw std::runtime_error(context);
+}
+
 } // namespace planar_ale_detail
 
 template<TpetraTypePack Pack>
@@ -70,8 +120,9 @@ PlanarALEMeshMotion<Pack>::PlanarALEMeshMotion(SP<mesh_type> mesh, PlanarALEMesh
     const auto axis = static_cast<int>(d_options.axis);
     const auto axis_is_valid = axis >= static_cast<int>(Dimension::X) && axis <= static_cast<int>(Dimension::Z);
     const auto family_axis_is_valid =
-        d_family == Family::Cartesian ||
-        ((d_family == Family::Cylindrical || d_family == Family::SemiStructured || d_family == Family::CompositeAffine) && d_options.axis == Dimension::Z);
+        d_family == Family::Cartesian || ((d_family == Family::Cylindrical || d_family == Family::SemiStructured ||
+                                              d_family == Family::CompositeAffine) &&
+                                             d_options.axis == Dimension::Z);
     if (d_family != Family::Unsupported && axis_is_valid && family_axis_is_valid)
     {
         d_reference_axis_edges = current_axis_edges();
@@ -126,7 +177,7 @@ template<TpetraTypePack Pack> PlanarALEMeshMotion<Pack>::~PlanarALEMeshMotion()
     try
     {
         if (d_trial_active && geometry_motion_owned() && d_mesh->geometry_epoch() == d_expected_geometry_epoch &&
-            geometry_edge_coordinates() == d_trial_geometry_edges)
+            geometry_edges_match(d_trial_geometry_edges))
         {
             rollback_impl();
         }
@@ -215,7 +266,9 @@ template<TpetraTypePack Pack> std::array<ArrReal, 3> PlanarALEMeshMotion<Pack>::
             }
             else if constexpr (std::same_as<concrete_type, typename mesh_type::MultiRegion>)
             {
-                std::array<ArrReal,3> result; result[2]=mesh.axial_edges(); return result;
+                std::array<ArrReal, 3> result;
+                result[2] = mesh.axial_edges();
+                return result;
             }
             else
             {
@@ -241,6 +294,24 @@ template<TpetraTypePack Pack> bool PlanarALEMeshMotion<Pack>::geometry_motion_av
             {
                 return false;
             }
+        });
+}
+
+template<TpetraTypePack Pack>
+bool PlanarALEMeshMotion<Pack>::geometry_edges_match(const std::array<ArrReal, 3>& expected) const noexcept
+{
+    return d_mesh->visit(
+        [&]<class Mesh>(const Mesh& mesh)
+        {
+            if constexpr (std::same_as<Mesh, typename mesh_type::Cartesian> ||
+                          std::same_as<Mesh, typename mesh_type::Cylindrical>)
+                return mesh.cell_edges() == expected;
+            else if constexpr (std::same_as<Mesh, typename mesh_type::SemiStructured>)
+                return mesh.z_edges() == expected[2];
+            else if constexpr (std::same_as<Mesh, typename mesh_type::MultiRegion>)
+                return mesh.axial_edges() == expected[2];
+            else
+                return false;
         });
 }
 
@@ -325,7 +396,7 @@ template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::replace_axis_edges
             }
             else if constexpr (std::same_as<concrete_type, typename mesh_type::Cylindrical> ||
                                std::same_as<concrete_type, typename mesh_type::SemiStructured> ||
-                          std::same_as<concrete_type, typename mesh_type::MultiRegion>)
+                               std::same_as<concrete_type, typename mesh_type::MultiRegion>)
             {
                 Meshes::PlanarALEGeometryAccess::require_motion_owner(mesh, this);
                 Meshes::PlanarALEGeometryAccess::replace_axial_edges(mesh, std::move(edges));
@@ -420,8 +491,9 @@ template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::validate_collectiv
 
     const auto reference_bottom = d_reference_axis_edges.empty() ? real_t{} : d_reference_axis_edges.front();
     const auto reference_top = d_reference_axis_edges.empty() ? real_t{} : d_reference_axis_edges.back();
-    if (d_family == Family::CompositeAffine && d_options.deformation_start_elevation
-        && *d_options.deformation_start_elevation != reference_bottom) local_valid = 0;
+    if (d_family == Family::CompositeAffine && d_options.deformation_start_elevation &&
+        *d_options.deformation_start_elevation != reference_bottom)
+        local_valid = 0;
     const auto deformation_start = d_options.deformation_start_elevation.value_or(reference_bottom);
     local_valid = local_valid && std::isfinite(deformation_start) && deformation_start >= reference_bottom &&
                   deformation_start < reference_top;
@@ -434,8 +506,13 @@ template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::validate_collectiv
     try
     {
         static_cast<void>(MeshQualityGate(d_options.quality_limits));
+        d_authority = std::make_shared<const AuthorityIdentity>();
     }
     catch (const std::invalid_argument&)
+    {
+        local_valid = 0;
+    }
+    catch (const std::bad_alloc&)
     {
         local_valid = 0;
     }
@@ -496,10 +573,11 @@ template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::validate_collectiv
 
     if (any_invalid != 0)
     {
-        throw std::invalid_argument("PlanarALEMeshMotion requires valid options and a mutable "
-                                    "Cartesian mesh, axial cylindrical mesh, or axial "
-                                    "SemiStructuredXY_Z mesh, or a composite axial affine mesh on every rank. "
-                                    "Composite motion requires full-height Z deformation and a fixed axial periodic length.");
+        throw std::invalid_argument(
+            "PlanarALEMeshMotion requires valid options and a mutable "
+            "Cartesian mesh, axial cylindrical mesh, or axial "
+            "SemiStructuredXY_Z mesh, or a composite axial affine mesh on every rank. "
+            "Composite motion requires full-height Z deformation and a fixed axial periodic length.");
     }
     if (minimum_integer_state != maximum_integer_state || minimum_extra_presence != maximum_extra_presence ||
         !option_values_match || !geometry_edge_counts_match || !geometry_edge_values_match || !epoch_matches)
@@ -510,39 +588,45 @@ template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::validate_collectiv
 }
 
 template<TpetraTypePack Pack>
-void PlanarALEMeshMotion<Pack>::validate_collective_trial(real_t surface_elevation, real_t time_step) const
+void PlanarALEMeshMotion<Pack>::validate_collective_trial(
+    real_t surface_elevation, real_t time_step, bool enforce_displacement_limit) const
 {
     const auto communicator = d_mesh->owned_cell_map()->getComm();
     int execution_held = 0;
-    d_mesh->visit([&](const auto& mesh)
-    {
-        if constexpr (requires { mesh.require_geometry_writable(); })
-            try { mesh.require_geometry_writable(); }
-            catch (const std::logic_error&) { execution_held = 1; }
-    });
+    d_mesh->visit(
+        [&](const auto& mesh)
+        {
+            if constexpr (requires { mesh.require_geometry_writable(); })
+                try
+                {
+                    mesh.require_geometry_writable();
+                }
+                catch (...)
+                {
+                    execution_held = 1;
+                }
+        });
     const auto current_epoch = d_mesh->geometry_epoch();
-    const auto current_geometry = geometry_edge_coordinates();
-    const auto expected_geometry = candidate_geometry_edges(d_accepted_surface_elevation);
-    const auto proposed_edges = candidate_axis_edges(surface_elevation);
-
-    int local_invalid = execution_held || d_trial_active || !geometry_motion_owned() || current_epoch != d_expected_geometry_epoch ||
-                                current_geometry != expected_geometry || !std::isfinite(surface_elevation) ||
-                                !std::isfinite(time_step) || time_step <= 0.0 ||
-                                proposed_edges.size() != d_reference_axis_edges.size() ||
-                                current_epoch > std::numeric_limits<std::uint64_t>::max() - 2
-                            ? 1
-                            : 0;
-    if (d_options.maximum_level_change &&
+    int local_invalid = execution_held || d_trial_active || !geometry_motion_owned() ||
+                        current_epoch != d_expected_geometry_epoch || !std::isfinite(surface_elevation) ||
+                        !std::isfinite(time_step) || time_step <= 0.0 ||
+                        current_epoch > std::numeric_limits<std::uint64_t>::max() - 2;
+    if (enforce_displacement_limit && d_options.maximum_level_change &&
         std::abs(surface_elevation - d_accepted_surface_elevation) > *d_options.maximum_level_change)
     {
         local_invalid = 1;
     }
-    for (size_t edge = 0; edge < proposed_edges.size(); ++edge)
+    try
     {
-        if (!std::isfinite(proposed_edges[edge]) || (edge > 0 && proposed_edges[edge] <= proposed_edges[edge - 1]))
-        {
-            local_invalid = 1;
-        }
+        const auto proposed_edges = candidate_axis_edges(surface_elevation);
+        local_invalid = local_invalid || !geometry_edges_match(candidate_geometry_edges(d_accepted_surface_elevation));
+        for (size_t edge = 0; edge < proposed_edges.size(); ++edge)
+            if (!std::isfinite(proposed_edges[edge]) || (edge > 0 && proposed_edges[edge] <= proposed_edges[edge - 1]))
+                local_invalid = 1;
+    }
+    catch (...)
+    {
+        local_invalid = 1;
     }
 
     const std::array<real_t, 2> local_scalars{surface_elevation, time_step};
@@ -551,9 +635,10 @@ void PlanarALEMeshMotion<Pack>::validate_collective_trial(real_t surface_elevati
         local_scalars.data(), minimum_scalars.data());
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_scalars.size()),
         local_scalars.data(), maximum_scalars.data());
-    const std::array<unsigned long long, 3> local_ull{static_cast<unsigned long long>(current_epoch),
-        static_cast<unsigned long long>(d_trial_active ? 1 : 0), static_cast<unsigned long long>(local_invalid ? 1 : 0)};
-    std::array<unsigned long long, 3> minimum_ull{}, maximum_ull{};
+    const std::array<unsigned long long, 4> local_ull{static_cast<unsigned long long>(current_epoch),
+        static_cast<unsigned long long>(d_trial_active), static_cast<unsigned long long>(local_invalid),
+        static_cast<unsigned long long>(enforce_displacement_limit)};
+    std::array<unsigned long long, 4> minimum_ull{}, maximum_ull{};
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, static_cast<int>(local_ull.size()), local_ull.data(),
         minimum_ull.data());
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_ull.size()), local_ull.data(),
@@ -563,6 +648,7 @@ void PlanarALEMeshMotion<Pack>::validate_collective_trial(real_t surface_elevati
     const bool time_step_matches = minimum_scalars[1] == maximum_scalars[1];
     const bool epoch_matches = minimum_ull[0] == maximum_ull[0];
     const bool active_matches = minimum_ull[1] == maximum_ull[1];
+    const bool mode_matches = minimum_ull[3] == maximum_ull[3];
 
     if (any_invalid)
     {
@@ -570,7 +656,7 @@ void PlanarALEMeshMotion<Pack>::validate_collective_trial(real_t surface_elevati
                                     "a finite positive time step, a finite non-inverting target, and "
                                     "a displacement within the configured limit on every rank.");
     }
-    if (!surface_matches || !time_step_matches || !epoch_matches || !active_matches)
+    if (!surface_matches || !time_step_matches || !mode_matches || !epoch_matches || !active_matches)
     {
         throw std::invalid_argument("PlanarALEMeshMotion target, time step, geometry epoch, and "
                                     "transaction state must match on every rank.");
@@ -582,16 +668,22 @@ void PlanarALEMeshMotion<Pack>::validate_collective_transaction(TransactionActio
 {
     const auto communicator = d_mesh->owned_cell_map()->getComm();
     int execution_held = 0;
-    d_mesh->visit([&](const auto& mesh)
-    {
-        if constexpr (requires { mesh.require_geometry_writable(); })
-            try { mesh.require_geometry_writable(); }
-            catch (const std::logic_error&) { execution_held = 1; }
-    });
-    const auto current_geometry = geometry_edge_coordinates();
+    d_mesh->visit(
+        [&](const auto& mesh)
+        {
+            if constexpr (requires { mesh.require_geometry_writable(); })
+                try
+                {
+                    mesh.require_geometry_writable();
+                }
+                catch (...)
+                {
+                    execution_held = 1;
+                }
+        });
     const int local_invalid = execution_held || !d_trial_active || !geometry_motion_owned() ||
                                       d_mesh->geometry_epoch() != d_expected_geometry_epoch ||
-                                      current_geometry != d_trial_geometry_edges
+                                      !geometry_edges_match(d_trial_geometry_edges)
                                   ? 1
                                   : 0;
     const std::array<unsigned long long, 4> local_ull{static_cast<unsigned long long>(d_trial_active ? 1 : 0),
@@ -628,10 +720,10 @@ void PlanarALEMeshMotion<Pack>::compute_trial_state(
         const auto execution = acquire_mesh_execution(*d_mesh);
         d_new_cell_volumes = capture_cell_volumes();
         d_face_mesh_fluxes.assign(d_mesh->num_faces(), 0.0);
-        local_invalid =
-            old_face_centroids.size() != d_face_mesh_fluxes.size() || d_old_cell_volumes.size() != d_new_cell_volumes.size()
-                ? 1
-                : 0;
+        local_invalid = old_face_centroids.size() != d_face_mesh_fluxes.size() ||
+                                d_old_cell_volumes.size() != d_new_cell_volumes.size()
+                            ? 1
+                            : 0;
         for (size_t face = 0; face < d_face_mesh_fluxes.size(); ++face)
         {
             const auto face_lid = static_cast<local_ordinal_type>(face);
@@ -705,12 +797,91 @@ void PlanarALEMeshMotion<Pack>::compute_trial_state(
 
 template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::begin_trial(real_t surface_elevation, real_t time_step)
 {
-    validate_collective_trial(surface_elevation, time_step);
+    begin_trial_impl(surface_elevation, time_step);
+}
+
+template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::stage_restart_geometry(real_t surface_elevation)
+{
+    if (d_family == Family::CompositeAffine)
+    {
+        begin_trial_impl(surface_elevation, std::nullopt);
+        return;
+    }
+
+    validate_collective_trial(surface_elevation, real_t{1}, false);
+    const auto comm = d_mesh->owned_cell_map()->getComm();
+    RestartUpdate update;
+    std::array<ArrReal, 3> trial_edges;
+    std::vector<real_t> old_volumes, new_volumes, zero_sweeps;
+    planar_ale_detail::validate_local_restart(*comm, "Planar restart storage preparation failed on another rank.",
+        [&]
+        {
+            trial_edges = candidate_geometry_edges(surface_elevation);
+            update.axis.edges = trial_edges[static_cast<size_t>(d_options.axis)];
+            update.axis.midpoints = MeshUtils::consec_mid(update.axis.edges);
+            update.axis.widths = MeshUtils::consec_diff(update.axis.edges);
+            if (d_family == Family::Cylindrical)
+                update.axis.cylindrical_side_widths = {update.axis.widths, update.axis.widths};
+            update.previous_cell_volumes = capture_cell_volumes();
+            old_volumes.resize(d_mesh->num_local_cells());
+            new_volumes.resize(d_mesh->num_local_cells());
+            zero_sweeps.resize(d_mesh->num_faces());
+        });
+
+    // After this point the coordinate update and its inverse use the same prepared storage.
+    d_restart_update.emplace(std::move(update));
+    d_trial_geometry_edges = std::move(trial_edges);
+    d_old_cell_volumes = std::move(old_volumes);
+    d_new_cell_volumes = std::move(new_volumes);
+    d_face_mesh_fluxes = std::move(zero_sweeps);
+    swap_restart_axis_update();
+    d_trial_active = true;
+    try
+    {
+        planar_ale_detail::validate_local_restart(*comm, "Planar restart volume evaluation failed on another rank.",
+            [&]
+            {
+                const auto execution = acquire_mesh_execution(*d_mesh);
+                for (size_t c = 0; c < d_new_cell_volumes.size(); ++c)
+                    d_new_cell_volumes[c] = d_mesh->cell_volume(static_cast<local_ordinal_type>(c));
+                std::ranges::copy(d_new_cell_volumes, d_old_cell_volumes.begin());
+            });
+        const auto quality = evaluate_mesh_quality(*d_mesh);
+        planar_ale_detail::validate_local_restart(*comm, "Planar restart mesh quality failed on another rank.",
+            [&] { MeshQualityGate(d_options.quality_limits).require(quality); });
+        d_diagnostics = {};
+        d_diagnostics.old_surface_elevation = d_diagnostics.new_surface_elevation = surface_elevation;
+        d_diagnostics.old_geometry_epoch = d_diagnostics.new_geometry_epoch = d_expected_geometry_epoch;
+        d_diagnostics.mesh_quality = quality;
+        d_diagnostics.trial_active = true;
+    }
+    catch (...)
+    {
+        rollback_impl();
+        throw;
+    }
+}
+
+template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::swap_restart_axis_update() noexcept
+{
+    d_mesh->visit_mutable(
+        [this]<class Mesh>(Mesh& mesh)
+        {
+            Meshes::PlanarALEGeometryAccess::swap_axis_update(
+                mesh, static_cast<size_t>(d_options.axis), d_restart_update->axis);
+        });
+    d_expected_geometry_epoch = d_mesh->geometry_epoch();
+}
+
+template<TpetraTypePack Pack>
+void PlanarALEMeshMotion<Pack>::begin_trial_impl(real_t surface_elevation, std::optional<real_t> time_step)
+{
+    validate_collective_trial(surface_elevation, time_step.value_or(real_t{1}), time_step.has_value());
     auto candidate_edges = candidate_axis_edges(surface_elevation);
     d_trial_geometry_edges = candidate_geometry_edges(surface_elevation);
     d_pre_trial_axis_edges = current_axis_edges();
     d_old_cell_volumes = capture_cell_volumes();
-    const auto old_face_centroids = capture_face_centroids();
+    const auto old_face_centroids = time_step ? capture_face_centroids() : decltype(capture_face_centroids()){};
     const auto old_epoch = d_mesh->geometry_epoch();
 
     bool geometry_replaced = false;
@@ -724,11 +895,19 @@ template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::begin_trial(real_t
         d_diagnostics = {};
         d_diagnostics.old_surface_elevation = d_accepted_surface_elevation;
         d_diagnostics.new_surface_elevation = surface_elevation;
-        d_diagnostics.time_step = time_step;
+        d_diagnostics.time_step = time_step.value_or(0.);
         d_diagnostics.old_geometry_epoch = old_epoch;
         d_diagnostics.new_geometry_epoch = d_expected_geometry_epoch;
         d_diagnostics.trial_active = true;
-        compute_trial_state(old_face_centroids, time_step);
+        if (time_step)
+            compute_trial_state(old_face_centroids, *time_step);
+        else
+        {
+            d_new_cell_volumes = capture_cell_volumes();
+            d_face_mesh_fluxes.assign(d_mesh->num_faces(), 0.);
+            d_diagnostics.mesh_quality = evaluate_mesh_quality(*d_mesh);
+            MeshQualityGate(d_options.quality_limits).require(d_diagnostics.mesh_quality);
+        }
     }
     catch (...)
     {
@@ -741,27 +920,26 @@ template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::begin_trial(real_t
     }
 }
 
-template<TpetraTypePack Pack>
-auto PlanarALEMeshMotion<Pack>::snapshot() const -> StateSnapshot
+template<TpetraTypePack Pack> auto PlanarALEMeshMotion<Pack>::snapshot() const -> StateSnapshot
 {
     // Existing trial preflight validates ownership, geometry parity and epoch
     // without changing geometry. Reusing the accepted level requests no motion.
     validate_collective_trial(d_accepted_surface_elevation, real_t{1});
     StateSnapshot result;
-    result.owner = this;
-    result.axis_edges = current_axis_edges();
+    result.authority = d_authority;
+    planar_ale_detail::validate_local_restart(*d_mesh->owned_cell_map()->getComm(),
+        "Planar snapshot capture failed on another rank.", [&] { result.axis_edges = current_axis_edges(); });
     result.accepted_surface = d_accepted_surface_elevation;
     result.accepted_quality = d_accepted_quality;
     return result;
 }
 
-template<TpetraTypePack Pack>
-void PlanarALEMeshMotion<Pack>::restore(const StateSnapshot& saved)
+template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::restore(const StateSnapshot& saved)
 {
     validate_collective_trial(d_accepted_surface_elevation, real_t{1});
     const auto communicator = d_mesh->owned_cell_map()->getComm();
-    const int invalid = saved.owner != this || saved.axis_edges.size() != d_reference_axis_edges.size() ||
-        saved.axis_edges != candidate_axis_edges(saved.accepted_surface);
+    const int invalid = saved.authority != d_authority || saved.axis_edges.size() != d_reference_axis_edges.size() ||
+                        saved.axis_edges != candidate_axis_edges(saved.accepted_surface);
     int any_invalid = 0;
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &invalid, &any_invalid);
     if (any_invalid)
@@ -785,6 +963,12 @@ template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::accept_trial()
     validate_collective_transaction(TransactionAction::Accept);
     d_accepted_surface_elevation = d_diagnostics.new_surface_elevation;
     d_accepted_quality = d_diagnostics.mesh_quality;
+    if (d_diagnostics.time_step == 0.)
+    {
+        std::ranges::copy(d_new_cell_volumes, d_old_cell_volumes.begin());
+        reset_stationary_diagnostics();
+    }
+    d_restart_update.reset();
     d_pre_trial_axis_edges.clear();
     d_trial_geometry_edges = {};
     d_trial_active = false;
@@ -803,6 +987,18 @@ template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::rollback_impl()
     {
         return;
     }
+    if (d_restart_update)
+    {
+        swap_restart_axis_update();
+        std::ranges::copy(d_restart_update->previous_cell_volumes, d_old_cell_volumes.begin());
+        std::ranges::copy(d_old_cell_volumes, d_new_cell_volumes.begin());
+        d_restart_update.reset();
+        d_pre_trial_axis_edges.clear();
+        d_trial_active = false;
+        d_trial_geometry_edges = {};
+        reset_stationary_diagnostics();
+        return;
+    }
     replace_axis_edges(std::move(d_pre_trial_axis_edges));
     d_expected_geometry_epoch = d_mesh->geometry_epoch();
     d_trial_active = false;
@@ -815,6 +1011,11 @@ template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::reset_stationary_s
     d_old_cell_volumes = capture_cell_volumes();
     d_new_cell_volumes = d_old_cell_volumes;
     d_face_mesh_fluxes.assign(d_mesh->num_faces(), 0.0);
+    reset_stationary_diagnostics();
+}
+
+template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::reset_stationary_diagnostics() noexcept
+{
     d_diagnostics = {};
     d_diagnostics.old_surface_elevation = d_accepted_surface_elevation;
     d_diagnostics.new_surface_elevation = d_accepted_surface_elevation;
