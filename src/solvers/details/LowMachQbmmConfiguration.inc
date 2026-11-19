@@ -43,14 +43,42 @@ std::shared_ptr<const InterphaseConfiguration> configure_qbmm_sources(
     if (!options.qbmm_population)
         return thermal;
     const auto& provider = *options.qbmm_population;
-    require(provider.evaluate && !provider.metadata.identity.empty() && provider.metadata.revision > 0 &&
-                provider.metadata.schema_fingerprint == catalog.fingerprint(),
+    require((provider.evaluate || !provider.laws.empty()) && !provider.metadata.identity.empty() &&
+                provider.metadata.revision > 0 && provider.metadata.schema_fingerprint == catalog.fingerprint(),
         "QBMM provider needs a valid identity, revision, matching species catalog and local law.");
     for (const auto& family : families)
-        require(!family || (family->catalog().fingerprint() == catalog.fingerprint() &&
-                               family->closure_versions().source_identity == provider.metadata.identity &&
-                               family->closure_versions().source == provider.metadata.revision),
-            "QBMM source policy differs from the bound family.");
+        if (family)
+        {
+            const bool selected = provider.evaluate || std::ranges::any_of(provider.laws, [&](const auto& law)
+                                                           { return law && family->declares_law(law->metadata); });
+            require(family->catalog().fingerprint() == catalog.fingerprint() &&
+                        (!selected || (family->closure_versions().source_identity == provider.metadata.identity &&
+                                          family->closure_versions().source == provider.metadata.revision)),
+                "QBMM source policy differs from the selected family.");
+        }
+    for (std::size_t i = 0; i < provider.laws.size(); ++i)
+    {
+        const auto& law = provider.laws[i];
+        require(law && law->evaluate, "A QBMM constitutive law requires an immutable local evaluator.");
+        validate_qbmm_law_metadata(law->metadata, catalog.species().size());
+        require(
+            !qbmm_is_transport_law(law->metadata), "Slip and property laws cannot own integrated population events.");
+        for (std::size_t j = 0; j < i; ++j)
+            require(law->metadata != provider.laws[j]->metadata,
+                "A QBMM law contract may have only one evaluator; use distinct family contracts for distinct laws.");
+        bool bound = false;
+        for (const auto& family : families)
+            if (family)
+                bound = bound || family->declares_law(law->metadata);
+        require(bound, "Each supplied QBMM constitutive law must be declared by at least one bound family.");
+    }
+    for (const auto& family : families)
+        if (family)
+            for (const auto& declared : family->closure_versions().laws)
+                if (!qbmm_is_transport_law(declared))
+                    require(provider.evaluate || std::ranges::any_of(provider.laws,
+                                                     [&](const auto& law) { return law->metadata == declared; }),
+                        "A declared population law needs a matching evaluator or the integrated provider adapter.");
     if (!provider.transfers)
         return thermal;
     const auto transfers = std::make_shared<const InterphaseConfiguration>(*provider.transfers);
@@ -78,7 +106,7 @@ std::shared_ptr<const InterphaseConfiguration> configure_qbmm_sources(
     if (!flow.state().cells.empty())
         validate_interphase_configuration(*transfers, flow.state().cells.front().phases);
     options.qbmm_population = std::make_shared<const MixtureQbmmProvider>(
-        MixtureQbmmProvider{provider.metadata, transfers, provider.evaluate});
+        MixtureQbmmProvider{provider.metadata, transfers, provider.evaluate, provider.laws});
     if (!thermal)
         return transfers;
     auto combined = std::make_shared<InterphaseConfiguration>(*thermal);

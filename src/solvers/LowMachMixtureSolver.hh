@@ -20,12 +20,18 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 #include <vector>
 
 namespace SimpleFluid::Reacting
 {
 class ReactingMixtureCoupler;
+namespace low_mach_faces
+{
+class SIMPLEFLUID_SOLVERS_LOCAL LowMachFaceTransportAdapter;
+struct ComposedSourceStage;
+} // namespace low_mach_faces
 
 class SIMPLEFLUID_SOLVERS_EXPORT LowMachMixtureSolver
 {
@@ -83,8 +89,9 @@ public:
     struct CellState
     {
         std::vector<PhaseThermalState> phases; ///< One liquid (including dissolved), then independently owned gas bins.
-        std::vector<Vector> drift_velocity; ///< Prescribed phase velocity relative to the shared continuous velocity.
-        Vector velocity{};
+        std::vector<Vector>
+            drift_velocity; ///< Supplied m/s relative to the carrier, retained unchanged by advancement.
+        Vector velocity{};  ///< Carrier velocity, m/s; not generally the barycentric velocity.
         double mechanical_pressure = 0;
         std::vector<std::optional<double>>
             phase_numbers; ///< Engaged extensive finite N only for explicit dispersed roles.
@@ -159,6 +166,28 @@ public:
         std::array<long double, 2> event_shape_change{}; ///< Q1 signed H2,H3 before canonical endpoint rounding.
     };
     using QbmmSourceCells = std::vector<std::vector<std::optional<QbmmSourceReceipt>>>;
+    struct FourierFaceResolution
+    {
+        Pack::global_ordinal_type geometry_identity;
+        double energy;             ///< Exact signed energy received by this owned cell, J.
+        double decrease, increase; ///< Distances to the temperature-operand interval endpoints, J.
+    };
+    class FourierGrossResolution
+    {
+        friend class low_mach_faces::LowMachFaceTransportAdapter;
+        friend struct low_mach_faces::ComposedSourceStage;
+        size_t channel_;                           ///< Adjacent exact positive and negative Fourier heat totals.
+        std::vector<FourierFaceResolution> faces_; ///< Sorted by canonical geometry identity.
+        FourierGrossResolution(size_t channel, std::vector<FourierFaceResolution> faces)
+            : channel_(channel), faces_(std::move(faces))
+        {
+        }
+
+    public:
+        [[nodiscard]] size_t positive_channel() const noexcept { return channel_; }
+        [[nodiscard]] std::span<const FourierFaceResolution> faces() const noexcept { return faces_; }
+    };
+    using FourierGrossResolutions = std::vector<std::vector<FourierGrossResolution>>;
     struct SourceStageResult
     {
         std::vector<CellSources> sources;
@@ -171,6 +200,7 @@ public:
         std::shared_ptr<const PressureConditionedThermalBatch>
             thermal_receipt;        ///< Frozen events, raw energy; no rates inside pressure roots.
         QbmmSourceCells qbmm_cells; ///< Owned-cell and physical-phase order; engaged for every bound family.
+        FourierGrossResolutions fourier_gross_resolution; ///< Sparse owned rows from the canonical Fourier adapter.
     };
     using SourceStageCallback = std::function<SourceStageResult(const SourceStageContext&)>;
     /** Immutable metadata and shared callback lifetime, independent of any controller object.
@@ -188,6 +218,14 @@ public:
         const SourceStageCallback evaluate;
         const double relative_tolerance = 0; ///< Zero uses Options::source_relative_tolerance.
         const int maximum_evaluations = 0;   ///< Zero uses Options::maximum_correctors; an override must be >=2.
+        /** Uniform m/s2 for balanced pressure reconstruction only. A nonzero value asserts that evaluate()
+         * includes the matching integrated physical impulse M*g*dt in each cell's momentum packet, using
+         * the current trial mixture mass, alongside any other external impulses. Direct providers must
+         * satisfy this contract too: metadata alone supplies no force and must not be used without that impulse.
+         * Absent and exactly zero values use the same pressure reconstruction; their metadata remain distinct.
+         * Presence and all components must agree across ranks, including empty owners.
+         */
+        const std::optional<Vector> body_acceleration = std::nullopt;
     };
     struct QbmmFaceFlux
     {
@@ -195,6 +233,9 @@ public:
         double population_number_flux = 0;      ///< Owner-oriented number/s.
         QbmmShapeState shape_flux;              ///< Owner-oriented H2/s,H3/s.
         double internal_energy_flux = 0;        ///< Owner-oriented J/s; native phase energy, counted once.
+        double material_volume_flux = 0;        ///< Exact owner-oriented m3/s consumed by native work and continuity.
+        double derived_mass_flux = 0;           ///< Species rates weighted by molar mass and rounded to double, kg/s.
+        Vector derived_drift_momentum_flux{};   ///< Donor drift-weighted mass rate rounded to double, kg m/s2.
         bool operator==(const QbmmFaceFlux&) const = default;
     };
     /** Exact owned-face packet used by the final conservative transport stage.
@@ -210,6 +251,8 @@ public:
         double mesh_volume_flux = 0;                        ///< Canonical swept rate; zero for fixed geometry.
         std::vector<double> relative_phase_volume_flux;     ///< Actual phase advection rate; no extra alpha.
         std::vector<std::optional<QbmmFaceFlux>> qbmm_flux; ///< EOS-indexed; engaged for bound families only.
+        double momentum_mass_flux = 0; ///< Exact owner-oriented kg/s consumed by native momentum convection.
+        Vector drift_momentum_flux{};  ///< Exact owner-oriented kg m/s2 consumed by native drift-momentum divergence.
         bool operator==(const PhaseFaceTransport&) const = default;
     };
     struct Diagnostics
@@ -273,6 +316,8 @@ public:
             double consistency_repair_seconds = 0;
         };
         TransportMultiRhsDiagnostics transport_multi_rhs = {};
+        std::optional<double> maximum_fourier_gross_comparison_uncertainty_j;
+        ///< Fourier operand comparison bound in joules, retained by portable v5 when known.
     };
     enum class QbmmStateKind
     {
@@ -317,12 +362,15 @@ public:
         QbmmQuadrature quadrature;
         std::optional<QbmmGeometryView> geometry; ///< Engaged for supported inversion, including exact absence.
         bool closure_evaluated = false, closure_validated = false; ///< Physical validation requires application data.
+        std::vector<QbmmApplicabilityEvaluation> applicability;    ///< Supplied ranges; distinct from realizability.
     };
     struct QbmmCellReport
     {
         Pack::global_ordinal_type geometry_cell_id = 0;
         double bulk_volume_m3 = 0, mixture_density_kg_per_m3 = 0, gas_volume_fraction = 0;
         double mechanical_pressure_pa = 0;
+        Vector carrier_velocity{}, barycentric_velocity{};         ///< Cell vectors, m/s.
+        Vector mass_weighted_drift{};                              ///< sum(M_phase * drift_phase) / sum(M_phase), m/s.
         std::optional<double> temperature_K;                       ///< Shared temperature of the occupied phases.
         std::vector<std::optional<QbmmCellFamilyReport>> families; ///< EOS order.
     };
@@ -333,7 +381,11 @@ public:
         QbmmFamilyStamp stamp;
         std::array<std::uint64_t, status_count> inversion_counts{}; ///< Index by InversionStatus.
         std::optional<long double> minimum_hankel_margin, minimum_shifted_hankel_margin;
-        MomentResiduals maximum_reconstruction; ///< Per-moment maxima over owned cells on all ranks.
+        MomentResiduals maximum_reconstruction;    ///< Per-moment maxima over owned cells on all ranks.
+        std::vector<QbmmLawMetadata> law_metadata; ///< Immutable contracts in family schema order.
+        // Per-law cell totals: within all ranges, outside/missing input, absent; reduced over all ranks.
+        std::vector<std::array<std::uint64_t, 3>> applicability_counts;
+        std::vector<std::uint64_t> applicability_gate_failures;
     };
     struct QbmmIntervalReport
     {
@@ -350,6 +402,8 @@ public:
         double maximum_event_residual = 0; ///< Gross source convergence, normalized by its physical gate.
         std::optional<double> maximum_shape_source_residual, maximum_shape_transport_residual;
         ///< Shape residuals are disengaged when omitted by the source archive.
+        std::optional<double> maximum_fourier_gross_comparison_uncertainty_j;
+        ///< Fourier operand comparison bound in joules, disengaged when unavailable.
     };
     enum class QbmmMaterialBalanceBasis
     {
@@ -379,6 +433,7 @@ public:
     class Checkpoint
     {
         friend class LowMachMixtureSolver;
+        friend class ReactingMixtureCoupler;
         State state;
         std::uint64_t generation = 0;
         const LowMachMixtureSolver* owner = nullptr;
@@ -388,14 +443,18 @@ public:
         Diagnostics diagnostics;
         std::shared_ptr<const QbmmPublication> qbmm_publication;
         std::optional<std::uint64_t> qbmm_controller_signature;
+        std::optional<std::array<double, 3>> count_only_body_acceleration;
+        bool qbmm_legacy_default_only = false;
     };
     class ControllerLease
     {
         friend class LowMachMixtureSolver;
         LowMachMixtureSolver* owner = nullptr;
         std::uint64_t id = 0;
-        SIMPLEFLUID_SOLVERS_LOCAL ControllerLease(LowMachMixtureSolver* solver, std::uint64_t value)
-            : owner(solver), id(value)
+        bool reacting_source_authority = false;
+        SIMPLEFLUID_SOLVERS_LOCAL ControllerLease(
+            LowMachMixtureSolver* solver, std::uint64_t value, bool reacting_source_authority)
+            : owner(solver), id(value), reacting_source_authority(reacting_source_authority)
         {
         }
 
@@ -523,6 +582,7 @@ public:
     void restore_qbmm_restart(std::span<const std::byte> payload, const ControllerLease* controller = nullptr);
     /** Migrate an owner-bound count-only checkpoint on the same live fixed mesh.
      * Preserve the checkpoint's accepted flux and diagnostics while initializing its missing shape.
+     * A checkpoint with supplied acceleration requires a receiving controller with the same acceleration.
      */
     void restore_qbmm_checkpoint(const LowMachMixtureSolver& previous, const Checkpoint& saved,
         const QbmmInitialization& initialization, const ControllerLease* controller = nullptr);
@@ -551,7 +611,8 @@ private:
         const PlanarMotion& motion) const;
     SIMPLEFLUID_SOLVERS_LOCAL void restore_accepted_after_motion(
         PlanarMotion& motion, const PlanarMotion::StateSnapshot& snapshot, std::span<const double> absolute_flux);
-    SIMPLEFLUID_SOLVERS_LOCAL ControllerLease acquire_controller_for(std::string_view signature);
+    SIMPLEFLUID_SOLVERS_LOCAL ControllerLease acquire_controller_for(
+        std::string_view signature, bool legacy_compatible = true, std::optional<Vector> body_acceleration = {});
     SIMPLEFLUID_SOLVERS_LOCAL void require_controller(const ControllerLease* controller) const;
     SIMPLEFLUID_SOLVERS_LOCAL void release_controller(std::uint64_t id) noexcept;
     SIMPLEFLUID_SOLVERS_LOCAL QbmmReport qbmm_report_impl(const Trial* trial) const;

@@ -27,8 +27,9 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_configuration(
                 model.transport.time == FVM::ScalarTimeScheme::BackwardEuler &&
                 model.transport.convection == FVM::ScalarConvectionScheme::Upwind,
         "Native QBMM transport requires transient backward Euler and first-order upwind.");
-    require(model.velocity == QbmmModelOptions::Velocity::SharedCarrier,
-        "Native QBMM requires the shared carrier velocity with zero slip.");
+    require(model.velocity == QbmmModelOptions::Velocity::SharedCarrier ||
+                model.velocity == QbmmModelOptions::Velocity::SuppliedPhaseSlip,
+        "Native QBMM requires shared carrier or explicitly supplied common phase slip.");
     require(!model.variable_composition && !model.cross_family_coalescence && !model.bulk_gas_conversion,
         "Native QBMM requires fixed family composition and within-family population events.");
     require(!model.capillarity && !model.independent_node_temperatures,
@@ -82,8 +83,12 @@ SIMPLEFLUID_SOLVERS_LOCAL inline std::vector<std::optional<InversionStatus>> val
     for (size_t a = 0; a < families.size(); ++a)
     {
         for (size_t axis = 0; axis < 3; ++axis)
-            require(
-                cell.drift_velocity[a].component(axis) == 0, "Native QBMM requires exactly zero supplied phase slip.");
+        {
+            const double drift = cell.drift_velocity[a].component(axis);
+            require(std::isfinite(drift), "Native QBMM supplied phase slip must be finite.");
+            require(options.qbmm_model.velocity == QbmmModelOptions::Velocity::SuppliedPhaseSlip || drift == 0,
+                "Native QBMM nonzero phase slip requires the explicit SuppliedPhaseSlip velocity mode.");
+        }
         const auto& family = families[a];
         const auto& shape = cell.qbmm_shape[a];
         require(bool(shape) == bool(family), "Native QBMM requires shape precisely for each bound family.");

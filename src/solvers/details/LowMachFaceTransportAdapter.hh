@@ -55,6 +55,7 @@ struct FourierFaceLedger
     GO geometry_identity = 0;
     std::optional<std::size_t> owner, neighbor;
     double energy = 0; ///< Canonical integrated J owner -> neighbor; count global diagnostics only if owner is owned.
+    double decrease = 0, increase = 0; ///< Canonical signed packet's binary64 temperature operand bounds, J.
 };
 class SIMPLEFLUID_SOLVERS_LOCAL LowMachFaceTransportAdapter;
 

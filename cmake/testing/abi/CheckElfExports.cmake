@@ -919,12 +919,14 @@ simplefluid_require_reacting_api(
     "^${qbmm_ns}advance_qbmm_population[(]${qbmm_schema} const&, ${qbmm_ns}CellSpeciesState const&, ${qbmm_ns}QbmmCellView, ${qbmm_ns}QbmmEventBatch const&[)]$" 1)
 
 # Four Q2 solver entry points for explicit migration and fixed-partition restart.
-set(simplefluid_qbmm_state_public_symbol_budget 4)
+set(simplefluid_qbmm_state_public_symbol_budget 5)
 set(qbmm_flow "${qbmm_ns}LowMachMixtureSolver")
 simplefluid_require_reacting_api(
     "^${qbmm_flow}::initialize_qbmm[(]${qbmm_flow}::State, ${qbmm_flow}::QbmmInitialization const&, ${simplefluid_stage3_controller_pointer}[)]$" 1)
 simplefluid_require_reacting_api(
     "^${qbmm_flow}::restore_qbmm_checkpoint[(]${qbmm_flow} const&, ${qbmm_flow}::Checkpoint const&, ${qbmm_flow}::QbmmInitialization const&, ${simplefluid_stage3_controller_pointer}[)]$" 1)
+simplefluid_require_reacting_api(
+    "^${qbmm_ns}ReactingMixtureCoupler::restore_qbmm_checkpoint[(]${qbmm_flow} const&, ${qbmm_flow}::Checkpoint const&, ${qbmm_flow}::QbmmInitialization const&[)]$" 1)
 simplefluid_require_reacting_api("^${qbmm_flow}::serialize_qbmm_restart[(][)] const$" 1)
 simplefluid_require_reacting_api(
     "^${qbmm_flow}::restore_qbmm_restart[(]${simplefluid_stage3_std}span<${simplefluid_stage3_std}byte const, [0-9]+u?l*>, ${simplefluid_stage3_controller_pointer}[)]$" 1)

@@ -7,8 +7,11 @@ namespace
 // come from the receiving mesh and schema. Only strings used in schema hashing
 // have variable byte lengths. The species, phase and element layouts bound the diagnostic records.
 // Versions 2 and 3 add shape residuals. Version 4 records controller provenance and physical balances.
+// Version 5 adds the exact admitted transport/velocity model stamp and the
+// retained legacy default-only restriction after the controller stamp. A known
+// Fourier uncertainty occupies one optional trailing word before the checksums.
 constexpr std::uint64_t qbmm_restart_magic = 0x5453524d4d425153ULL;
-constexpr std::uint64_t qbmm_restart_version = 4;
+constexpr std::uint64_t qbmm_restart_version = 5;
 constexpr size_t restart_word_size = sizeof(std::uint64_t);
 static_assert(sizeof(double) == restart_word_size && std::numeric_limits<double>::is_iec559);
 
@@ -268,6 +271,62 @@ std::uint64_t restart_schema_fingerprint(
     return hash.value;
 }
 
+std::uint64_t restart_model_code(const Solver::Options& options)
+{
+    const auto& model = options.qbmm_model;
+    check(model.transport.mode == FVM::AssemblyMode::Transient &&
+              model.transport.time == FVM::ScalarTimeScheme::BackwardEuler &&
+              model.transport.convection == FVM::ScalarConvectionScheme::Upwind && !model.variable_composition &&
+              !model.cross_family_coalescence && !model.bulk_gas_conversion && !model.capillarity &&
+              !model.independent_node_temperatures,
+        "QBMM restart requires the admitted fixed-composition backward-Euler upwind model.");
+    // Explicit wire codes: enum declaration order is not an archive contract.
+    switch (model.velocity)
+    {
+        case QbmmModelOptions::Velocity::SharedCarrier:
+            return 0;
+        case QbmmModelOptions::Velocity::SuppliedPhaseSlip:
+            return 1;
+        default:
+            throw std::invalid_argument("QBMM restart has an unsupported velocity model.");
+    }
+}
+
+void validate_legacy_restart_model(const Solver::Options& options)
+{
+    check(restart_model_code(options) == 0, "QBMM restart versions 1-4 require the zero-slip shared-carrier model.");
+    for (const auto& family : options.qbmm_families)
+        check(!family || family->closure_versions().laws.empty(),
+            "QBMM restart versions 1-4 have no supplied constitutive-law metadata.");
+}
+
+void require_uniform_restart_configuration(const Solver::Mesh& mesh, const Solver::Options& options,
+    std::span<const std::shared_ptr<const MixtureThermodynamics>> eos, const Solver::State& state,
+    std::optional<std::uint64_t> controller, std::uint64_t model, bool legacy_default_only = false)
+{
+    // This is schema-only work, including on owners without cells. Drift is
+    // deliberately excluded: SuppliedPhaseSlip is a per-cell canonical field.
+    RestartHash hash;
+    hash.word(restart_schema_fingerprint(options, eos));
+    hash.word(eos.front()->catalog().fingerprint());
+    hash.word(model);
+    hash.word(legacy_default_only);
+    hash.word(state.qbmm_families.size());
+    for (const auto& stamp : state.qbmm_families)
+    {
+        hash.word(stamp.has_value());
+        if (stamp)
+        {
+            hash.word(stamp->catalog_fingerprint);
+            hash.word(stamp->family_fingerprint);
+            hash.number(stamp->mass_scale_kg);
+        }
+    }
+    collective_detail::require_uniform_value(mesh, hash.value, "QBMM restart model and family schema");
+    collective_detail::require_uniform_value(mesh, int(controller.has_value()), "QBMM restart controller presence");
+    collective_detail::require_uniform_value(mesh, controller.value_or(0), "QBMM restart controller signature");
+}
+
 template<class Archive, class Diagnostics>
 void restart_diagnostics(Archive& io, Diagnostics& value, size_t phases, size_t species, std::uint64_t version)
 {
@@ -290,6 +349,25 @@ void restart_diagnostics(Archive& io, Diagnostics& value, size_t phases, size_t 
         io(value.maximum_shape_source_residual);
     if (version >= 3)
         io(value.maximum_shape_transport_residual);
+}
+
+void validate_restart_fourier_uncertainty(const Solver::Diagnostics& statistics)
+{
+    if (const auto value = statistics.maximum_fourier_gross_comparison_uncertainty_j)
+        check(statistics.source_evaluations >= 2 && statistics.source_evaluations == statistics.correctors &&
+                  std::isfinite(*value) && *value >= 0,
+            "QBMM restart Fourier gross comparison uncertainty needs at least two source corrector evaluations "
+            "and a finite, nonnegative value.");
+}
+
+void require_uniform_restart_fourier_uncertainty(const Solver::Mesh& mesh, const Solver::Diagnostics& statistics)
+{
+    const auto uncertainty = statistics.maximum_fourier_gross_comparison_uncertainty_j;
+    collective_detail::require_uniform_value(
+        mesh, uncertainty.value_or(-1.), "QBMM restart Fourier gross comparison uncertainty");
+    if (uncertainty)
+        collective_detail::require_uniform_value(
+            mesh, statistics.source_evaluations, "QBMM restart Fourier source evaluation count");
 }
 
 template<class Archive>
@@ -403,22 +481,26 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart() const
     const auto& mesh = *d->mesh;
     const auto& state = d->accepted;
     RestartWriter writer;
-    std::uint64_t checksum = 0;
+    std::uint64_t checksum = 0, model = 0;
+    const auto signature = d->checkpoint_controller();
     collective_detail::collective_local_validation(mesh, "QBMM restart encoding",
         [&]
         {
             check(d->initialized && !d->options.qbmm_families.empty() && d->logical_geometry == 0 &&
                       d->epoch == mesh_geometry_epoch(mesh),
                 "QBMM restart requires initialized QBMM state on unchanged fixed geometry.");
+            check(d->trial_nonce != 0 && d->trial_nonce != std::numeric_limits<std::uint64_t>::max(),
+                "QBMM restart generation is invalid or exhausted.");
             qbmm_detail::validate_state(d->options, state);
+            model = restart_model_code(d->options);
             const auto& catalog = d->eos.front()->catalog();
             writer(qbmm_restart_magic, qbmm_restart_version, restart_partition_fingerprint(mesh),
                 restart_schema_fingerprint(d->options, d->eos), catalog.fingerprint(),
                 static_cast<std::uint64_t>(d->eos.size()), static_cast<std::uint64_t>(catalog.species().size()),
                 static_cast<std::uint64_t>(mesh.num_owned_cells()), static_cast<std::uint64_t>(mesh.num_owned_faces()),
                 state.thermodynamic_pressure, state.time, state.revision, d->trial_nonce);
-            const auto signature = d->checkpoint_controller();
             writer(signature.has_value(), signature.value_or(0));
+            writer(model, d->qbmm_legacy_default_only);
             for (const auto& stamp : state.qbmm_families)
             {
                 writer(stamp.has_value());
@@ -451,9 +533,15 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart() const
             restart_qbmm_balances(writer, balances, d->diagnostics, catalog);
             if (balances)
                 writer(d->qbmm_publication->shape_diagnostics_version);
+            validate_restart_fourier_uncertainty(d->diagnostics);
+            if (const auto uncertainty = d->diagnostics.maximum_fourier_gross_comparison_uncertainty_j)
+                writer(*uncertainty);
             checksum = restart_checksum(writer.bytes);
         });
     require_uniform_restart_state(mesh, state, d->trial_nonce);
+    require_uniform_restart_configuration(
+        mesh, d->options, d->eos, state, signature, model, d->qbmm_legacy_default_only);
+    require_uniform_restart_fourier_uncertainty(mesh, d->diagnostics);
     // The local digest includes the rank and its maps; the collective digest
     // also rejects shards accidentally mixed between different saved images.
     std::uint64_t image_checksum = 0;
@@ -472,7 +560,8 @@ void LowMachMixtureSolver::restore_qbmm_restart(std::span<const std::byte> paylo
     std::vector<double> face_flux;
     std::optional<std::uint64_t> controller_signature;
     std::shared_ptr<const QbmmPublication> publication;
-    std::uint64_t version = 0, saved_generation = 0, checksum = 0, image_checksum = 0;
+    std::uint64_t version = 0, model = 0, saved_generation = 0, checksum = 0, image_checksum = 0;
+    bool legacy_default_only = false;
     collective_detail::collective_local_validation(mesh, "QBMM restart decoding",
         [&]
         {
@@ -508,9 +597,23 @@ void LowMachMixtureSolver::restore_qbmm_restart(std::span<const std::byte> paylo
                 check(coupled || signature == 0, "Invalid QBMM restart controller stamp.");
                 if (coupled)
                     controller_signature = signature;
-                check(!d->controller_active || d->active_qbmm_controller == controller_signature,
-                    "QBMM restart target has a different coupled source configuration.");
             }
+            // Old images have no model stamp. In particular, a numerically zero
+            // supplied drift does not make SuppliedPhaseSlip a legacy model.
+            model = restart_model_code(d->options);
+            if (version >= 5)
+            {
+                reader.expect(model, "QBMM restart transport or velocity model differs.");
+                reader(legacy_default_only);
+            }
+            else
+                legacy_default_only = true;
+            if (legacy_default_only)
+                validate_legacy_restart_model(d->options);
+            check(!legacy_default_only || !d->controller_active || d->active_legacy_compatible,
+                "Legacy QBMM restart requires default force and constitutive-law configuration.");
+            check(!d->controller_active || d->active_qbmm_controller == controller_signature,
+                "QBMM restart target has a different or unrecorded coupled source configuration.");
             candidate.qbmm_families.resize(phases);
             for (auto& stamp : candidate.qbmm_families)
             {
@@ -585,15 +688,17 @@ void LowMachMixtureSolver::restore_qbmm_restart(std::span<const std::byte> paylo
             if (statistics.correctors > 0)
                 metadata->history = QbmmReceiptHistory::UnavailableAfterPortableRestart;
             publication = std::move(metadata);
+            if (version == 5 && reader.remaining_size() == restart_word_size)
+                reader(statistics.maximum_fourier_gross_comparison_uncertainty_j.emplace());
             check(reader.remaining_size() == 0, "Unexpected trailing QBMM restart data.");
+            validate_restart_fourier_uncertainty(statistics);
             qbmm_detail::validate_state(d->options, candidate);
         });
     require_uniform_restart_state(mesh, candidate, saved_generation);
-    collective_detail::require_uniform_value(
-        mesh, int(controller_signature.has_value()), "QBMM restart controller presence");
-    collective_detail::require_uniform_value(
-        mesh, controller_signature.value_or(0), "QBMM restart controller signature");
+    require_uniform_restart_configuration(
+        mesh, d->options, d->eos, candidate, controller_signature, model, legacy_default_only);
     collective_detail::require_uniform_value(mesh, version, "QBMM restart archive version");
+    require_uniform_restart_fourier_uncertainty(mesh, statistics);
     collective_detail::require_uniform_value(mesh, image_checksum, "QBMM restart image checksum");
     std::uint64_t actual_image_checksum = 0;
     Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &checksum, &actual_image_checksum);
@@ -604,6 +709,7 @@ void LowMachMixtureSolver::restore_qbmm_restart(std::span<const std::byte> paylo
         std::max(d->trial_nonce, saved_generation) + 1, std::move(publication));
     d->accepted_qbmm_controller = controller_signature;
     d->needs_restart_controller = controller_signature.has_value();
+    d->qbmm_legacy_default_only = legacy_default_only;
 }
 
 void LowMachMixtureSolver::restore_qbmm_checkpoint(const LowMachMixtureSolver& previous, const Checkpoint& saved,
@@ -615,6 +721,7 @@ void LowMachMixtureSolver::restore_qbmm_checkpoint(const LowMachMixtureSolver& p
     State candidate;
     Diagnostics statistics;
     std::shared_ptr<const QbmmPublication> publication;
+    std::uint64_t model = 0;
     collective_detail::collective_local_validation(mesh, "Count-only checkpoint migration authority",
         [&]
         {
@@ -634,22 +741,35 @@ void LowMachMixtureSolver::restore_qbmm_checkpoint(const LowMachMixtureSolver& p
                       restart_schema_fingerprint(d->options, d->eos) ==
                           restart_schema_fingerprint(prior.options, prior.eos),
                 "QBMM migration requires matching native catalogs, physical roles and EOS schemas.");
+            model = restart_model_code(d->options);
+            check(saved.count_only_body_acceleration == d->active_body_acceleration,
+                "QBMM migration requires the same physical body acceleration, including its opt-in state.");
             check(saved.generation != 0 && saved.generation <= prior.trial_nonce &&
                       saved.generation != std::numeric_limits<std::uint64_t>::max() &&
-                      std::isfinite(saved.state.time) && std::isfinite(saved.state.thermodynamic_pressure),
+                      std::isfinite(saved.state.time) &&
+                      saved.state.thermodynamic_pressure >= d->options.minimum_pressure &&
+                      saved.state.thermodynamic_pressure <= d->options.maximum_pressure,
                 "QBMM migration checkpoint time, pressure or generation is invalid.");
             candidate = saved.state;
             statistics = saved.diagnostics;
         });
     require_uniform_restart_state(mesh, candidate, saved.generation);
+    collective_detail::require_uniform_value(mesh, model, "QBMM migration velocity model");
     supply_qbmm_shape(candidate, initialization);
     collective_detail::collective_local_validation(mesh, "Migrated QBMM checkpoint physical state",
         [&]
         {
             for (auto& cell : candidate.cells)
                 for (size_t a = 0; a < d->eos.size(); ++a)
+                {
+                    check(cell.phases[a].thermodynamics == prior.eos[a],
+                        "QBMM migration checkpoint contains a foreign EOS provider.");
                     cell.phases[a].thermodynamics = d->eos[a];
+                }
             qbmm_detail::validate_state(d->options, candidate);
+            // Validate the receiving pressure/tolerance contract even with shared
+            // EOS objects. Compatible replacements retain the original migration
+            // path; EOS evaluation invokes no kinetics or force callback.
             validate_restart_physics(mesh, d->options, candidate, saved.face_flux);
             auto metadata = std::make_shared<QbmmPublication>();
             metadata->origin = QbmmStateOrigin::CountOnlyMigration;
@@ -659,6 +779,8 @@ void LowMachMixtureSolver::restore_qbmm_checkpoint(const LowMachMixtureSolver& p
                 metadata->history = QbmmReceiptHistory::UnavailableAfterCountOnlyMigration;
             publication = std::move(metadata);
         });
+    require_uniform_restart_configuration(mesh, d->options, d->eos, candidate, d->active_qbmm_controller, model);
     d->publish_fixed(std::move(candidate), std::move(statistics), saved.face_flux,
         std::max(d->trial_nonce, saved.generation) + 1, std::move(publication));
+    d->qbmm_legacy_default_only = false;
 }

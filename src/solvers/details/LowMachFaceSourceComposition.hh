@@ -148,6 +148,16 @@ struct ComposedSourceStage
     std::vector<SpeciesSourceLedger> chemistry_ledgers;
     std::vector<std::shared_ptr<const Receipt>> faces;
     std::vector<CellSpeciesState> post_faces; ///< Actual donors for the next interphase stage.
+
+    void append_fourier_resolution(size_t cell, size_t offset, std::span<const Flow::FourierGrossResolution> source)
+    {
+        auto& destination = result.fourier_gross_resolution[cell];
+        for (auto interval : source)
+        {
+            interval.channel_ += offset;
+            destination.push_back(interval);
+        }
+    }
 };
 
 /** Exact apply order: transported inventory -> pure chemistry -> ordered face stages ->
@@ -206,8 +216,17 @@ inline ComposedSourceStage compose_post_chemistry_faces(const Flow::SourceStageC
                 }
                 if (face.rounded.gross_events.size() != chemistry.gross_events.size())
                     throw std::invalid_argument("Face gross events do not match chemistry owned rows.");
+                const auto& resolution = face.rounded.fourier_gross_resolution;
+                if (!resolution.empty())
+                {
+                    if (resolution.size() != chemistry.gross_events.size())
+                        throw std::invalid_argument("Fourier gross resolution does not match chemistry owned rows.");
+                    result.result.fourier_gross_resolution.resize(resolution.size());
+                }
                 for (std::size_t c = 0; c < chemistry.gross_events.size(); ++c)
                 {
+                    if (!resolution.empty())
+                        result.append_fourier_resolution(c, chemistry.gross_events[c].size(), resolution[c]);
                     const auto& extra = face.rounded.gross_events[c];
                     chemistry.gross_events[c].insert(chemistry.gross_events[c].end(), extra.begin(), extra.end());
                 }

@@ -6,8 +6,8 @@
 
 namespace SimpleFluid::Reacting
 {
-/** The fixed-mesh baseline admits the defaults. Selecting an unsupported model
- * rejects solver construction collectively, including on ranks without cells.
+/** The fixed-mesh baseline admits the defaults and explicitly supplied phase slip.
+ * Unsupported models reject solver construction collectively, including on ranks without cells.
  * Native phase temperatures, prescribed drift and mesh motion have their own
  * configuration or state checks.
  */
@@ -15,8 +15,9 @@ struct QbmmModelOptions
 {
     enum class Velocity
     {
-        SharedCarrier,
-        SuppliedPhaseSlip,
+        SharedCarrier, ///< Exactly zero drift on every physical phase.
+        ZeroSlip = SharedCarrier,
+        SuppliedPhaseSlip, ///< Immutable per-cell phase drift; all family atoms share its velocity, m/s.
         NodeDependentSlip,
         IndependentPhaseMomentum
     };

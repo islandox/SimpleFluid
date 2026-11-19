@@ -2,8 +2,9 @@
  * Conservative distributed source packets with explicit immutable supplied laws.
  */
 #include "solvers/details/LowMachFaceTransportAdapter.hh"
-#include "solvers/details/LowMachRawSpeciesInventory.hh"
 #include "equations/CollectiveValidation.hh"
+#include "solvers/details/LowMachRawSpeciesInventory.hh"
+#include "solvers/details/LowMachSourceStage.hh"
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_OrdinalTraits.hpp>
@@ -248,11 +249,12 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
 {
     collective_detail::require_uniform_value(*mesh_, int(raw_authority), "Face raw predecessor authority");
     const auto ns = catalog_->species().size(), np = compartments_.size(), physical = options_.physical_phase;
-    const std::size_t sample_columns = 2 * ns + 6, packet_columns = 3 * ns + 4;
+    const std::size_t sample_columns = 2 * ns + 6, packet_columns = 3 * ns + 4 + (options_.fourier ? 2 : 0);
     const std::size_t t = 2 * ns, p = t + 1, volume = t + 2, density = t + 3;
     const std::size_t counter_amount = t + 4, bulk_volume = t + 5;
     const std::size_t h_owner = 1 + ns, h_neighbor = 1 + 2 * ns;
-    const std::size_t hc_owner = 1 + 3 * ns, hc_neighbor = hc_owner + 1, heat_column = hc_owner + 2;
+    const std::size_t hc_owner = 1 + 3 * ns, hc_neighbor = hc_owner + 1, heat_column = hc_owner + 2,
+                      heat_decrease = heat_column + 1, heat_increase = heat_column + 2;
     std::unique_ptr<MV> owned_samples, local_samples, owned_packets, local_packets;
     Receipt result;
     collective_detail::collective_local_validation(*mesh_, "Face stage state and halo packing",
@@ -497,9 +499,17 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
                     const double g = options_.fourier->conductance(law);
                     require(std::isfinite(g) && g >= 0 && (g == 0 || (a.phase_volume > 0 && b.phase_volume > 0)),
                         "Fourier contact requires finite nonnegative conductance and two occupied selected phases.");
-                    const double q = narrow(static_cast<long double>(law.time_step) * g *
-                                            (static_cast<long double>(a.temperature) - b.temperature));
+                    const long double integrated_conductance = static_cast<long double>(law.time_step) * g;
+                    const double q =
+                        narrow(integrated_conductance * (static_cast<long double>(a.temperature) - b.temperature));
                     owned_packets->replaceLocalValue(row, heat_column, q);
+                    if (g > 0)
+                    {
+                        const auto [decrease, increase] = source_stage_detail::fourier_temperature_bounds(
+                            a.temperature, b.temperature, integrated_conductance);
+                        owned_packets->replaceLocalValue(row, heat_decrease, decrease);
+                        owned_packets->replaceLocalValue(row, heat_increase, increase);
+                    }
                 }
             }
         });
@@ -546,15 +556,16 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
                 }
                 if (options_.fourier)
                     result.fourier_faces.push_back(
-                        {mesh_->face_geometry_global_id(face), a, b, local_packets->getData(heat_column)[row]});
+                        {mesh_->face_geometry_global_id(face), a, b, local_packets->getData(heat_column)[row],
+                            local_packets->getData(heat_decrease)[row], local_packets->getData(heat_increase)[row]});
             }
             std::ranges::sort(result.raw_diffusion_faces, {}, &CanonicalDiffusionFace::identity);
             if (options_.diffusion)
                 result.diffusion = raw_authority
-                    ? preview_species_diffusion(*catalog_, post_chemistry, options_.diffusion->binding,
-                          result.raw_diffusion_faces, owner_parts)
-                    : preview_species_diffusion(
-                          *catalog_, post_chemistry, options_.diffusion->binding, result.raw_diffusion_faces);
+                                       ? preview_species_diffusion(*catalog_, post_chemistry,
+                                             options_.diffusion->binding, result.raw_diffusion_faces, owner_parts)
+                                       : preview_species_diffusion(*catalog_, post_chemistry,
+                                             options_.diffusion->binding, result.raw_diffusion_faces);
             else
             {
                 result.diffusion.state.assign(post_chemistry.begin(), post_chemistry.end());
@@ -566,6 +577,12 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
             result.rounded.sources.resize(post_chemistry.size());
             result.rounded.gross_events.assign(post_chemistry.size(), std::vector<double>(2 * ns + 6));
             std::vector<std::vector<Sum>> gross(post_chemistry.size(), std::vector<Sum>(2 * ns + 6));
+            std::vector<std::vector<Flow::FourierFaceResolution>> fourier_resolution;
+            if (options_.fourier)
+            {
+                fourier_resolution.resize(post_chemistry.size());
+                result.rounded.fourier_gross_resolution.resize(post_chemistry.size());
+            }
             const auto add_material = [&](std::size_t c, SpeciesId id, const DiffusionCompartment& compartment,
                                           double value, std::size_t offset)
             {
@@ -612,7 +629,11 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
                         return;
                     const double q = sign * face.energy;
                     result.cells[*c].fourier_energy.push_back(q);
-                    gross[*c][2 * ns + 4 + (q < 0 ? 1 : 0)] += std::abs(static_cast<long double>(q));
+                    const size_t direction = q < 0 ? 1 : 0;
+                    const long double magnitude = std::abs(static_cast<long double>(q));
+                    gross[*c][2 * ns + 4 + direction] += magnitude;
+                    fourier_resolution[*c].push_back({face.geometry_identity, q,
+                        sign > 0 ? face.decrease : face.increase, sign > 0 ? face.increase : face.decrease});
                 };
                 deposit(face.owner, -1);
                 deposit(face.neighbor, 1);
@@ -636,6 +657,9 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
                 // source.momentum remains exactly zero; no rounding-based donor velocity cancellation.
                 for (std::size_t i = 0; i < gross[c].size(); ++i)
                     result.rounded.gross_events[c][i] = narrow(gross[c][i].value());
+                if (options_.fourier)
+                    result.rounded.fourier_gross_resolution[c].push_back(
+                        Flow::FourierGrossResolution{2 * ns + 4, std::move(fourier_resolution[c])});
             }
         });
     return result;

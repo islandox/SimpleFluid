@@ -95,6 +95,108 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_event_shape(
     for (size_t c = 0; c < current.size(); ++c)
         require(current[c].size() == previous[c].size(), "Source stage changed its gross-event dimensions.");
 }
+SIMPLEFLUID_SOLVERS_LOCAL inline void validate_fourier_resolution(
+    const Flow::FourierGrossResolutions& resolution, const std::vector<std::vector<double>>& events)
+{
+    require(resolution.empty() || resolution.size() == events.size(), "Fourier gross resolution rows differ.");
+    for (size_t c = 0; c < resolution.size(); ++c)
+    {
+        size_t first_available = 0;
+        for (const auto& stage : resolution[c])
+        {
+            const auto channel = stage.positive_channel();
+            require(channel >= first_available && channel < events[c].size() && events[c].size() - channel >= 2,
+                "Fourier gross resolution channel pair is invalid or overlaps.");
+            first_available = channel + 2;
+            std::array<SimpleFluid::detail::CompensatedSum<long double>, 2> gross;
+            const auto faces = stage.faces();
+            for (size_t i = 0; i < faces.size(); ++i)
+            {
+                const auto& face = faces[i];
+                require(i == 0 || faces[i - 1].geometry_identity < face.geometry_identity,
+                    "Fourier resolution faces must have unique ordered canonical identities.");
+                require(std::isfinite(face.energy) && std::isfinite(face.decrease) && face.decrease >= 0 &&
+                            std::isfinite(face.increase) && face.increase >= 0,
+                    "Fourier packet and temperature resolution must be finite, with nonnegative bounds.");
+                gross[face.energy < 0 ? 1 : 0] += std::abs(static_cast<long double>(face.energy));
+            }
+            for (size_t sign = 0; sign < gross.size(); ++sign)
+                require(static_cast<double>(gross[sign].value()) == events[c][channel + sign],
+                    "Fourier face resolution packets must reproduce the exact directional gross totals.");
+        }
+    }
+}
+
+SIMPLEFLUID_SOLVERS_LOCAL inline double outward_temperature_resolution(long double value)
+{
+    // Use strict comparison for subnormal bounds. Also exclude the smallest
+    // normal value, which a subnormal product can round to when long double
+    // has binary64 precision. Out-of-range bounds likewise grant no allowance.
+    if (value <= std::numeric_limits<double>::min() || value > std::numeric_limits<double>::max())
+        return 0;
+    const auto rounded = static_cast<double>(value);
+    return rounded < value ? std::nextafter(rounded, std::numeric_limits<double>::infinity()) : rounded;
+}
+
+SIMPLEFLUID_SOLVERS_LOCAL inline std::array<double, 2> fourier_temperature_bounds(
+    double owner, double neighbor, long double integrated_conductance)
+{
+    const auto spacing = [](double temperature)
+    {
+        const long double below = temperature - std::nextafter(temperature, 0.);
+        const double above = std::nextafter(temperature, std::numeric_limits<double>::infinity());
+        return std::array{below, std::isfinite(above) ? static_cast<long double>(above) - temperature : below};
+    };
+    const auto [owner_down, owner_up] = spacing(owner);
+    const auto [neighbor_down, neighbor_up] = spacing(neighbor);
+    // The faces use owner minus neighbor. Each binary64 operand extends to
+    // the midpoint toward its adjacent representable value in that direction.
+    return {outward_temperature_resolution(integrated_conductance * (owner_down + neighbor_up) * .5L),
+        outward_temperature_resolution(integrated_conductance * (owner_up + neighbor_down) * .5L)};
+}
+
+struct GrossComparison
+{
+    double residual = 0;
+    double fourier_uncertainty = 0;
+
+    void include(GrossComparison local)
+    {
+        residual = std::max(residual, local.residual);
+        fourier_uncertainty = std::max(fourier_uncertainty, local.fourier_uncertainty);
+    }
+};
+
+SIMPLEFLUID_SOLVERS_LOCAL inline GrossComparison fourier_face_error(
+    std::span<const Flow::FourierFaceResolution> current, std::span<const Flow::FourierFaceResolution> previous,
+    double tolerance)
+{
+    require(current.size() == previous.size(), "Fourier resolution face count changed between correctors.");
+    GrossComparison maximum;
+    for (size_t i = 0; i < current.size(); ++i)
+    {
+        const auto& now = current[i];
+        const auto& old = previous[i];
+        require(now.geometry_identity == old.geometry_identity, "Fourier resolution canonical face changed.");
+        if (now.energy == old.energy)
+            continue;
+        const auto& greater = now.energy > old.energy ? now : old;
+        const auto& lesser = now.energy > old.energy ? old : now;
+        const long double high = greater.energy, low = lesser.energy;
+        const long double decrease = greater.decrease, increase = lesser.increase;
+        const long double scale = std::max(std::abs(high), std::abs(low));
+        // Half-scale only at extreme magnitudes so even binary64 long double
+        // can subtract a reversal or sum its bounds without overflow.
+        constexpr long double half_maximum = std::numeric_limits<long double>::max() / 2;
+        const long double factor = std::max({scale, decrease, increase}) > half_maximum ? .5L : 1.L;
+        const long double uncertainty = factor * decrease + factor * increase;
+        const long double gap = std::max(0.L, (factor * high - factor * low) - uncertainty);
+        maximum.include({normalized(gap, factor * scale, tolerance),
+            static_cast<double>(std::min(uncertainty, factor * std::numeric_limits<double>::max()) / factor)});
+    }
+    return maximum;
+}
+
 SIMPLEFLUID_SOLVERS_LOCAL inline double event_error(
     const std::vector<std::vector<double>>& current, const std::vector<std::vector<double>>& previous, double tolerance)
 {
@@ -106,6 +208,41 @@ SIMPLEFLUID_SOLVERS_LOCAL inline double event_error(
             const long double now = current[c][i], old = previous[c][i];
             maximum = std::max(maximum, normalized(now - old, std::max(now, old), tolerance));
         }
+    return maximum;
+}
+SIMPLEFLUID_SOLVERS_LOCAL inline GrossComparison event_error(const std::vector<std::vector<double>>& current,
+    const std::vector<std::vector<double>>& previous, double tolerance,
+    const Flow::FourierGrossResolutions& current_fourier, const Flow::FourierGrossResolutions& previous_fourier)
+{
+    require(current_fourier.size() == previous_fourier.size(), "Fourier gross resolution rows changed.");
+    if (current_fourier.empty())
+        return {event_error(current, previous, tolerance)};
+    validate_event_shape(current, previous);
+    GrossComparison maximum;
+    for (size_t c = 0; c < current.size(); ++c)
+    {
+        const auto& now_stages = current_fourier[c];
+        const auto& old_stages = previous_fourier[c];
+        require(now_stages.size() == old_stages.size(), "Fourier gross resolution stage count changed.");
+        for (size_t stage = 0; stage < now_stages.size(); ++stage)
+            require(now_stages[stage].positive_channel() == old_stages[stage].positive_channel(),
+                "Fourier gross resolution stage channel changed.");
+        size_t stage = 0;
+        for (size_t i = 0; i < current[c].size(); ++i)
+        {
+            if (stage < now_stages.size() && i == now_stages[stage].positive_channel())
+            {
+                // The raw directional aggregates stay in the receipt. Compare
+                // their constituent signed contacts with each face's own scale.
+                maximum.include(fourier_face_error(now_stages[stage].faces(), old_stages[stage].faces(), tolerance));
+                ++stage;
+                ++i;
+                continue;
+            }
+            const long double now = current[c][i], old = previous[c][i];
+            maximum.residual = std::max(maximum.residual, normalized(now - old, std::max(now, old), tolerance));
+        }
+    }
     return maximum;
 }
 

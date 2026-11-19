@@ -71,14 +71,26 @@ struct MixtureQbmmContext
     std::span<const PhaseThermalState> phases;
     const LowMachMixtureSolver::SourceStageMetadata& stage;
     double time_step, accepted_time;
+    const QbmmLawInputs* law_inputs = nullptr; ///< Frozen SI values for this exact source evaluation.
 };
 
-/** Integrated local allocation law. Its optional material slots use pressure-conditioned donor enthalpy. */
+/** Pure integrated local law. Captures must be immutable and evaluation must be deterministic and MPI-free. */
+struct MixtureQbmmLaw
+{
+    const QbmmLawMetadata metadata;
+    const std::function<std::vector<QbmmEventOperation>(const QbmmLawInputs&)> evaluate;
+};
+
+/** Integrated local allocation law. Its optional material slots use pressure-conditioned donor enthalpy.
+ * A family without population-law declarations retains the existing integrated callback scope, including birth
+ * from absence. With declarations, a callback at absence requires a contract that does not require a population.
+ */
 struct MixtureQbmmProvider
 {
     const ThermalLawIdentity metadata;
     const std::shared_ptr<const InterphaseConfiguration> transfers;
     const std::function<std::vector<QbmmEventOperation>(const MixtureQbmmContext&)> evaluate;
+    const std::vector<std::shared_ptr<const MixtureQbmmLaw>> laws{}; ///< Ordered, additionally supplied local laws.
 };
 /** Exact local supplied events and their raw endpoint replay proof; aligned with physical phases. */
 struct MixturePopulationEventReceipt
@@ -155,6 +167,7 @@ struct ReactingMixtureOptions
     std::shared_ptr<const MixtureInterphaseEventProvider>
         interphase; ///< Frozen material amounts before explicit number law.
     std::shared_ptr<const MixtureQbmmProvider> qbmm_population;
+    std::optional<LowMachMixtureSolver::Vector> body_acceleration; ///< Uniform fixed-grid acceleration, m/s².
 };
 
 class SIMPLEFLUID_SOLVERS_EXPORT ReactingMixtureCoupler
@@ -214,6 +227,9 @@ public:
     Diagnostics advance(double time_step);
     [[nodiscard]] Checkpoint checkpoint() const;
     void restore(const Checkpoint& checkpoint);
+    /** Migrate a native count-only checkpoint using this controller's force configuration and lease. */
+    void restore_qbmm_checkpoint(const LowMachMixtureSolver& previous, const LowMachMixtureSolver::Checkpoint& saved,
+        const LowMachMixtureSolver::QbmmInitialization& initialization);
     [[nodiscard]] const std::shared_ptr<LowMachMixtureSolver>& solver() const noexcept;
     [[nodiscard]] const Diagnostics& diagnostics() const noexcept;
     /** Collective QBMM reporting on the solver communicator for the accepted state or a live trial. */
