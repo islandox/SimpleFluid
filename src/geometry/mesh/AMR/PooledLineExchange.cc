@@ -9,6 +9,7 @@
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <tuple>
 #include <utility>
 
@@ -928,9 +929,13 @@ void exchange_pooled_line_edits(PooledLineRegistry& registry, IncidencePools& po
                 {
                     const auto& item = staged[staged_cursor];
                     const auto bytes = edit_size(item, pools, source_protocol);
-                    if (bytes > wire_credit || sizeof(OwnerPacket) > wire_credit - bytes)
-                        throw std::invalid_argument("Pooled line edit exceeds live page credit.");
-                    const auto cost = bytes + sizeof(OwnerPacket);
+                    const auto cost = add_size(bytes, sizeof(OwnerPacket));
+                    if (cost > wire_credit)
+                        throw std::invalid_argument("Pooled line edit exceeds live page credit: rank=" +
+                            std::to_string(comm->getRank()) + " used=" + std::to_string(budget.used) +
+                            " request=" + std::to_string(cost) + " limit=" + std::to_string(budget.limit) +
+                            " wire_credit=" + std::to_string(wire_credit) +
+                            " cumulative_spent=" + std::to_string(budget.cumulative) + ".");
                     if (cost > wire_credit - page_used)
                         break;
                     page_used += cost;

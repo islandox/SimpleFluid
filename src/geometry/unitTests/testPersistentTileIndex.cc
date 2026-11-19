@@ -73,19 +73,20 @@ TEST(PersistentTileIndex, ExactBatchCapAndRejectedEditsPreserveAcceptedPages)
     const auto old_memory = arena();
     const auto accepted = source(old_memory, 72);
     const auto before = old_memory->used;
-    const auto replace = [](Index& index)
+    const auto replace = [](Index& index, const D::Budget& memory)
     {
         Index::Batch batch(index);
         batch.replace_support(9);
         batch.insert({9, 11}, 71);
         batch.insert({9, 18}, 81);
         batch.publish(400);
+        EXPECT_EQ(memory.used, index.metadata_bytes() - index.inherited_metadata_bytes());
     };
     const auto measured = arena();
     {
         Index candidate(*measured, measured);
         candidate.fork_from(*accepted);
-        replace(candidate);
+        replace(candidate, *measured);
         EXPECT_EQ(candidate.size(), accepted->size() - 2);
         EXPECT_FALSE(candidate.find({9, 0}));
         EXPECT_EQ(candidate.at({9, 11}), 71u);
@@ -98,7 +99,7 @@ TEST(PersistentTileIndex, ExactBatchCapAndRejectedEditsPreserveAcceptedPages)
     const auto short_memory = arena(measured->peak - 1);
     Index rejected(*short_memory, short_memory);
     rejected.fork_from(*accepted);
-    EXPECT_THROW(replace(rejected), std::invalid_argument);
+    EXPECT_THROW(replace(rejected, *short_memory), std::invalid_argument);
     EXPECT_EQ(short_memory->used, 0u);
     EXPECT_EQ(rejected.find({9, 0}), accepted->find({9, 0}));
     EXPECT_EQ(rejected.size(), accepted->size());
@@ -107,7 +108,7 @@ TEST(PersistentTileIndex, ExactBatchCapAndRejectedEditsPreserveAcceptedPages)
     const auto exact_memory = arena(measured->peak);
     Index retry(*exact_memory, exact_memory);
     retry.fork_from(*accepted);
-    EXPECT_NO_THROW(replace(retry));
+    EXPECT_NO_THROW(replace(retry, *exact_memory));
     EXPECT_EQ(retry.at({9, 18}), 81u);
     EXPECT_THROW(retry.update({9, 18},
                      [](auto& value)

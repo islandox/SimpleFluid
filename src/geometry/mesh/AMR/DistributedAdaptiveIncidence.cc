@@ -1445,14 +1445,31 @@ struct DistributedAdaptiveIncidenceSession::Impl
         return true;
     }
 
-    using ChangedTiles = ChangedTileMap;
+    struct ChangedTiles
+    {
+        ChangedTileMap predecessors;
+        bool bootstrap_from_empty_index = false;
+    };
     void remember(ChangedTiles& before, TileId id, Lease& scratch)
     {
-        if (before.contains(id))
+        if (before.bootstrap_from_empty_index || before.predecessors.contains(id))
             return;
         scratch.add(changed_map_node);
         const auto found = tiles.find(id);
-        before.emplace(id, found ? std::optional<TileEntry>(*found) : std::optional<TileEntry>{});
+        before.predecessors.emplace(id, found ? std::optional<TileEntry>(*found) : std::optional<TileEntry>{});
+    }
+    template<class Visit> void visit_changed_tiles(const ChangedTiles& changed, const Visit& visit) const
+    {
+        if (changed.bootstrap_from_empty_index)
+        {
+            // All published keys are new. Read one key by value so a visitor
+            // can replace its row without pinning or borrowing the old root.
+            for (std::size_t i = 0; i < tiles.size(); ++i)
+                visit(tiles.key_at(i), nullptr);
+        }
+        else
+            for (const auto& [id, old] : changed.predecessors)
+                visit(id, old ? &*old : nullptr);
     }
     void replace_group(Slot support, std::span<const ReceivedTileRecipe> recipes, ChangedTiles& before, Lease& scratch,
         TileMap::Batch& batch, SubfaceProvenanceBuilder* provenance, const OwnedLeafLookup& lookup)
@@ -1643,7 +1660,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
             {
                 tile_bodies.freeze();
                 lines.begin_replay(bootstrap);
-                for (const auto& [id, state] : changed)
+                for (const auto& [id, state] : changed.predecessors)
                 {
                     frontier.add(tile_set_node);
                     pending.insert(id);
@@ -1669,8 +1686,23 @@ struct DistributedAdaptiveIncidenceSession::Impl
                 const std::vector<PooledLineEdit>& buffered;
                 ~WorkObservation() { state.diagnostic_work("scope_exit", working, buffered); }
             } work_observation{*this, working, buffered};
+            const bool first_bootstrap_layer = changed.bootstrap_from_empty_index && layer == 0;
             auto current_id = pending.begin();
-            unsigned edit_phase = 0;
+            std::size_t tile_ordinal = 0;
+            const auto next_pending = [&]() -> std::optional<TileId>
+            {
+                if (first_bootstrap_layer)
+                {
+                    if (tile_ordinal < tiles.size())
+                        return tiles.key_at(tile_ordinal++);
+                }
+                else if (current_id != pending.end())
+                    return *current_id++;
+                return std::nullopt;
+            };
+            // Fresh layer zero has no retired edges. Its pending keys are
+            // already ordered in the published tile index.
+            unsigned edit_phase = first_bootstrap_layer ? 1 : 0;
             std::size_t cursor = 0;
             const auto next_edit = [&](PooledLineEdit& value)
             {
@@ -1686,26 +1718,28 @@ struct DistributedAdaptiveIncidenceSession::Impl
                     iteration.bytes -= old_bytes;
                     budget->used -= old_bytes;
                     cursor = 0;
-                    if (current_id == pending.end())
+                    const auto next_id = next_pending();
+                    if (!next_id)
                     {
-                        if (++edit_phase == 2)
+                        if (edit_phase == 1)
                             return false;
+                        edit_phase = 1;
                         current_id = pending.begin();
-                    }
-                    if (current_id == pending.end())
                         continue;
-                    const auto id = *current_id++;
+                    }
+                    const auto id = *next_id;
                     const auto current = tiles.find(id);
                     if (edit_phase == 0)
                     {
-                        const auto original = changed.find(id);
                         const TileEntry* old_state = nullptr;
                         if (bootstrap)
                             old_state = layer && current != nullptr ? current : nullptr;
                         else if (replacements.contains(id))
-                            old_state = original == changed.end() ? nullptr
-                                        : original->second        ? &*original->second
-                                                                  : nullptr;
+                        {
+                            const auto original = changed.predecessors.find(id);
+                            if (original != changed.predecessors.end() && original->second)
+                                old_state = &*original->second;
+                        }
                         else if (current != nullptr)
                             old_state = current;
                         const auto* old_layer = old_state ? at_layer(*old_state, layer) : nullptr;
@@ -2147,22 +2181,23 @@ struct DistributedAdaptiveIncidenceSession::Impl
                 collective(*comm,
                     [&]
                     {
-                        for (const auto& [id, old] : changed)
+                        const auto finish_tile = [&](TileId id, const TileEntry*)
                         {
                             const auto found = tiles.find(id);
                             if (found == nullptr)
-                                continue;
+                                return;
                             const auto& entry = *found;
                             if (!entry.history)
-                                continue;
+                                return;
                             const auto& previous = entry.layers();
                             const auto retained_end = std::upper_bound(previous.begin(), previous.end(), layer,
                                 [](unsigned n, const auto& value) { return n < value.first; });
                             const bool intrinsic = std::all_of(previous.begin(), retained_end, [&](const auto& value)
                                 { return !value.second || intrinsic_fixed_layer(entry, *value.second); });
                             if (!intrinsic && retained_end == previous.end())
-                                continue;
-                            update_tile(id, [&](TileEntry& candidate)
+                                return;
+                            update_tile(id,
+                                [&](TileEntry& candidate)
                                 {
                                     if (intrinsic)
                                     {
@@ -2179,7 +2214,8 @@ struct DistributedAdaptiveIncidenceSession::Impl
                                         history.erase(future, history.end());
                                     }
                                 });
-                        }
+                        };
+                        visit_changed_tiles(changed, finish_tile);
                         lines.finish_replay(layer);
                         statistics.dirty_lines = lines.processed_lines();
                     });
@@ -2631,7 +2667,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
         collective(*comm,
             [&]
             {
-                for (const auto& [id, old] : changed)
+                for (const auto& [id, old] : changed.predecessors)
                     if (old)
                         owner_rows.remove(old->tile(), final_loop(*old, old_last, native_source_protocol));
                 for (const auto& old : retired)
@@ -2644,7 +2680,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
                             generation = old.incidence_generation;
                     owner_rows.insert(*pools.cells.find(key), generation);
                 }
-                for (const auto& [id, old] : changed)
+                const auto replace_contribution = [&](TileId id, const TileEntry* old)
                 {
                     auto current = tiles.find(id);
                     if (current)
@@ -2666,7 +2702,8 @@ struct DistributedAdaptiveIncidenceSession::Impl
                         scratch.append(*dirty);
                         dirty->push_back({id, old ? old->final_piece : CanonicalSubfaceView{}});
                     }
-                }
+                };
+                visit_changed_tiles(changed, replace_contribution);
             });
         collective(*comm,
             [&]
@@ -2674,10 +2711,10 @@ struct DistributedAdaptiveIncidenceSession::Impl
                 // Neither old tile bodies nor the change index is consulted
                 // after contribution replacement. Retire them before row
                 // allocation, then release only physically expired floors.
-                const auto staged = changed.size() * changed_map_node;
+                const auto staged = changed.predecessors.size() * changed_map_node;
                 if (staged > scratch.bytes)
                     throw std::invalid_argument("Incidence change-index admission disagrees.");
-                changed.clear();
+                changed.predecessors.clear();
                 scratch.bytes -= staged;
                 budget->used -= staged;
                 (void) tile_bodies.reap();
@@ -2801,6 +2838,7 @@ std::vector<IncidenceRowDelivery> DistributedAdaptiveIncidenceSession::bootstrap
         {
             if (state.ready)
                 throw std::invalid_argument("Repeated incidence bootstrap.");
+            changed.bootstrap_from_empty_index = state.tiles.size() == 0;
             (void) state.tile_bodies.reap();
             state.owner_rows.begin_delta();
             const auto grid = trusted_cartesian_incidence_grid(*state.kernel);

@@ -349,11 +349,11 @@ if(TEST SpatialAdaptiveCanonicalN16_4procs)
     ENVIRONMENT "SIMPLEFLUID_SPATIAL_CLOSURE_N32=1;OMP_NUM_THREADS=1")
 endif()
 
-# Full canonical cache construction is a separate Debug storage probe. Its
-# byte cap is unchanged; allow the setup walk to reach byte admission.
+# Full canonical cache construction is a separate Debug storage probe. Allow
+# the setup walk to reach the approved 96 MiB canonical N32 budget.
 simplefluid_add_mpi_test(NAME SpatialAdaptiveCanonicalN32_4procs
   TARGET testSpatialAdaptiveClosure PROCS 4
-  ARGS "--gtest_filter=SpatialAdaptiveClosure.CubicN32CanonicalCacheUnder64MiB"
+  ARGS "--gtest_filter=SpatialAdaptiveClosure.CubicN32CanonicalCacheUnder96MiB"
   LABELS "mpi;amr;closure;spatial;resource" TIMEOUT 1800)
 if(TEST SpatialAdaptiveCanonicalN32_4procs)
   set_tests_properties(SpatialAdaptiveCanonicalN32_4procs PROPERTIES

@@ -189,7 +189,11 @@ public:
             if (root && root->size > tile_limit)
                 throw std::invalid_argument("Active tile count exceeds its limit.");
             owner_.root_ = std::move(root);
-            inserted_.clear();
+            const auto staging_bytes =
+                inserted_.capacity() * sizeof(Row) + retired_supports_.capacity() * sizeof(std::size_t);
+            decltype(inserted_){}.swap(inserted_);
+            decltype(retired_supports_){}.swap(retired_supports_);
+            scratch_.release(staging_bytes);
             owner_.batch_live_ = false;
             published_ = true;
         }

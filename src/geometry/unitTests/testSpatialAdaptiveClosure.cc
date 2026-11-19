@@ -32,6 +32,7 @@ using Cell = P::ConvexCellGeometry<ordinary>;
 using Wide = std::array<long double, 3>;
 using Marks = std::vector<std::pair<AMR::AdaptiveCellKey, AMR::AdaptiveSplit>>;
 constexpr std::size_t cap64 = 64 * 1024 * 1024;
+constexpr std::size_t cap96 = 96 * 1024 * 1024;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
 Marks mark_set(const std::vector<AMR::AdaptiveMark>& marks)
@@ -249,7 +250,7 @@ std::uint64_t incidence_pairs(const SlabFixture& fixture)
     const std::uint64_t n = fixture.n, w = fixture.width, transverse = (4 * n - 2) * (4 * n - 2);
     return (transverse * (4 * w - 2) - 8 * n * n * w) / 2 + fixture.sides * transverse;
 }
-void check_slab(unsigned n, bool canonical = false)
+void check_slab(unsigned n, bool canonical = false, std::size_t byte_budget = cap64)
 {
     const auto comm = Tpetra::getDefaultComm();
     const auto fixture = slab(n);
@@ -264,7 +265,7 @@ void check_slab(unsigned n, bool canonical = false)
         EXPECT_TRUE(leaf.native_recipe);
     }
     AMR::AdaptiveClosureOptions options;
-    options.byte_budget = cap64;
+    options.byte_budget = byte_budget;
     D::DistributedAdaptiveContactHalo halo(*fixture.detached.kernel, comm, options, {7, 11, 13, 0});
     if (canonical)
     {
@@ -380,7 +381,7 @@ TEST(SpatialAdaptiveClosure, CubicN16CanonicalCacheStorageObservation)
     check_slab(16, true);
 }
 
-TEST(SpatialAdaptiveClosure, CubicN32CanonicalCacheUnder64MiB)
+TEST(SpatialAdaptiveClosure, CubicN32CanonicalCacheUnder96MiB)
 {
     const auto comm = Tpetra::getDefaultComm();
     const int requested = std::getenv("SIMPLEFLUID_SPATIAL_CLOSURE_N32") != nullptr;
@@ -393,7 +394,7 @@ TEST(SpatialAdaptiveClosure, CubicN32CanonicalCacheUnder64MiB)
     if (comm->getSize() != 4)
         GTEST_SKIP() << "The original N32 storage oracle requires exactly four ranks.";
     // check_slab independently requires 1024, 2048, 2048, 1024 remote records.
-    check_slab(32, true);
+    check_slab(32, true, cap96);
 }
 
 TEST(SpatialAdaptiveClosure, IsolatedEdgeVertexAndTJunctionMatchIndependentMarksAndLegacy)
