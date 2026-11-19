@@ -1269,7 +1269,7 @@ TEST(LowMachQbmmStateTest, DeferredModelRequestsRejectCollectivelyBeforeAdvance)
         {"BDF2", [](Model& m) { m.transport.time = FVM::ScalarTimeScheme::BDF2; }},
         {"linear upwind", [](Model& m) { m.transport.convection = FVM::ScalarConvectionScheme::BoundedLinearUpwind; }},
         {"steady", [](Model& m) { m.transport.mode = FVM::AssemblyMode::Steady; }},
-        {"node slip", [](Model& m) { m.velocity = Model::Velocity::NodeDependentSlip; }},
+        {"node slip with native implicit transport", [](Model& m) { m.velocity = Model::Velocity::NodeDependentSlip; }},
         {"independent momentum", [](Model& m) { m.velocity = Model::Velocity::IndependentPhaseMomentum; }},
         {"variable composition", [](Model& m) { m.variable_composition = true; }},
         {"merging unlike families", [](Model& m) { m.cross_family_coalescence = true; }},

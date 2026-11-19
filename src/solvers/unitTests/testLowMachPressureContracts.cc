@@ -253,6 +253,74 @@ TEST(LowMachPressureContractsTest, NonunitMaterialFractionsPreserveCarrierFluxAn
     }
 }
 
+TEST(LowMachPressureContractsTest, KineticProjectionPreservesTheDirectlyTransportedAnchor)
+{
+    Fixture f;
+    constexpr double anchored = 0x1p-104;
+    f.configure(.5, anchored, 1.);
+    for (size_t c = 0; c < f.target.size(); ++c)
+        f.target[c] = f.lower(static_cast<LO>(c)) ? anchored : -anchored;
+    const auto result = f.equation.project_kinetic_material_with_eos(f.rho, 1., f.target, f.chi, f.theta, f.slip,
+        f.predictor, f.predictor, f.corrected, f.mechanical, f.velocity, f.linear(), 0x1p-150);
+    // A conventional slip offset would round the anchored perturbation out of
+    // .5*phi0 + S. No pressure response is required when W0 meets the target.
+    EXPECT_TRUE(result.linear.converged);
+    EXPECT_EQ(result.maximum_continuity_residual, 0.);
+    EXPECT_EQ(result.maximum_linearized_continuity_residual, 0.);
+    for (const auto face : f.corrected.owned_face_ids())
+        EXPECT_EQ(f.corrected.value(face), f.predictor.value(face));
+    for (size_t c = 0; c < f.target.size(); ++c)
+        EXPECT_EQ(f.mechanical.value(static_cast<LO>(c)), 0.);
+}
+
+TEST(LowMachPressureContractsTest, KineticProjectionCorrectsTheReferenceDifferenceWithNonunitMobility)
+{
+    Fixture f;
+    f.configure(.75, .125, .5);
+    Pressure::FaceField reference(f.grid, 0., "kinetic_reference_carrier");
+    for (const auto face : reference.owned_face_ids())
+        if (!f.grid->is_geometry_exterior_face(face))
+            reference.set_owned_value(face, .25 * f.orientation(face));
+    reference.sync_ghosts();
+    for (size_t c = 0; c < f.target.size(); ++c)
+        f.target[c] = f.lower(static_cast<LO>(c)) ? .875 : -.875;
+    const auto result = f.equation.project_kinetic_material_with_eos(f.rho, 1., f.target, f.chi, f.theta, f.slip,
+        reference, f.predictor, f.corrected, f.mechanical, f.velocity, f.linear(), 1e-12);
+    // W0=.125 at phi0=.25, so the .875 target requires phi=1.25.
+    // Bare mobility .25 and predictor .5 give p_lower-p_upper=3.
+    EXPECT_TRUE(result.linear.converged);
+    EXPECT_LE(result.maximum_continuity_residual, 1e-12);
+    EXPECT_LE(result.maximum_linearized_continuity_residual, 1e-12);
+    for (const auto face : f.corrected.owned_face_ids())
+        if (!f.grid->is_geometry_exterior_face(face))
+            EXPECT_NEAR(f.corrected.value(face), 1.25 * f.orientation(face), 1e-12);
+    for (size_t c = 0; c < f.target.size(); ++c)
+        EXPECT_NEAR(f.mechanical.value(static_cast<LO>(c)), 3. * (f.lower(static_cast<LO>(c)) - f.gauge_lower), 1e-12);
+}
+
+TEST(LowMachPressureContractsTest, KineticZeroDerivativeRequiresEOSAnchoringAndRetainsTheDirectPacket)
+{
+    Fixture f;
+    f.configure(0., .125, .5);
+    for (size_t c = 0; c < f.target.size(); ++c)
+        f.target[c] = f.lower(static_cast<LO>(c)) ? .125 : -.125;
+    const auto project = [&]
+    {
+        return f.equation.project_kinetic_material_with_eos(f.rho, 1., f.target, f.chi, f.theta, f.slip, f.predictor,
+            f.predictor, f.corrected, f.mechanical, f.velocity, f.linear(), 1e-12);
+    };
+    const auto before = f.snapshot();
+    EXPECT_THROW((void) project(), std::invalid_argument);
+    f.unchanged(before);
+    std::ranges::fill(f.chi, .5);
+    const auto result = project();
+    EXPECT_TRUE(result.linear.converged);
+    EXPECT_EQ(result.maximum_continuity_residual, 0.);
+    EXPECT_EQ(result.maximum_linearized_continuity_residual, 0.);
+    for (const auto face : f.corrected.owned_face_ids())
+        EXPECT_EQ(f.corrected.value(face), f.predictor.value(face));
+}
+
 TEST(LowMachPressureContractsTest, ZeroThetaWithPositiveSusceptibilityKeepsBareCarrierAndPressureResponse)
 {
     Fixture fixture;

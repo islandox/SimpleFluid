@@ -928,7 +928,8 @@ TEST(QbmmSlipAndGravity, UnsupportedCapabilitiesAndDivergentSlipModeRejectWithAc
         const char* name;
         void (*select)(Model&);
     };
-    const Request requests[]{{"node slip", [](Model& m) { m.velocity = Velocity::NodeDependentSlip; }},
+    const Request requests[]{
+        {"node slip with native implicit transport", [](Model& m) { m.velocity = Velocity::NodeDependentSlip; }},
         {"independent momentum", [](Model& m) { m.velocity = Velocity::IndependentPhaseMomentum; }},
         {"BDF2", [](Model& m) { m.transport.time = FVM::ScalarTimeScheme::BDF2; }},
         {"linear upwind", [](Model& m) { m.transport.convection = FVM::ScalarConvectionScheme::BoundedLinearUpwind; }},

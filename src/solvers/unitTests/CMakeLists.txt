@@ -19,6 +19,10 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     # Exercise the private adapter directly without exporting it from the DSO.
     target_sources(${TEST_NAME} PRIVATE ../details/LowMachFaceTransportAdapter.cc)
   endif()
+  if(TEST_NAME STREQUAL "testLowMachQbmmKineticTransport")
+    # Use the production operator with prescribed fluxes and exact donor traces.
+    target_sources(${TEST_NAME} PRIVATE ../details/LowMachQbmmKineticTransport.cc)
+  endif()
   if(TEST_NAME STREQUAL "testVolumeContinuityGeometryAccess")
     target_sources(${TEST_NAME} PRIVATE
       VolumeContinuityALETestProvider.cc
@@ -45,6 +49,10 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       ${TEST_NAME}
       PROPERTIES LABELS "ale\\;free_surface\\;boussinesq\\;conservation\\;transaction"
     )
+  elseif(TEST_NAME MATCHES "^testLowMachQbmmKinetic(Transport)?$")
+    simplefluid_discover_tests(${TEST_NAME}
+      XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q7b/$<CONFIG>"
+      PROPERTIES LABELS "qbmm\\;kinetic\\;low_mach\\;conservation")
   elseif(TEST_NAME MATCHES "^testQbmm(ApplicationBenchmarks|SlipAndGravity)$")
     simplefluid_discover_tests(${TEST_NAME}
       XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q6/$<CONFIG>"
@@ -110,7 +118,7 @@ foreach(_native_ale_ranks IN ITEMS 2 4)
 endforeach()
 
 # Use independent test processes and partition-local shards for each portable restart.
-function(add_qbmm_planar_restart_tests name target filter)
+function(add_qbmm_restart_tests name target filter environment_prefix labels)
     foreach(ranks IN ITEMS 1 2 4)
         set(fixture "${name}_${ranks}procs")
         set(prefix "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>-${fixture}")
@@ -118,28 +126,40 @@ function(add_qbmm_planar_restart_tests name target filter)
             set(test "${fixture}_${stage}")
             if(ranks EQUAL 1)
                 add_test(NAME "${test}" COMMAND "$<TARGET_FILE:${target}>" "--gtest_filter=${filter}")
-                set_tests_properties("${test}" PROPERTIES LABELS "qbmm;ale;restart" TIMEOUT 180)
+                set_tests_properties("${test}" PROPERTIES LABELS "${labels}" TIMEOUT 180)
             else()
                 simplefluid_add_mpi_test(NAME "${test}" TARGET "${target}" PROCS "${ranks}"
-                    ARGS "--gtest_filter=${filter}" LABELS "qbmm;ale;restart" TIMEOUT 180)
+                    ARGS "--gtest_filter=${filter}" LABELS "${labels}" TIMEOUT 180)
             endif()
             if(TEST "${test}")
                 if(stage STREQUAL "Write")
                     set_tests_properties("${test}" PROPERTIES FIXTURES_SETUP "${fixture}"
-                        ENVIRONMENT "SIMPLEFLUID_Q7A_RESTART_WRITE=${prefix}")
+                        ENVIRONMENT "${environment_prefix}_WRITE=${prefix}")
                 else()
                     set_tests_properties("${test}" PROPERTIES FIXTURES_REQUIRED "${fixture}"
-                        ENVIRONMENT "SIMPLEFLUID_Q7A_RESTART_READ=${prefix}")
+                        ENVIRONMENT "${environment_prefix}_READ=${prefix}")
                 endif()
             endif()
         endforeach()
     endforeach()
 endfunction()
 
-add_qbmm_planar_restart_tests(QbmmPlanarRestart testLowMachQbmmPlanarALE
-    LowMachQbmmPlanarALETest.PortableRestartContinuesFromOriginalReference)
-add_qbmm_planar_restart_tests(QbmmPlanarControllerRestart testReactingMixtureQbmmSources
-    ReactingMixtureQbmmSourcesTest.PlanarEventsUseLiveGeometryAndReplayAfterSingleOwnerFailure)
+add_qbmm_restart_tests(QbmmPlanarRestart testLowMachQbmmPlanarALE
+    LowMachQbmmPlanarALETest.PortableRestartContinuesFromOriginalReference SIMPLEFLUID_Q7A_RESTART "qbmm;ale;restart")
+add_qbmm_restart_tests(QbmmPlanarControllerRestart testReactingMixtureQbmmSources
+    ReactingMixtureQbmmSourcesTest.PlanarEventsUseLiveGeometryAndReplayAfterSingleOwnerFailure
+    SIMPLEFLUID_Q7A_RESTART "qbmm;ale;restart")
+add_qbmm_restart_tests(QbmmKineticControllerRestart testReactingMixtureQbmmSources
+    ReactingMixtureQbmmSourcesTest.KineticTransportFeedsCoherentEventsThermalsCommitAndRestart
+    SIMPLEFLUID_Q7B_RESTART "qbmm;kinetic;restart;transaction;conservation")
+
+foreach(_kinetic_ranks IN ITEMS 2 4)
+    foreach(_kinetic_case IN ITEMS LowMachQbmmKinetic LowMachQbmmKineticTransport)
+        simplefluid_add_mpi_test(NAME ${_kinetic_case}_${_kinetic_ranks}procs
+            TARGET test${_kinetic_case} PROCS ${_kinetic_ranks}
+            LABELS "mpi;qbmm;kinetic;low_mach;conservation;transaction;empty_rank" TIMEOUT 180)
+    endforeach()
+endforeach()
 
 # Configured local interphase thermal events, including the prescribed ALE transaction.
 foreach(_interphase_ranks IN ITEMS 2 4)

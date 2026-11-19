@@ -37,7 +37,7 @@ inline void require_io(const Teuchos::Comm<int>& comm, bool valid)
     int local = valid, global = 0;
     Teuchos::reduceAll(comm, Teuchos::REDUCE_MIN, 1, &local, &global);
     if (!global)
-        throw std::runtime_error("Could not read or write a rank-local Q7a restart fixture.");
+        throw std::runtime_error("Could not read or write a rank-local QBMM restart fixture.");
 }
 
 inline void write_restart(
