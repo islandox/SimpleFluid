@@ -310,13 +310,18 @@ std::shared_ptr<const LowMachMixtureSolver::QbmmIntervalReport> LowMachMixtureSo
     interval->source_stage = transport.stage;
     interval->local_receipts = trial.qbmm_cells;
     interval->local_gross_events = trial.gross_events;
+    interval->family_transport = trial.statistics.family_transport;
     interval->kinetic_substeps = trial.statistics.kinetic_substeps;
     interval->maximum_kinetic_cfl = trial.statistics.maximum_kinetic_cfl;
-    if (interval->kinetic_substeps > 0)
-    {
+    interval->linear_substeps = trial.statistics.linear_substeps;
+    interval->linear_stages = trial.statistics.linear_stages;
+    interval->maximum_linear_cfl = trial.statistics.maximum_linear_cfl;
+    interval->maximum_linear_stage_residual = trial.statistics.maximum_linear_stage_residual;
+    interval->maximum_linear_step_residual = trial.statistics.maximum_linear_step_residual;
+    if (interval->kinetic_substeps > 0 || interval->linear_substeps > 0)
         interval->local_face_transport = trial.phase_transport;
+    if (interval->kinetic_substeps > 0)
         interval->local_kinetic_law_receipts = trial.kinetic_law_receipts;
-    }
     return interval;
 }
 
@@ -536,6 +541,11 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
             const auto& diagnostics = trial ? trial->statistics : d->diagnostics;
             report.kinetic_substeps = diagnostics.kinetic_substeps;
             report.maximum_kinetic_cfl = diagnostics.maximum_kinetic_cfl;
+            report.linear_substeps = diagnostics.linear_substeps;
+            report.linear_stages = diagnostics.linear_stages;
+            report.maximum_linear_cfl = diagnostics.maximum_linear_cfl;
+            report.maximum_linear_stage_residual = diagnostics.maximum_linear_stage_residual;
+            report.maximum_linear_step_residual = diagnostics.maximum_linear_step_residual;
             if (diagnostics.correctors > 0)
             {
                 auto& convergence = report.convergence.emplace();

@@ -265,13 +265,13 @@ public:
         double material_volume_flux = 0;        ///< Exact owner-oriented m3/s consumed by native work and continuity.
         double derived_mass_flux = 0;           ///< Species rates weighted by molar mass and rounded to double, kg/s.
         Vector derived_drift_momentum_flux{};   ///< Donor drift-weighted mass rate rounded to double, kg m/s2.
-        std::optional<QbmmKineticFaceFlux> kinetic;
+        std::optional<QbmmKineticFaceFlux> kinetic; ///< Directional packet for either explicit family integrator.
         bool operator==(const QbmmFaceFlux&) const = default;
     };
     /** Exact owned-face packet used by the final conservative transport stage.
      * carrier_volume_flux is the STAGE-USED absolute carrier flux, before the last pressure correction.
      * phase_volume_flux contains absolute carrier-plus-phase-slip fluxes, m3/s, for ordinary/native phases.
-     * Kinetic slots use only the directional receipts in qbmm_flux and have zero phase_volume_flux
+     * Explicit family slots use the directional receipts in qbmm_flux and have zero phase_volume_flux
      * and relative_phase_volume_flux entries.
      * material_fraction contains that phase's actual upwind EOS fraction; sums may exceed one in counterflow.
      * Trial::owned_volume_flux() instead contains the FINAL corrected absolute carrier flux.
@@ -287,7 +287,7 @@ public:
         Vector drift_momentum_flux{};  ///< Exact owner-oriented kg m/s2 consumed by native drift-momentum divergence.
         double forward_mass_flux = 0, backward_mass_flux = 0; ///< Directional magnitudes across all physical phases.
         Vector momentum_owner_velocity{},
-            momentum_neighbor_velocity{};        ///< Kinetic implicit carrier solve, before projection.
+            momentum_neighbor_velocity{};        ///< Directional implicit carrier solve, before projection.
         Vector implicit_carrier_momentum_flux{}; ///< Owner-oriented carrier momentum flux from that solve.
         double symmetric_mass_flux = 0;          ///< Counterflow coefficient in the carrier convection solve, kg/s.
         double theta = 0, slip_volume_flux = 0;  ///< Time-averaged physical material coefficients.
@@ -360,6 +360,12 @@ public:
         ///< Fourier operand comparison bound in joules, retained by portable v5 when known.
         int kinetic_substeps = 0; ///< Actual globally synchronized substeps in the final corrector.
         double maximum_kinetic_cfl = 0;
+        QbmmModelOptions::FamilyTransport family_transport = QbmmModelOptions::FamilyTransport::NativeImplicit;
+        int linear_substeps = 0;         ///< Actual globally synchronized SSPRK2 substeps in the final corrector.
+        std::uint64_t linear_stages = 0; ///< Two forward Euler stages per completed substep.
+        double maximum_linear_cfl = 0;
+        double maximum_linear_stage_residual = 0, maximum_linear_step_residual = 0;
+        ///< Local block residuals normalized by the physical conservation gate, reduced over owners.
     };
     enum class QbmmStateKind
     {
@@ -450,8 +456,13 @@ public:
         std::vector<std::vector<double>> local_gross_events; ///< Exact final per-cell corrector packets.
         int kinetic_substeps = 0;
         double maximum_kinetic_cfl = 0;
-        std::vector<PhaseFaceTransport> local_face_transport; ///< Final corrector's kinetic owned-face evidence.
+        std::vector<PhaseFaceTransport> local_face_transport; ///< Final corrector's explicit owned-face evidence.
         std::vector<QbmmKineticLawReceipt> local_kinetic_law_receipts;
+        QbmmModelOptions::FamilyTransport family_transport = QbmmModelOptions::FamilyTransport::NativeImplicit;
+        int linear_substeps = 0;
+        std::uint64_t linear_stages = 0;
+        double maximum_linear_cfl = 0;
+        double maximum_linear_stage_residual = 0, maximum_linear_step_residual = 0;
     };
     struct QbmmConvergenceReport
     {
@@ -489,6 +500,10 @@ public:
         QbmmModelOptions::FamilyTransport family_transport = QbmmModelOptions::FamilyTransport::NativeImplicit;
         int kinetic_substeps = 0; ///< Last interval, including when portable history omits the face receipts.
         double maximum_kinetic_cfl = 0;
+        int linear_substeps = 0; ///< Last interval, including when portable history omits the face receipts.
+        std::uint64_t linear_stages = 0;
+        double maximum_linear_cfl = 0;
+        double maximum_linear_stage_residual = 0, maximum_linear_step_residual = 0;
     };
     class Checkpoint
     {
@@ -617,9 +632,10 @@ public:
     void initialize_qbmm(
         State legacy, const QbmmInitialization& initialization, const ControllerLease* controller = nullptr);
     void initialize(State state, const ControllerLease* controller = nullptr);
-    /** Closed, fixed orthogonal mapped Cartesian/cylindrical meshes. No implicit chemistry ownership.
+    /** Closed, fixed orthogonal mapped meshes. No implicit chemistry ownership.
      * Every corrector starts from the same accepted state; only passing physical gates publishes once.
-     * Face species and phase energy use the exact same implicit upwind carrier-plus-prescribed-slip flux.
+     * Each phase transports species and internal energy together. Explicit QBMM families use the retained
+     * stage-integrated face packets for material pressure work and momentum.
      * Pressure work uses the EOS phase-volume trial; external/chemical transfer packets must exclude it.
      * Mechanical correctors include the actual fixed-packet EOS volume susceptibility. Uniform gauge shifts
      * move into p0 without changing absolute pressure; nonlinear physical continuity/thermal gates still apply.

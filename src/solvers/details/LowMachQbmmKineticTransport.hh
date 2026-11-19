@@ -3,33 +3,13 @@
  */
 #pragma once
 
-#include "equations/details/LowMachScaledFaceSum.hh"
-#include "solvers/LowMachMixtureSolver.hh"
+#include "solvers/details/LowMachQbmmExplicitTransport.hh"
 
 namespace SimpleFluid::Reacting::qbmm_kinetic_detail
 {
-using Flow = LowMachMixtureSolver;
-
-struct SIMPLEFLUID_SOLVERS_LOCAL FaceIntegrals
-{
-    qbmm_face_detail::ScaledFaceSum forward_mass, backward_mass;  ///< Nonnegative kg per direction.
-    std::array<qbmm_face_detail::ScaledFaceSum, 3> drift;         ///< Signed kg m/s in owner orientation.
-    qbmm_face_detail::ScaledFaceSum theta, slip, material_volume; ///< Integrated physical pressure operands.
-};
-
-struct SIMPLEFLUID_SOLVERS_LOCAL TransportResult
-{
-    std::vector<std::vector<Flow::QbmmFaceFlux>> owned_flux;    ///< Physical phase, owned face.
-    std::vector<std::vector<double>> advected_material_volumes; ///< Owned cell, physical phase.
-    std::vector<FaceIntegrals> integrated_faces;                ///< Owned-face order, all kinetic families.
-    std::vector<Flow::QbmmKineticLawReceipt> law_receipts;
-    std::vector<double> substep_durations;
-    int substeps = 0;
-    double maximum_cfl = 0;
-    double maximum_species_residual = 0, maximum_population_residual = 0;
-    double maximum_shape_residual = 0, maximum_energy_residual = 0;
-    double local_caloric_transport_magnitude = 0, local_energy_transport_magnitude = 0;
-};
+using qbmm_explicit_detail::FaceIntegrals;
+using qbmm_explicit_detail::Flow;
+using qbmm_explicit_detail::TransportResult;
 
 /** Updates only the bound families in the private corrector candidate. All
  * ranks take the same substeps. Carrier flux and the thermodynamic guess are

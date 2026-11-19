@@ -3,7 +3,9 @@ set(SIMPLEFLUID_SOLVER_SOURCES
     LowMachQbmmInitialization.cc
     ReactingMixtureCoupler.cc
     details/LowMachFaceTransportAdapter.cc
+    details/LowMachQbmmExplicitTransport.cc
     details/LowMachQbmmKineticTransport.cc
+    details/LowMachQbmmLinearTransport.cc
     explicit_instantiation/LiquidMassInventory.cc
     explicit_instantiation/VolumeContinuityModel.cc
     explicit_instantiation/PlanarALEBoundary.cc

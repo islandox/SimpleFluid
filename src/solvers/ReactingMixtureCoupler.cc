@@ -1020,9 +1020,9 @@ struct ReactingMixtureCoupler::Implementation
                     "Reacting mixture controller requires a mechanism, phases and valid iteration controls.");
                 require((!options.source || !options.source_identity.empty()) && options.source_revision > 0,
                     "A reaction source needs an explicit identity and a positive immutable revision.");
-                require(!uses_qbmm_kinetic_transport(flow->options().qbmm_model) ||
+                require(!uses_qbmm_explicit_transport(flow->options().qbmm_model) ||
                             (!options.planar_motion && !options.body_acceleration),
-                    "Node-dependent slip requires fixed geometry with body acceleration disabled.");
+                    "Explicit QBMM requires fixed geometry with body acceleration disabled.");
                 require(flow->initialized(), "Initialize low-Mach flow before constructing its reaction controller.");
                 if (options.body_acceleration)
                 {
@@ -1264,6 +1264,12 @@ struct ReactingMixtureCoupler::Implementation
                         else
                             signature << ":0:";
                 }
+                if (uses_qbmm_linear_transport(flow->options().qbmm_model))
+                {
+                    const auto& model = flow->options().qbmm_model;
+                    signature << ":realizable-linear-ssprk2:" << qbmm_linear_transport_revision << ':'
+                              << model.linear_cfl << ':' << model.maximum_linear_substeps;
+                }
                 signature << ":qbmm:" << bool(options.qbmm_population);
                 if (options.qbmm_population)
                 {
@@ -1359,6 +1365,7 @@ struct ReactingMixtureCoupler::Implementation
             options.mechanism->reactions().size(), nullptr, &diagnostics};
         lease.emplace(flow->acquire_controller_for(
             schema_signature, legacy_compatible, options.body_acceleration, motion.get(), &restart));
+        diagnostics.flow.family_transport = flow->options().qbmm_model.family_transport;
     }
 
     Diagnostics totals(const std::vector<SpeciesSourceLedger>& ledgers, std::span<const Solver::CellSources> applied,
@@ -1779,7 +1786,7 @@ void ReactingMixtureCoupler::restore(const Checkpoint& checkpoint)
 
 std::vector<std::byte> ReactingMixtureCoupler::serialize_qbmm_restart() const
 {
-    if (!d->motion && !uses_qbmm_kinetic_transport(d->flow->options().qbmm_model))
+    if (!d->motion && !uses_qbmm_explicit_transport(d->flow->options().qbmm_model))
         return d->flow->serialize_qbmm_restart();
     const auto* target = d->options.planar_motion.get();
     const Solver::ControllerRestartDiagnostics diagnostics{d->options.mechanism->reactions().size(), &d->diagnostics};
@@ -1817,6 +1824,7 @@ void ReactingMixtureCoupler::restore_qbmm_checkpoint(
             restored.flow = saved.diagnostics;
         });
     d->flow->restore_qbmm_checkpoint(previous, saved, initialization, &*d->lease);
+    restored.flow.family_transport = d->flow->diagnostics().family_transport;
     d->diagnostics = std::move(restored);
     ++d->generation;
 }

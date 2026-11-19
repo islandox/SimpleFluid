@@ -15,10 +15,13 @@ namespace
 // and accepted aggregate controller diagnostics when available.
 // Version 7 is fixed Cartesian kinetic transport. It binds the substep policy
 // and node laws, and retains endpoint node velocities, drift and interval diagnostics.
+// Version 8 binds the realizable linear SSPRK2 policy and retains interval and
+// controller diagnostics. Only the accepted step boundary is archived.
 constexpr std::uint64_t qbmm_restart_magic = 0x5453524d4d425153ULL;
 constexpr std::uint64_t qbmm_fixed_restart_version = 5;
 constexpr std::uint64_t qbmm_planar_restart_version = 6;
 constexpr std::uint64_t qbmm_kinetic_restart_version = 7;
+constexpr std::uint64_t qbmm_linear_restart_version = 8;
 constexpr size_t restart_word_size = sizeof(std::uint64_t);
 static_assert(sizeof(double) == restart_word_size && std::numeric_limits<double>::is_iec559);
 
@@ -340,7 +343,7 @@ std::uint64_t restart_model_code(const Solver::Options& options)
     switch (model.velocity)
     {
         case QbmmModelOptions::Velocity::SharedCarrier:
-            return 0;
+            return uses_qbmm_linear_transport(model) ? 3 : 0;
         case QbmmModelOptions::Velocity::SuppliedPhaseSlip:
             return 1;
         case QbmmModelOptions::Velocity::NodeDependentSlip:
@@ -388,6 +391,12 @@ void require_uniform_restart_configuration(const Solver::Mesh& mesh, const Solve
             hash.word(model);
             if (uses_qbmm_kinetic_transport(options.qbmm_model))
                 hash.word(restart_kinetic_policy_fingerprint(options));
+            if (uses_qbmm_linear_transport(options.qbmm_model))
+            {
+                hash.word(qbmm_linear_transport_revision);
+                hash.number(options.qbmm_model.linear_cfl);
+                hash.word(options.qbmm_model.maximum_linear_substeps);
+            }
             hash.word(legacy_default_only);
             hash.word(state.qbmm_families.size());
             for (const auto& stamp : state.qbmm_families)
@@ -430,6 +439,9 @@ void restart_diagnostics(Archive& io, Diagnostics& value, size_t phases, size_t 
         io(value.maximum_shape_transport_residual);
     if (version == qbmm_kinetic_restart_version)
         io(value.kinetic_substeps, value.maximum_kinetic_cfl);
+    if (version == qbmm_linear_restart_version)
+        io(value.linear_substeps, value.linear_stages, value.maximum_linear_cfl, value.maximum_linear_stage_residual,
+            value.maximum_linear_step_residual);
 }
 
 void validate_restart_kinetic_diagnostics(const Solver::Options& options, const Solver::Diagnostics& statistics)
@@ -446,6 +458,33 @@ void require_uniform_restart_kinetic_diagnostics(const Solver::Mesh& mesh, const
 {
     collective_detail::require_uniform_value(mesh, statistics.kinetic_substeps, "QBMM restart kinetic substeps");
     collective_detail::require_uniform_value(mesh, statistics.maximum_kinetic_cfl, "QBMM restart maximum kinetic CFL");
+}
+
+void validate_restart_linear_diagnostics(const QbmmModelOptions& model, const Solver::Diagnostics& statistics)
+{
+    const auto in_gate = [](double value, double limit)
+    { return std::isfinite(value) && value >= 0 && value <= limit; };
+    check(statistics.linear_substeps >= 0 && statistics.linear_substeps <= model.maximum_linear_substeps &&
+              statistics.linear_stages == 2 * static_cast<std::uint64_t>(statistics.linear_substeps) &&
+              in_gate(statistics.maximum_linear_cfl, model.linear_cfl) &&
+              in_gate(statistics.maximum_linear_stage_residual, 1.) &&
+              in_gate(statistics.maximum_linear_step_residual, 1.) &&
+              (statistics.linear_substeps > 0
+                      ? statistics.correctors > 0
+                      : statistics.maximum_linear_cfl == 0 && statistics.maximum_linear_stage_residual == 0 &&
+                            statistics.maximum_linear_step_residual == 0),
+        "QBMM restart realizable linear diagnostics disagree with the configured substep policy.");
+}
+
+void require_uniform_restart_linear_diagnostics(const Solver::Mesh& mesh, const Solver::Diagnostics& statistics)
+{
+    collective_detail::require_uniform_value(mesh, statistics.linear_substeps, "QBMM restart linear substeps");
+    collective_detail::require_uniform_value(mesh, statistics.linear_stages, "QBMM restart linear stages");
+    collective_detail::require_uniform_value(mesh, statistics.maximum_linear_cfl, "QBMM restart maximum linear CFL");
+    collective_detail::require_uniform_value(
+        mesh, statistics.maximum_linear_stage_residual, "QBMM restart maximum linear stage residual");
+    collective_detail::require_uniform_value(
+        mesh, statistics.maximum_linear_step_residual, "QBMM restart maximum linear step residual");
 }
 
 template<class Archive, class Diagnostics>
@@ -681,8 +720,11 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
     const auto& mesh = *d->mesh;
     const auto& state = d->accepted;
     const bool kinetic = uses_qbmm_kinetic_transport(d->options.qbmm_model);
+    const bool linear = uses_qbmm_linear_transport(d->options.qbmm_model);
+    const bool explicit_family = kinetic || linear;
     const auto version = motion    ? qbmm_planar_restart_version
                          : kinetic ? qbmm_kinetic_restart_version
+                         : linear  ? qbmm_linear_restart_version
                                    : qbmm_fixed_restart_version;
     collective_detail::require_uniform_value(mesh, version, "QBMM restart encoding version");
     RestartWriter writer;
@@ -699,7 +741,7 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
                 d->validate_planar_checkpoint_provenance(*motion);
                 check(motion->mesh_ptr().get() == d->mesh.get() && !motion->has_active_trial() &&
                           (!d->accepted_planar_motion || d->accepted_planar_motion == motion->d_authority) &&
-                          !d->active_body_acceleration && !kinetic,
+                          !d->active_body_acceleration && !explicit_family,
                     "Planar QBMM restart requires its live idle motion authority and zero supplied body force.");
                 validate_planar_mesh(mesh);
                 motion_configuration =
@@ -731,6 +773,9 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
             writer(model, d->qbmm_legacy_default_only);
             if (kinetic)
                 writer(restart_kinetic_policy_fingerprint(d->options));
+            if (linear)
+                writer(qbmm_linear_transport_revision, d->options.qbmm_model.linear_cfl,
+                    d->options.qbmm_model.maximum_linear_substeps);
             for (const auto& stamp : state.qbmm_families)
             {
                 writer(stamp.has_value());
@@ -788,11 +833,11 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
             restart_qbmm_balances(writer, balances, d->diagnostics, catalog);
             if (balances)
                 writer(d->qbmm_publication->shape_diagnostics_version);
-            if (motion || kinetic)
+            if (motion || explicit_family)
             {
                 const auto start = writer.bytes.size();
                 const auto* saved = controller_diagnostics ? controller_diagnostics->saved : nullptr;
-                if (!saved && kinetic && d->qbmm_publication)
+                if (!saved && explicit_family && d->qbmm_publication)
                     saved = d->qbmm_publication->archived_controller_diagnostics.get();
                 const bool has_history = saved && saved->correctors > 0;
                 writer(has_history);
@@ -805,6 +850,8 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
             }
             if (kinetic)
                 validate_restart_kinetic_diagnostics(d->options, d->diagnostics);
+            if (linear)
+                validate_restart_linear_diagnostics(d->options.qbmm_model, d->diagnostics);
             validate_restart_fourier_uncertainty(d->diagnostics);
             if (const auto uncertainty = d->diagnostics.maximum_fourier_gross_comparison_uncertainty_j)
                 writer(*uncertainty);
@@ -815,12 +862,14 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
         mesh, d->options, d->eos, state, signature, model, d->qbmm_legacy_default_only);
     if (motion)
         require_uniform_restart_wall_interval(mesh, wall_interval);
-    if (motion || kinetic)
+    if (motion || explicit_family)
     {
         collective_detail::require_uniform_value(mesh, controller_history, "QBMM restart controller diagnostics");
     }
     if (kinetic)
         require_uniform_restart_kinetic_diagnostics(mesh, d->diagnostics);
+    if (linear)
+        require_uniform_restart_linear_diagnostics(mesh, d->diagnostics);
     require_uniform_restart_fourier_uncertainty(mesh, d->diagnostics);
     // The local digest includes the rank and its maps; the collective digest
     // also rejects shards accidentally mixed between different saved images.
@@ -849,8 +898,11 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
     require_controller(controller);
     const auto& mesh = *d->mesh;
     const bool kinetic = uses_qbmm_kinetic_transport(d->options.qbmm_model);
+    const bool linear = uses_qbmm_linear_transport(d->options.qbmm_model);
+    const bool explicit_family = kinetic || linear;
     State candidate;
     Diagnostics statistics;
+    statistics.family_transport = d->options.qbmm_model.family_transport;
     std::vector<double> face_flux;
     std::optional<std::uint64_t> controller_signature;
     std::shared_ptr<const QbmmPublication> publication;
@@ -872,7 +924,7 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
                 d->validate_planar_controller_authority(*motion);
                 check(motion->mesh_ptr().get() == d->mesh.get() && !motion->has_active_trial() &&
                           (!d->accepted_planar_motion || d->accepted_planar_motion == motion->d_authority) &&
-                          !d->active_body_acceleration && !kinetic &&
+                          !d->active_body_acceleration && !explicit_family &&
                           d->logical_geometry != std::numeric_limits<std::uint64_t>::max(),
                     "Planar QBMM restart requires its live idle motion authority and zero supplied body force.");
                 validate_planar_mesh(mesh);
@@ -889,6 +941,7 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
             reader(version);
             check(motion    ? version == qbmm_planar_restart_version
                   : kinetic ? version == qbmm_kinetic_restart_version
+                  : linear  ? version == qbmm_linear_restart_version
                             : version >= 1 && version <= qbmm_fixed_restart_version,
                 "QBMM restart version is incompatible with the receiving geometry or transport mode.");
             if (motion)
@@ -935,6 +988,16 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
             if (kinetic)
                 reader.expect(restart_kinetic_policy_fingerprint(d->options),
                     "QBMM restart kinetic CFL, substep cap or ordered node-slip law differs.");
+            if (linear)
+            {
+                reader.expect(qbmm_linear_transport_revision, "QBMM restart linear transport revision differs.");
+                double cfl = 0.;
+                int substeps = 0;
+                reader(cfl, substeps);
+                const auto& linear_model = d->options.qbmm_model;
+                check(cfl == linear_model.linear_cfl && substeps == linear_model.maximum_linear_substeps,
+                    "QBMM restart linear CFL or substep cap differs.");
+            }
             check(!legacy_default_only || !d->controller_active || d->active_legacy_compatible,
                 "Legacy QBMM restart requires default force and constitutive-law configuration.");
             check((!motion && !d->controller_active) || d->active_qbmm_controller == controller_signature,
@@ -1055,19 +1118,19 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
                 metadata->history = QbmmReceiptHistory::UnavailableAfterPortableRestart;
             auto* restored = controller_diagnostics ? controller_diagnostics->restored : nullptr;
             std::shared_ptr<ReactingMixtureCoupler::Diagnostics> archived_controller;
-            if (motion || kinetic)
+            if (motion || explicit_family)
             {
                 const auto before = reader.remaining_size();
                 bool has_history = false;
                 reader(has_history);
                 if (has_history)
                 {
-                    check(controller_signature && (kinetic || restored),
+                    check(controller_signature && (explicit_family || restored),
                         "QBMM restart controller diagnostics require matching reacting authority.");
                     std::optional<size_t> expected_reactions;
                     if (controller_diagnostics)
                         expected_reactions = controller_diagnostics->reaction_count;
-                    if (kinetic)
+                    if (explicit_family)
                         archived_controller = std::make_shared<ReactingMixtureCoupler::Diagnostics>();
                     auto& diagnostics = archived_controller ? *archived_controller : *restored;
                     restart_controller_diagnostics(
@@ -1087,6 +1150,8 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
                 for (const auto& cell : candidate.cells)
                     qbmm_native_law_detail::validate_kinetic_closure(d->options, cell);
             }
+            if (linear)
+                validate_restart_linear_diagnostics(d->options.qbmm_model, statistics);
             if (archived_controller)
             {
                 archived_controller->flow = statistics;
@@ -1108,10 +1173,12 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
     Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &checksum, &actual_image_checksum);
     check(actual_image_checksum == image_checksum, "QBMM restart ranks do not belong to the same saved image.");
     const auto generation = std::max(d->trial_nonce, saved_generation) + 1;
-    if (motion || kinetic)
+    if (motion || explicit_family)
         collective_detail::require_uniform_value(mesh, controller_history, "QBMM restart controller diagnostics");
     if (kinetic)
         require_uniform_restart_kinetic_diagnostics(mesh, statistics);
+    if (linear)
+        require_uniform_restart_linear_diagnostics(mesh, statistics);
     if (motion)
     {
         collective_detail::require_uniform_value(mesh, motion_configuration, "QBMM restart planar configuration");
@@ -1191,8 +1258,8 @@ void LowMachMixtureSolver::restore_qbmm_checkpoint(const LowMachMixtureSolver& p
             model = restart_model_code(d->options);
             check(saved.count_only_body_acceleration == d->active_body_acceleration,
                 "QBMM migration requires the same physical body acceleration, including its opt-in state.");
-            check(!uses_qbmm_kinetic_transport(d->options.qbmm_model) || !saved.count_only_body_acceleration,
-                "Kinetic QBMM migration requires a checkpoint without supplied body acceleration.");
+            check(!uses_qbmm_explicit_transport(d->options.qbmm_model) || !saved.count_only_body_acceleration,
+                "Explicit QBMM migration requires a checkpoint without supplied body acceleration.");
             check(saved.generation != 0 && saved.generation <= prior.trial_nonce &&
                       saved.generation != std::numeric_limits<std::uint64_t>::max() &&
                       std::isfinite(saved.state.time) &&

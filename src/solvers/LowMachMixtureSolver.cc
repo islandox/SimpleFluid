@@ -14,6 +14,7 @@
 #include "solvers/details/LowMachQbmmControllerRestart.hh"
 #include "solvers/details/LowMachQbmmKineticTransport.hh"
 #include "solvers/details/LowMachQbmmLawInputs.hh"
+#include "solvers/details/LowMachQbmmLinearTransport.hh"
 #include "solvers/details/LowMachQbmmState.hh"
 #include "solvers/details/LowMachQbmmTransport.hh"
 #include "solvers/details/LowMachSourceStage.hh"
@@ -475,7 +476,7 @@ struct LowMachMixtureSolver::Implementation
                         "dispersed identities must be explicit.");
                 }
                 qbmm_detail::validate_configuration(options, eos);
-                qbmm_detail::validate_kinetic_mesh(options, *mesh);
+                qbmm_detail::validate_explicit_mesh(options, *mesh);
                 planar_owner = std::make_shared<const ALEGeometryCertificate::OwnerIdentity>();
                 if (!options.qbmm_families.empty())
                     BelosLinearSolver<Pack>::validate_options(options.linear);
@@ -492,6 +493,9 @@ struct LowMachMixtureSolver::Implementation
                     check(owner >= 0 && neighbor >= 0, "An owned low-Mach incidence lacks its adjacent halo cell.");
                     const auto displacement = mesh->cell_center_vector(face, owner);
                     const auto normal = mesh->face_normal(face);
+                    if (uses_qbmm_linear_transport(options.qbmm_model))
+                        check(std::isfinite(displacement.norm()) && displacement.norm() > 0,
+                            "Realizable linear QBMM requires distinct adjacent cell centroids.");
                     check(std::abs(displacement.dot(normal)) >= (1 - 1e-10) * displacement.norm(),
                         "Low-Mach mixture currently requires orthogonal mapped face geometry.");
                 }
@@ -563,6 +567,12 @@ struct LowMachMixtureSolver::Implementation
                 collective_detail::require_uniform_value(*mesh, options.qbmm_model.kinetic_cfl, "Kinetic CFL cap");
                 collective_detail::require_uniform_value(
                     *mesh, options.qbmm_model.maximum_kinetic_substeps, "Kinetic subcycle limit");
+            }
+            if (uses_qbmm_linear_transport(options.qbmm_model))
+            {
+                collective_detail::require_uniform_value(*mesh, options.qbmm_model.linear_cfl, "QBMM linear CFL cap");
+                collective_detail::require_uniform_value(
+                    *mesh, options.qbmm_model.maximum_linear_substeps, "QBMM linear subcycle limit");
             }
             const auto& linear = options.linear;
             collective_detail::require_uniform_value(
@@ -702,6 +712,7 @@ struct LowMachMixtureSolver::Implementation
             stage_publication_fields(state, face_flux);
             publish_staged_fields();
         }
+        statistics.family_transport = options.qbmm_model.family_transport;
         accepted = std::move(state);
         diagnostics = std::move(statistics);
         qbmm_publication = std::move(publication);
@@ -1592,7 +1603,9 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
     std::vector<CellSources> sources;
     const auto& mesh = *d->mesh;
     const bool has_qbmm = !d->options.qbmm_families.empty();
-    const bool kinetic = d->options.qbmm_model.velocity == QbmmModelOptions::Velocity::NodeDependentSlip;
+    const bool kinetic = uses_qbmm_kinetic_transport(d->options.qbmm_model);
+    const bool linear = uses_qbmm_linear_transport(d->options.qbmm_model);
+    const bool explicit_family = kinetic || linear;
     require_controller(controller);
     collective_detail::require_uniform_value(mesh, dt, "Low-Mach mixture timestep");
     collective_detail::require_uniform_value(mesh, int(ale != nullptr), "Low-Mach ALE transport selection");
@@ -1603,8 +1616,9 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
     collective_detail::collective_local_validation(mesh, "Low-Mach mixture step inputs",
         [&]
         {
-            check(!kinetic || (!ale && !d->active_body_acceleration && (!provider || !provider->body_acceleration)),
-                "Node-dependent slip requires a fixed mesh with body acceleration disabled.");
+            check(!explicit_family ||
+                      (!ale && !d->active_body_acceleration && (!provider || !provider->body_acceleration)),
+                "Explicit QBMM requires a fixed mesh with body acceleration disabled.");
             check(!coherent_qbmm || (has_qbmm && controller && controller->reacting_source_authority && provider),
                 "Coherent QBMM sources require the reacting controller and an immutable source provider.");
             check(!has_qbmm || !provider || coherent_qbmm,
@@ -1769,6 +1783,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
         {
             trial = accepted;
             result = {};
+            result.family_transport = d->options.qbmm_model.family_transport;
             result.correctors = iteration + 1;
             pressure_impulse = {};
             double local_caloric_transport = 0, local_energy_transport = 0;
@@ -1791,7 +1806,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             std::vector<std::unique_ptr<VectorField>> drift(np);
             std::vector<std::unique_ptr<FaceField>> phase_flux(np);
             std::vector<std::vector<QbmmFaceFlux>> qbmm_face_flux(np);
-            std::vector<qbmm_kinetic_detail::FaceIntegrals> kinetic_faces;
+            std::vector<qbmm_kinetic_detail::FaceIntegrals> explicit_faces;
             std::vector<double> before(nc), after;
             if (ale)
             {
@@ -1800,16 +1815,28 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         d->trial_flux.set_owned_value(static_cast<LO>(f), ale->face_mesh_fluxes()[f]);
                 d->trial_flux.sync_ghosts();
             }
-            if (kinetic)
+            if (explicit_family)
             {
-                auto transported = qbmm_kinetic_detail::transport(d->mesh, d->options, accepted, thermodynamic_guess,
-                    trial, d->trial_flux, old_volumes, dt, static_cast<size_t>(iteration));
+                const auto transport = linear ? qbmm_linear_detail::transport : qbmm_kinetic_detail::transport;
+                auto transported = transport(d->mesh, d->options, accepted, thermodynamic_guess, trial, d->trial_flux,
+                    old_volumes, dt, static_cast<size_t>(iteration));
                 qbmm_face_flux = std::move(transported.owned_flux);
-                kinetic_faces = std::move(transported.integrated_faces);
+                explicit_faces = std::move(transported.integrated_faces);
                 adv_volumes = std::move(transported.advected_material_volumes);
-                last_kinetic_law_receipts = std::move(transported.law_receipts);
-                result.kinetic_substeps = transported.substeps;
-                result.maximum_kinetic_cfl = transported.maximum_cfl;
+                if (linear)
+                {
+                    result.linear_substeps = transported.substeps;
+                    result.linear_stages = 2 * static_cast<std::uint64_t>(transported.substeps);
+                    result.maximum_linear_cfl = transported.maximum_cfl;
+                    result.maximum_linear_stage_residual = transported.maximum_stage_residual;
+                    result.maximum_linear_step_residual = transported.maximum_step_residual;
+                }
+                else
+                {
+                    last_kinetic_law_receipts = std::move(transported.law_receipts);
+                    result.kinetic_substeps = transported.substeps;
+                    result.maximum_kinetic_cfl = transported.maximum_cfl;
+                }
                 result.maximum_species_transport_residual = transported.maximum_species_residual;
                 result.maximum_population_transport_residual = transported.maximum_population_residual;
                 result.maximum_shape_transport_residual = transported.maximum_shape_residual;
@@ -1819,7 +1846,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             }
             for (size_t a = 0; a < np; ++a)
             {
-                if (kinetic && is_qbmm_bound(a))
+                if (explicit_family && is_qbmm_bound(a))
                     continue;
                 drift[a] = std::make_unique<VectorField>(d->mesh, "phase_drift");
                 phase_flux[a] = std::make_unique<FaceField>(d->mesh, 0.0, "phase_carrier_slip_flux");
@@ -1861,7 +1888,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             for (size_t a = 0; a < np; ++a)
             {
                 const bool qbmm_bound = is_qbmm_bound(a);
-                if (kinetic && qbmm_bound)
+                if (explicit_family && qbmm_bound)
                     continue;
                 if (qbmm_bound || !d->options.use_multi_rhs_transport)
                 {
@@ -2162,11 +2189,12 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         {
                             if (!qbmm_families.empty() && qbmm_families[a])
                                 packet.qbmm_flux[a] = qbmm_face_flux[a][f];
-                            if (kinetic && qbmm_families[a])
+                            if (explicit_family && qbmm_families[a])
                             {
+                                check(packet.qbmm_flux[a]->kinetic.has_value(),
+                                    "Explicit QBMM requires a directional packet on each owned face.");
                                 packet.material_fraction[a] = packet.qbmm_flux[a]->kinetic->theta;
-                                // The tagged kinetic receipt carries two directional streams. These legacy
-                                // scalar slots have no corresponding family advection velocity.
+                                // Explicit-family transfers are represented by their directional packets.
                                 continue;
                             }
                             packet.relative_phase_volume_flux[a] = phase_flux[a]->local_value(face);
@@ -2656,10 +2684,10 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             trial.thermodynamic_pressure = p0;
             std::vector<double> target(nc), volume_susceptibility(nc);
             FaceField material_pressure_rate(
-                d->mesh, 0.0, kinetic ? "kinetic_anchored_material_rate" : "phase_slip_material_volume");
+                d->mesh, 0.0, explicit_family ? "explicit_anchored_material_rate" : "phase_slip_material_volume");
             FaceField carrier_fraction(d->mesh, 0.0, "phase_upwind_carrier_fraction");
             std::optional<FaceField> bidirectional;
-            if (kinetic)
+            if (explicit_family)
                 bidirectional.emplace(d->mesh, 0.0, "opposing_carrier_mass_rates");
             std::array<std::unique_ptr<FaceField>, 3> drift_momentum;
             for (auto& field : drift_momentum)
@@ -2692,7 +2720,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         {
                             auto* packet = qbmm_enabled && receipt.qbmm_flux[a] ? &*receipt.qbmm_flux[a] : nullptr;
                             if (packet && packet->kinetic)
-                                continue; // The integrated kinetic sums below retain all families before rounding.
+                                continue; // The integrated explicit sums retain all bound families before rounding.
                             const double phi = phase_flux[a]->local_value(face);
                             const LO donor = phi >= 0 ? owner : neighbor;
                             const auto donor_drift = drift[a]->local_value(donor);
@@ -2754,11 +2782,11 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         auto effective_slip = slip_rate;
                         effective_slip.add_weighted(pressure_rounding, 1.);
                         double pressure_input = effective_slip.rounded();
-                        if (kinetic)
+                        if (explicit_family)
                         {
                             // Pressure uses the directly accumulated material flux at this corrector's
                             // frozen carrier flux. S remains the physical slip term, even near a kink.
-                            const auto& packet = kinetic_faces[f];
+                            const auto& packet = explicit_faces[f];
                             auto theta = packet.theta, slip = packet.slip, work = packet.material_volume;
                             theta.add_weighted(theta_sum, dt);
                             slip.add_weighted(slip_rate, dt);
@@ -2946,7 +2974,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 },
                 {}, {}, d->options.linear, FVM::NonOrthogonalTreatment::Implicit, ale,
                 bidirectional ? &*bidirectional : nullptr);
-            if (kinetic)
+            if (explicit_family)
                 collective_detail::collective_local_validation(mesh, "Implicit directional carrier momentum receipts",
                     [&]
                     {
@@ -3015,7 +3043,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 });
             const auto projected = [&]
             {
-                if (kinetic)
+                if (explicit_family)
                     return d->pressure->project_kinetic_material_with_eos(d->rho, dt, target, volume_susceptibility,
                         carrier_fraction, material_pressure_rate, d->trial_flux, predictor, d->trial_flux,
                         d->mechanical_pressure, d->u, d->options.linear, d->options.continuity_tolerance);
@@ -3446,9 +3474,8 @@ LowMachMixtureSolver::ControllerLease LowMachMixtureSolver::acquire_controller_f
     collective_detail::collective_local_validation(*d->mesh, "Low-Mach acquire controller",
         [&]
         {
-            check(d->options.qbmm_model.velocity != QbmmModelOptions::Velocity::NodeDependentSlip ||
-                      (!motion && !body_acceleration),
-                "Kinetic QBMM requires a fixed controller with body acceleration disabled.");
+            check(!uses_qbmm_explicit_transport(d->options.qbmm_model) || (!motion && !body_acceleration),
+                "Explicit QBMM requires a fixed controller with body acceleration disabled.");
             check(!motion || (motion->mesh_ptr().get() == d->mesh.get() && !body_acceleration),
                 "Planar controller requires its exact mutable solver mesh and zero supplied body force.");
             check(signature.empty() || !d->accepted_planar_motion ||

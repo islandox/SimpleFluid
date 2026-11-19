@@ -27,8 +27,7 @@ std::shared_ptr<LowMachMixtureSolver::ALEGeometryCertificate> LowMachMixtureSolv
     collective_detail::collective_local_validation(mesh, "Accepted planar geometry authority",
         [&]
         {
-            check(d->options.qbmm_model.velocity != QbmmModelOptions::Velocity::NodeDependentSlip,
-                "Kinetic QBMM requires fixed Cartesian geometry.");
+            check(!uses_qbmm_explicit_transport(d->options.qbmm_model), "Explicit QBMM requires fixed geometry.");
             d->validate_planar_controller_authority(motion);
             check(d->initialized && d->epoch == mesh_geometry_epoch(mesh) && !motion.has_active_trial() &&
                       motion.mesh_ptr().get() == d->mesh.get() &&
@@ -118,6 +117,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_planar_impl(double dt,
                       !motion.has_active_trial(),
                 "Planar preview requires initialized accepted geometry and its explicit idle motion authority.");
             const bool has_qbmm = !d->options.qbmm_families.empty();
+            check(!uses_qbmm_explicit_transport(d->options.qbmm_model), "Explicit QBMM requires fixed geometry.");
             check(!has_qbmm || !provider || coherent_qbmm,
                 "Planar QBMM source providers require the coherent reacting controller.");
             check(!coherent_qbmm || (has_qbmm && controller && controller->reacting_source_authority && provider),

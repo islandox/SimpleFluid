@@ -236,6 +236,8 @@ set(simplefluid_forbidden_api_patterns
     "^SimpleFluid::Reacting::source_stage_detail::"
     "^SimpleFluid::Reacting::history_detail::"
     "^SimpleFluid::Reacting::low_mach_faces::"
+    # Explicit QBMM reconstruction, stage exchange and packet arithmetic are solver implementation details.
+    "^SimpleFluid::Reacting::qbmm_(linear|explicit|kinetic)_detail::"
     "^SimpleFluid::Reacting::population_source_detail::"
     "^SimpleFluid::detail::surface_species::"
     "^SimpleFluid::ClosedMixtureHeadspaceModel::(prospective|recover)[(]"

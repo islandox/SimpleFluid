@@ -21,7 +21,9 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   endif()
   if(TEST_NAME STREQUAL "testLowMachQbmmKineticTransport")
     # Use the production operator with prescribed fluxes and exact donor traces.
-    target_sources(${TEST_NAME} PRIVATE ../details/LowMachQbmmKineticTransport.cc)
+    target_sources(${TEST_NAME} PRIVATE
+      ../details/LowMachQbmmExplicitTransport.cc
+      ../details/LowMachQbmmKineticTransport.cc)
   endif()
   if(TEST_NAME STREQUAL "testVolumeContinuityGeometryAccess")
     target_sources(${TEST_NAME} PRIVATE

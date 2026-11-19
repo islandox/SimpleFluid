@@ -24,14 +24,18 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_configuration(
     const auto& families = options.qbmm_families;
     const auto& model = options.qbmm_model;
     const bool kinetic = uses_qbmm_kinetic_transport(model);
+    const bool linear = uses_qbmm_linear_transport(model);
     require(model.transport.mode == FVM::AssemblyMode::Transient &&
                 model.transport.time == FVM::ScalarTimeScheme::BackwardEuler &&
                 model.transport.convection == FVM::ScalarConvectionScheme::Upwind,
         "Native QBMM transport requires transient backward Euler and first-order upwind.");
-    require(kinetic ? model.velocity == QbmmModelOptions::Velocity::NodeDependentSlip
-                    : model.family_transport == QbmmModelOptions::FamilyTransport::NativeImplicit &&
-                          (model.velocity == QbmmModelOptions::Velocity::SharedCarrier ||
-                              model.velocity == QbmmModelOptions::Velocity::SuppliedPhaseSlip),
+    using Velocity = QbmmModelOptions::Velocity;
+    using FamilyTransport = QbmmModelOptions::FamilyTransport;
+    const bool implicit = model.family_transport == FamilyTransport::NativeImplicit;
+    const bool supported_implicit_velocity =
+        model.velocity == Velocity::SharedCarrier || model.velocity == Velocity::SuppliedPhaseSlip;
+    require((kinetic && model.velocity == Velocity::NodeDependentSlip) ||
+                (linear && model.velocity == Velocity::SharedCarrier) || (implicit && supported_implicit_velocity),
         "Native QBMM requires a compatible family integrator and velocity mode.");
     require(!model.variable_composition && !model.cross_family_coalescence && !model.bulk_gas_conversion,
         "Native QBMM requires fixed family composition and within-family population events.");
@@ -42,6 +46,9 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_configuration(
                           model.kinetic_cfl > 0 && model.kinetic_cfl <= 1 && model.maximum_kinetic_substeps > 0
                     : node_laws.empty(),
         "Kinetic QBMM requires an EOS-indexed node-law layout, a CFL in (0, 1], and a positive substep cap.");
+    require(!linear || (!families.empty() && std::isfinite(model.linear_cfl) && model.linear_cfl > 0 &&
+                           model.linear_cfl <= 0.5 && model.maximum_linear_substeps > 0),
+        "Realizable linear QBMM requires a bound family, a CFL in (0, 0.5], and a positive substep cap.");
     if (families.empty())
         return;
     require(families.size() == eos.size() && options.phase_roles.size() == eos.size(),
@@ -73,23 +80,36 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_configuration(
     }
 }
 
-SIMPLEFLUID_SOLVERS_LOCAL inline void validate_kinetic_mesh(const Flow::Options& options, const Flow::Mesh& mesh)
+SIMPLEFLUID_SOLVERS_LOCAL inline void validate_explicit_mesh(const Flow::Options& options, const Flow::Mesh& mesh)
 {
-    if (!uses_qbmm_kinetic_transport(options.qbmm_model))
+    if (!uses_qbmm_explicit_transport(options.qbmm_model))
         return;
+    const bool linear = uses_qbmm_linear_transport(options.qbmm_model);
     mesh.visit(
-        [](const auto& native)
+        [linear](const auto& native)
         {
             using Native = std::remove_cvref_t<decltype(native)>;
             if constexpr (std::is_same_v<Native, Flow::Mesh::Cartesian>)
             {
                 for (std::size_t axis = 0; axis < 3; ++axis)
                     require(!native.indexer().periodic_dimensions[axis],
-                        "Kinetic QBMM requires closed Cartesian topology.");
+                        "Explicit QBMM requires closed Cartesian topology.");
             }
+            else if constexpr (std::is_same_v<Native, Flow::Mesh::Cylindrical>)
+                require(linear, "Kinetic QBMM requires native Cartesian geometry.");
+            else if constexpr (std::is_same_v<Native, Flow::Mesh::SemiStructured>)
+                require(linear && !native.indexer().axial_periodic,
+                    "Semi-structured explicit QBMM requires realizable linear transport and closed axial topology.");
             else
-                require(false, "Kinetic QBMM requires native Cartesian geometry.");
+                require(false, "Explicit QBMM requires a supported native orthogonal mesh.");
         });
+    if (linear)
+        for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
+        {
+            const auto face = static_cast<Flow::Pack::local_ordinal_type>(f);
+            require(!mesh.is_geometry_exterior_face(face) || mesh.is_boundary_face(face),
+                "Realizable linear QBMM requires physical walls at geometric exterior faces.");
+        }
 }
 
 SIMPLEFLUID_SOLVERS_LOCAL inline void validate_stamps(const Flow::Options& options, const Flow::State& state)
