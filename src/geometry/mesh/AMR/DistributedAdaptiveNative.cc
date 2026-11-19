@@ -429,6 +429,7 @@ namespace SimpleFluid::Meshes::AMR::adaptive_detail
 AdaptiveNativePublicationView NativeSparseAssembler::compatibility(const DistributedAdaptiveHierarchy& hierarchy,
     std::span<const char> schema, std::span<const AdaptiveCellKey> additional)
 {
+    record_pipeline_work(PipelineWork::NativeCompatibilityPublication);
     // This explicit full-validation boundary retains the original owning
     // materializer. It makes no incremental metadata or physical-work claim.
     auto full = assemble_adaptive_native(hierarchy, schema, additional);
@@ -508,9 +509,11 @@ AdaptiveNativePublicationView NativeSparseAssembler::publish(const DistributedAd
                 std::unique(selection.begin(), selection.end(), [](const auto* a, const auto* b) { return *a == *b; }),
                 selection.end());
         });
-    auto full = NativePublicationExchange::fetch(session, hierarchy, selection);
+    NativePublicationExchangeStatistics full_statistics, incidence_statistics, outer_statistics;
+    auto full = NativePublicationExchange::fetch(session, hierarchy, selection, &full_statistics);
     auto numbering = number(session, full);
-    auto incidence = NativePublicationExchange::fetch_incidence(session, hierarchy, full, *numbering);
+    auto incidence = NativePublicationExchange::fetch_incidence(session, hierarchy, full, *numbering,
+        &incidence_statistics);
     geometry_detail::NativeConstructorVector<const AdaptiveCellKey*> outer_keys(a.allocator<const AdaptiveCellKey*>());
     collective(*input.comm,
         [&]
@@ -538,7 +541,13 @@ AdaptiveNativePublicationView NativeSparseAssembler::publish(const DistributedAd
                                  [](const auto* a, const auto* b) { return *a == *b; }),
                 outer_keys.end());
         });
-    auto outer = NativePublicationExchange::fetch(session, hierarchy, outer_keys);
+    auto outer = NativePublicationExchange::fetch(session, hierarchy, outer_keys, &outer_statistics);
+    record_pipeline_work(PipelineWork::NativeRemoteSourceReuse,
+        full_statistics.confirmed_reuse + outer_statistics.confirmed_reuse);
+    record_pipeline_work(PipelineWork::NativeRemoteSourceDecode,
+        full_statistics.full_replies + outer_statistics.full_replies);
+    record_pipeline_work(PipelineWork::NativeRemoteIncidenceReuse, incidence_statistics.incidence_reuse);
+    record_pipeline_work(PipelineWork::NativeRemoteIncidenceDecode, incidence_statistics.incidence_full);
     geometry_detail::NativeConstructorVector<std::shared_ptr<const NativeCellSourceProof>> membership(
         a.allocator<std::shared_ptr<const NativeCellSourceProof>>());
     collective(*input.comm,
@@ -561,6 +570,7 @@ AdaptiveNativePublicationView NativeSparseAssembler::publish(const DistributedAd
             session.stage_numbering(numbering);
             session.stage_result(data, data->payload->mesh->owned_cell_map());
             const PipelineNativeOwnerScope audit(PipelineNativeOwnerStage::Output, operation.geometry_accounting());
+            operation.credit_previous_native_output();
             data->proof_root = NativePublicationOutputGraph::make(data->payload, data->allocation,
                 operation.previous_native_root(), operation.geometry_accounting());
             operation.stage_native_result(data->proof_root);

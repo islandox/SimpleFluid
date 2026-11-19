@@ -1,4 +1,5 @@
 #include "geometry/mesh/AMR/NativeSourceOwnerStore.hh"
+#include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/AMR/NativeContactFunding.hh"
 #include "geometry/mesh/AMR/NativePublicationSession.hh"
@@ -57,7 +58,10 @@ template<bool Publication> bool precharge_halo(void* raw, std::size_t bytes) noe
     auto& budget = *static_cast<Budget*>(raw);
     if (budget.used > budget.limit || bytes > budget.limit - budget.used ||
         bytes > std::numeric_limits<std::size_t>::max() - budget.cumulative)
+    {
+        record_pipeline_budget_rejection({budget.used, bytes, budget.limit, budget.cumulative});
         return false;
+    }
     budget.used += bytes;
     if constexpr (Publication) budget.publication_mirror_live += bytes;
     budget.peak = std::max(budget.peak, budget.used);

@@ -12,7 +12,8 @@ enum class PipelinePhase : unsigned
     Candidate,
     Transport,
     Directory,
-    NativePublication
+    NativePublication,
+    NativeCellRoutes
 };
 /** Event units are individual call sites, not inferred primitive constructions.
  * PLIC geometry_statistics supplies actual nested construction counts. ActiveLeafVisit
@@ -41,10 +42,26 @@ enum class PipelineWork : unsigned
     WireDecodedFamilies,
     WireEncodedProductFrames,
     WireDecodedProductFrames,
+    NativeCompatibilityPublication,
+    NativeExactPartitionBinding,
+    NativeCompatibilityPartitionBinding,
+    NativeSourceProofReuse,
+    NativeSourceProofIssue,
+    NativeIncidenceProofReuse,
+    NativeIncidenceProofIssue,
+    NativeRemoteSourceReuse,
+    NativeRemoteSourceDecode,
+    NativeRemoteIncidenceReuse,
+    NativeRemoteIncidenceDecode,
     Count
 };
 using PipelineWorkObserver = void (*)(void*, PipelineWork, std::size_t) noexcept;
 using PipelinePhaseObserver = void (*)(void*, PipelinePhase) noexcept;
+struct PipelineBudgetRejection
+{
+    std::size_t used, request, limit, cumulative_spent;
+};
+using PipelineBudgetObserver = void (*)(void*, PipelineBudgetRejection) noexcept;
 enum class PipelineNativeOwnerStage { Output, Source, Union };
 struct PipelineNativeOwnerAdmission
 {
@@ -58,6 +75,7 @@ struct PipelineObserver
     void* context = nullptr;
     PipelinePhaseObserver enter = nullptr;
     PipelineWorkObserver work = nullptr;
+    PipelineBudgetObserver reject_budget = nullptr;
     PipelineNativeOwnerObserver native_owner = nullptr;
 };
 /** Registration belongs to the calling thread. Nested registrations and phases
@@ -65,6 +83,7 @@ struct PipelineObserver
 [[nodiscard]] PipelineObserver set_pipeline_observer(PipelineObserver) noexcept;
 [[nodiscard]] PipelinePhase switch_pipeline_phase(PipelinePhase) noexcept;
 void record_pipeline_work(PipelineWork, std::size_t count = 1) noexcept;
+void record_pipeline_budget_rejection(PipelineBudgetRejection) noexcept;
 class PipelinePhaseScope
 {
 public:

@@ -127,7 +127,7 @@ struct AdaptiveGeometrySnapshotCache
             return {};
         return {root, sizeof(*root), GeometrySnapshotAccess::owner_pair(*root)};
     }
-    void record_union_work(const PLIC::details::GeometryOwnerUnionWork& work)
+    void record_union_work(const PLIC::details::GeometryOwnerUnionWork& work) noexcept
     {
         ++union_updates;
         union_work.imported_rows += work.imported_rows;
@@ -2858,6 +2858,8 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
     agree(*data_->comm, std::array<std::uint64_t, 11>{data_->lineage[0], data_->lineage[1],
         std::uint64_t(provenance_kind), provenance.lineage[0], provenance.lineage[1], provenance.publication,
         plan.collective_identity(), plan.global_cells(), plan.global_faces(), plan.global_nodes(), exact_receipt});
+    record_pipeline_work(exact_receipt ? PipelineWork::NativeExactPartitionBinding
+                                       : PipelineWork::NativeCompatibilityPartitionBinding);
     collective(*data_->comm,
         [&]
         {
@@ -5601,6 +5603,11 @@ void record_pipeline_work(PipelineWork work, std::size_t count) noexcept
     if (pipeline_observer.work)
         pipeline_observer.work(pipeline_observer.context, work, count);
 }
+void record_pipeline_budget_rejection(PipelineBudgetRejection value) noexcept
+{
+    if (pipeline_observer.reject_budget)
+        pipeline_observer.reject_budget(pipeline_observer.context, value);
+}
 PipelineNativeOwnerScope::PipelineNativeOwnerScope(
     PipelineNativeOwnerStage stage, PLIC::details::NativeGeometryAccounting& accounting) noexcept
     : stage_(stage), accounting_(accounting)
@@ -5901,6 +5908,12 @@ void NativePublicationOperation::stage_native_result(std::shared_ptr<const Nativ
         throw std::logic_error("Native output root was already staged, locked or absent.");
     staged_native_ = NativeGeometryRootStore::staged(std::move(root));
 }
+void NativePublicationOperation::credit_previous_native_output()
+{
+    if (accepted_native_.binding())
+        accepted_union_.certify_subset(accepted_native_.binding(), accounting_->ordinary(), accounting_->bounded(),
+            accounting_->cursor(), accounting_->limit());
+}
 void NativePublicationOperation::prepare_commit(NativePublicationSession& session)
 {
     if (!staged_native_.root() || token_ || session.admission_.state() != admission_->state() ||
@@ -5909,6 +5922,10 @@ void NativePublicationOperation::prepare_commit(NativePublicationSession& sessio
     session.recheck(*hierarchy_);
     {
         const PipelineNativeOwnerScope audit(PipelineNativeOwnerStage::Source, *accounting_);
+        // Source construction can use the ledger's bounded certificate slots.
+        // Authenticate the accepted source immediately before its incremental edit.
+        accepted_union_.certify_subset(accepted_source_.binding(), accounting_->ordinary(), accounting_->bounded(),
+            accounting_->cursor(), accounting_->limit());
         accepted_union_.import_subset(accepted_source_.binding(), accounting_->ordinary(), accounting_->bounded(),
             accounting_->cursor(), accounting_->limit());
         staged_source_ = NativeSourceOwnerStore::assemble(accepted_source_, accepted_source_.components(),
@@ -5922,7 +5939,7 @@ void NativePublicationOperation::prepare_commit(NativePublicationSession& sessio
             PLIC::details::GeometryOwnerUnion::Replacement{&accepted_native_.binding(), &staged_native_.binding()},
             PLIC::details::GeometryOwnerUnion::Replacement{&accepted_source_.binding(), &staged_source_.binding()}};
         staged_union_ = accepted_union_.staged(replacements, accounting_->ordinary(), accounting_->bounded(),
-            accounting_->cursor(), accounting_->limit());
+            accounting_->cursor(), accounting_->limit(), &union_work_);
         staged_native_.certify(staged_union_, accounting_->ordinary(), accounting_->bounded(),
             accounting_->cursor(), accounting_->limit());
     }
@@ -5968,6 +5985,7 @@ void NativePublicationOperation::commit(NativePublicationSession& session) noexc
     using std::swap;
     swap(cache_->owner_union, staged_union_);
     cache_->seal_residency(cache_->owner_union.resident_bytes());
+    cache_->record_union_work(union_work_);
     ++cache_->revision;
     session.commit_locked();
     committed_ = true;

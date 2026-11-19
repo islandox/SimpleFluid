@@ -120,13 +120,15 @@ template<class Rows, class Key> void strictly_sorted(const Rows& rows, Key key)
 } // namespace
 std::shared_ptr<MultiRegionMesh> NativeSparseAccess::make(NativePublicationSession& session,
     std::shared_ptr<const NativePublicationNumbering> numbering, std::shared_ptr<const NativeSparseFragments> fragments,
-    std::shared_ptr<const NativeSparseNumericIndex> numeric, std::span<const NativeSparseSealedCell> sealed,
+    std::shared_ptr<const NativeSparseNumericIndex> numeric, std::span<const NativePublicationKeyRoute> routes,
+    std::size_t full_cells,
     std::uint64_t global_faces, std::uint64_t global_nodes)
 {
     const auto& admission = session.admission();
     const auto& inputs = session.inputs();
     if (!session.qualified() || !fragments || !numeric || !numbering || !numeric->allocation ||
-        !numeric->allocation->authentic_owner(numeric->allocation) || !numeric->allocation->matches(numeric))
+        !numeric->allocation->authentic_owner(numeric->allocation) || !numeric->allocation->matches(numeric) ||
+        routes.size() != numeric->cells.size())
         throw std::invalid_argument("Unsealed private sparse publication.");
     strictly_sorted(numeric->cells, [](const auto& r) { return r.gid; });
     strictly_sorted(numeric->faces, [](const auto& r) { return r.gid; });
@@ -171,34 +173,43 @@ std::shared_ptr<MultiRegionMesh> NativeSparseAccess::make(NativePublicationSessi
     result.d_sparse_native = index.owner;
     result.d_num_local_cells = result.d_num_owned_cells = result.d_num_owned_faces = 0;
     std::size_t full = 0;
-    for (const auto& cell : numeric->cells)
+    const auto& source_indexes = *session.indexes();
+    for (std::size_t ordinal = 0; ordinal < routes.size(); ++ordinal)
     {
+        const auto& cell = numeric->cells[ordinal];
+        const auto& route = routes[ordinal];
+        const bool owned = cell.owner == inputs.comm->getRank();
         if (cell.gid >= inputs.global_cells || cell.owner < 0 || cell.owner >= inputs.comm->getSize() ||
+            cell.gid != route.gid || route.remote == owned ||
+            (!route.remote && (route.ordinal >= inputs.layout->size() || cell.gid != inputs.cell_begin + route.ordinal)) ||
+            (route.remote && route.ordinal >= source_indexes.remote.size()) ||
             !(cell.volume > 0) || !std::isfinite(cell.volume) ||
             !std::all_of(cell.centroid.begin(), cell.centroid.end(), [](double x) { return std::isfinite(x); }))
             throw std::invalid_argument("Invalid private sparse cell route.");
         if (!cell.full)
         {
-            if (cell.owner == inputs.comm->getRank())
+            if (owned)
                 throw std::invalid_argument("Owned private sparse cell is metric-only.");
             continue;
         }
         ++full;
-        const auto found = std::lower_bound(
-            sealed.begin(), sealed.end(), cell.gid, [](const auto& row, std::uint64_t gid) { return row.gid < gid; });
-        if (found == sealed.end() || found->gid != cell.gid || found->region != cell.region)
+        const auto& key = route.remote ? source_indexes.remote.at_ordinal(route.ordinal)
+                                       : inputs.layout->at_ordinal(route.ordinal).key;
+        const auto* row = source_indexes.find(key);
+        if (!row)
             throw std::invalid_argument("Private sparse cell lacks its Session seal.");
-        const auto& source = found->seal.source();
-        if (&found->seal.incidence().source() != &source || !source.fragment() ||
+        const auto seal = session.seal(row->source, row->incidence);
+        const auto& source = seal.source();
+        if (source.ticket().issuer != cell.owner || !source.fragment() ||
             &source.fragment()->region() != &result.region(cell.region) || source.native_cell() != cell.native_cell ||
             source.metrics().volume != cell.volume || source.metrics().centroid != cell.centroid ||
             cell.native_cell >= result.region_layout(cell.region).cells ||
             index.owner->native_cell({cell.region, cell.native_cell}) != cell.gid)
             throw std::invalid_argument("Private sparse cell/source controls or metrics differ.");
         ++result.d_num_local_cells;
-        result.d_num_owned_cells += cell.owner == inputs.comm->getRank();
+        result.d_num_owned_cells += owned;
     }
-    if (full != sealed.size() || result.d_num_owned_cells != inputs.layout->size())
+    if (full != full_cells || result.d_num_owned_cells != inputs.layout->size())
         throw std::invalid_argument("Private sparse sealed membership differs from current owned layout.");
     for (const auto& node : numeric->nodes)
     {

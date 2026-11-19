@@ -190,7 +190,10 @@ void NativeGeometryRootStore::certify(const PLIC::details::GeometryOwnerUnion& u
     std::size_t limit) const
 {
     if (root_)
+    {
+        union_owners.certify_subset(binding_, ordinary, bounded, used, limit);
         union_owners.import_subset(binding_, ordinary, bounded, used, limit);
+    }
 }
 NativeGeometryRootStore NativeGeometryRootStore::staged(std::shared_ptr<const NativePublicationRoot> root)
 {

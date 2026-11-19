@@ -8,7 +8,9 @@
 #include "geometry/mesh/AMR/NativePublicationSession.hh"
 #include "geometry/mesh/AMR/NativePublicationViewData.hh"
 #include "geometry/mesh/NativeSparseAccess.hh"
+#include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "native_constructor_allocation_operators.inc"
+#include "native_publication_test_helpers.hh"
 #include "parallel/details/NativePartitionAccess.hh"
 #include "parallel/details/NativeTpetraMapAdmission.hh"
 #include "utils/testing_environment.hh"
@@ -29,6 +31,7 @@ namespace
 using namespace SimpleFluid;
 namespace A = Meshes::AMR;
 namespace D = A::adaptive_detail;
+using SimpleFluid::test::native_publication::complete_parity;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 std::shared_ptr<const A::DistributedAdaptiveHierarchy> cartesian(A::AMRGrid grid = {})
 {
@@ -121,8 +124,31 @@ TEST(NativePublicationProducer, QualifiedViewMatchesFullOracleAndWarmPublication
     }
     auto bound = source->with_partition(view.partition(), view.mesh()->owned_cell_map());
     D::GeometrySnapshotAccess::reset_pipeline_geometry_statistics();
+    using Owners = PLIC::details::GeometryAllocationOwnerAccess;
+    Owners::reset_work_statistics();
+    struct Trace
+    {
+        D::PipelineObserver previous = D::set_pipeline_observer({nullptr,
+            [](void*, D::PipelinePhase phase) noexcept
+            { pipeline_trace::phase = static_cast<pipeline_trace::Phase>(phase); }, nullptr});
+        Trace() { pipeline_trace::begin(); }
+        ~Trace()
+        {
+            pipeline_trace::recording.store(false);
+            (void) D::set_pipeline_observer(previous);
+        }
+    } trace;
     const auto warm = A::publish_adaptive_native(*bound, A::native_publication_schema(*bound));
     const auto work = D::GeometrySnapshotAccess::pipeline_geometry_statistics();
+    const auto owner_work = Owners::work_statistics();
+    const auto routes = pipeline_trace::summary().phase[static_cast<unsigned>(pipeline_trace::Phase::NativeCellRoutes)];
+    const pipeline_trace::Pause pause;
+    EXPECT_FALSE(pipeline_trace::overflow.load());
+    EXPECT_EQ(owner_work.import_fallbacks, 0u);
+    EXPECT_EQ(owner_work.import_rows, 0u);
+    EXPECT_EQ(routes.allocations, 2u);
+    EXPECT_EQ(routes.bytes, warm.local_keys().size() * sizeof(Meshes::SparseNativeCell) +
+                                 warm.partition()->plan().cell_ids().size() * sizeof(Meshes::NativeSparseAliasRoute));
     EXPECT_EQ(work.source_imports, 0u);
     EXPECT_EQ(work.constructions, 0u);
     const auto& repeated = *warm.partition()->geometry();
@@ -201,68 +227,6 @@ TEST(NativePublicationProducer, EqualSchemaBytesFromForeignFactoryDoNotGrantAuth
     EXPECT_THROW((void) A::publish_adaptive_native(*first, schema), std::invalid_argument);
 }
 
-void same_bits(double first, double second)
-{
-    EXPECT_EQ(std::bit_cast<std::uint64_t>(first), std::bit_cast<std::uint64_t>(second));
-}
-void same_vector(MeshUtils::Vec3 first, MeshUtils::Vec3 second)
-{
-    same_bits(first.x, second.x);
-    same_bits(first.y, second.y);
-    same_bits(first.z, second.z);
-}
-template<class Range> std::vector<std::uint64_t> ids(const Range& range)
-{
-    return {range.begin(), range.end()};
-}
-void complete_parity(const A::AdaptiveNativePublicationView& view, const A::AdaptiveNativePublication& oracle)
-{
-    const auto& actual = *view.partition()->geometry();
-    const auto& expected = *oracle.partition->geometry();
-    EXPECT_EQ(view.partition()->plan().cell_ids(), oracle.partition->plan().cell_ids());
-    EXPECT_EQ(view.partition()->plan().face_ids(), oracle.partition->plan().face_ids());
-    EXPECT_EQ(view.partition()->plan().node_ids(), oracle.partition->plan().node_ids());
-    for (const auto cell : view.partition()->plan().cell_ids())
-    {
-        EXPECT_EQ(view.local_keys().at(cell), oracle.local_keys.at(cell));
-        EXPECT_EQ(ids(actual.cell_faces(cell)), ids(expected.cell_faces(cell)));
-        EXPECT_EQ(ids(actual.cell_nodes(cell)), ids(expected.cell_nodes(cell)));
-        same_bits(actual.cell_volume(cell), expected.cell_volume(cell));
-        same_vector(actual.cell_centroid(cell), expected.cell_centroid(cell));
-        const auto [ar, ac] = actual.native_cell(cell);
-        const auto [er, ec] = expected.native_cell(cell);
-        EXPECT_EQ(ac, ec);
-        EXPECT_EQ(std::visit([](const auto& r) { return r.name(); }, actual.region(ar)),
-            std::visit([](const auto& r) { return r.name(); }, expected.region(er)));
-    }
-    EXPECT_EQ(actual.boundary_batch_ids(), expected.boundary_batch_ids());
-    for (const auto boundary : actual.boundary_batch_ids())
-        EXPECT_EQ(actual.boundary_batch_name(boundary), expected.boundary_batch_name(boundary));
-    for (const auto face : view.partition()->plan().face_ids())
-    {
-        EXPECT_EQ(ids(actual.face_nodes(face)), ids(expected.face_nodes(face)));
-        EXPECT_EQ(actual.owner_cell(face), expected.owner_cell(face));
-        EXPECT_EQ(actual.neighbor_cell(face), expected.neighbor_cell(face));
-        EXPECT_EQ(actual.boundary_id(face), expected.boundary_id(face));
-        same_bits(actual.face_area(face), expected.face_area(face));
-        same_vector(actual.face_centroid(face), expected.face_centroid(face));
-        same_vector(actual.face_area_vector(face), expected.face_area_vector(face));
-        const auto af = actual.native_face(face), ef = expected.native_face(face);
-        EXPECT_EQ(af.face, ef.face);
-        EXPECT_EQ(std::visit([](const auto& r) { return r.name(); }, actual.region(af.region)),
-            std::visit([](const auto& r) { return r.name(); }, expected.region(ef.region)));
-        same_bits(actual.native_flux_orientation(af, face), expected.native_flux_orientation(ef, face));
-        if (!actual.is_exterior_face(face))
-        {
-            same_vector(actual.cell_center_vector(face, actual.owner_cell(face)),
-                expected.cell_center_vector(face, expected.owner_cell(face)));
-            same_vector(actual.cell_center_vector(face, actual.neighbor_cell(face)),
-                expected.cell_center_vector(face, expected.neighbor_cell(face)));
-        }
-    }
-    for (const auto node : view.partition()->plan().node_ids())
-        same_vector(actual.node_coordinates(node), expected.node_coordinates(node));
-}
 struct Proofs
 {
     std::shared_ptr<const D::NativeCellSourceProof> source;

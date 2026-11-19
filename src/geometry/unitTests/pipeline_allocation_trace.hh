@@ -21,6 +21,7 @@ enum class Phase : unsigned
     Transport,
     Directory,
     NativePublication,
+    NativeCellRoutes,
     Count
 };
 inline constexpr std::size_t phases = static_cast<unsigned>(Phase::Count);

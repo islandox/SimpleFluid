@@ -10,19 +10,12 @@ namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 class NativeSparseAssembler;
 class NativePublicationNumbering;
-struct NativeSparseSealedCell
-{
-    std::uint64_t gid;
-    std::size_t region;
-    NativeSparseSeal seal;
-};
 struct NativeSourceCellFragment
 {
     MultiRegionMesh::Region region;
     geometry_detail::NativeConstructorStorageOwner metadata;
 };
-/** No public SparseNativeMeshInput flags or proof registration exist. This
- * private producer consumes Session-created source/incidence seals only. */
+/** The private producer resolves source/incidence seals from the issuing session. */
 class SIMPLEFLUID_LOCAL NativeSparseAccess final
 {
 public:
@@ -50,7 +43,8 @@ private:
     friend class NativeSparseAssembler;
     [[nodiscard]] static std::shared_ptr<MultiRegionMesh> make(NativePublicationSession&,
         std::shared_ptr<const NativePublicationNumbering>, std::shared_ptr<const NativeSparseFragments>,
-        std::shared_ptr<const NativeSparseNumericIndex>, std::span<const NativeSparseSealedCell>,
+        std::shared_ptr<const NativeSparseNumericIndex>, std::span<const NativePublicationKeyRoute>,
+        std::size_t full_cells,
         std::uint64_t global_faces, std::uint64_t global_nodes);
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

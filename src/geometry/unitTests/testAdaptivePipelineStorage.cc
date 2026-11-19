@@ -40,13 +40,17 @@ using OwnerAccess = SimpleFluid::PLIC::details::GeometryAllocationOwnerAccess;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 inline std::array<std::size_t, static_cast<unsigned>(D::PipelineWork::Count)> pipeline_work{};
 constexpr std::size_t ample = 256 * 1024 * 1024;
-constexpr std::array phase_names{"candidate", "transport", "directory", "native_publication"};
+constexpr std::array phase_names{"candidate", "transport", "directory", "native_publication", "native_cell_routes"};
 constexpr std::array work_names{"active_leaf_callback_visits", "leased_directory_wire_keys", "numeric_output_rows",
     "cell_geometry_requests", "surface_batch_requests", "exact_cell_shell_calls", "native_materialization_requests",
     "native_face_certificate_requests", "ordered_pages_created", "ordered_page_admitted_bytes", "leaf_pages_created",
     "leaf_row_iterator_dereferences", "wire_sent_packets", "wire_received_packets", "wire_sent_payload_bytes",
     "wire_received_payload_bytes", "wire_leaf_encode_visits", "wire_family_encode_visits", "wire_leaf_decode_visits",
-    "wire_family_decode_visits", "wire_product_frame_encode_visits", "wire_product_frame_decode_visits"};
+    "wire_family_decode_visits", "wire_product_frame_encode_visits", "wire_product_frame_decode_visits",
+    "native_compatibility_publications", "native_exact_partition_bindings", "native_compatibility_partition_bindings",
+    "native_source_proof_hits", "native_source_proofs_issued", "native_incidence_proof_hits",
+    "native_incidence_proofs_issued", "native_remote_source_hits", "native_remote_source_decodes",
+    "native_remote_incidence_hits", "native_remote_incidence_decodes"};
 constexpr std::array owner_phase_names{"first_publication", "repeat_publication", "adaptation", "migration",
     "edited_publication", "source_warm", "adapted_warm", "migrated_warm"};
 static_assert(work_names.size() == static_cast<unsigned>(D::PipelineWork::Count));

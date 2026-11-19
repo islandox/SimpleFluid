@@ -503,7 +503,11 @@ std::shared_ptr<const NativeCellSourceProof> NativePublicationSession::source_im
             ((remote_ticket && proof->ticket_ == *remote_ticket) ||
                 (!remote_ticket && proof->ticket_.issuer == inputs_.comm->getRank())))
         {
-            if (proof->binding_->matches(leaf)) return proof;
+            if (proof->binding_->matches(leaf))
+            {
+                record_pipeline_work(PipelineWork::NativeSourceProofReuse);
+                return proof;
+            }
             if (!remote_ticket && proof->fragment_ && proof->binding_->matches(proof->source()) &&
                 product_native_repack_candidate(proof->source(), leaf) &&
                 NativeKernelAuthority::can_rebind_source(inputs_.kernel, proof->source(), leaf))
@@ -639,6 +643,7 @@ std::shared_ptr<const NativeCellSourceProof> NativePublicationSession::source_im
     proof.allocation_ = controlled.envelope;
     auto result = std::shared_ptr<const NativeCellSourceProof>(std::move(controlled.owner));
     replace({result, {}});
+    record_pipeline_work(PipelineWork::NativeSourceProofIssue);
     return result;
 }
 void NativePublicationSession::compact_remote(
@@ -736,7 +741,10 @@ std::shared_ptr<const NativeCellIncidenceProof> NativePublicationSession::incide
         if (accepted->allocation_ && accepted->allocation_->authentic_owner(accepted->allocation_) &&
             accepted->allocation_->matches(accepted) && accepted->pieces_.size() == pieces.size() &&
             std::equal(pieces.begin(), pieces.end(), accepted->pieces_.begin(), same_occurrence))
+        {
+            record_pipeline_work(PipelineWork::NativeIncidenceProofReuse);
             return accepted;
+        }
     }
     auto scratch = geometry_detail::native_constructor_storage(admission_);
     std::vector<Face> outward;
@@ -773,6 +781,7 @@ std::shared_ptr<const NativeCellIncidenceProof> NativePublicationSession::incide
     controlled.owner->allocation_ = controlled.envelope;
     auto result = std::shared_ptr<const NativeCellIncidenceProof>(std::move(controlled.owner));
     replace({source, result});
+    record_pipeline_work(PipelineWork::NativeIncidenceProofIssue);
     return result;
 }
 std::shared_ptr<NativePublicationCache> NativePublicationSession::edited(

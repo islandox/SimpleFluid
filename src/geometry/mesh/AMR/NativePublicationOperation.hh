@@ -24,6 +24,7 @@ public:
     { return accepted_native_.root(); }
     [[nodiscard]] NativeSourceCoverageTransaction& source_coverage_transaction() noexcept { return *coverage_tx_; }
     void prepare_source_coverage();
+    void credit_previous_native_output();
     void stage_native_result(std::shared_ptr<const NativePublicationRoot>);
     /** All throwing work, including lease growth and revision-token acquisition,
      * is finished before the caller's final collective agreement. */
@@ -35,6 +36,7 @@ private:
     std::shared_ptr<const void> source_data_;
     std::shared_ptr<AdaptiveGeometrySnapshotCache> cache_;
     PLIC::details::GeometryOwnerUnion accepted_union_, staged_union_;
+    PLIC::details::GeometryOwnerUnionWork union_work_;
     NativeSourceOwnerStore accepted_source_, staged_source_;
     NativeGeometryRootStore accepted_native_, staged_native_;
     SourceAccountingPartition partition_;

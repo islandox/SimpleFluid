@@ -25,18 +25,11 @@ std::shared_ptr<Budget> scalar_arena(const Admission& a)
 {
     return std::static_pointer_cast<Budget>(std::const_pointer_cast<void>(a.state()->counter_owner));
 }
-struct SourceRoute
+const NativeRemoteSource* find_remote(std::span<const NativeRemoteSource> records, const AdaptiveCellKey& key)
 {
-    std::shared_ptr<const NativeCellSourceProof> source;
-    std::shared_ptr<const NativeCellIncidenceProof> incidence;
-    ID gid = 0;
-    int owner = -1;
-};
-const SourceRoute* find_source(std::span<const SourceRoute> rows, const AdaptiveCellKey& key)
-{
-    const auto at = std::lower_bound(
-        rows.begin(), rows.end(), key, [](const auto& row, const auto& key) { return row.source->source().key < key; });
-    return at == rows.end() || at->source->source().key != key ? nullptr : &*at;
+    const auto at = std::lower_bound(records.begin(), records.end(), key,
+        [](const auto& row, const auto& value) { return row.source->source().key < value; });
+    return at != records.end() && at->source->source().key == key ? &*at : nullptr;
 }
 std::size_t region_ordinal(const NativeSparseFragments& fragments, const NativeFragmentRecord* record)
 {
@@ -60,10 +53,23 @@ std::shared_ptr<NativePublicationViewData> NativeSparseAssembler::assemble(Nativ
     const auto& input = session.inputs();
     if (!numbering || full.size() != remote_incidence.size())
         throw std::invalid_argument("Incomplete private sparse assembler input.");
-    geometry_detail::NativeConstructorVector<SourceRoute> sources(a.allocator<SourceRoute>());
-    geometry_detail::NativeConstructorVector<NativeSparseSealedCell> seals(a.allocator<NativeSparseSealedCell>());
     std::shared_ptr<NativeSparseFragments> fragments;
     std::shared_ptr<NativeSparseNumericIndex> numeric;
+    const auto number_full = input.layout->size() + full.size();
+    const auto& indexes = *session.indexes();
+    const auto visit_full = [&](const auto& visit)
+    {
+        std::uint64_t gid = input.cell_begin;
+        for (const auto& leaf : *input.layout)
+        {
+            const auto* row = indexes.find(leaf.key);
+            if (!row || !row->source || !row->incidence)
+                throw std::invalid_argument("Owned native source has no complete current incidence.");
+            visit(*row->source, gid++, input.comm->getRank());
+        }
+        for (const auto& remote : full)
+            visit(*remote.source, remote.gid, remote.owner);
+    };
     collective(*input.comm,
         [&]
         {
@@ -82,40 +88,25 @@ std::shared_ptr<NativePublicationViewData> NativeSparseAssembler::assemble(Nativ
     collective(*input.comm,
         [&]
         {
-            sources.reserve(input.layout->size() + full.size());
-            std::size_t ordinal = 0;
-            for (const auto& leaf : *input.layout)
-            {
-                const auto proof = session.source(leaf);
-                const auto row = session.indexes()->find(leaf.key);
-                if (!row || !row->incidence)
-                    throw std::invalid_argument("Owned native source has no complete current incidence.");
-                sources.push_back({proof, row->incidence, input.cell_begin + ordinal++, input.comm->getRank()});
-            }
             for (std::size_t i = 0; i < full.size(); ++i)
             {
                 if (!full[i].source || !remote_incidence[i].proof ||
-                    &remote_incidence[i].proof->source() != full[i].source.get())
+                    &remote_incidence[i].proof->source() != full[i].source.get() ||
+                    (i && !(full[i - 1].source->source().key < full[i].source->source().key)))
                     throw std::invalid_argument("Remote native incidence/source controls differ.");
-                sources.push_back({full[i].source, remote_incidence[i].proof, full[i].gid, full[i].owner});
             }
-            std::sort(sources.begin(), sources.end(),
-                [](const auto& a, const auto& b) { return a.source->source().key < b.source->source().key; });
-            for (std::size_t i = 1; i < sources.size(); ++i)
-                if (sources[i - 1].source->source().key == sources[i].source->source().key)
-                    throw std::invalid_argument("Duplicate current full native source.");
-            fragments->route.reserve(sources.size());
-            for (const auto& source : sources)
-            {
-                if (!source.source->fragment())
-                    throw std::invalid_argument("Full source has no detached immutable native fragment.");
-                fragments->route.push_back(source.source->fragment().get());
-                NativeSparseFragments::Row selector{source.source->fragment()};
-                const auto at = NativeSparseFragments::Pages::lower_bound(fragments->root, [&](const auto& row)
-                    { return std::less<const void*>{}(row.fragment.get(), selector.fragment.get()); });
-                if (!at || at->fragment.get() != selector.fragment.get())
-                    fragments->root = fragment_editor.edit(fragments->root, selector, &selector, false);
-            }
+            fragments->route.reserve(number_full);
+            visit_full([&](const NativeCellSourceProof& source, ID, int)
+                {
+                    if (!source.fragment())
+                        throw std::invalid_argument("Full source has no detached immutable native fragment.");
+                    fragments->route.push_back(source.fragment().get());
+                    NativeSparseFragments::Row selector{source.fragment()};
+                    const auto at = NativeSparseFragments::Pages::lower_bound(fragments->root, [&](const auto& row)
+                        { return std::less<const void*>{}(row.fragment.get(), selector.fragment.get()); });
+                    if (!at || at->fragment.get() != selector.fragment.get())
+                        fragments->root = fragment_editor.edit(fragments->root, selector, &selector, false);
+                });
             std::sort(fragments->route.begin(), fragments->route.end(), std::less<const NativeFragmentRecord*>{});
             fragments->route.erase(
                 std::unique(fragments->route.begin(), fragments->route.end()), fragments->route.end());
@@ -127,21 +118,23 @@ std::shared_ptr<NativePublicationViewData> NativeSparseAssembler::assemble(Nativ
                                 std::less<const NativeFragmentRecord*>{}))
                             fragments->root = fragment_editor.edit(fragments->root, row, nullptr, true);
                     });
-            numeric->cells.reserve(sources.size() + outer.size());
-            seals.reserve(sources.size());
-            numeric->native_cells.reserve(sources.size());
-            for (const auto& source : sources)
-            {
-                const auto region = region_ordinal(*fragments, source.source->fragment().get());
-                const auto& metrics = source.source->metrics();
-                numeric->cells.push_back({source.gid, source.owner, region, source.source->native_cell(), true,
-                    metrics.volume, metrics.centroid});
-                numeric->native_cells.push_back({{region, source.source->native_cell()}, source.gid});
-                seals.push_back({source.gid, region, session.seal(source.source, source.incidence)});
-            }
+            const PipelinePhaseScope phase(PipelinePhase::NativeCellRoutes);
+            numeric->cells.reserve(number_full + outer.size());
+            numeric->native_cells.reserve(number_full);
+            visit_full([&](const NativeCellSourceProof& source, ID gid, int owner)
+                {
+                    const auto region = region_ordinal(*fragments, source.fragment().get());
+                    const auto& metrics = source.metrics();
+                    numeric->cells.push_back({gid, owner, region, source.native_cell(), true, metrics.volume,
+                        metrics.centroid});
+                    numeric->native_cells.push_back({{region, source.native_cell()}, gid});
+                });
             for (const auto& metric : outer)
             {
-                if (!metric.source || find_source(sources, metric.source->source().key))
+                if (!metric.source)
+                    throw std::invalid_argument("Outer metric source lacks its current proof.");
+                const auto& key = metric.source->source().key;
+                if (input.layout->contains(key) || find_remote(full, key))
                     throw std::invalid_argument("Outer metric source overlaps full native selection.");
                 const auto& metrics = metric.source->metrics();
                 numeric->cells.push_back({metric.gid, metric.owner, 0, 0, false, metrics.volume, metrics.centroid});
@@ -149,7 +142,6 @@ std::shared_ptr<NativePublicationViewData> NativeSparseAssembler::assemble(Nativ
             std::sort(numeric->cells.begin(), numeric->cells.end(),
                 [](const auto& a, const auto& b) { return a.gid < b.gid; });
             std::sort(numeric->native_cells.begin(), numeric->native_cells.end());
-            std::sort(seals.begin(), seals.end(), [](const auto& a, const auto& b) { return a.gid < b.gid; });
         });
     // Boundary strings are detached admitted owners, created only for newly
     // observed schema names. Every current numeric row borrows those owners.
@@ -326,13 +318,14 @@ std::shared_ptr<NativePublicationViewData> NativeSparseAssembler::assemble(Nativ
                     const auto& route = reply.numeric[slot];
                     auto current_gid = [&](const AdaptiveCellKey& key) -> ID
                     {
-                        if (const auto source = find_source(sources, key))
+                        if (const auto owned = input.layout->ordinal_of(key))
+                            return input.cell_begin + *owned;
+                        if (const auto source = find_remote(full, key))
                             return source->gid;
-                        const auto at = std::lower_bound(outer.begin(), outer.end(), key,
-                            [](const auto& row, const auto& key) { return row.source->source().key < key; });
-                        if (at == outer.end() || at->source->source().key != key)
+                        const auto* source = find_remote(outer, key);
+                        if (!source)
                             throw std::invalid_argument("Remote incidence has no exact current outer membership.");
-                        return at->gid;
+                        return source->gid;
                     };
                     if (route.first_gid != current_gid(tile.first) ||
                         (tile.second ? route.second_gid != current_gid(*tile.second)
@@ -563,12 +556,27 @@ std::shared_ptr<NativePublicationViewData> NativeSparseAssembler::assemble(Nativ
             numbering->fragments = fragments;
             numeric->physical_owners = numbering;
         });
+    geometry_detail::NativeConstructorStorageOwner route_storage;
+    std::vector<NativePublicationKeyRoute> key_routes;
     std::shared_ptr<MultiRegionMesh> geometry;
     collective(*input.comm,
         [&]
         {
-            geometry = NativeSparseAccess::make(
-                session, numbering, fragments, numeric, seals, numbering->global_faces, numbering->global_nodes);
+            route_storage = geometry_detail::native_constructor_storage(a);
+            route_storage.owner->reserve(key_routes, numeric->cells.size());
+            for (std::size_t ordinal = 0; ordinal < input.layout->size(); ++ordinal)
+                key_routes.push_back({input.cell_begin + ordinal, ordinal, false});
+            for (const auto records : {full, outer})
+                for (const auto& row : records)
+                {
+                    const auto ordinal = indexes.remote.ordinal_of(row.source->source().key);
+                    if (!ordinal)
+                        throw std::invalid_argument("Current remote key catalog lacks numeric route.");
+                    key_routes.push_back({row.gid, *ordinal, true});
+                }
+            std::sort(key_routes.begin(), key_routes.end(), [](const auto& a, const auto& b) { return a.gid < b.gid; });
+            geometry = NativeSparseAccess::make(session, numbering, fragments, numeric, key_routes, number_full,
+                numbering->global_faces, numbering->global_nodes);
         });
     geometry_detail::NativeConstructorVector<ID> owned(a.allocator<ID>()), ghosts(a.allocator<ID>());
     collective(*input.comm,
@@ -602,43 +610,13 @@ std::shared_ptr<NativePublicationViewData> NativeSparseAssembler::assemble(Nativ
             data->payload->cell_begin = input.cell_begin;
             data->payload->partition = partition.partition;
             data->payload->mesh = handle;
-            auto storage = geometry_detail::native_constructor_storage(a);
-            storage.owner->reserve(data->payload->keys, numeric->cells.size());
-            for (const auto& cell : numeric->cells)
-            {
-                if (cell.gid >= input.cell_begin && cell.gid - input.cell_begin < input.layout->size())
-                    data->payload->keys.push_back({cell.gid, static_cast<std::size_t>(cell.gid - input.cell_begin), false});
-                else
-                {
-                    const SourceRoute* source = nullptr;
-                    for (const auto& row : sources)
-                        if (row.gid == cell.gid)
-                        {
-                            source = &row;
-                            break;
-                        }
-                    const AdaptiveCellKey* key = source ? &source->source->source().key : nullptr;
-                    if (!key)
-                        for (const auto& row : outer)
-                            if (row.gid == cell.gid)
-                            {
-                                key = &row.source->source().key;
-                                break;
-                            }
-                    if (!key)
-                        throw std::invalid_argument("Numeric cell has no current borrowed key source.");
-                    const auto ordinal = data->payload->remote.ordinal_of(*key);
-                    if (!ordinal)
-                        throw std::invalid_argument("Current remote key catalog lacks numeric route.");
-                    data->payload->keys.push_back({cell.gid, *ordinal, true});
-                }
-            }
+            data->payload->keys = std::move(key_routes);
             // The output graph supplies exact unique physical categories during
             // first/last edits. Numeric routes are separately measured capacities.
             data->payload->summary.scalar_numeric = numeric->storage_bytes();
             // Keep the admitted concrete key-route buffer's receipt alive with the
             // current view. It is never a controller or prior publication capture.
-            data->payload->route_storage = std::move(storage);
+            data->payload->route_storage = std::move(route_storage);
         });
     return data;
 }
