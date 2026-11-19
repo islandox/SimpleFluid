@@ -35,6 +35,11 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       ${TEST_NAME}
       PROPERTIES LABELS "verification\\;integration"
     )
+  elseif(TEST_NAME STREQUAL "testALESpeciesConvergence")
+    simplefluid_discover_tests(
+      ${TEST_NAME}
+      PROPERTIES LABELS "ale\\;reacting_gas\\;convergence\\;roundoff"
+    )
   elseif(TEST_NAME STREQUAL "testBoussinesqPlanarALE")
     simplefluid_discover_tests(
       ${TEST_NAME}

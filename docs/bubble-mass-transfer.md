@@ -8,6 +8,60 @@ whole `population_process` packet and own its constitutive law and event order.
 Enabled setup requires an explicit mechanism/catalog, initial material and counts,
 mixture thermodynamics and per-species properties; it has no heat-yield fallback.
 
+## Composing supplied population laws
+
+[`equations/SpeciesBubbleProcesses.hh`](../src/equations/SpeciesBubbleProcesses.hh)
+provides reusable typed packet builders for `ReactingGasOptions::population_process`:
+
+- `make_nucleation_process` moves explicitly selected species from Dissolved to a
+  named population and pairs the material with a supplied physical number-birth law.
+- `make_population_number_process` supplies count births/deaths when an independent
+  material source or a declared complete-dissolution operator owns those counts.
+- `make_population_dissolution_process` returns every constituent to its own
+  Dissolved inventory and owns proportional count deaths.
+- `make_population_conversion_process` moves every constituent and its physical
+  count between two named populations.
+- `make_film_transfer_process` evaluates supplied per-species `kL` and equilibrium
+  laws using the population's actual area, mixture properties and liquid volume.
+
+`PopulationRate` receives the complete `MultispeciesPopulationContext`. Nucleation
+molar rates use mol/(m3 bulk s), number rates use count/(m3 bulk s), and dissolution
+or conversion frequencies use 1/s. The last two use the exact frozen-coefficient
+fraction `-expm1(-frequency*dt)`. Film coefficients use m/s and equilibrium
+concentrations use mol/m3 actual liquid. IDs are catalog species IDs, independent
+of catalog order. No helper assumes a hydrogen slot or an empirical correlation.
+
+For example, two independently supplied frequencies can be combined as:
+
+```cpp
+using namespace SimpleFluid::BubbleGasPhysics;
+options.population_process = compose_population_processes({
+    make_population_dissolution_process("small", supplied_dissolution_frequency),
+    make_population_conversion_process("small", "upper", supplied_conversion_frequency)});
+```
+
+Every composed process sees the **same chemistry-updated, frozen population
+state**. Composition concatenates original events; it does not replay one helper
+into the next. The enclosing field adapter or
+`advance_multispecies_population_exchange` reserves all original species and
+count donors together. Incoming dissolution, births or conversion cannot fund
+another simultaneous outgoing request. Excessive combined consumption rejects
+atomically; the owner must reduce the interval or supply a different declared
+schedule. A sequential physical schedule requires explicitly advancing and
+reconstructing its intermediate state outside this frozen composition.
+
+Nucleation requires both positive gas and positive count births. An externally
+supplied gas source instead pairs its explicit material input with a number
+process; count events alone create no material. Film preserves count even at
+complete material depletion, which requires a separate explicit death owner.
+The helpers allocate no energy. The caller must declare its thermal ownership
+or approximation; choosing a helper does not establish a phase-energy owner or
+EOS compatibility. The Boussinesq field path owns liquid sensible storage only;
+gas carried enthalpy remains a trace without an extensive gas-energy debit. Coalescence and breakup may
+still use explicit typed packets, or the separate single-species fixed-pivot
+value kernel when its representation applies; these helpers add no mixed-species
+size-grid closure.
+
 `ReactingGasOptions::mass_transfer_mode` selects `Hughmark`,
 `SphericalDiffusion`, `FengMichaelidesClean` or `FengMichaelidesRigid`. The neutral
 database spellings are `hughmark`, `sphericalDiffusion`, `fengMichaelidesClean`

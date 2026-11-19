@@ -7,17 +7,22 @@
  * rollback or MPI work.
  */
 
+#include "solvers/details/ALESpeciesConvergence.hh"
+
 namespace SimpleFluid
 {
 
 /** @brief Own one accepted snapshot and the trial schedule for a planar-ALE step. */
 template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALEStep
 {
+    using GasStateEntry = detail::ale_species::ConvergenceEntry;
+
     /** Preview ownership lasts through commit or internal replay of one corrector. */
     struct TrialState
     {
         std::optional<typename liquid_mass_inventory_type::PhaseChangePreview> temperature_mass_preview;
-        std::vector<scalar_type> next_density_guess, next_heat_capacity_guess, current_gas_state;
+        std::vector<scalar_type> next_density_guess, next_heat_capacity_guess;
+        std::vector<GasStateEntry> current_gas_state;
         std::optional<typename liquid_mass_inventory_type::PhaseChangePreview> liquid_preview;
         std::optional<typename free_surface_model_type::UpdatePreview> surface_preview;
         std::optional<FreeSurfaceAccountingPreview> species_accounting;
@@ -80,7 +85,8 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
     SP<const typename thermal_participant_type::State> accepted_thermal, substep_thermal;
     SP<const typename temperature_equation_type::boundary_cache_type> accepted_thermal_flux;
     std::unique_ptr<field_type> thermal_guess;
-    std::vector<scalar_type> target_guess, density_guess, heat_capacity_guess, previous_gas_state;
+    std::vector<scalar_type> target_guess, density_guess, heat_capacity_guess;
+    std::vector<GasStateEntry> previous_gas_state;
     scalar_type accepted_mesh_level{}, top_area{}, candidate_level{}, mesh_volume_correction_rate{};
     scalar_type last_level_residual{}, last_target_change{}, last_continuity_maximum{};
     scalar_type last_level_tolerance{}, last_target_tolerance{}, last_pool_volume_mismatch{},
@@ -88,6 +94,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
     scalar_type last_material_state_residual{}, last_gas_state_residual{}, last_thermal_state_residual{};
     std::size_t last_local_species_entry = std::numeric_limits<std::size_t>::max();
     scalar_type last_local_species_before{}, last_local_species_after{};
+    long double last_local_species_before_allowance{}, last_local_species_after_allowance{};
     static constexpr scalar_type state_relative_tolerance{1.0e-10};
     std::vector<scalar_type> level_residual_history, target_change_history, continuity_maximum_history;
     std::vector<scalar_type> material_state_residual_history, gas_state_residual_history;
@@ -312,9 +319,9 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
     }
 
     /** @brief Capture authoritative inventory and feedback inputs for nonlinear convergence. */
-    std::vector<scalar_type> capture_gas_state() const
+    std::vector<GasStateEntry> capture_gas_state() const
     {
-        std::vector<scalar_type> state;
+        std::vector<GasStateEntry> state;
         if (coupler.species_surface_enabled())
         {
             const auto& model = *coupler.d_reacting_gas_model;
@@ -405,12 +412,19 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
                 state.push_back(event.interphase_inflow);
                 state.push_back(event.interphase_outflow);
                 state.push_back(event.physical_outflow);
-                state.push_back(event.signed_source_change);
+                // Keep the raw signed receipt. Only its own opposing source operands
+                // establish arithmetic uncertainty; physical escape never contributes.
+                state.emplace_back(event.signed_source_change,
+                    detail::ale_species::source_cancellation_allowance(event));
             }
             for (const auto& event : model.species_subset_source_changes())
             {
                 state.push_back(event.gas_source_moles);
-                state.push_back(event.solution_source_moles);
+                // A sole allowed solution phase is the identical source net. General
+                // multi-phase solution subsets and all gas subsets retain no allowance.
+                state.emplace_back(event.solution_source_moles,
+                    detail::ale_species::solution_subset_cancellation_allowance(
+                        model.options().reaction_mechanism->catalog(), event.species, model.species_step_events()));
             }
             return state;
         }
@@ -708,16 +722,16 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
                     last_local_species_entry = std::numeric_limits<std::size_t>::max();
                     for (std::size_t i = 0; i < trial.current_gas_state.size(); ++i)
                     {
-                        const auto before = previous_gas_state[i], after = trial.current_gas_state[i];
-                        if (!std::isfinite(before) || !std::isfinite(after))
-                            throw std::runtime_error("ALE species/event convergence state is nonfinite.");
-                        const auto scale = std::max(std::abs(before), std::abs(after));
-                        const auto residual = scale == 0 ? scalar_type{} : std::abs(after - before) / scale;
+                        const auto& before = previous_gas_state[i];
+                        const auto& after = trial.current_gas_state[i];
+                        const auto residual = detail::ale_species::relative_change(before, after);
                         if (residual > local)
                         {
                             last_local_species_entry = i;
-                            last_local_species_before = before;
-                            last_local_species_after = after;
+                            last_local_species_before = before.value;
+                            last_local_species_after = after.value;
+                            last_local_species_before_allowance = before.cancellation_allowance;
+                            last_local_species_after_allowance = after.cancellation_allowance;
                         }
                         local = std::max(local, residual);
                     }
@@ -743,9 +757,10 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
             {
                 for (size_t entry = 0; entry < trial.current_gas_state.size(); ++entry)
                 {
-                    const auto scale = std::max({scalar_type{1}, std::abs(previous_gas_state[entry]),
-                        std::abs(trial.current_gas_state[entry])});
-                    const auto residual = std::abs(trial.current_gas_state[entry] - previous_gas_state[entry]) / scale;
+                    const auto scale = std::max({scalar_type{1}, std::abs(previous_gas_state[entry].value),
+                        std::abs(trial.current_gas_state[entry].value)});
+                    const auto residual =
+                        std::abs(trial.current_gas_state[entry].value - previous_gas_state[entry].value) / scale;
                     local[0] = std::max(local[0], residual);
                     const auto field = entry / d_solver.d_mesh->num_owned_cells();
                     local[1 + field] = std::max(local[1 + field], residual);
@@ -1290,7 +1305,9 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
                 << "), thermal-state residual=" << last_thermal_state_residual << " (tolerance=1).";
         if (coupler.species_surface_enabled() && last_local_species_entry != std::numeric_limits<std::size_t>::max())
             message << " Local largest species/event residual at entry " << last_local_species_entry
-                    << ": before=" << last_local_species_before << ", after=" << last_local_species_after << '.';
+                    << ": before=" << last_local_species_before << ", after=" << last_local_species_after
+                    << ", before_cancellation_allowance=" << last_local_species_before_allowance
+                    << ", after_cancellation_allowance=" << last_local_species_after_allowance << '.';
         throw std::runtime_error(message.str());
     }
 

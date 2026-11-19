@@ -62,6 +62,19 @@ does not drive the ALE target or its nonlinear source gate. The independent
 level, exact material-volume packet, continuity and conservation gates remain
 mandatory.
 
+Signed compartment source nets retain their raw receipts. Their nonlinear
+comparison allows at most `epsilon_double` times the sum of that compartment's
+opposing gross chemical, external and interphase source operands per evaluation;
+one-sided sources get no allowance, and physical escape contributes none. The
+same allowance applies to a solution-subset net only when the catalog permits
+exactly one of Liquid/Dissolved, making it identical to its matched species/phase
+compartment. General solution subsets and gas subsets retain the original gate.
+The residual subtracts the two arithmetic allowances from the absolute trial
+change before normalizing by the larger raw magnitude. Stocks, counts, heat and
+gross events keep their original binary64 relative comparison. This comparison
+rule changes no inventory, source, receipt or physical conservation gate and uses
+no unit-dependent absolute floor.
+
 The mirrored `S_alpha_total` is `(alpha_g_final - alpha_g_step_start)/dt` over the
 whole accepted interval, including transport, accepted sources, temperature and
 headspace-pressure refreshes. Intermediate mirrors serve material coupling and do

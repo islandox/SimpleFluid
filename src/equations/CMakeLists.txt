@@ -21,6 +21,7 @@ set(SIMPLEFLUID_EQUATION_SOURCES
     BoussFiniteVapor.cc
     ReactingGasProperties.cc
     BubblePopulationKinetics.cc
+    SpeciesBubbleProcesses.cc
     explicit_instantiation/SolidHeatConductionEquation.cc
     explicit_instantiation/MappedTemperatureDiffusionEquation.cc
     explicit_instantiation/TemperatureFluxResponse.cc

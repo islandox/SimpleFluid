@@ -544,6 +544,37 @@ simplefluid_require_exact_api(
 simplefluid_require_exact_api(
     "^SimpleFluid::BubbleGasPhysics::advance_multispecies_population_exchange[(]SimpleFluid::Reacting::SpeciesCatalog const&, SimpleFluid::Reacting::CellSpeciesState const&, std::(__[0-9]+::)?vector<SimpleFluid::BubbleGasPhysics::PopulationNumberState, .* const&, SimpleFluid::Reacting::ReactionEnvironment const&, SimpleFluid::BubbleGasPhysics::MultispeciesPopulationPacket const&[)]$" 1)
 
+set(simplefluid_stage3_std "std::(__[0-9]+::)?")
+set(simplefluid_surface_string
+    "std::(__[0-9]+::|__cxx11::)?basic_string<char, ${simplefluid_stage3_std}char_traits<char>, ${simplefluid_stage3_std}allocator<char>[ ]*>")
+set(simplefluid_population_process_public_symbol_budget 6)
+set(simplefluid_bubble_ns "SimpleFluid::BubbleGasPhysics::")
+set(simplefluid_bubble_context "${simplefluid_bubble_ns}MultispeciesPopulationContext const&")
+set(simplefluid_bubble_rate "${simplefluid_stage3_std}function<double [(]${simplefluid_bubble_context}[)]>")
+set(simplefluid_bubble_process "${simplefluid_stage3_std}function<${simplefluid_bubble_ns}MultispeciesPopulationPacket [(]${simplefluid_bubble_context}, double[)]>")
+set(simplefluid_bubble_molar_rate "${simplefluid_bubble_ns}SpeciesMolarRate")
+set(simplefluid_bubble_film_law "${simplefluid_bubble_ns}SpeciesFilmLaw")
+foreach(element IN ITEMS process molar_rate film_law)
+    set(element_pattern "${simplefluid_bubble_${element}}")
+    set(simplefluid_bubble_${element}_vector
+        "${simplefluid_stage3_std}vector<${element_pattern}, ${simplefluid_stage3_std}allocator<${element_pattern}[ ]*>[ ]*>")
+endforeach()
+macro(simplefluid_require_population_process name parameters)
+    simplefluid_require_exact_api("^${simplefluid_bubble_ns}${name}[(]" 1)
+    simplefluid_require_exact_api("^${simplefluid_bubble_ns}${name}[(]${parameters}[)]$" 1)
+endmacro()
+simplefluid_require_population_process(compose_population_processes "${simplefluid_bubble_process_vector}")
+simplefluid_require_population_process(make_nucleation_process
+    "${simplefluid_surface_string}, ${simplefluid_bubble_molar_rate_vector}, ${simplefluid_bubble_rate}")
+simplefluid_require_population_process(make_population_number_process
+    "${simplefluid_surface_string}, ${simplefluid_bubble_rate}, ${simplefluid_bubble_rate}")
+simplefluid_require_population_process(make_population_dissolution_process
+    "${simplefluid_surface_string}, ${simplefluid_bubble_rate}")
+simplefluid_require_population_process(make_population_conversion_process
+    "${simplefluid_surface_string}, ${simplefluid_surface_string}, ${simplefluid_bubble_rate}")
+simplefluid_require_population_process(make_film_transfer_process
+    "${simplefluid_surface_string}, ${simplefluid_bubble_film_law_vector}")
+
 # Stage 3 retains exactly 47 public definitions after mesh retirement:
 # LowMachMixtureSolver (19) plus its move-only ControllerLease (5),
 # LowMachPressureEquation (5), ReactingMixtureCoupler including Trial queries
@@ -551,7 +582,6 @@ simplefluid_require_exact_api(
 # Complete/base constructors and nonvirtual destructors each have two entries.
 # Inline trial/checkpoint storage and private implementation helpers are not API.
 set(simplefluid_low_mach_public_symbol_budget 47)
-set(simplefluid_stage3_std "std::(__[0-9]+::)?")
 set(simplefluid_stage3_size "(unsigned long|unsigned long long)")
 set(simplefluid_stage3_native_mesh
     "SimpleFluid::MeshHandle<SimpleFluid::TpetraTypes<.*>[ ]*>")
@@ -835,8 +865,6 @@ simplefluid_require_exact_api(
 simplefluid_require_exact_api(
     "^SimpleFluid::HeadspaceModel::HeadspaceModel[(]SimpleFluid::HeadspaceOptions, SimpleFluid::HeadspaceMetadata[)]$" "1|2")
 simplefluid_require_exact_api("^SimpleFluid::HeadspaceModel::metadata[(][)] const$" 1)
-set(simplefluid_surface_string
-    "std::(__[0-9]+::|__cxx11::)?basic_string<char, ${simplefluid_stage3_std}char_traits<char>, ${simplefluid_stage3_std}allocator<char>[ ]*>")
 set(simplefluid_surface_moles
     "${simplefluid_stage3_std}map<${simplefluid_surface_string}, double, ${simplefluid_stage3_std}less<${simplefluid_surface_string}[ ]*>[ ]*, ${simplefluid_stage3_std}allocator<${simplefluid_stage3_std}pair<${simplefluid_surface_string} const, double>[ ]*>[ ]*>")
 simplefluid_require_exact_api(
@@ -1304,7 +1332,7 @@ math(EXPR simplefluid_retired_mesh_total_symbol_budget
 math(EXPR simplefluid_api_symbol_lower_bound
     "${simplefluid_pre_retirement_api_symbol_lower_bound} - ${simplefluid_retired_mesh_total_symbol_budget}")
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget} - ${simplefluid_retired_mesh_exact_symbol_budget}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_population_process_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget} - ${simplefluid_retired_mesh_exact_symbol_budget}")
 math(EXPR simplefluid_api_symbol_reviewed_maximum
     "${simplefluid_api_symbol_upper_bound} - 3")
 math(EXPR simplefluid_api_symbol_upper_bound
