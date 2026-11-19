@@ -1,12 +1,13 @@
 # QBMM family kernel and native integration contract
 
-The contract below binds phases Q0 through Q6 of [SF-QBMM-CODE-001](qbmm_reacting_bubbles.md)
+The contract below binds phases Q0 through Q7a of [SF-QBMM-CODE-001](qbmm_reacting_bubbles.md)
 to the SimpleFluid source baseline `0029a93f`. The physical assumptions and moment definitions
 are in [SF-QBMM-MODEL-001](../modeling/qbmm_reacting_bubbles.md). Q1 provides local numerical
 operations. Q2 supplies native state ownership, Q3 couples local population sources to the native corrector,
 Q4 transports each family on the fixed mesh, and Q5 exposes endpoint reporting and the coupled
 numerical release gate. Q6 adds explicitly supplied common family slip, body acceleration and
-application-declared constitutive ranges. None of these options changes the defaults.
+application-declared constitutive ranges. Q7a extends the native transport and reacting controller
+to prescribed planar ALE with the same two velocity modes.
 
 ## Source alignment
 
@@ -125,8 +126,8 @@ only after migration succeeds everywhere. Existing shape-bearing states use `ini
 The native preview supports a moving population on a fixed orthogonal mesh; its zero-slip path
 does not require a supplied velocity model. A local source changing a bound family's material, count or shape requires a coherent Q3 packet
 from the reacting controller. Direct fixed energy inputs and material packets for unbound phases
-pass through the native acceptance gates. Only Q6's explicit common phase-slip mode
-extends this baseline; ALE, node slip and higher-order moment advection remain excluded.
+pass through the native acceptance gates. Q6 adds explicit common phase slip. Q7a extends both
+velocity modes to prescribed planar ALE.
 
 The transport snapshot owns pre-source shape, count, moles and the family stamps alongside
 the catalog stamp. A trial owns its candidate, the exact integrated source packets, transport
@@ -299,13 +300,13 @@ fraction and an energy-balanced timestep give no empirical validity range for a 
 
 | Selection | Baseline contract and gate |
 | --- | --- |
-| Native mesh and boundaries | Closed, fixed, supported orthogonal native geometry; common-pressure and equilibrium-temperature EOS. QBMM planar ALE rejects before opening a motion trial. Open-reservoir face transport, moving-mesh remap and interface-resolving evolution have no native QBMM entry point. |
+| Native mesh and boundaries | Closed, supported orthogonal native geometry with common pressure and equilibrium temperature. Prescribed fixed-topology planar ALE supports Cartesian X/Y/Z, cylindrical axial Z on a nonperiodic sector, and `SemiStructuredXY_Z` axial Z. Moving geometry requires nonperiodic topology, zero mixture viscosity and native slip walls. General remap, AMR and open-reservoir face transport are outside this capability. |
 | Velocity and order | `SharedCarrier` (zero slip) by default. `SuppliedPhaseSlip` admits a finite prescribed phase velocity relative to the carrier, common to every node in that phase. Both modes require transient backward Euler and first-order upwind. Node slip, independent momentum, steady assembly, BDF2 and higher-order advection reject at construction. |
-| Gravity and applicability | Fixed grid, optional explicit SI acceleration. EOS density alone does not activate gravity. Reported validity ranges belong to supplied laws; satisfying them is not empirical validation. |
+| Gravity and applicability | Fixed grid admits optional explicit SI acceleration. A moving controller rejects any supplied acceleration, including a supplied zero vector. Reported validity ranges belong to supplied laws; satisfying them is not empirical validation. |
 | Family schema | One named fixed-composition family per dispersed gas phase; catalog, family stamp, reference scale and phase ordering agree on all ranks. Variable composition, cross-family coalescence and unmigrated count-only state reject. |
 | Local material and topology | Constructive paired birth, growth, shrinkage, disappearance, coalescence and breakup; transfers may involve the liquid carrier or a declared external reservoir. Declaring either direction of a family-to-background-gas material slot rejects. Generic chemistry, face transport and interphase laws can act on unbound compartments. A legacy number law must name only unbound populations. Selective or unpaired family material returned by a law rejects the preview. |
 | Thermal and pool closures | Common temperature and pressure, zero surface tension. Separate phase or node temperatures, bulk-gas conversion and capillary/surface-energy closures reject. A separate background gas may carry its own inventory. |
-| Transactions and restart | All owners use a common numerical configuration and controller selection. Commit publishes one retained trial. Rejection preserves accepted canonical state, histories and other compatible previews. Portable restart uses the same geometry, partition, bindings and supplied physics. |
+| Transactions and restart | All owners use a common numerical configuration and controller selection. Commit publishes one retained trial. Rejection preserves accepted canonical state, histories and other compatible previews. Fixed-grid restart reads versions 1–5. Moving restart uses version 6 and binds the original and accepted geometry, motion controls, partition, target policy and supplied physics. |
 
 The release suite follows circulating polydisperse gas across partition faces into exact vacuum,
 combines it with population events, unrelated mole-changing chemistry and heat, and checks the
@@ -409,3 +410,77 @@ and compares the fractional area moment against a two-node population initialize
 the same H0–H3. A separate constant-kernel test checks the bin reference against a discrete
 analytic solution. These tests quantify closure error, not empirical validity of a
 particular growth, collision, breakup, slip or high-void correlation.
+
+## Q7a prescribed planar ALE
+
+For each bound phase the unknowns are extensive species moles, H0, H2, H3 and signed internal
+energy. Let \(w_f\) be the certified swept volume rate, oriented from the face owner. A cell uses
+the same signed face divergence \(D_c\) for every channel. The pre-source stock satisfies
+
+\[
+Q_c^* - Q_c^n + \Delta t\,D_c\!\left[
+(\phi_{\rm carrier}^{\rm abs}+\phi_{p}^{\rm slip}-w)
+(Q^*/V^{n+1})_{\rm up}\right]=0 .
+\]
+
+The native factory assembles the history with \(Q^n/V^n\) and coefficient \(V^n/\Delta t\).
+The new concentration diagonal contains \(V^{n+1}/\Delta t\). All channels advance through the
+same number of positive extensive sweeps, with diagonal
+\(1+\Delta t\sum_f[\sigma_{cf}\phi_{p,f}^{\rm rel}]_+/V_c^{n+1}\).
+The species and moment packets already carry their donor's bulk concentration. Each phase selects
+its donor using its own relative flux. Counterflow therefore preserves the individual upwind
+fractions even when their sum differs from one. Acceptance checks the stored operator residual,
+the cell face balances, all closed inventories, species-derived H1, fixed composition, exact
+absence and four-moment inversion. Transport-law gates use the accepted volume at entry and
+the trial volume at the endpoint.
+
+The motion certificate verifies \(D_c w=(V_c^{n+1}-V_c^n)/\Delta t\). At a closed moving wall
+the absolute carrier flux equals the sweep rate, the wall-normal drift is zero and the relative
+phase transport vanishes. Each phase carries its own advected material volume
+\(W^{\rm adv}_{p,c}=W^n_{p,c}-\Delta t D_c F^V_p\). The flow owner charges pressure work
+\(-p_{p,c}^{\rm abs}(W^{\rm final}_{p,c}-W^{\rm adv}_{p,c})\). With \(\theta\) the sum of
+the upwind phase material fractions, the absolute pressure projection uses the full target
+
+\[
+\frac{\sum_p (W^{\rm final}_{p,c}-W^{\rm adv}_{p,c})}{\Delta t}
++\frac{\sum_p W^n_{p,c}-V_c^{n+1}}{\Delta t}+D_c(\theta w).
+\]
+
+A direct `preview_ale` accepts supported native inputs. The reacting controller evaluates the
+target once per preview and invokes its private coherent source path on live trial geometry.
+Population laws receive the trial location, volume and epoch. Paired population allocations,
+controller ownership and transport-first source convergence use the Q3 rules.
+
+Preview returns with accepted geometry and absolute face flux restored. Its owned certificate
+identifies the creating solver and motion authority, local maps, old and new volumes, swept rates
+and target. These lifetime identities survive reuse of a former object address.
+Trial reports use the retained bulk volumes and geometry epoch. Another preview or rollback
+can change the raw mesh epoch while the accepted generation and the earlier trial remain valid.
+Commit requires collective agreement on the selected preview and exact restaging of its
+certificate. It prepares the field imports and publication before accepting the motion and
+publishes the retained state, absolute flux, diagnostics and interval receipts together.
+Target, thermodynamic and population laws run during preview. Commit replays their retained results.
+
+A motion checkpoint preserves the accepted geometry and native QBMM publication, including
+the controller fingerprint and available interval receipts. The version 6 portable image
+also binds the original reference map, motion axis, deformation start, displacement and
+quality limits, GCL tolerances, accepted surface and deformed edges. For an accepted displacement,
+the image records the prior surface and timestep. The reader reconstructs the previous cap
+position and checks the absolute exterior flux against the resulting wall sweep, including zero
+flux at stationary walls. Before publishing, it checks the receiving EOS and the effective
+mixture viscosity on the restored geometry. After restore, the motion object exposes equal old and
+new control volumes at the restored surface, a zero timestep and zero pending mesh sweep. The solver
+retains the absolute flux from its last accepted physical interval. Fixed-grid controller history and a moving controller’s motion authority
+are distinguished at checkpoint and restart. A newly attached moving controller can export a
+fresh initial condition. After an interval produced on a fixed grid, its first accepted moving
+step establishes the moving history for export. The image retains per-rank
+canonical state, clock, solver diagnostics and absolute face flux, including moving-wall history.
+A controller-written v6 image also preserves the accepted corrector count, reaction extents,
+heat and transfer totals, and per-phase population births, deaths and number changes. Prior raw
+interval receipts remain unavailable on portable restore.
+Direct callers use `serialize_qbmm_restart(motion)` and `restore_qbmm_restart(bytes, motion)`
+for numeric targets. Both overloads also accept a named target identity and positive revision.
+The reacting controller supplies that pair through its own `serialize_qbmm_restart()` and
+`restore_qbmm_restart(bytes)`. Each rank restores its own image with matching owned and overlap
+maps and the same target policy. A new motion authority is constructed
+on the original reference mesh so that its next displacement uses the same deformation map.
