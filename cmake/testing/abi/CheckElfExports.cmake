@@ -886,6 +886,38 @@ foreach(simplefluid_surface_rtti IN ITEMS "typeinfo for" "typeinfo name for" "vt
     simplefluid_require_exact_api("^${simplefluid_surface_rtti} SimpleFluid::ClosedMixtureHeadspaceModel$" 1)
 endforeach()
 
+# QBMM Q1. The public delegating schema constructor needs both compiled ABI
+# entries. Three schema methods, five migrations and five numerical kernels
+# account for the remaining exports. Keep the Reacting namespace exact audit.
+set(simplefluid_qbmm_public_symbol_budget 15)
+set(qbmm_ns "SimpleFluid::Reacting::")
+set(qbmm_schema "${qbmm_ns}QbmmPopulationSchema")
+set(qbmm_block "${simplefluid_stage3_std}array<double, 4u?l*>")
+set(qbmm_fractions
+    "${simplefluid_stage3_std}vector<${qbmm_ns}QbmmMassFraction, ${simplefluid_stage3_std}allocator<${qbmm_ns}QbmmMassFraction>[ ]*>")
+set(qbmm_atom_span "${simplefluid_stage3_std}span<${qbmm_ns}QbmmAtom const, [0-9]+u?l*>")
+set(qbmm_molar_span "${simplefluid_stage3_std}span<${qbmm_ns}QbmmMolarPivot const, [0-9]+u?l*>")
+set(qbmm_stock "${qbmm_schema} const&, double, ${simplefluid_reacting_const_double_span}")
+simplefluid_require_reacting_api(
+    "^${qbmm_schema}::QbmmPopulationSchema[(]${simplefluid_reacting_catalog_pointer_pattern}, ${simplefluid_stage3_size}, ${simplefluid_surface_string}, ${simplefluid_reacting_string_view_pattern}, bool, double, ${qbmm_fractions}, ${qbmm_ns}QbmmClosureVersions[)]$" 2)
+foreach(query IN ITEMS scaled_mass scaled_mass_change)
+    simplefluid_require_reacting_api("^${qbmm_schema}::${query}[(]${simplefluid_reacting_const_double_span}[)] const$" 1)
+endforeach()
+simplefluid_require_reacting_api("^${qbmm_schema}::species_moles[(]double[)] const$" 1)
+simplefluid_require_reacting_api("^${qbmm_ns}qbmm_initialize_monodisperse[(]${qbmm_stock}[)]$" 1)
+simplefluid_require_reacting_api("^${qbmm_ns}qbmm_migrate_mass_pivots[(]${qbmm_stock}, ${qbmm_atom_span}[)]$" 1)
+simplefluid_require_reacting_api("^${qbmm_ns}qbmm_migrate_molar_pivots[(]${qbmm_stock}, ${qbmm_molar_span}[)]$" 1)
+simplefluid_require_reacting_api("^${qbmm_ns}qbmm_convert_molar_moments[(]${qbmm_stock}, ${qbmm_block}[)]$" 1)
+simplefluid_require_reacting_api(
+    "^${qbmm_ns}qbmm_rescale_moments[(]${qbmm_schema} const&, ${qbmm_schema} const&, ${qbmm_block}[)]$" 1)
+simplefluid_require_reacting_api("^${qbmm_ns}qbmm_atom_moments[(]${qbmm_atom_span}[)]$" 1)
+simplefluid_require_reacting_api("^${qbmm_ns}qbmm_cell_moments[(]${qbmm_schema} const&, ${qbmm_ns}QbmmCellView[)]$" 1)
+simplefluid_require_reacting_api("^${qbmm_ns}invert_qbmm_moments[(]${qbmm_block}[)]$" 1)
+simplefluid_require_reacting_api(
+    "^${qbmm_ns}qbmm_geometry[(]${qbmm_schema} const&, ${qbmm_ns}QbmmCellView, double, ${simplefluid_stage3_std}optional<double>[)]$" 1)
+simplefluid_require_reacting_api(
+    "^${qbmm_ns}advance_qbmm_population[(]${qbmm_schema} const&, ${qbmm_ns}CellSpeciesState const&, ${qbmm_ns}QbmmCellView, ${qbmm_ns}QbmmEventBatch const&[)]$" 1)
+
 # Isothermal NOX adds one public context constructor (two Itanium entries) and
 # two virtual hooks. Even private overrides must remain exported: downstream
 # derived-driver vtables refer to them. The custom-driver link test covers this.
@@ -1332,7 +1364,7 @@ math(EXPR simplefluid_retired_mesh_total_symbol_budget
 math(EXPR simplefluid_api_symbol_lower_bound
     "${simplefluid_pre_retirement_api_symbol_lower_bound} - ${simplefluid_retired_mesh_total_symbol_budget}")
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_population_process_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget} - ${simplefluid_retired_mesh_exact_symbol_budget}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_qbmm_public_symbol_budget} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_population_process_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget} - ${simplefluid_retired_mesh_exact_symbol_budget}")
 math(EXPR simplefluid_api_symbol_reviewed_maximum
     "${simplefluid_api_symbol_upper_bound} - 3")
 math(EXPR simplefluid_api_symbol_upper_bound

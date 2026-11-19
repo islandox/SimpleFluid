@@ -22,6 +22,9 @@ set(SIMPLEFLUID_EQUATION_SOURCES
     ReactingGasProperties.cc
     BubblePopulationKinetics.cc
     SpeciesBubbleProcesses.cc
+    QbmmPopulationSchema.cc
+    QbmmInversion.cc
+    QbmmPopulationEvents.cc
     explicit_instantiation/SolidHeatConductionEquation.cc
     explicit_instantiation/MappedTemperatureDiffusionEquation.cc
     explicit_instantiation/TemperatureFluxResponse.cc

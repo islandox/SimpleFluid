@@ -29,6 +29,9 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
          TEST_NAME STREQUAL "testSpeciesBubbleProcesses")
     simplefluid_discover_tests(${TEST_NAME}
       PROPERTIES LABELS "reacting_gas\\;kinetics\\;conservation")
+  elseif(TEST_NAME MATCHES "^testQbmm")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "qbmm\\;reacting_gas\\;conservation")
   else()
     simplefluid_discover_tests(${TEST_NAME})
   endif()
