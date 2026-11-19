@@ -3,10 +3,10 @@
  */
 #pragma once
 #include "FVM/ALEControlVolumeState.hh"
-#include "utils/export_helper.hh"
 #include "fields/MeshFieldTraits.hh"
 #include "geometry/MeshHandle.hh"
 #include "solvers/BelosLinearSolver.hh"
+#include "utils/export_helper.hh"
 #include <memory>
 #include <span>
 
@@ -21,6 +21,11 @@ public:
     using ScalarField = Traits::scalar_cell_type;
     using VectorField = Traits::vector_cell_type;
     using FaceField = Traits::scalar_face_type;
+    enum class CellPressureGradient
+    {
+        HomogeneousNeumann, ///< Default closed-wall cell reconstruction.
+        Interior            ///< Neighbor pressure differences, including at body-forced walls.
+    };
     struct Result
     {
         LinearSolveStatistics linear;
@@ -76,6 +81,17 @@ public:
         const FaceField& predictor_carrier_flux, FaceField& corrected_carrier_flux, ScalarField& mechanical_pressure,
         VectorField& velocity, const LinearSolverOptions& linear = {}, double continuity_tolerance = 1e-10);
 
+    /** Explicit fixed-material cell-gradient policy for a consistently reconstructed body-force predictor.
+     * Changes only the cell velocity correction; face mobility, continuity and pressure gauge are unchanged.
+     * Existing overloads retain their homogeneous-Neumann cell reconstruction.
+     */
+    Result project_material_with_eos(const ScalarField& density, double time_step,
+        std::span<const double> integrated_material_volume_target, std::span<const double> volume_susceptibility,
+        const FaceField& material_carrier_fraction, const FaceField& slip_material_flux,
+        const FaceField& predictor_carrier_flux, FaceField& corrected_carrier_flux, ScalarField& mechanical_pressure,
+        VectorField& velocity, const LinearSolverOptions& linear, double continuity_tolerance,
+        CellPressureGradient cell_gradient);
+
     /** Explicit closed moving-wall variant. The supplied ALE transaction must
      * remain active; physical boundary predictor/corrected ABSOLUTE flux is
      * exactly the owner-oriented mesh swept rate, with zero normal phase slip.
@@ -95,7 +111,8 @@ private:
         bool linearize_eos, const FaceField* material_carrier_fraction, const FaceField* slip_material_flux,
         const FaceField& predictor_flux, FaceField& corrected_flux, ScalarField& mechanical_pressure,
         VectorField& velocity, const LinearSolverOptions& linear, double continuity_tolerance,
-        const FVM::ALEControlVolumeState* ale = nullptr);
+        const FVM::ALEControlVolumeState* ale = nullptr,
+        CellPressureGradient cell_gradient = CellPressureGradient::HomogeneousNeumann);
     struct SIMPLEFLUID_SOLVERS_LOCAL Implementation;
     std::unique_ptr<Implementation> d;
 };

@@ -71,11 +71,20 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_material_ale_wi
         velocity, options, tolerance, &ale);
 }
 
+LowMachPressureEquation::Result LowMachPressureEquation::project_material_with_eos(const ScalarField& rho, double dt,
+    std::span<const double> target, std::span<const double> susceptibility, const FaceField& fraction,
+    const FaceField& slip, const FaceField& predictor, FaceField& corrected, ScalarField& pressure,
+    VectorField& velocity, const LinearSolverOptions& options, double tolerance, CellPressureGradient cell_gradient)
+{
+    return project_impl(rho, dt, target, susceptibility, true, &fraction, &slip, predictor, corrected, pressure,
+        velocity, options, tolerance, nullptr, cell_gradient);
+}
+
 LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const ScalarField& rho, double dt,
     std::span<const double> target, std::span<const double> susceptibility, bool linearize_eos,
     const FaceField* fraction, const FaceField* slip, const FaceField& predictor, FaceField& corrected,
     ScalarField& pressure, VectorField& velocity, const LinearSolverOptions& options, double tolerance,
-    const FVM::ALEControlVolumeState* ale)
+    const FVM::ALEControlVolumeState* ale, CellPressureGradient cell_gradient)
 {
     const auto& mesh = *d->mesh;
     using LO = Pack::local_ordinal_type;
@@ -86,12 +95,17 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
     const bool material = fraction != nullptr;
     collective_detail::require_uniform_value(mesh, int(material), "Low-Mach material flux projection");
     collective_detail::require_uniform_value(mesh, int(ale != nullptr), "Low-Mach moving-wall projection");
+    collective_detail::require_uniform_value(mesh, int(cell_gradient), "Low-Mach cell pressure-gradient policy");
     if (ale)
         ale->validate(mesh, dt); // Collective geometry seam, never inside a local callback fence.
     collective_detail::collective_local_validation(mesh, "Low-Mach pressure inputs",
         [&]
         {
             BelosLinearSolver<Pack>::validate_options(options);
+            if ((cell_gradient != CellPressureGradient::HomogeneousNeumann &&
+                    cell_gradient != CellPressureGradient::Interior) ||
+                (cell_gradient == CellPressureGradient::Interior && (!material || ale)))
+                throw std::invalid_argument("Interior pressure reconstruction requires fixed material projection.");
             if (d->epoch != mesh_geometry_epoch(mesh) || !std::isfinite(dt) || dt <= 0 || !std::isfinite(tolerance) ||
                 tolerance <= 0 || target.size() != mesh.num_owned_cells() ||
                 (linearize_eos && susceptibility.size() != mesh.num_owned_cells()))
@@ -315,10 +329,10 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
     // resolved. An L2 residual allowance of gate/8 also bounds every cell;
     // the independently recomputed physical and linearized gates below still
     // use the original limit. Saturation only makes this allowance stricter.
-    result.linear_rhs_norm_floor = std::min(std::numeric_limits<double>::max(),
-        (continuity_limit / 8) / options.tolerance);
-    result.linear = d->solver.solve_with_statistics(matrix, *rhs, d->correction.owned_data(), options,
-        LinearResidualScaling{result.linear_rhs_norm_floor});
+    result.linear_rhs_norm_floor =
+        std::min(std::numeric_limits<double>::max(), (continuity_limit / 8) / options.tolerance);
+    result.linear = d->solver.solve_with_statistics(
+        matrix, *rhs, d->correction.owned_data(), options, LinearResidualScaling{result.linear_rhs_norm_floor});
     if (!result.linear.converged)
         throw std::runtime_error("Low-Mach pressure failed its true residual gate.");
     d->correction.sync_ghosts();
@@ -384,8 +398,11 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
         throw std::runtime_error("Low-Mach pressure correction fails its linearized continuity residual gate.");
     if (!reactive && result.maximum_continuity_residual > continuity_limit)
         throw std::runtime_error("Low-Mach pressure correction fails physical continuity residual gate.");
-    FVM::cell_gradient(
-        d->correction, BoundaryConditionMap{}, d->gradient, d->gradient_cache, FVM::CellGradientScheme::LeastSquares);
+    if (cell_gradient == CellPressureGradient::Interior)
+        FVM::cell_gradient(d->correction, d->gradient, d->gradient_cache);
+    else
+        FVM::cell_gradient(d->correction, BoundaryConditionMap{}, d->gradient, d->gradient_cache,
+            FVM::CellGradientScheme::LeastSquares);
     d->gradient.sync_ghosts();
     std::vector<double> candidate_pressure(mesh.num_owned_cells());
     std::vector<VectorField::vec_type> candidate_velocity(mesh.num_owned_cells());

@@ -939,6 +939,11 @@ simplefluid_require_reacting_api(
 set(simplefluid_qbmm_transport_public_symbol_budget 1)
 simplefluid_require_reacting_api("^${qbmm_ns}ReactingMixtureCoupler::Trial::owned_phase_transport[(][)] const$" 1)
 
+# Q6's body-forced velocity correction is an explicit fixed-material projection overload.
+math(EXPR simplefluid_qbmm_transport_public_symbol_budget "${simplefluid_qbmm_transport_public_symbol_budget} + 1")
+simplefluid_require_reacting_api(
+    "^${qbmm_ns}LowMachPressureEquation::project_material_with_eos[(]${simplefluid_stage3_scalar_cell} const&, double, ${simplefluid_reacting_const_double_span}, ${simplefluid_reacting_const_double_span}, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face}&, ${simplefluid_stage3_scalar_cell}&, ${simplefluid_stage3_vector_cell}&, SimpleFluid::LinearSolverOptions const&, double, ${qbmm_ns}LowMachPressureEquation::CellPressureGradient[)]$" 1)
+
 # Q5 accepted and trial reporting entry points on the native flow and its controller.
 set(simplefluid_qbmm_report_public_symbol_budget 4)
 foreach(owner IN ITEMS LowMachMixtureSolver ReactingMixtureCoupler)
