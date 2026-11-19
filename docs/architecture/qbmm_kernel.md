@@ -1,13 +1,14 @@
 # QBMM family kernel and native integration contract
 
-The contract below binds phases Q0 through Q7a of [SF-QBMM-CODE-001](qbmm_reacting_bubbles.md)
+The contract below binds phases Q0 through Q7b of [SF-QBMM-CODE-001](qbmm_reacting_bubbles.md)
 to the SimpleFluid source baseline `0029a93f`. The physical assumptions and moment definitions
 are in [SF-QBMM-MODEL-001](../modeling/qbmm_reacting_bubbles.md). Q1 provides local numerical
 operations. Q2 supplies native state ownership, Q3 couples local population sources to the native corrector,
 Q4 transports each family on the fixed mesh, and Q5 exposes endpoint reporting and the coupled
 numerical release gate. Q6 adds explicitly supplied common family slip, body acceleration and
 application-declared constitutive ranges. Q7a extends the native transport and reacting controller
-to prescribed planar ALE with the same two velocity modes.
+to prescribed planar ALE with the same two velocity modes. Q7b adds first-order kinetic transport
+with node-dependent slip on a fixed, closed Cartesian mesh.
 
 ## Source alignment
 
@@ -301,12 +302,12 @@ fraction and an energy-balanced timestep give no empirical validity range for a 
 | Selection | Baseline contract and gate |
 | --- | --- |
 | Native mesh and boundaries | Closed, supported orthogonal native geometry with common pressure and equilibrium temperature. Prescribed fixed-topology planar ALE supports Cartesian X/Y/Z, cylindrical axial Z on a nonperiodic sector, and `SemiStructuredXY_Z` axial Z. Moving geometry requires nonperiodic topology, zero mixture viscosity and native slip walls. General remap, AMR and open-reservoir face transport are outside this capability. |
-| Velocity and order | `SharedCarrier` (zero slip) by default. `SuppliedPhaseSlip` admits a finite prescribed phase velocity relative to the carrier, common to every node in that phase. Both modes require transient backward Euler and first-order upwind. Node slip, independent momentum, steady assembly, BDF2 and higher-order advection reject at construction. |
-| Gravity and applicability | Fixed grid admits optional explicit SI acceleration. A moving controller rejects any supplied acceleration, including a supplied zero vector. Reported validity ranges belong to supplied laws; satisfying them is not empirical validation. |
+| Velocity and order | `SharedCarrier` (zero slip) by default. `SuppliedPhaseSlip` admits a finite prescribed phase velocity relative to the carrier, common to every node in that phase. Both modes use native implicit backward Euler and first-order upwind. On a fixed closed Cartesian mesh, pair `NodeDependentSlip` with `FamilyTransport::KineticEuler`. The background uses transient backward Euler. Independent phase momentum, steady assembly, BDF2 and higher-order advection reject. |
+| Gravity and applicability | Native implicit transport on a fixed grid admits optional SI acceleration. Moving and kinetic controllers require acceleration to be disabled, including when a supplied vector has zero magnitude. Reported validity ranges belong to supplied laws; satisfying them is not empirical validation. |
 | Family schema | One named fixed-composition family per dispersed gas phase; catalog, family stamp, reference scale and phase ordering agree on all ranks. Variable composition, cross-family coalescence and unmigrated count-only state reject. |
 | Local material and topology | Constructive paired birth, growth, shrinkage, disappearance, coalescence and breakup; transfers may involve the liquid carrier or a declared external reservoir. Declaring either direction of a family-to-background-gas material slot rejects. Generic chemistry, face transport and interphase laws can act on unbound compartments. A legacy number law must name only unbound populations. Selective or unpaired family material returned by a law rejects the preview. |
 | Thermal and pool closures | Common temperature and pressure, zero surface tension. Separate phase or node temperatures, bulk-gas conversion and capillary/surface-energy closures reject. A separate background gas may carry its own inventory. |
-| Transactions and restart | All owners use a common numerical configuration and controller selection. Commit publishes one retained trial. Rejection preserves accepted canonical state, histories and other compatible previews. Fixed-grid restart reads versions 1–5. Moving restart uses version 6 and binds the original and accepted geometry, motion controls, partition, target policy and supplied physics. |
+| Transactions and restart | All owners use a common numerical configuration and controller selection. Commit publishes one retained trial. Rejection preserves accepted canonical state, histories and other compatible previews. Fixed-grid restart supports the original version 1–5 modes and version 7 kinetic images. Moving restart uses version 6 and binds the original and accepted geometry, motion controls, partition, target policy and supplied physics. |
 
 The release suite follows circulating polydisperse gas across partition faces into exact vacuum,
 combines it with population events, unrelated mole-changing chemistry and heat, and checks the
@@ -484,3 +485,107 @@ The reacting controller supplies that pair through its own `serialize_qbmm_resta
 `restore_qbmm_restart(bytes)`. Each rank restores its own image with matching owned and overlap
 maps and the same target policy. A new motion authority is constructed
 on the original reference mesh so that its next displacement uses the same deformation map.
+
+## Q7b node-dependent slip on a fixed Cartesian mesh
+
+Select `Velocity::NodeDependentSlip` and `FamilyTransport::KineticEuler` together.
+`Options::qbmm_node_slip_laws` follows physical EOS order. Each bound family supplies one
+immutable `QbmmNodeSlipLaw` matching its schema declaration, identity, revision, units, bases
+and inclusive SI ranges. Every unbound law slot is empty. Omit the initial
+`CellState::drift_velocity` for all-kinetic states. A mixed layout can supply ordinary phase
+drifts in physical order with a zero placeholder at every kinetic slot. The law supplies the carrier-relative vector in m/s for one active atom.
+Its input includes physical mass per bubble, equivalent spherical diameter, donor pressure and
+temperature, and separate family-gas and carrier-liquid concentrations in their EOS volumes.
+The law runs deterministically on the donor owner and makes no MPI calls. It takes no numerical
+timestep. Slip-speed applicability uses the returned vector. Interval applicability uses the
+substep actually taken. An out-of-range `ReportOnly` observation is retained. A failed
+`RejectOutside` gate rejects the entire preview collectively.
+
+### Transport, conservation and pressure work
+
+Use the absolute carrier flux frozen for the current corrector and the face area vector directed
+from the canonical owner cell \(L\) toward its neighbor \(R\). For an atom in donor cell \(d\),
+
+\[
+ g_{d,a}=\phi_{c,f}^{abs}+\mathbf u_{rel,d,a}\cdot\mathbf A_f,\qquad
+ q_{L,a}=\max(g_{L,a},0),\quad q_{R,a}=\min(g_{R,a},0).
+\]
+
+Quadrature indices belong to a single donor reconstruction. Every active direction transfers a
+signed count \(b=h q_{d,a}w_{d,a}/V_d\) using donor **bulk** volume, and carries all these
+extensive quantities together.
+
+| Channel | Signed integrated transfer |
+| --- | --- |
+| Moments of scaled mass \(\xi_a=x_a/x_*\) | \(b(1,\xi_a,\xi_a^2,\xi_a^3)\) |
+| Moles of species \(s\) and physical mass | \(bY_s x_a/W_s\) and \(b x_a\), with species authoritative |
+| Internal energy and material work volume | \(b x_a U_d/M_d\) and \(b x_a/\rho_{p,d}^{EOS}\) |
+| Physical momentum | \(b x_a(\mathbf u_{c,d}+\mathbf u_{rel,d,a})\) |
+
+Coincident presence applies to each directed packet. Opposite streams can cancel any subset of
+the signed face moments. Recover the thermodynamic trace of an arriving phase before using it
+as a donor. Closed boundaries transfer zero material. The source stage sees the final transported
+stocks once per corrector. Interphase exchange and diffusion own their declared enthalpy terms.
+The native work term uses \(-p(W^{final}-W^{adv})\), where \(W^{adv}\) starts from accepted
+material volume and includes the signed volume transfers.
+
+Each substep exchanges owner traces on the one-ring halo, forms canonical face rates and
+returns all outgoing reservations to donor owners. The maximum across owners, families and atoms
+selects one duration \(h\) satisfying
+
+\[
+ C_{c,a}=\sum_{f\in c}h[\sigma_{cf}g_{c,a,f}]_+/V_c
+ \le \mathtt{kinetic\_cfl}\le 1 .
+\]
+
+Owners use the actual fractions to check the positive remainder \((1-C_{c,a})w_{c,a}\).
+Canonical packet incidences update cell stocks before moment inversion and the next owner-law
+evaluation. Zero transfer preserves the original stocks. Full evacuation produces exact absence.
+An empty owner enters each exchange, reduction and failure fence. Rejection on invalid arithmetic,
+lost time progress or exhausted `maximum_kinetic_substeps` preserves the accepted state and
+previously retained valid trials.
+
+For the pressure linearization, each active donor branch contributes
+\(\alpha=w_a x_a/(V_d\rho_{p,d}^{EOS})\) to \(\theta\) and
+\(\alpha\,\mathbf u_{rel,d,a}\cdot\mathbf A_f\) to \(S\). At an exact zero of \(g\), use
+one half of each tied branch in both coefficients. With the corrector carrier flux fixed, the
+substep-time averages satisfy \(\bar F^V=\bar\theta\phi_c+\bar S\) against the direct material
+volume packet. When the binary64 derivative loses precision at the subnormal scale,
+`pressure_rounding_flux` records the coefficient representation correction at the frozen
+carrier flux. The receipt retains the independently accumulated physical slip coefficient.
+The pressure solve evaluates \(F^V(\phi)=F^V(\phi_0)+\bar\theta(\phi-\phi_0)\) using the
+direct all-phase rate at the frozen flux \(\phi_0\). This form preserves a small residual when
+normal carrier and slip terms nearly cancel. A zero represented derivative retains the
+prescribed rate and requires positive EOS susceptibility on every cell for pressure anchoring.
+
+### Momentum, receipts and continuation
+
+Summing both streams across the kinetic and ordinary phases gives nonnegative mass rates
+\(F^+,F^-\). The carrier operator transports \(F^+\mathbf u_L-F^-\mathbf u_R\). Net upwinding
+plus the symmetric two-cell coefficient \(\min(F^+,F^-)\) supplies both contributions, including
+at zero net mass flux. The drift flux uses each atom's own donor slip. For kinetic phases the
+accepted and trial momentum storage includes \(\mathbf D_p=\sum_a w_ax_a\mathbf u_{rel,a}\).
+The endpoint law runs after sources and thermal recovery, outside the pressure root. The
+barycentric velocity is \((M_{tot}\mathbf u_c+\sum_p\mathbf D_p)/M_{tot}\).
+
+In `PhaseFaceTransport`, an engaged `qbmm_flux[p]->kinetic` selects the directional representation.
+Its forward and backward rates retain the canonical face sign. The legacy phase-volume-flux
+slots are zero placeholders for kinetic families. The receipt records the actual pressure
+coefficients and the mixture momentum inputs. The directional `carrier_momentum_flux`
+uses the frozen transport trace. The mixture's `implicit_carrier_momentum_flux` uses the
+solved owner and neighbor velocities before the separate pressure correction. `qbmm_report()` uses the retained endpoint
+closure for drift and barycentric velocity, and reports the final corrector's subcycle count,
+maximum used CFL, atom applicability and directional face evidence when the interval is available.
+
+A checkpoint retains the endpoint closure and historical interval. A portable v7 kinetic image
+binds the numerical method, velocity mode, law metadata, CFL and finite subcycle limit, and
+retains endpoint node velocities and drift momentum for old momentum storage on continuation.
+Commit, restore and reporting use the retained slip closure without invoking its evaluator.
+Portable restore uses the original partition and reports prior raw interval packets as unavailable.
+A fresh native flow can restore an image from a reacting controller and report immediately.
+Attaching the matching controller restores its accepted diagnostics before the next preview.
+The archive binds the endpoint EOS volumes used for applicability and the corresponding
+retained velocities. Hard instantaneous ranges are checked on these operands during restore.
+Earlier portable versions require their original model selections. Prescribed planar ALE, supplied
+body acceleration (including explicit zero), SSPRK2 or BDF2, separate temperatures, variable
+composition, bulk-gas conversion and capillarity remain outside the kinetic admission.
