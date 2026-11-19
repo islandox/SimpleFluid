@@ -77,6 +77,7 @@ struct Specification
     bool phase_slip = true, carrier_motion = false;
     bool stratified = false, single_phase_gas = false;
     std::optional<double> hydrostatic_acceleration;
+    bool planar_motion = false;
 };
 
 struct Fixture
@@ -176,6 +177,8 @@ struct Fixture
             return {};
         const double sign = phase == 1 ? 1 : -1;
         const auto point = mesh->cell_centroid(cell);
+        if (spec.planar_motion && (point.z < .25 || point.z > .75))
+            return {};
         return spec.layout == Layout::Loop ? Flow::Vector{sign * (.5 - point.z), 0, sign * (point.x < .5 ? -.25 : .25)}
                                            : Flow::Vector{0, 0, sign * .125};
     }
@@ -452,7 +455,7 @@ void audit_transport(const Fixture& f, const Flow::Trial& trial, bool require_pa
             const auto last = values(b.moles, *b.population_number, *b.qbmm_shape, b.internal_energy, scale);
             std::copy(first.begin(), first.end(), old_local.begin() + i * channels);
             std::copy(last.begin(), last.end(), now_local.begin() + i * channels);
-            volumes_local[i] = f.mesh->cell_volume(static_cast<LO>(c));
+            volumes_local[i] = snapshot.new_control_volumes[c];
             old_volume_local[i] = std::accumulate(a.phases[p].moles.begin(), a.phases[p].moles.end(), 0.) *
                                   gas_constant * a.phases[p].temperature / a.phases[p].absolute_pressure;
             adv_volume_local[i] = b.advected_material_volume;
@@ -465,8 +468,9 @@ void audit_transport(const Fixture& f, const Flow::Trial& trial, bool require_pa
             const auto flux = values(packet.species_molar_flux, packet.population_number_flux, packet.shape_flux,
                 packet.internal_energy_flux, scale);
             const auto q = receipt.relative_phase_volume_flux[p];
-            EXPECT_EQ(receipt.mesh_volume_flux, 0);
-            EXPECT_EQ(receipt.phase_volume_flux[p], q);
+            if (!f.spec.planar_motion)
+                EXPECT_EQ(receipt.mesh_volume_flux, 0);
+            EXPECT_DOUBLE_EQ(receipt.phase_volume_flux[p] - receipt.mesh_volume_flux, q);
             near_relative(packet.derived_mass_flux, molar_mass[0] * flux[0] + molar_mass[1] * flux[1]);
             EXPECT_EQ(packet.material_volume_flux, q * receipt.material_fraction[p]);
             if (f.mesh->is_geometry_exterior_face(id))
@@ -484,7 +488,8 @@ void audit_transport(const Fixture& f, const Flow::Trial& trial, bool require_pa
             const auto i = f.index(owner), j = f.index(neighbor);
             const auto donor = q >= 0 ? owner : neighbor;
             const auto slip = (f.slip(p, owner) + f.slip(p, neighbor)) * .5;
-            near_relative(q, receipt.carrier_volume_flux + slip.dot(f.mesh->face_area_vector(id)));
+            near_relative(
+                q, receipt.carrier_volume_flux + slip.dot(f.mesh->face_area_vector(id)) - receipt.mesh_volume_flux);
             const auto donor_slip = f.slip(p, donor);
             for (size_t axis = 0; axis < 3; ++axis)
                 near_relative(packet.derived_drift_momentum_flux.component(axis),
@@ -555,7 +560,7 @@ void audit_transport(const Fixture& f, const Flow::Trial& trial, bool require_pa
         const auto cell = static_cast<LO>(c);
         const auto& liquid = snapshot.cells[c].phases[0].moles;
         local_liquid_density[f.index(cell)] =
-            std::inner_product(liquid.begin(), liquid.end(), molar_mass.begin(), 0.) / f.mesh->cell_volume(cell);
+            std::inner_product(liquid.begin(), liquid.end(), molar_mass.begin(), 0.) / snapshot.new_control_volumes[c];
     }
     const auto liquid_density = f.sum(local_liquid_density);
     for (size_t face = 0; face < receipts.size(); ++face)
@@ -626,6 +631,200 @@ TEST(QbmmSlipAndGravity, CounterflowAcrossPartitionsMatchesIndependentTransportA
         accepted.expect_same(*f.flow);
         audit_transport(f, trial, true);
         f.flow->commit(trial);
+    }
+}
+
+TEST(QbmmSlipAndGravity, MovingPartitionCounterflowClosesBackwardEulerReceiptsWorkAndContinuity)
+{
+    const Specification spec{.layout = Layout::Column, .stratified = true, .planar_motion = true};
+    Fixture f(spec);
+    f.check_ownership();
+    Flow::PlanarMotion motion(f.mesh);
+    const auto audit = [&](const Fixture& fixture, const Flow::Trial& trial)
+    {
+        audit_transport(fixture, trial, true);
+        const auto& snapshot = trial.transport_snapshot();
+        const auto& accepted = fixture.flow->state();
+        const auto report = fixture.flow->qbmm_report(trial);
+        Flow::Traits::scalar_face_type corrected(fixture.mesh, 0., "checked_relative_material_flux");
+        double moving_counterflow = 0;
+        for (size_t f = 0; f < trial.owned_phase_transport().size(); ++f)
+        {
+            const auto& face = trial.owned_phase_transport()[f];
+            const LO id = static_cast<LO>(f);
+            if (fixture.mesh->is_geometry_exterior_face(id))
+            {
+                EXPECT_DOUBLE_EQ(trial.owned_volume_flux()[f], face.mesh_volume_flux);
+                for (const auto relative : face.relative_phase_volume_flux)
+                    EXPECT_EQ(relative, 0);
+            }
+            else if (face.relative_phase_volume_flux[1] * face.relative_phase_volume_flux[2] < 0 &&
+                     face.mesh_volume_flux != 0)
+            {
+                const double theta = std::accumulate(face.material_fraction.begin(), face.material_fraction.end(), 0.);
+                if (std::abs(theta - 1) > .01 &&
+                    (fixture.mesh->owned_cell_map()->getComm()->getSize() == 1 ||
+                        static_cast<size_t>(fixture.mesh->owner_cell(id)) >= fixture.mesh->num_owned_cells() ||
+                        static_cast<size_t>(fixture.mesh->neighbor_cell(id)) >= fixture.mesh->num_owned_cells()))
+                    ++moving_counterflow;
+            }
+            double flux = 0;
+            for (size_t p = 0; p < face.material_fraction.size(); ++p)
+                flux += face.material_fraction[p] * (trial.owned_volume_flux()[f] - face.mesh_volume_flux +
+                                                        face.phase_volume_flux[p] - face.carrier_volume_flux);
+            corrected.set_owned_value(id, flux);
+        }
+        corrected.sync_ghosts();
+        EXPECT_GT(fixture.sum(moving_counterflow), 0);
+        double local_work = 0, local_energy = 0, local_continuity_error = 0, local_drift = 0;
+        for (size_t c = 0; c < snapshot.cells.size(); ++c)
+        {
+            const auto& old = accepted.cells[c];
+            const auto& next = trial.state().cells[c];
+            const auto volume = [](const R::PhaseThermalState& phase, size_t p)
+            {
+                return p == 0 ? mass(phase) / liquid_density
+                              : std::accumulate(phase.moles.begin(), phase.moles.end(), 0.) * gas_constant *
+                                    phase.temperature / phase.absolute_pressure;
+            };
+            double initial_volume = 0, work_volume = 0, final_volume = 0;
+            Flow::Vector drift_momentum{};
+            for (size_t p = 0; p < next.phases.size(); ++p)
+            {
+                const double advected = snapshot.cells[c].phases[p].advected_material_volume;
+                const double final = volume(next.phases[p], p);
+                initial_volume += volume(old.phases[p], p);
+                work_volume += advected;
+                final_volume += final;
+                local_work -= next.phases[p].absolute_pressure * (final - advected);
+                local_energy += next.phases[p].internal_energy - old.phases[p].internal_energy;
+                drift_momentum = drift_momentum + next.drift_velocity[p] * mass(next.phases[p]);
+            }
+            const LO cell = static_cast<LO>(c);
+            double divergence = 0;
+            for (size_t f = 0; f < fixture.mesh->num_faces(); ++f)
+            {
+                const LO id = static_cast<LO>(f);
+                if (fixture.mesh->owner_cell(id) == cell)
+                    divergence += corrected.local_value(id);
+                else if (!fixture.mesh->is_geometry_exterior_face(id) && fixture.mesh->neighbor_cell(id) == cell)
+                    divergence -= corrected.local_value(id);
+            }
+            const double v1 = snapshot.new_control_volumes[c];
+            EXPECT_NEAR(final_volume, v1, fixture.options.volume_relative_tolerance * v1);
+            const double expected_divergence = (final_volume - work_volume + initial_volume - v1) / dt;
+            local_continuity_error = std::max(local_continuity_error, std::abs(divergence - expected_divergence));
+            EXPECT_NEAR(divergence, expected_divergence, fixture.options.continuity_tolerance);
+            const auto barycentric = next.velocity + drift_momentum / mass(next);
+            local_drift = std::max(local_drift, std::abs(barycentric.z - next.velocity.z));
+            for (size_t axis = 0; axis < 3; ++axis)
+            {
+                EXPECT_DOUBLE_EQ(report.cells[c].carrier_velocity.component(axis), next.velocity.component(axis));
+                EXPECT_NEAR(report.cells[c].barycentric_velocity.component(axis), barycentric.component(axis), 1e-14);
+            }
+        }
+        EXPECT_GT(fixture.maximum(local_drift), 0);
+        const double work = fixture.sum(local_work);
+        EXPECT_NEAR(trial.diagnostics().pressure_work, work, 1e-8);
+        EXPECT_NEAR(fixture.sum(local_energy), work, trial.diagnostics().internal_energy_roundoff_bound + 1e-7);
+        record("moving_material_continuity_error_m3_s", fixture.maximum(local_continuity_error));
+        record("moving_counterflow_work_error_j", std::abs(trial.diagnostics().pressure_work - work));
+    };
+
+    const auto trial = f.flow->preview_ale(dt, motion, 1.00001);
+    audit(f, trial);
+    f.flow->commit_ale(trial, motion);
+    const auto bytes = f.flow->serialize_qbmm_restart(motion);
+    Fixture restarted(spec);
+    Flow::PlanarMotion fresh_motion(restarted.mesh);
+    restarted.flow->restore_qbmm_restart(bytes, fresh_motion);
+    Endpoint(*f.flow).expect_same(*restarted.flow);
+    const auto second = f.flow->preview_ale(dt, motion, .99999);
+    const auto resumed = restarted.flow->preview_ale(dt, fresh_motion, .99999);
+    audit(f, second);
+    audit(restarted, resumed);
+    f.flow->commit_ale(second, motion);
+    restarted.flow->commit_ale(resumed, fresh_motion);
+    Endpoint(*f.flow).expect_same(*restarted.flow);
+}
+
+TEST(QbmmSlipAndGravity, PlanarMotionRejectsSuppliedGravityAndWallNormalSlip)
+{
+    Fixture f({.layout = Layout::EmptyColumn});
+    f.check_ownership();
+    const Endpoint accepted(*f.flow);
+    for (const Flow::Vector acceleration : {Flow::Vector{}, Flow::Vector{0, 0, -9.81}})
+    {
+        auto controls = f.controller_options(acceleration);
+        int targets = 0;
+        controls.planar_motion = std::make_shared<const R::MixturePlanarMotionProvider>(
+            R::MixturePlanarMotionProvider{f.mesh, {}, "gravity restriction", 1, [&](double, double)
+                {
+                    ++targets;
+                    return 1.01;
+                }});
+        EXPECT_THROW((void) Coupler(f.flow, controls), std::exception);
+        EXPECT_EQ(targets, 0);
+        EXPECT_EQ(f.source_calls, 0);
+        accepted.expect_same(*f.flow);
+    }
+    // The fixed path admits its native phase slip. In the planar path the
+    // same axial drift has a nonzero normal component at both closed end walls.
+    const auto earlier = f.flow->preview(dt);
+    Flow::PlanarMotion motion(f.mesh);
+    EXPECT_THROW((void) f.flow->preview_ale(dt, motion, 1.01), std::exception);
+    EXPECT_FALSE(motion.has_active_trial());
+    accepted.expect_same(*f.flow);
+    f.flow->commit(earlier);
+    EXPECT_EQ(f.flow->state().time, dt);
+}
+
+TEST(QbmmSlipAndGravity, FixedControllerProvenanceRejectsMovingCheckpointAndPortableEncoding)
+{
+    const std::array<std::optional<Flow::Vector>, 3> accelerations{
+        std::nullopt, Flow::Vector{}, Flow::Vector{0, 0, -1}};
+    for (const auto& acceleration : accelerations)
+    {
+        SCOPED_TRACE(acceleration ? acceleration->z : 1.);
+        Fixture f({.layout = Layout::EmptyColumn,
+            .phase_slip = false,
+            .stratified = true,
+            .hydrostatic_acceleration = acceleration ? std::optional<double>(acceleration->z) : std::nullopt});
+        f.check_ownership();
+        Flow::PlanarMotion unrelated(f.mesh);
+        const auto reject_moving_capture = [&]
+        {
+            const Endpoint accepted(*f.flow);
+            const auto archive = f.flow->serialize_qbmm_restart();
+            const auto epoch = f.mesh->geometry_epoch();
+            const int calls = f.source_calls;
+            EXPECT_THROW((void) f.flow->checkpoint(unrelated), std::exception);
+            EXPECT_THROW((void) f.flow->serialize_qbmm_restart(unrelated), std::exception);
+            EXPECT_FALSE(unrelated.has_active_trial());
+            EXPECT_EQ(f.mesh->geometry_epoch(), epoch);
+            EXPECT_EQ(f.source_calls, calls);
+            accepted.expect_same(*f.flow);
+            EXPECT_EQ(f.flow->serialize_qbmm_restart(), archive);
+        };
+        {
+            SCOPED_TRACE("attached fixed controller");
+            Coupler fixed(f.flow, f.controller_options(acceleration));
+            reject_moving_capture();
+            const auto earlier = fixed.preview(dt);
+            reject_moving_capture();
+            fixed.commit(earlier);
+            EXPECT_EQ(f.flow->state().time, dt);
+            if (acceleration && acceleration->z != 0.)
+                EXPECT_LT(fixed.diagnostics().flow.external_impulse.z, 0.);
+        }
+        {
+            SCOPED_TRACE("accepted fixed provenance after controller release");
+            EXPECT_TRUE(f.flow->qbmm_report().provenance.controller_configuration_signature);
+            reject_moving_capture();
+            Coupler fixed(f.flow, f.controller_options(acceleration));
+            fixed.advance(dt);
+            EXPECT_EQ(f.flow->state().time, 2 * dt);
+        }
     }
 }
 

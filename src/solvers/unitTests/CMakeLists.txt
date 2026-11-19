@@ -102,12 +102,44 @@ endforeach()
 
 # Prescribed native ALE transactions and actual source geometry frames.
 foreach(_native_ale_ranks IN ITEMS 2 4)
-    foreach(_native_ale_case IN ITEMS LowMachPlanarALE LowMachALEConservation ReactingMixtureALE ReactingSourceLocation)
+    foreach(_native_ale_case IN ITEMS LowMachPlanarALE LowMachALEConservation LowMachQbmmPlanarALE ReactingMixtureALE ReactingSourceLocation)
         simplefluid_add_mpi_test(NAME ${_native_ale_case}_${_native_ale_ranks}procs
             TARGET test${_native_ale_case} PROCS ${_native_ale_ranks}
             LABELS "mpi;reacting;low_mach;ale;conservation;transaction;empty_rank" TIMEOUT 180)
     endforeach()
 endforeach()
+
+# Use independent test processes and partition-local shards for each portable restart.
+function(add_qbmm_planar_restart_tests name target filter)
+    foreach(ranks IN ITEMS 1 2 4)
+        set(fixture "${name}_${ranks}procs")
+        set(prefix "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>-${fixture}")
+        foreach(stage IN ITEMS Write Read)
+            set(test "${fixture}_${stage}")
+            if(ranks EQUAL 1)
+                add_test(NAME "${test}" COMMAND "$<TARGET_FILE:${target}>" "--gtest_filter=${filter}")
+                set_tests_properties("${test}" PROPERTIES LABELS "qbmm;ale;restart" TIMEOUT 180)
+            else()
+                simplefluid_add_mpi_test(NAME "${test}" TARGET "${target}" PROCS "${ranks}"
+                    ARGS "--gtest_filter=${filter}" LABELS "qbmm;ale;restart" TIMEOUT 180)
+            endif()
+            if(TEST "${test}")
+                if(stage STREQUAL "Write")
+                    set_tests_properties("${test}" PROPERTIES FIXTURES_SETUP "${fixture}"
+                        ENVIRONMENT "SIMPLEFLUID_Q7A_RESTART_WRITE=${prefix}")
+                else()
+                    set_tests_properties("${test}" PROPERTIES FIXTURES_REQUIRED "${fixture}"
+                        ENVIRONMENT "SIMPLEFLUID_Q7A_RESTART_READ=${prefix}")
+                endif()
+            endif()
+        endforeach()
+    endforeach()
+endfunction()
+
+add_qbmm_planar_restart_tests(QbmmPlanarRestart testLowMachQbmmPlanarALE
+    LowMachQbmmPlanarALETest.PortableRestartContinuesFromOriginalReference)
+add_qbmm_planar_restart_tests(QbmmPlanarControllerRestart testReactingMixtureQbmmSources
+    ReactingMixtureQbmmSourcesTest.PlanarEventsUseLiveGeometryAndReplayAfterSingleOwnerFailure)
 
 # Configured local interphase thermal events, including the prescribed ALE transaction.
 foreach(_interphase_ranks IN ITEMS 2 4)

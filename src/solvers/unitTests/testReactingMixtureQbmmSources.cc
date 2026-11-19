@@ -1,10 +1,12 @@
 /** Conservative fixed-mesh QBMM source integration with an analytic, closed-cell caloric oracle. */
 #include "ConditionedThermalTestSupport.hh"
+#include "QbmmRestartTestSupport.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/ReactingMixtureCoupler.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <cmath>
+#include <cstdlib>
 #include <gtest/gtest.h>
 #include <numeric>
 
@@ -13,6 +15,7 @@ namespace
 using namespace SimpleFluid;
 namespace R = Reacting;
 namespace Thermo = Testing::ConditionedTransfer;
+namespace RestartIO = Testing::QbmmRestart;
 using Coupler = R::ReactingMixtureCoupler;
 using Flow = R::LowMachMixtureSolver;
 using Ops = std::vector<R::QbmmEventOperation>;
@@ -1115,6 +1118,343 @@ TEST(ReactingMixtureQbmmSourcesTest, MovingTransportFeedsCoherentEventsThermalsC
     for (size_t face = 0; face < f.mesh->num_owned_faces(); ++face)
         EXPECT_EQ(restored.volume_flux().owned_value(static_cast<LO>(face)),
             f.flow->volume_flux().owned_value(static_cast<LO>(face)));
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, PlanarEventsUseLiveGeometryAndReplayAfterSingleOwnerFailure)
+{
+    using LO = Flow::Pack::local_ordinal_type;
+    const char* writer = std::getenv("SIMPLEFLUID_Q7A_RESTART_WRITE");
+    const char* reader = std::getenv("SIMPLEFLUID_Q7A_RESTART_READ");
+    ASSERT_FALSE(writer && reader);
+    struct Observations
+    {
+        double target = 0;
+        int targets = 0, injected_failures = 0;
+        bool fail = false;
+    };
+    constexpr double dt = .01;
+    const auto make_options = [&](Fixture& f, Observations& calls, const char* target_identity = "Q7a coherent piston")
+    {
+        auto options = f.options(
+            [&](const R::MixtureQbmmContext& context)
+            {
+                if (!context.law_inputs || !context.law_inputs->location)
+                    throw std::runtime_error("The coherent source must provide its live location.");
+                const auto& location = *context.law_inputs->location;
+                const LO cell = static_cast<LO>(context.owned_cell);
+                EXPECT_EQ(location.ownedCell, context.owned_cell);
+                EXPECT_EQ(location.geometryCellId, f.mesh->cell_geometry_global_id(cell));
+                EXPECT_EQ(location.geometryEpoch, f.mesh->geometry_epoch());
+                EXPECT_NEAR(location.centroid[2], calls.target / 2, 1e-14);
+                EXPECT_NEAR(context.law_inputs->bulk_volume_m3, calls.target, 1e-14);
+                EXPECT_DOUBLE_EQ(context.law_inputs->bulk_volume_m3, f.mesh->cell_volume(cell));
+                if (calls.fail)
+                {
+                    ++calls.injected_failures;
+                    throw std::runtime_error("Manufactured source failure on the only owning rank.");
+                }
+                // The manufactured birth depends on both pieces of the live geometry.
+                const double count = context.law_inputs->bulk_volume_m3 * location.centroid[2] * .5;
+                return Ops{R::QbmmBirth{{{{count, 1}, from_liquid(count)}}}};
+            },
+            true);
+        options.planar_motion = std::make_shared<const R::MixturePlanarMotionProvider>(
+            R::MixturePlanarMotionProvider{f.mesh, {}, target_identity, 3, [&calls](double accepted_time, double step)
+                {
+                    ++calls.targets;
+                    calls.target = 1. + .05 * (accepted_time + step);
+                    return calls.target;
+                }});
+        return options;
+    };
+    const auto expect_same = [](const Fixture& a, const Fixture& b)
+    {
+        const auto& left = a.flow->state();
+        const auto& right = b.flow->state();
+        EXPECT_EQ(left.time, right.time);
+        EXPECT_EQ(left.revision, right.revision);
+        EXPECT_DOUBLE_EQ(left.thermodynamic_pressure, right.thermodynamic_pressure);
+        ASSERT_EQ(left.cells.size(), right.cells.size());
+        for (size_t c = 0; c < left.cells.size(); ++c)
+        {
+            const LO cell = static_cast<LO>(c);
+            EXPECT_DOUBLE_EQ(a.mesh->cell_volume(cell), b.mesh->cell_volume(cell));
+            EXPECT_EQ(a.mesh->cell_centroid(cell), b.mesh->cell_centroid(cell));
+            EXPECT_EQ(left.cells[c].qbmm_shape, right.cells[c].qbmm_shape);
+            EXPECT_EQ(left.cells[c].phase_numbers, right.cells[c].phase_numbers);
+            EXPECT_EQ(left.cells[c].velocity, right.cells[c].velocity);
+            for (size_t p = 0; p < left.cells[c].phases.size(); ++p)
+            {
+                const auto& x = left.cells[c].phases[p];
+                const auto& y = right.cells[c].phases[p];
+                EXPECT_EQ(x.moles, y.moles);
+                EXPECT_DOUBLE_EQ(x.temperature, y.temperature);
+                EXPECT_DOUBLE_EQ(x.internal_energy, y.internal_energy);
+                EXPECT_DOUBLE_EQ(x.absolute_pressure, y.absolute_pressure);
+            }
+        }
+        ASSERT_EQ(a.mesh->num_faces(), b.mesh->num_faces());
+        for (size_t f = 0; f < a.mesh->num_faces(); ++f)
+            EXPECT_DOUBLE_EQ(a.flow->volume_flux().local_value(static_cast<LO>(f)),
+                b.flow->volume_flux().local_value(static_cast<LO>(f)));
+    };
+
+    Fixture f;
+    Observations calls;
+    Coupler controller(f.flow, make_options(f, calls));
+    const auto comm = f.mesh->owned_cell_map()->getComm();
+    if (writer)
+    {
+        controller.advance(dt);
+        RestartIO::write_restart(*comm, writer, ".first", controller.serialize_qbmm_restart());
+        controller.advance(dt);
+        RestartIO::write_restart(*comm, writer, ".next", controller.serialize_qbmm_restart());
+        return;
+    }
+    if (reader)
+    {
+        controller.restore_qbmm_restart(RestartIO::read_restart(*comm, reader, ".next"));
+        Fixture fresh;
+        Observations fresh_calls;
+        Coupler restored(fresh.flow, make_options(fresh, fresh_calls));
+        restored.restore_qbmm_restart(RestartIO::read_restart(*comm, reader, ".first"));
+        EXPECT_EQ(fresh_calls.targets, 0);
+        EXPECT_EQ(fresh.law_calls, 0);
+        restored.advance(dt);
+        EXPECT_EQ(fresh_calls.targets, 1);
+        expect_same(f, fresh);
+        return;
+    }
+
+    int empty = f.mesh->num_owned_cells() == 0, empty_total = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &empty, &empty_total);
+    EXPECT_EQ(empty_total, comm->getSize() - 1);
+    const auto before = controller.serialize_qbmm_restart();
+    const auto first = controller.preview(dt);
+    EXPECT_EQ(calls.targets, 1);
+    EXPECT_GE(first.diagnostics().flow.source_evaluations, 2);
+    const double first_target = 1. + .05 * dt;
+    const double expected_birth = first_target * first_target / 4;
+    for (size_t c = 0; c < first.state().cells.size(); ++c)
+    {
+        const auto& pre_source = first.transport_snapshot().cells[c].phases[1];
+        const auto& receipt = *first.local_qbmm_sources()[c][1];
+        ASSERT_EQ(receipt.events.size(), 1u);
+        EXPECT_EQ(receipt.events[0].kind, Kind::Birth);
+        EXPECT_NEAR(receipt.final_count - *pre_source.population_number, expected_birth, 1e-13);
+        EXPECT_NEAR(receipt.final_moles[0] - pre_source.moles[0], scale * expected_birth, 1e-13);
+        EXPECT_NEAR(receipt.final_shape.H2 - pre_source.qbmm_shape->H2, expected_birth, 1e-13);
+        EXPECT_NEAR(receipt.final_shape.H3 - pre_source.qbmm_shape->H3, expected_birth, 1e-13);
+    }
+    const auto first_report = controller.qbmm_report(first);
+    const auto epoch_before_failure = f.mesh->geometry_epoch();
+    calls.fail = true;
+    EXPECT_THROW((void) controller.preview(2 * dt), std::exception);
+    calls.fail = false;
+    int failures = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &calls.injected_failures, &failures);
+    EXPECT_EQ(failures, 1);
+    EXPECT_EQ(calls.targets, 2);
+    EXPECT_GT(f.mesh->geometry_epoch(), epoch_before_failure);
+    EXPECT_EQ(controller.serialize_qbmm_restart(), before);
+    const auto retained = controller.qbmm_report(first);
+    EXPECT_EQ(retained.provenance.preview_id, first_report.provenance.preview_id);
+    EXPECT_EQ(retained.provenance.geometry_epoch, first.transport_snapshot().new_geometry_epoch);
+    for (const auto& cell : retained.cells)
+        EXPECT_NEAR(cell.bulk_volume_m3, first_target, 1e-14);
+    const std::array callback_counts{calls.targets, f.law_calls, f.constitutive_calls};
+    controller.commit(first);
+    EXPECT_EQ((std::array{calls.targets, f.law_calls, f.constitutive_calls}), callback_counts);
+    EXPECT_EQ(f.flow->state().time, dt);
+    const auto archived = controller.serialize_qbmm_restart();
+    Fixture fresh;
+    Observations fresh_calls;
+    Coupler restarted(fresh.flow, make_options(fresh, fresh_calls));
+    restarted.restore_qbmm_restart(archived);
+    EXPECT_EQ((std::array{fresh_calls.targets, fresh.law_calls, fresh.constitutive_calls}), (std::array{0, 0, 0}));
+    expect_same(f, fresh);
+    EXPECT_GE(restarted.diagnostics().correctors, 2);
+    EXPECT_EQ(restarted.diagnostics().correctors, controller.diagnostics().correctors);
+    EXPECT_EQ(restarted.diagnostics().flow.source_evaluations, controller.diagnostics().flow.source_evaluations);
+    ASSERT_EQ(restarted.diagnostics().population_births.size(), f.flow->options().phase_roles.size());
+    EXPECT_NEAR(restarted.diagnostics().population_births[1], expected_birth, 1e-13);
+    EXPECT_EQ(restarted.diagnostics().population_births, controller.diagnostics().population_births);
+    Fixture wrong;
+    Observations wrong_calls;
+    Coupler wrong_target(wrong.flow, make_options(wrong, wrong_calls, "different geometry target"));
+    EXPECT_THROW(wrong_target.restore_qbmm_restart(archived), std::exception);
+    EXPECT_EQ(wrong.flow->state().time, 0);
+    EXPECT_EQ(wrong_calls.targets, 0);
+    controller.advance(dt);
+    restarted.advance(dt);
+    expect_same(f, fresh);
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, RankMixedControllerAndNativeAdvancementRejectBeforeCallbacks)
+{
+    constexpr double dt = .01, target = 1.0005;
+    Fixture f;
+    const auto comm = f.mesh->owned_cell_map()->getComm();
+    Fixture unrelated;
+    Flow::PlanarMotion native_motion(unrelated.mesh);
+    const auto native_trial = unrelated.flow->preview_ale(dt, native_motion, target);
+
+    int target_calls = 0, native_source_calls = 0;
+    auto options = f.options([](const auto&) { return Ops{}; });
+    options.planar_motion = std::make_shared<const R::MixturePlanarMotionProvider>(
+        R::MixturePlanarMotionProvider{f.mesh, {}, "consistent controller entry", 1, [&](double, double)
+            {
+                ++target_calls;
+                return target;
+            }});
+    Coupler controller(f.flow, options);
+    auto native_source = std::make_shared<const Flow::SourceStageProvider>(Flow::SourceStageProvider{
+        "native test source", 1, f.catalog->fingerprint(), [&](const Flow::SourceStageContext& context)
+        {
+            ++native_source_calls;
+            return Flow::SourceStageResult{std::vector<Flow::CellSources>(context.transport.cells.size()), {}};
+        }});
+    const auto expect_mismatch = [](const auto& call)
+    {
+        try
+        {
+            call();
+            ADD_FAILURE() << "Expected rank-mixed advancement to be rejected.";
+        }
+        catch (const std::invalid_argument& error)
+        {
+            EXPECT_STREQ(error.what(), "Low-Mach advancement operation must agree on every rank.");
+        }
+    };
+    const auto accepted = controller.serialize_qbmm_restart();
+    const auto before_preview = f.mesh->geometry_epoch();
+    if (comm->getSize() > 1)
+    {
+        expect_mismatch(
+            [&]
+            {
+                if (comm->getRank() == 0)
+                    (void) controller.preview(dt);
+                else
+                    (void) f.flow->preview_ale_with_sources(dt, native_motion, target, native_source);
+            });
+        EXPECT_EQ(f.mesh->geometry_epoch(), before_preview);
+        EXPECT_EQ(controller.serialize_qbmm_restart(), accepted);
+    }
+    EXPECT_EQ(target_calls, 0);
+    EXPECT_EQ(f.law_calls, 0);
+    EXPECT_EQ(native_source_calls, 0);
+
+    const auto earlier = controller.preview(dt);
+    EXPECT_EQ(target_calls, 1);
+    const auto before_commit = f.mesh->geometry_epoch();
+    const auto callback_counts = std::array{target_calls, f.law_calls, f.constitutive_calls, native_source_calls};
+    if (comm->getSize() > 1)
+    {
+        expect_mismatch(
+            [&]
+            {
+                if (comm->getRank() == 0)
+                    controller.commit(earlier);
+                else
+                    f.flow->commit_ale(native_trial, native_motion);
+            });
+        EXPECT_EQ(f.mesh->geometry_epoch(), before_commit);
+        EXPECT_EQ(controller.serialize_qbmm_restart(), accepted);
+    }
+    controller.commit(earlier);
+    EXPECT_EQ((std::array{target_calls, f.law_calls, f.constitutive_calls, native_source_calls}), callback_counts);
+    EXPECT_EQ(f.flow->state().time, dt);
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, MovingExportRequiresItsOwnAcceptedIntervalOrFreshInitialization)
+{
+    using LO = Flow::Pack::local_ordinal_type;
+    constexpr double dt = .01;
+    const auto source = [](const auto&) { return Ops{R::QbmmBirth{{{{.25, 1}, from_liquid(.25)}}}}; };
+    const auto moving_options = [&](Fixture& f, int& target_calls)
+    {
+        auto options = f.options(source, true);
+        options.planar_motion = std::make_shared<const R::MixturePlanarMotionProvider>(R::MixturePlanarMotionProvider{
+            f.mesh, {}, "fixed-to-moving provenance", 1, [&target_calls](double time, double step)
+            {
+                ++target_calls;
+                return 1. + .05 * (time + step);
+            }});
+        return options;
+    };
+    const auto owned_flux = [](const Fixture& f)
+    {
+        std::vector<double> flux(f.mesh->num_owned_faces());
+        for (size_t i = 0; i < flux.size(); ++i)
+            flux[i] = f.flow->volume_flux().owned_value(static_cast<LO>(i));
+        return flux;
+    };
+
+    Fixture f;
+    {
+        Coupler fixed(f.flow, f.options(source, true));
+        const auto step = fixed.advance(dt);
+        ASSERT_EQ(step.population_births.size(), f.flow->options().phase_roles.size());
+        EXPECT_EQ(step.population_births[1], .25);
+    }
+    auto fixed_report = f.flow->qbmm_report();
+    ASSERT_TRUE(fixed_report.provenance.controller_configuration_signature);
+    int target_calls = 0;
+    Coupler moving(f.flow, moving_options(f, target_calls));
+    const auto epoch = f.mesh->geometry_epoch();
+    const auto fixed_flux = owned_flux(f);
+    const auto old_calls = std::array{target_calls, f.law_calls, f.constitutive_calls};
+    EXPECT_THROW((void) moving.checkpoint(), std::exception);
+    EXPECT_THROW((void) moving.serialize_qbmm_restart(), std::exception);
+    EXPECT_EQ((std::array{target_calls, f.law_calls, f.constitutive_calls}), old_calls);
+    EXPECT_EQ(f.mesh->geometry_epoch(), epoch);
+    EXPECT_EQ(owned_flux(f), fixed_flux);
+    EXPECT_EQ(f.flow->state().time, dt);
+    EXPECT_EQ(moving.qbmm_report().provenance.controller_configuration_signature,
+        fixed_report.provenance.controller_configuration_signature);
+
+    moving.commit(moving.preview(dt));
+    EXPECT_EQ(target_calls, 1);
+    EXPECT_EQ(f.flow->state().time, 2 * dt);
+    const auto moving_flux = owned_flux(f);
+    const auto committed = moving.qbmm_report();
+    ASSERT_TRUE(committed.interval);
+    EXPECT_NE(committed.provenance.controller_configuration_signature,
+        fixed_report.provenance.controller_configuration_signature);
+    const auto checkpoint = moving.checkpoint();
+    const auto archive = moving.serialize_qbmm_restart();
+    moving.advance(dt);
+    const auto before_restore = std::array{target_calls, f.law_calls, f.constitutive_calls};
+    moving.restore(checkpoint);
+    EXPECT_EQ((std::array{target_calls, f.law_calls, f.constitutive_calls}), before_restore);
+    EXPECT_EQ(f.flow->state().time, 2 * dt);
+    EXPECT_EQ(owned_flux(f), moving_flux);
+
+    Fixture fresh;
+    int fresh_targets = 0;
+    Coupler restarted(fresh.flow, moving_options(fresh, fresh_targets));
+    const auto initial_checkpoint = restarted.checkpoint();
+    const auto initial_archive = restarted.serialize_qbmm_restart();
+    restarted.restore(initial_checkpoint);
+    restarted.restore_qbmm_restart(initial_archive);
+    EXPECT_EQ(fresh.flow->state().time, 0.);
+    EXPECT_EQ(fresh_targets, 0);
+    restarted.restore_qbmm_restart(archive);
+    EXPECT_EQ(fresh_targets, 0);
+    EXPECT_EQ(fresh.law_calls, 0);
+    EXPECT_EQ(fresh.flow->state().time, f.flow->state().time);
+    EXPECT_EQ(owned_flux(fresh), moving_flux);
+    EXPECT_EQ(restarted.diagnostics().population_births, moving.diagnostics().population_births);
+    const auto restarted_report = restarted.qbmm_report();
+    EXPECT_EQ(restarted_report.provenance.controller_configuration_signature,
+        committed.provenance.controller_configuration_signature);
+    ASSERT_EQ(restarted_report.cells.size(), committed.cells.size());
+    for (size_t c = 0; c < restarted_report.cells.size(); ++c)
+    {
+        EXPECT_EQ(restarted_report.cells[c].bulk_volume_m3, committed.cells[c].bulk_volume_m3);
+        EXPECT_EQ(restarted_report.cells[c].families[1]->moments, committed.cells[c].families[1]->moments);
+    }
 }
 
 TEST(ReactingMixtureQbmmSourcesTest, PortableRestartBindsTheActualControllerAndThermalLawBeforeContinuation)

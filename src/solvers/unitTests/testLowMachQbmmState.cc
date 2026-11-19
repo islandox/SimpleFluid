@@ -1,4 +1,5 @@
 /** Native QBMM ownership, pre-transport capability gates, and transactional replay. */
+#include "QbmmRestartTestSupport.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/ReactingMixtureCoupler.hh"
 #include "utils/testing_environment.hh"
@@ -155,20 +156,11 @@ void expect_identity(const Flow::Trial& trial, const Flow::State& accepted, R::I
     }
 }
 
-void append_restart_word(std::vector<std::byte>& body, std::uint64_t value)
-{
-    for (unsigned shift = 0; shift < 64; shift += 8)
-        body.push_back(static_cast<std::byte>((value >> shift) & 0xff));
-}
+using Testing::QbmmRestart::append_restart_word;
 
 void append_restart_checksums(const Fixture& fixture, std::vector<std::byte>& body)
 {
-    std::uint64_t local = 14695981039346656037ULL, image = 0;
-    for (const auto byte : body)
-        local = (local ^ std::to_integer<std::uint64_t>(byte)) * 1099511628211ULL;
-    Teuchos::reduceAll(*fixture.mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local, &image);
-    append_restart_word(body, local);
-    append_restart_word(body, image);
+    Testing::QbmmRestart::append_restart_checksums(*fixture.mesh->owned_cell_map()->getComm(), body);
 }
 
 std::vector<std::byte> restart_with_fourier_uncertainty(
@@ -552,7 +544,7 @@ TEST(LowMachQbmmStateTest, CoexistingTrialsOwnSnapshotsSourcesAndInversionResult
     EXPECT_EQ(replay.qbmm_inversion_status(), statuses);
 }
 
-TEST(LowMachQbmmStateTest, UnpairedProvidersMotionAndSlipRejectWhileCarrierTransportRemainsTransactional)
+TEST(LowMachQbmmStateTest, UnpairedProvidersAndUndeclaredSlipRejectWithoutInvalidatingFixedTrial)
 {
     Fixture f(2);
     auto flow = f.solver();
@@ -568,7 +560,7 @@ TEST(LowMachQbmmStateTest, UnpairedProvidersMotionAndSlipRejectWhileCarrierTrans
         }});
     EXPECT_THROW((void) flow->preview_with_sources(.01, provider), std::exception);
     Flow::PlanarMotion motion(f.mesh);
-    EXPECT_THROW((void) flow->preview_ale(.01, motion, 2.001), std::exception);
+    EXPECT_NO_THROW((void) flow->preview_ale(.01, motion, 2.001));
     EXPECT_THROW((void) flow->preview_ale_with_sources(.01, motion, 2.001, provider), std::exception);
     EXPECT_EQ(calls, 0);
     EXPECT_FALSE(motion.has_active_trial());
