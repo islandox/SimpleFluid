@@ -502,10 +502,10 @@ simplefluid_require_reacting_api(
 simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::preview_interphase_exchange[(]${simplefluid_reacting_phase_span}, (unsigned long|unsigned long long), (unsigned long|unsigned long long), std::(__[0-9]+::)?function<SimpleFluid::Reacting::InterphaseExchange [(]SimpleFluid::Reacting::PhaseThermalState const&, SimpleFluid::Reacting::MixtureThermodynamicPoint const&, SimpleFluid::Reacting::PhaseThermalState const&, SimpleFluid::Reacting::MixtureThermodynamicPoint const&[)]> const&, SimpleFluid::Reacting::PhaseThermalMode[)]$" 1)
 
-# Caloric feasibility adds five functions (including two constructor entries)
-# and up to three RTTI/vtable definitions of its typed unresolved error.
+# Caloric feasibility adds five functions (including two constructor entries),
+# three destructor ABI entries and three RTTI/vtable definitions of its typed error.
 # The original EOS constructor and every earlier thermodynamic anchor remain.
-set(simplefluid_caloric_domain_public_symbol_budget 8)
+set(simplefluid_caloric_domain_public_symbol_budget 11)
 simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::MixtureThermodynamics::MixtureThermodynamics[(]${simplefluid_reacting_catalog_pointer_pattern}, SimpleFluid::Reacting::ThermodynamicBounds, SimpleFluid::Reacting::EOSKind, SimpleFluid::Reacting::EnthalpyPressureDependence, std::(__[0-9]+::)?function<SimpleFluid::Reacting::MixtureThermodynamicPoint [(]double, double, ${simplefluid_reacting_const_double_span}[)]>, SimpleFluid::Reacting::EnergyConvention, std::(__[0-9]+::)?function<.* [(]double, double, ${simplefluid_reacting_const_double_span}[)]>[)]$" 2)
 simplefluid_require_reacting_api(
@@ -514,15 +514,11 @@ simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::exact_caloric_pressure_domain[(]SimpleFluid::Reacting::CaloricPressureQuery const&[)]$" 1)
 simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::evaluate_caloric_pressure_margins[(]SimpleFluid::Reacting::CaloricPressureQuery const&, double[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::CaloricDomainUnresolved::~CaloricDomainUnresolved[(][)]$" 3)
 foreach(simplefluid_caloric_rtti IN ITEMS "typeinfo for" "typeinfo name for" "vtable for")
-    set(simplefluid_caloric_rtti_count 1)
-    if(simplefluid_caloric_rtti STREQUAL "vtable for")
-        # An inline-only exception has no key function; Clang can omit its
-        # unused vtable in Release while retaining the cross-DSO catch RTTI.
-        set(simplefluid_caloric_rtti_count "0|1")
-    endif()
     simplefluid_require_exact_api(
-        "^${simplefluid_caloric_rtti} SimpleFluid::Reacting::CaloricDomainUnresolved$" "${simplefluid_caloric_rtti_count}")
+        "^${simplefluid_caloric_rtti} SimpleFluid::Reacting::CaloricDomainUnresolved$" 1)
 endforeach()
 
 # The distributed face adapter stays private. Its pure finite-counter packet
@@ -771,8 +767,9 @@ simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::LowMachPressureEquation::project_material_ale_with_eos[(]${simplefluid_stage3_scalar_cell} const&, double, ${simplefluid_reacting_const_double_span}, ${simplefluid_reacting_const_double_span}, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face}&, ${simplefluid_stage3_scalar_cell}&, ${simplefluid_stage3_vector_cell}&, SimpleFluid::FVM::ALEControlVolumeState const&, SimpleFluid::LinearSolverOptions const&, double[)]$" 1)
 
 # Pressure-conditioned local thermal transfer: four pure kernels, two receipt
-# queries and the three definitions of the typed caloric-range error.
-set(simplefluid_conditioned_thermal_public_symbol_budget 10)
+# queries, three destructor ABI entries and three RTTI/vtable definitions
+# of the typed caloric-range error.
+set(simplefluid_conditioned_thermal_public_symbol_budget 13)
 set(simplefluid_thermal_double_vector
     "${simplefluid_stage3_std}vector<double, ${simplefluid_stage3_std}allocator<double>[ ]*>")
 set(simplefluid_thermal_long_vector
@@ -795,13 +792,11 @@ foreach(simplefluid_thermal_query IN ITEMS interphase_receipt final_thermal_eval
     simplefluid_require_reacting_api(
         "^SimpleFluid::Reacting::ReactingMixtureCoupler::Trial::${simplefluid_thermal_query}[(][)] const$" 1)
 endforeach()
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::ThermalCaloricRangeError::~ThermalCaloricRangeError[(][)]$" 3)
 foreach(simplefluid_thermal_rtti IN ITEMS "typeinfo for" "typeinfo name for" "vtable for")
-    set(simplefluid_thermal_rtti_count 1)
-    if(simplefluid_thermal_rtti STREQUAL "vtable for")
-        set(simplefluid_thermal_rtti_count "0|1")
-    endif()
     simplefluid_require_exact_api(
-        "^${simplefluid_thermal_rtti} SimpleFluid::Reacting::ThermalCaloricRangeError$" "${simplefluid_thermal_rtti_count}")
+        "^${simplefluid_thermal_rtti} SimpleFluid::Reacting::ThermalCaloricRangeError$" 1)
 endforeach()
 
 # Fixed-reference finite vapor: seven pure functions, one controller entry point,

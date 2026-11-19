@@ -30,6 +30,9 @@ Detailed workstream status is tracked in [docs/verification/](docs/verification/
   Cartesian, Product, Polyhedral, Static with a refinable companion, and Mixed providers. They exercise fixed edits,
   migration, retained generations, and publication under the 512 MiB scaling fixture budget.
   [AMR heap attribution](docs/architecture/amr_heap_attribution.md)
+- [x] **AMR storage Stage 7 — caloric exception exports.** The Solvers library owns the vtables and type information
+  for `CaloricDomainUnresolved` and `ThermalCaloricRangeError`. The shared-library exception and export checks
+  passed in GCC Debug and LTO-enabled RelWithDebInfo.
 
 ## Active roadmap
 

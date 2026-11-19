@@ -12,6 +12,8 @@
 
 namespace SimpleFluid::Reacting
 {
+CaloricDomainUnresolved::~CaloricDomainUnresolved() = default;
+
 namespace
 {
 void require(bool condition, const char* message)

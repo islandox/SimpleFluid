@@ -104,6 +104,12 @@ class SIMPLEFLUID_SOLVERS_EXPORT ThermalCaloricRangeError : public std::domain_e
 {
 public:
     using std::domain_error::domain_error;
+    ThermalCaloricRangeError(const ThermalCaloricRangeError&) = default;
+    ThermalCaloricRangeError(ThermalCaloricRangeError&&) = default;
+    ThermalCaloricRangeError& operator=(const ThermalCaloricRangeError&) = default;
+    ThermalCaloricRangeError& operator=(ThermalCaloricRangeError&&) = default;
+    /** Anchor exception RTTI and its vtable in the Solvers shared library. */
+    ~ThermalCaloricRangeError() override;
 };
 struct ThermalEvaluationControls
 {

@@ -180,6 +180,12 @@ class SIMPLEFLUID_SOLVERS_EXPORT CaloricDomainUnresolved : public std::domain_er
 {
 public:
     using std::domain_error::domain_error;
+    CaloricDomainUnresolved(const CaloricDomainUnresolved&) = default;
+    CaloricDomainUnresolved(CaloricDomainUnresolved&&) = default;
+    CaloricDomainUnresolved& operator=(const CaloricDomainUnresolved&) = default;
+    CaloricDomainUnresolved& operator=(CaloricDomainUnresolved&&) = default;
+    /** Anchor exception RTTI and its vtable in the Solvers shared library. */
+    ~CaloricDomainUnresolved() override;
 };
 
 struct PhaseThermalRecovery

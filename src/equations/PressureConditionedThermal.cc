@@ -7,6 +7,8 @@
 
 namespace SimpleFluid::Reacting
 {
+ThermalCaloricRangeError::~ThermalCaloricRangeError() = default;
+
 namespace
 {
 void require(bool valid, const char* message)

@@ -41,6 +41,21 @@ function(simplefluid_add_abi_tests)
                 -P "${PROJECT_SOURCE_DIR}/cmake/testing/abi/CheckElfExports.cmake")
         set_tests_properties(simplefluid_elf_export_boundary PROPERTIES
             LABELS abi)
+        # Keep producer and consumer in separate images so LTO cannot turn this
+        # into an in-image exception test. Both use the real Solvers provider.
+        add_library(simplefluid_solver_exception_producer SHARED
+            "${PROJECT_SOURCE_DIR}/cmake/testing/abi/SolversExceptionProvider.cc")
+        target_link_libraries(simplefluid_solver_exception_producer PRIVATE SimpleFluid::Solvers)
+        set_target_properties(simplefluid_solver_exception_producer PROPERTIES
+            CXX_VISIBILITY_PRESET hidden
+            VISIBILITY_INLINES_HIDDEN YES)
+        add_executable(simplefluid_solver_exception_consumer
+            "${PROJECT_SOURCE_DIR}/cmake/testing/abi/CheckSolversExceptions.cc")
+        target_link_libraries(simplefluid_solver_exception_consumer PRIVATE
+            simplefluid_solver_exception_producer SimpleFluid::Solvers GTest::gtest_main)
+        add_test(NAME simplefluid_solver_exception_boundary
+            COMMAND simplefluid_solver_exception_consumer)
+        set_tests_properties(simplefluid_solver_exception_boundary PROPERTIES LABELS abi)
         # LLVM's demangler understands Clang's constrained-template encodings.
         find_program(SIMPLEFLUID_FVM_CXXFILT
             NAMES llvm-cxxfilt c++filt
