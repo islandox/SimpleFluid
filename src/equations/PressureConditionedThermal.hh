@@ -63,6 +63,21 @@ struct InterphaseConfiguration
     std::shared_ptr<const ConditionedCaloricDomainProvider>
         caloric_domain; ///< No old affine inference for a composite plan.
 };
+/** Raw final material allocations. Paired and reservoir withdrawals share the
+ * predecessor of the last material stage when paired_stage is present.
+ */
+struct FrozenMaterialSourceTail
+{
+    struct ReservoirExchange
+    {
+        std::size_t phase;
+        std::vector<double> signed_moles; ///< Cell-side mol, catalog order.
+        double energy;                    ///< Cell-side J applied with the material.
+    };
+    std::optional<std::size_t> paired_stage;
+    std::vector<std::vector<double>> paired_amounts; ///< Original nonnegative packets by configured slot.
+    std::vector<ReservoirExchange> reservoirs;
+};
 struct FrozenInterphasePlan
 {
     std::shared_ptr<const InterphaseConfiguration> configuration;
@@ -71,6 +86,7 @@ struct FrozenInterphasePlan
     std::vector<std::vector<long double>> raw_static_energy; ///< Original per-phase channels, never rounded sums.
     std::vector<long double> raw_declared_energy;
     std::vector<std::vector<std::array<long double, 2>>> raw_pre_moles; ///< Owner-local predecessor high/correction.
+    FrozenMaterialSourceTail material_tail;
 };
 struct ConditionedCaloricQuery
 {
@@ -154,6 +170,12 @@ SIMPLEFLUID_SOLVERS_EXPORT void validate_interphase_configuration(
     std::vector<std::vector<double>> amounts, std::vector<std::vector<long double>> raw_static_energy,
     std::vector<long double> raw_declared_energy,
     std::span<const std::vector<std::array<long double, 2>>> predecessor_parts);
+/** Freeze raw, simultaneous final material allocations together with preceding stages. */
+[[nodiscard]] SIMPLEFLUID_SOLVERS_EXPORT FrozenInterphasePlan compile_interphase_plan(
+    std::shared_ptr<const InterphaseConfiguration> configuration, std::span<const PhaseThermalState> pre_phases,
+    std::vector<std::vector<double>> amounts, std::vector<std::vector<long double>> raw_static_energy,
+    std::vector<long double> raw_declared_energy,
+    std::span<const std::vector<std::array<long double, 2>>> predecessor_parts, FrozenMaterialSourceTail material_tail);
 /** Pressure-only constitutive/anchor evaluation; transferred amounts NEVER change here.
  * final_templates carries the applied rounded material endpoint. No kinetic/count provider is callable here.
  */

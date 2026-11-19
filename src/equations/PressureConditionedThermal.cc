@@ -138,8 +138,8 @@ struct MaterialStocks
         for (size_t p = 0; p < before.size(); ++p)
         {
             require(before[p].size() == catalog.species().size(), "Material donor species layout differs.");
-            require(raw.empty() || raw[p].size() == before[p].size(),
-                "Raw thermal predecessor species layout differs.");
+            require(
+                raw.empty() || raw[p].size() == before[p].size(), "Raw thermal predecessor species layout differs.");
             amounts[p].resize(before[p].size());
             for (size_t s = 0; s < before[p].size(); ++s)
             {
@@ -172,22 +172,52 @@ struct MaterialStocks
         return result;
     }
 
-    std::vector<std::vector<double>> apply(const ConfiguredInterphaseStage& stage, std::span<const double> events)
+    std::vector<std::vector<double>> apply(
+        const ConfiguredInterphaseStage* stage, std::span<const double> events, const FrozenMaterialSourceTail* tail)
     {
-        require(stage.kind == InterphaseStageKind::Material && stage.material.size() == events.size(),
+        require(stage ? stage->kind == InterphaseStageKind::Material && stage->material.size() == events.size()
+                      : events.empty(),
             "Material stage layout differs.");
         auto margins = amounts;
         auto next = amounts;
+        const auto apply_pair = [&](const MaterialTransferSlot& slot, double amount)
+        {
+            require(std::isfinite(amount) && amount >= 0, "Material event amount must be finite nonnegative mol.");
+            const auto s = catalog.index(slot.species);
+            margins.at(slot.donor).at(s).add(-static_cast<long double>(amount));
+            next.at(slot.donor).at(s).add(-static_cast<long double>(amount));
+            next.at(slot.recipient).at(s).add(amount);
+        };
         for (size_t i = 0; i < events.size(); ++i)
         {
-            require(
-                std::isfinite(events[i]) && events[i] >= 0, "Material event amount must be finite nonnegative mol.");
-            const auto& slot = stage.material[i];
-            const auto s = catalog.index(slot.species);
-            margins.at(slot.donor).at(s).add(-static_cast<long double>(events[i]));
-            next.at(slot.donor).at(s).add(-static_cast<long double>(events[i]));
-            next.at(slot.recipient).at(s).add(events[i]);
+            const auto& slot = stage->material[i];
+            if (!tail)
+                apply_pair(slot, events[i]);
+            else
+            {
+                Acc total;
+                for (double amount : tail->paired_amounts.at(i))
+                {
+                    apply_pair(slot, amount);
+                    total.add(amount);
+                }
+                require(narrow(total.value()) == events[i], "Raw final material does not project to its slot amount.");
+            }
         }
+        if (tail)
+            for (const auto& exchange : tail->reservoirs)
+            {
+                require(exchange.phase < amounts.size() && exchange.signed_moles.size() == catalog.species().size() &&
+                            std::isfinite(exchange.energy),
+                    "Invalid frozen final reservoir layout or energy.");
+                for (size_t s = 0; s < exchange.signed_moles.size(); ++s)
+                {
+                    const double amount = exchange.signed_moles[s];
+                    if (amount < 0)
+                        margins[exchange.phase][s].add(amount);
+                    next[exchange.phase][s].add(amount);
+                }
+            }
         for (const auto& phase : margins)
             for (const auto& stock : phase)
                 require(
@@ -196,6 +226,20 @@ struct MaterialStocks
         return project();
     }
 };
+
+void validate_tail_layout(const FrozenInterphasePlan& plan)
+{
+    const auto& tail = plan.material_tail;
+    if (tail.paired_stage)
+    {
+        require(!plan.amounts.empty() && *tail.paired_stage == plan.amounts.size() - 1 &&
+                    plan.configuration->stages.back().kind == InterphaseStageKind::Material &&
+                    tail.paired_amounts.size() == plan.amounts.back().size(),
+            "Raw paired material requires a matching configured final material stage.");
+    }
+    else
+        require(tail.paired_amounts.empty(), "Raw paired material is missing a configured final material stage.");
+}
 } // namespace
 void validate_interphase_configuration(const InterphaseConfiguration& config, std::span<const PhaseThermalState> phases)
 {
@@ -274,6 +318,15 @@ FrozenInterphasePlan compile_interphase_plan(std::shared_ptr<const InterphaseCon
     std::vector<std::vector<long double>> raw_static_energy, std::vector<long double> raw_declared_energy,
     std::span<const std::vector<std::array<long double, 2>>> predecessor_parts)
 {
+    return compile_interphase_plan(std::move(configuration), pre_phases, std::move(amounts),
+        std::move(raw_static_energy), std::move(raw_declared_energy), predecessor_parts, {});
+}
+
+FrozenInterphasePlan compile_interphase_plan(std::shared_ptr<const InterphaseConfiguration> configuration,
+    std::span<const PhaseThermalState> pre_phases, std::vector<std::vector<double>> amounts,
+    std::vector<std::vector<long double>> raw_static_energy, std::vector<long double> raw_declared_energy,
+    std::span<const std::vector<std::array<long double, 2>>> predecessor_parts, FrozenMaterialSourceTail material_tail)
+{
     require(configuration != nullptr, "Missing immutable interphase configuration.");
     require(predecessor_parts.size() == pre_phases.size(), "Raw thermal predecessor requires every actual phase.");
     validate_interphase_configuration(*configuration, pre_phases);
@@ -285,6 +338,8 @@ FrozenInterphasePlan compile_interphase_plan(std::shared_ptr<const InterphaseCon
     result.raw_static_energy = std::move(raw_static_energy);
     result.raw_declared_energy = std::move(raw_declared_energy);
     result.raw_pre_moles.assign(predecessor_parts.begin(), predecessor_parts.end());
+    result.material_tail = std::move(material_tail);
+    validate_tail_layout(result);
     Acc allocated, declared;
     for (size_t p = 0; p < pre_phases.size(); ++p)
     {
@@ -306,7 +361,8 @@ FrozenInterphasePlan compile_interphase_plan(std::shared_ptr<const InterphaseCon
     {
         const auto& stage = result.configuration->stages[j];
         if (stage.kind == InterphaseStageKind::Material)
-            result.final_moles = stocks.apply(stage, result.amounts[j]);
+            result.final_moles = stocks.apply(
+                &stage, result.amounts[j], result.material_tail.paired_stage == j ? &result.material_tail : nullptr);
         else
         {
             require(result.amounts[j].size() == stage.heat.size(), "Configured heat amount layout differs.");
@@ -314,6 +370,8 @@ FrozenInterphasePlan compile_interphase_plan(std::shared_ptr<const InterphaseCon
                 require(std::isfinite(q), "Nonfinite supplied integrated interphase heat.");
         }
     }
+    if (!result.material_tail.paired_stage && !result.material_tail.reservoirs.empty())
+        result.final_moles = stocks.apply(nullptr, {}, &result.material_tail);
     return result;
 }
 
@@ -330,6 +388,7 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
                 plan.final_moles.size() == np && plan.raw_static_energy.size() == np &&
                 plan.amounts.size() == plan.configuration->stages.size(),
         "Conditioned thermal owned-cell phase layout differs.");
+    validate_tail_layout(plan);
     require(mode == PhaseThermalMode::Equilibrium || mode == PhaseThermalMode::SeparatePhaseTemperatures,
         "Invalid thermal mode.");
     require(std::isfinite(pressure) && pressure > 0 && std::isfinite(controls.physical_relative_tolerance) &&
@@ -517,6 +576,22 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
         result.anchors.push_back(std::move(anchor));
     };
     recover();
+    const auto& material_tail = plan.material_tail;
+    const bool detached_tail = !material_tail.paired_stage && !material_tail.reservoirs.empty();
+    const auto add_reservoir_energy = [&]
+    {
+        for (const auto& exchange : material_tail.reservoirs)
+        {
+            sources[exchange.phase].add(exchange.energy);
+            targets[exchange.phase].add(exchange.energy);
+        }
+    };
+    const auto project_final_moles = [&]
+    {
+        // Use the exact applied source-packet projection after independently checking its raw endpoint.
+        for (size_t a = 0; a < np; ++a)
+            moles[a] = final_templates[a].moles;
+    };
     for (size_t j = 0; j < plan.amounts.size(); ++j)
     {
         const auto& stage = plan.configuration->stages[j];
@@ -576,7 +651,8 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
         }
         else
         {
-            const auto after = stocks.apply(stage, amounts);
+            const bool raw_final = material_tail.paired_stage == j;
+            const auto after = stocks.apply(&stage, amounts, raw_final ? &material_tail : nullptr);
             std::vector<PartialMolarEnthalpyPoint> properties(np);
             std::vector<int> evaluated(np, 0);
             for (size_t i = 0; i < amounts.size(); ++i)
@@ -632,28 +708,45 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
                 }
                 const auto species = catalog.index(slot.species);
                 const auto& h = properties[a];
-                const long double energy = static_cast<long double>(amounts[i]) * h.value[species];
-                const long double tangent = static_cast<long double>(amounts[i]) *
-                                            (h.temperature[species] * temperature_derivative[a] + h.pressure[species]);
-                targets[a].add(-energy);
-                targets[slot.recipient].add(energy);
-                sources[a].add(-energy);
-                sources[slot.recipient].add(energy);
-                material[a].add(-energy);
-                material[slot.recipient].add(energy);
-                target_derivative[a] -= tangent;
-                target_derivative[slot.recipient] += tangent;
+                Acc slot_energy, slot_tangent;
+                const auto transfer = [&](double amount)
+                {
+                    const long double energy = static_cast<long double>(amount) * h.value[species];
+                    const long double tangent =
+                        static_cast<long double>(amount) *
+                        (h.temperature[species] * temperature_derivative[a] + h.pressure[species]);
+                    targets[a].add(-energy);
+                    targets[slot.recipient].add(energy);
+                    sources[a].add(-energy);
+                    sources[slot.recipient].add(energy);
+                    material[a].add(-energy);
+                    material[slot.recipient].add(energy);
+                    slot_energy.add(energy);
+                    slot_tangent.add(tangent);
+                };
+                if (raw_final)
+                    for (double amount : material_tail.paired_amounts[i])
+                        transfer(amount);
+                else
+                    transfer(amounts[i]);
+                target_derivative[a] -= slot_tangent.value();
+                target_derivative[slot.recipient] += slot_tangent.value();
                 result.material_events.push_back({j, i, h.value[species], h.temperature[species], h.pressure[species],
-                    narrow(temperature_derivative[a]), energy, tangent});
+                    narrow(temperature_derivative[a]), slot_energy.value(), slot_tangent.value()});
             }
             moles = after;
+            if (raw_final)
+                add_reservoir_energy();
         }
-        if (j + 1 == plan.amounts.size())
-        {
-            // Retain the exact applied source-packet material projection; its raw endpoint was independently checked.
-            for (size_t a = 0; a < np; ++a)
-                moles[a] = final_templates[a].moles;
-        }
+        if (j + 1 == plan.amounts.size() && !detached_tail)
+            project_final_moles();
+        recover();
+    }
+    if (detached_tail)
+    {
+        moles = stocks.apply(nullptr, {}, &material_tail);
+        add_reservoir_energy();
+        project_final_moles();
         recover();
     }
     Acc energy_error, total_roundoff, operand_bound, caloric, work, work_magnitude, pressure_operands;
@@ -661,6 +754,8 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
     Acc raw_roundoff, volume_derivative;
     for (auto e : plan.raw_declared_energy)
         declared_total.add(e);
+    for (const auto& exchange : material_tail.reservoirs)
+        declared_total.add(exchange.energy);
     for (size_t a = 0; a < np; ++a)
     {
         result.volumes[a] = narrow(points[a].V);
@@ -726,6 +821,8 @@ CaloricPressureInterval interphase_pressure_bounds(
 {
     require(plan.configuration != nullptr, "Missing frozen pressure-domain plan.");
     validate_interphase_configuration(*plan.configuration, phases);
+    require(plan.amounts.size() == plan.configuration->stages.size(), "Conditioned pressure stage layout differs.");
+    validate_tail_layout(plan);
     CaloricPressureInterval result{0, std::numeric_limits<double>::infinity()};
     const auto& catalog = phases.front().thermodynamics->catalog();
     MaterialStocks stocks(catalog, plan.pre_moles, plan.raw_pre_moles);
@@ -746,6 +843,7 @@ CaloricPressureInterval interphase_pressure_bounds(
         const auto& stage = plan.configuration->stages[j];
         if (stage.kind == InterphaseStageKind::Material)
         {
+            require(plan.amounts[j].size() == stage.material.size(), "Frozen pressure-domain material layout differs.");
             for (size_t i = 0; i < stage.material.size(); ++i)
                 if (plan.amounts[j][i] > 0)
                 {
@@ -753,8 +851,14 @@ CaloricPressureInterval interphase_pressure_bounds(
                     result.lower = std::max(result.lower, b.minimum_pressure);
                     result.upper = std::min(result.upper, b.maximum_pressure);
                 }
-            moles = stocks.apply(stage, plan.amounts[j]);
+            moles = stocks.apply(
+                &stage, plan.amounts[j], plan.material_tail.paired_stage == j ? &plan.material_tail : nullptr);
         }
+        include_phases();
+    }
+    if (!plan.material_tail.paired_stage && !plan.material_tail.reservoirs.empty())
+    {
+        moles = stocks.apply(nullptr, {}, &plan.material_tail);
         include_phases();
     }
     require(std::isfinite(result.lower) && std::isfinite(result.upper) && result.lower <= result.upper,

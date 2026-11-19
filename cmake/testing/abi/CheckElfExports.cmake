@@ -918,6 +918,11 @@ simplefluid_require_reacting_api(
 simplefluid_require_reacting_api(
     "^${qbmm_ns}advance_qbmm_population[(]${qbmm_schema} const&, ${qbmm_ns}CellSpeciesState const&, ${qbmm_ns}QbmmCellView, ${qbmm_ns}QbmmEventBatch const&[)]$" 1)
 
+# Raw final material allocations for pressure-conditioned replay.
+set(simplefluid_qbmm_source_public_symbol_budget 1)
+simplefluid_require_reacting_api(
+    "^${qbmm_ns}compile_interphase_plan[(]${simplefluid_stage3_std}shared_ptr<${qbmm_ns}InterphaseConfiguration const>, ${simplefluid_reacting_phase_span}, ${simplefluid_thermal_double_vectors}, ${simplefluid_thermal_long_vectors}, ${simplefluid_thermal_long_vector}, ${simplefluid_raw_amount_span}, ${qbmm_ns}FrozenMaterialSourceTail[)]$" 1)
+
 # Isothermal NOX adds one public context constructor (two Itanium entries) and
 # two virtual hooks. Even private overrides must remain exported: downstream
 # derived-driver vtables refer to them. The custom-driver link test covers this.
@@ -1364,7 +1369,7 @@ math(EXPR simplefluid_retired_mesh_total_symbol_budget
 math(EXPR simplefluid_api_symbol_lower_bound
     "${simplefluid_pre_retirement_api_symbol_lower_bound} - ${simplefluid_retired_mesh_total_symbol_budget}")
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_qbmm_public_symbol_budget} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_population_process_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget} - ${simplefluid_retired_mesh_exact_symbol_budget}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_qbmm_source_public_symbol_budget} + ${simplefluid_qbmm_public_symbol_budget} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_population_process_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget} - ${simplefluid_retired_mesh_exact_symbol_budget}")
 math(EXPR simplefluid_api_symbol_reviewed_maximum
     "${simplefluid_api_symbol_upper_bound} - 3")
 math(EXPR simplefluid_api_symbol_upper_bound
