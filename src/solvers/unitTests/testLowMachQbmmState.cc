@@ -95,6 +95,89 @@ struct Fixture
     std::shared_ptr<Flow> solver() const { return std::make_shared<Flow>(mesh, eos, options); }
 };
 
+void expect_state(const Flow::State& state, const Flow::State& expected);
+
+TEST(LowMachQbmmStateTest, LinearStageTwoRejectsOneOwnerAndPreservesEarlierTrial)
+{
+    Fixture f(3);
+    f.options.qbmm_model.family_transport = R::QbmmModelOptions::FamilyTransport::RealizableLinearSSPRK2;
+    f.options.qbmm_model.maximum_linear_substeps = 1;
+    constexpr double base_pressure = 100000., marker = 1. / 64., marked_pressure = base_pressure + marker;
+    const auto gas = f.eos[1];
+    bool armed = false, injected = false;
+    f.eos[1] = std::make_shared<const R::MixtureThermodynamics>(
+        f.catalog, gas->bounds(), gas->kind(), gas->enthalpy_pressure_dependence(),
+        [&](double temperature, double pressure, std::span<const double> fractions)
+        {
+            if (armed && pressure == marked_pressure)
+            {
+                injected = true;
+                throw std::invalid_argument("Test stage-two donor EOS failure.");
+            }
+            return gas->evaluate(temperature, pressure, fractions);
+        },
+        gas->energy_convention());
+    auto initial = f.initial(true);
+    const auto occupied = f.initial();
+    for (size_t c = 0; c < initial.cells.size(); ++c)
+    {
+        auto& cell = initial.cells[c];
+        const double z = f.mesh->cell_centroid(static_cast<LO>(c)).z;
+        if (z < 1.)
+            cell = occupied.cells[c];
+        if (z > 1. && z < 2.)
+        {
+            // Stage one has only the coarse gas here. Hold both occupied
+            // volumes fixed under the unique local pressure marker.
+            cell.mechanical_pressure = marker;
+            cell.phases[2].moles[1] *= marked_pressure / base_pressure;
+            const std::array fractions{1., 0.};
+            const auto liquid = f.eos[0]->evaluate(300., marked_pressure, fractions);
+            auto& phase = cell.phases[0];
+            phase.moles[0] *= liquid.density / 1000.;
+            phase.internal_energy = phase.moles[0] * .02 * liquid.internal_energy;
+        }
+        cell.velocity.component(2) = .04;
+    }
+    auto flow = f.solver();
+    flow->initialize(std::move(initial));
+    const auto accepted = flow->state();
+    std::vector<double> accepted_flux(f.mesh->num_owned_faces());
+    for (size_t k = 0; k < accepted_flux.size(); ++k)
+        accepted_flux[k] = flow->volume_flux().local_value(static_cast<LO>(k));
+    const auto earlier = flow->preview(.001);
+
+    const auto rejection = [&](double dt)
+    {
+        try
+        {
+            (void) flow->preview(dt);
+        }
+        catch (const std::exception& error)
+        {
+            return std::string(error.what());
+        }
+        return std::string{};
+    };
+    // Two interior faces carry .04 m3/s. A 15 s request needs more
+    // than one substep under the .5 donor Courant cap in each 1 m3 cell.
+    const auto cap_failure = rejection(15.);
+    EXPECT_NE(cap_failure.find("subcycle cap"), std::string::npos) << cap_failure;
+    expect_state(flow->state(), accepted);
+    armed = true;
+    const auto failure = rejection(.001);
+    EXPECT_NE(failure.find("QBMM SSPRK2 stage 2 donor traces"), std::string::npos) << failure;
+    const int local_injectors = injected;
+    int injectors = 0;
+    Teuchos::reduceAll(*f.mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_injectors, &injectors);
+    EXPECT_EQ(injectors, 1);
+    expect_state(flow->state(), accepted);
+    for (size_t k = 0; k < accepted_flux.size(); ++k)
+        EXPECT_EQ(flow->volume_flux().local_value(static_cast<LO>(k)), accepted_flux[k]);
+    EXPECT_NO_THROW(flow->commit(earlier));
+    expect_state(flow->state(), earlier.state());
+}
+
 void expect_state(const Flow::State& state, const Flow::State& expected)
 {
     EXPECT_EQ(state.qbmm_families, expected.qbmm_families);
@@ -1289,6 +1372,69 @@ TEST(LowMachQbmmStateTest, DeferredModelRequestsRejectCollectivelyBeforeAdvance)
     }
     auto supported = f.solver();
     EXPECT_NO_THROW(supported->initialize(f.initial()));
+}
+
+TEST(LowMachQbmmStateTest, RealizableLinearRequiresFixedSharedCarrierAndUniformControls)
+{
+    Fixture f;
+    using Model = R::QbmmModelOptions;
+    f.options.qbmm_model.family_transport = Model::FamilyTransport::RealizableLinearSSPRK2;
+    const auto comm = f.mesh->owned_cell_map()->getComm();
+    const auto configures_only_on_last_rank = [&](auto change)
+    {
+        auto options = f.options;
+        if (comm->getRank() == comm->getSize() - 1)
+            change(options);
+        EXPECT_THROW((void) Flow(f.mesh, f.eos, options), std::exception);
+    };
+    const auto rejects = [&](auto change)
+    { configures_only_on_last_rank([&](Flow::Options& options) { change(options.qbmm_model); }); };
+    rejects([](Model& model) { model.transport.time = FVM::ScalarTimeScheme::BDF2; });
+    rejects([](Model& model) { model.transport.convection = FVM::ScalarConvectionScheme::BoundedLinearUpwind; });
+    rejects([](Model& model) { model.transport.mode = FVM::AssemblyMode::Steady; });
+    rejects([](Model& model) { model.velocity = Model::Velocity::SuppliedPhaseSlip; });
+    rejects([](Model& model) { model.velocity = Model::Velocity::NodeDependentSlip; });
+    rejects([](Model& model) { model.velocity = Model::Velocity::IndependentPhaseMomentum; });
+    rejects([](Model& model) { model.linear_cfl = std::nextafter(.5, 1.); });
+    rejects([](Model& model) { model.linear_cfl = 0.; });
+    rejects([](Model& model) { model.maximum_linear_substeps = 0; });
+    configures_only_on_last_rank([](Flow::Options& options) { options.qbmm_families.clear(); });
+    if (comm->getSize() > 1)
+    {
+        rejects([](Model& model) { model.linear_cfl = .25; });
+        rejects([](Model& model) { --model.maximum_linear_substeps; });
+        rejects([](Model& model) { model.family_transport = Model::FamilyTransport::NativeImplicit; });
+    }
+    auto flow = f.solver();
+    flow->initialize(f.initial());
+    const auto earlier = flow->preview(.01);
+    EXPECT_EQ(earlier.diagnostics().family_transport, Model::FamilyTransport::RealizableLinearSSPRK2);
+    EXPECT_EQ(earlier.diagnostics().linear_substeps, 1);
+    EXPECT_EQ(earlier.diagnostics().linear_stages, 2u);
+    EXPECT_EQ(earlier.diagnostics().maximum_linear_cfl, 0.);
+    Flow::PlanarMotion motion(f.mesh);
+    EXPECT_THROW((void) flow->preview_ale(.01, motion, 1.001), std::exception);
+    EXPECT_FALSE(motion.has_active_trial());
+    int calls = 0;
+    auto forced = restart_controller_options(f, calls);
+    forced.body_acceleration = Flow::Vector{};
+    EXPECT_THROW((void) R::ReactingMixtureCoupler(flow, std::move(forced)), std::exception);
+    EXPECT_EQ(calls, 0);
+    EXPECT_NO_THROW(flow->commit(earlier));
+
+    Flow::Mesh::DistributionOptions distribution;
+    distribution.allow_empty_partitions = true;
+    const auto periodic = std::make_shared<Flow::Mesh>(
+        std::make_shared<Flow::Mesh::Cartesian>(
+            Vec3D<ArrReal>{ArrReal{0, 1}, ArrReal{0, 1}, ArrReal{0, 1, 2}}, Vec3D<bool>{false, false, true}),
+        distribution);
+    EXPECT_THROW((void) Flow(periodic, f.eos, f.options), std::exception);
+    using Semi = Flow::Mesh::SemiStructured;
+    const auto skew = std::make_shared<Flow::Mesh>(
+        std::make_shared<Semi>(Arr<Semi::Vec3>{{0, 0, 0}, {1, 0, 0}, {2, .5, 0}, {2, 1.5, 0}, {1, 1, 0}, {0, 1, 0}},
+            Arr<Arr<unsigned>>{{0, 1, 4, 5}, {1, 2, 3, 4}}, ArrReal{0, 1}),
+        distribution);
+    EXPECT_THROW((void) Flow(skew, f.eos, f.options), std::exception);
 }
 
 TEST(LowMachQbmmStateTest, MaterialSlotsCannotConvertTheFamilyToOrFromAnUnresolvedGasPool)

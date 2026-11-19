@@ -25,6 +25,11 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       ../details/LowMachQbmmExplicitTransport.cc
       ../details/LowMachQbmmKineticTransport.cc)
   endif()
+  if(TEST_NAME STREQUAL "testLowMachQbmmLinearTransport")
+    target_sources(${TEST_NAME} PRIVATE
+      ../details/LowMachQbmmExplicitTransport.cc
+      ../details/LowMachQbmmLinearTransport.cc)
+  endif()
   if(TEST_NAME STREQUAL "testVolumeContinuityGeometryAccess")
     target_sources(${TEST_NAME} PRIVATE
       VolumeContinuityALETestProvider.cc
@@ -51,6 +56,10 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       ${TEST_NAME}
       PROPERTIES LABELS "ale\\;free_surface\\;boussinesq\\;conservation\\;transaction"
     )
+  elseif(TEST_NAME STREQUAL "testLowMachQbmmLinearTransport")
+    simplefluid_discover_tests(${TEST_NAME}
+      XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q7c/$<CONFIG>"
+      PROPERTIES LABELS "qbmm\\;low_mach\\;conservation")
   elseif(TEST_NAME MATCHES "^testLowMachQbmmKinetic(Transport)?$")
     simplefluid_discover_tests(${TEST_NAME}
       XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q7b/$<CONFIG>"
@@ -154,6 +163,15 @@ add_qbmm_restart_tests(QbmmPlanarControllerRestart testReactingMixtureQbmmSource
 add_qbmm_restart_tests(QbmmKineticControllerRestart testReactingMixtureQbmmSources
     ReactingMixtureQbmmSourcesTest.KineticTransportFeedsCoherentEventsThermalsCommitAndRestart
     SIMPLEFLUID_Q7B_RESTART "qbmm;kinetic;restart;transaction;conservation")
+add_qbmm_restart_tests(QbmmLinearControllerRestart testReactingMixtureQbmmSources
+    ReactingMixtureQbmmSourcesTest.LinearTransportFeedsCoherentEventsThermalsCommitAndRestart
+    SIMPLEFLUID_Q7C_RESTART "qbmm;restart;transaction;conservation")
+
+foreach(_linear_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME LowMachQbmmLinearTransport_${_linear_ranks}procs
+        TARGET testLowMachQbmmLinearTransport PROCS ${_linear_ranks}
+        LABELS "mpi;qbmm;low_mach;conservation;empty_rank" TIMEOUT 900)
+endforeach()
 
 foreach(_kinetic_ranks IN ITEMS 2 4)
     foreach(_kinetic_case IN ITEMS LowMachQbmmKinetic LowMachQbmmKineticTransport)

@@ -23,6 +23,7 @@ using Law = std::function<Ops(const R::MixtureQbmmContext&)>;
 using Kind = R::QbmmEventKind;
 using Phase = R::SpeciesPhase;
 using Shape = R::QbmmShapeState;
+using FamilyTransport = R::QbmmModelOptions::FamilyTransport;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
 constexpr double scale = 1. / 128;      // kg/bubble. The pure family species weighs 1 kg/mol.
@@ -46,7 +47,7 @@ struct Fixture : Thermo::Fixture
     explicit Fixture(std::vector<R::QbmmAtom> seed = {{4, 1}}, bool moving = false, bool bind_coarse = false,
         R::EnergyConvention convention = R::EnergyConvention::IncludesFormationEnergy,
         R::QbmmClosureVersions policies = {}, double liquid_stock = liquid_moles, bool kinetic = false,
-        bool initialize_flow = true)
+        bool initialize_flow = true, FamilyTransport family_transport = FamilyTransport::NativeImplicit)
         : Thermo::Fixture(0, 0, convention)
     {
         Flow::Mesh::DistributionOptions partition;
@@ -62,6 +63,7 @@ struct Fixture : Thermo::Fixture
         controls.linear.tolerance = 1e-12;
         controls.phase_roles = {{Flow::PhaseRole::BulkLiquid, "liquid"}, {Flow::PhaseRole::DispersedGas, "vapor"},
             {Flow::PhaseRole::BulkGas, "inert"}, {Flow::PhaseRole::DispersedGas, "coarse"}};
+        controls.qbmm_model.family_transport = family_transport;
         if (kinetic)
         {
             const R::QbmmLawMetadata slip{"affine-mass-slip", 1, R::QbmmLawKind::NodeSlip,
@@ -977,15 +979,22 @@ TEST(ReactingMixtureQbmmSourcesTest, PairedEventsReserveCompensatedChemistryCred
     }
 }
 
-void exercise_coherent_transport(bool kinetic)
+void exercise_coherent_transport(FamilyTransport family_transport)
 {
     using LO = Flow::Pack::local_ordinal_type;
     constexpr double dt = .01;
-    const char* writer = kinetic ? std::getenv("SIMPLEFLUID_Q7B_RESTART_WRITE") : nullptr;
-    const char* reader = kinetic ? std::getenv("SIMPLEFLUID_Q7B_RESTART_READ") : nullptr;
+    const bool kinetic = family_transport == FamilyTransport::KineticEuler;
+    const bool linear = family_transport == FamilyTransport::RealizableLinearSSPRK2;
+    const bool explicit_family = kinetic || linear;
+    const char* writer = kinetic  ? std::getenv("SIMPLEFLUID_Q7B_RESTART_WRITE")
+                         : linear ? std::getenv("SIMPLEFLUID_Q7C_RESTART_WRITE")
+                                  : nullptr;
+    const char* reader = kinetic  ? std::getenv("SIMPLEFLUID_Q7B_RESTART_READ")
+                         : linear ? std::getenv("SIMPLEFLUID_Q7C_RESTART_READ")
+                                  : nullptr;
     ASSERT_FALSE(writer && reader);
     Fixture f({{4, 1}, {4, 2}}, true, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, kinetic,
-        !reader);
+        !reader, family_transport);
     std::vector<R::QbmmMomentBlock> law_moments(f.mesh->num_owned_cells());
     std::vector<std::array<double, 2>> law_nodes(f.mesh->num_owned_cells());
     bool fail_source = false;
@@ -1062,12 +1071,22 @@ void exercise_coherent_transport(bool kinetic)
         const auto report = f.flow->qbmm_report();
         EXPECT_EQ(report.receipt_history, Flow::QbmmReceiptHistory::UnavailableAfterPortableRestart);
         EXPECT_FALSE(report.interval);
-        EXPECT_GT(report.kinetic_substeps, 0);
+        EXPECT_EQ(report.family_transport, family_transport);
+        if (linear)
+        {
+            EXPECT_GT(report.linear_substeps, 0);
+            EXPECT_EQ(report.linear_stages, 2 * static_cast<std::uint64_t>(report.linear_substeps));
+            EXPECT_LE(report.maximum_linear_cfl, .5);
+            EXPECT_LE(report.maximum_linear_stage_residual, 1);
+            EXPECT_LE(report.maximum_linear_step_residual, 1);
+        }
+        else
+            EXPECT_GT(report.kinetic_substeps, 0);
         Coupler controller(f.flow, make_options(f));
         EXPECT_EQ((std::array{f.law_calls, f.constitutive_calls, f.slip_calls}), (std::array{0, 0, 0}));
         EXPECT_GT(controller.diagnostics().correctors, 0);
-        Fixture fresh(
-            {{4, 1}, {4, 2}}, true, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, true, false);
+        Fixture fresh({{4, 1}, {4, 2}}, true, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles,
+            kinetic, false, family_transport);
         EXPECT_FALSE(fresh.flow->initialized());
         fresh.flow->restore_qbmm_restart(RestartIO::read_restart(*comm, reader, ".first"));
         const auto first_recoded = fresh.flow->serialize_qbmm_restart();
@@ -1095,6 +1114,12 @@ void exercise_coherent_transport(bool kinetic)
         EXPECT_EQ(actual.flow.momentum_error, expected.flow.momentum_error);
         EXPECT_EQ(actual.flow.kinetic_substeps, expected.flow.kinetic_substeps);
         EXPECT_EQ(actual.flow.maximum_kinetic_cfl, expected.flow.maximum_kinetic_cfl);
+        EXPECT_EQ(actual.flow.family_transport, expected.flow.family_transport);
+        EXPECT_EQ(actual.flow.linear_substeps, expected.flow.linear_substeps);
+        EXPECT_EQ(actual.flow.linear_stages, expected.flow.linear_stages);
+        EXPECT_EQ(actual.flow.maximum_linear_cfl, expected.flow.maximum_linear_cfl);
+        EXPECT_EQ(actual.flow.maximum_linear_stage_residual, expected.flow.maximum_linear_stage_residual);
+        EXPECT_EQ(actual.flow.maximum_linear_step_residual, expected.flow.maximum_linear_step_residual);
         EXPECT_EQ(actual.external_mass, expected.external_mass);
         EXPECT_EQ(actual.external_heat, expected.external_heat);
         EXPECT_EQ(actual.transfer_energy, expected.transfer_energy);
@@ -1106,6 +1131,10 @@ void exercise_coherent_transport(bool kinetic)
         return;
     }
     Coupler controller(f.flow, make_options(f));
+    EXPECT_EQ(controller.diagnostics().flow.family_transport, family_transport);
+    EXPECT_EQ(controller.diagnostics().flow.kinetic_substeps, 0);
+    EXPECT_EQ(controller.diagnostics().flow.linear_substeps, 0);
+    EXPECT_EQ(controller.diagnostics().flow.linear_stages, 0);
     if (writer)
     {
         controller.advance(dt);
@@ -1150,6 +1179,24 @@ void exercise_coherent_transport(bool kinetic)
         {
             EXPECT_NEAR(rates.shape_flux.H2, 2.5 * rates.population_number_flux, 2e-13);
             EXPECT_NEAR(rates.shape_flux.H3, 4.5 * rates.population_number_flux, 2e-13);
+            if (linear)
+            {
+                EXPECT_TRUE(rates.kinetic);
+                if (!rates.kinetic)
+                    continue;
+                const auto& directional = *rates.kinetic;
+                const bool exterior = f.mesh->is_geometry_exterior_face(static_cast<LO>(index));
+                // Stage 1 starts uniform. Stage 2 sees opposite changes in the two unit-volume
+                // cells, so its midpoint reconstruction returns the original trace.
+                EXPECT_NEAR(rates.population_number_flux, exterior ? 0. : 8 * face.carrier_volume_flux, 3e-13);
+                EXPECT_NEAR(rates.derived_mass_flux, 1.5 * scale * rates.population_number_flux, 2e-14);
+                EXPECT_EQ(directional.slip_volume_flux, 0.);
+                EXPECT_EQ(rates.derived_drift_momentum_flux, Flow::Vector{});
+                EXPECT_NEAR(rates.material_volume_flux,
+                    directional.theta * face.carrier_volume_flux + directional.pressure_rounding_flux, 2e-16);
+                EXPECT_NEAR(face.momentum_mass_flux, face.forward_mass_flux - face.backward_mass_flux, 2e-15);
+                EXPECT_EQ(face.symmetric_mass_flux, 0.);
+            }
         }
     }
     double local_transport_change = 0;
@@ -1210,10 +1257,8 @@ void exercise_coherent_transport(bool kinetic)
                                (phase_volume - trial.transport_snapshot().cells[c].phases[p].advected_material_volume);
         }
         EXPECT_NEAR(volume, f.mesh->cell_volume(static_cast<LO>(c)), 2e-9);
-        if (kinetic)
+        if (explicit_family)
         {
-            const auto& closure = cell.qbmm_kinetic_closure.at(1);
-            EXPECT_TRUE(closure);
             const auto& old = accepted.cells[c];
             const auto mass = [&](const Flow::CellState& stock)
             {
@@ -1223,10 +1268,17 @@ void exercise_coherent_transport(bool kinetic)
                         total += phase.moles[s] * f.catalog->species()[s].molarMass;
                 return total;
             };
-            const double drift = scale * kinetic_slope * cell.qbmm_shape[1]->H2;
-            const double old_drift = scale * kinetic_slope * old.qbmm_shape[1]->H2;
-            if (closure)
-                EXPECT_NEAR(closure->drift_momentum.z, drift, 2e-14);
+            const double drift = kinetic ? scale * kinetic_slope * cell.qbmm_shape[1]->H2 : 0.;
+            const double old_drift = kinetic ? scale * kinetic_slope * old.qbmm_shape[1]->H2 : 0.;
+            if (kinetic)
+            {
+                const auto& closure = cell.qbmm_kinetic_closure.at(1);
+                EXPECT_TRUE(closure);
+                if (closure)
+                    EXPECT_NEAR(closure->drift_momentum.z, drift, 2e-14);
+            }
+            else
+                EXPECT_TRUE(cell.qbmm_kinetic_closure.empty());
             local_totals[5] += mass(cell) * cell.velocity.z + drift - mass(old) * old.velocity.z - old_drift;
         }
         local_totals[1] += cell.phases[0].moles[0] - accepted.cells[c].phases[0].moles[0];
@@ -1245,9 +1297,21 @@ void exercise_coherent_transport(bool kinetic)
     EXPECT_NEAR(totals[3], .75, 2e-11);
     EXPECT_EQ(trial.diagnostics().external_mass, 0);
     EXPECT_EQ(trial.diagnostics().external_heat, 0);
-    if (kinetic)
+    if (explicit_family)
     {
-        EXPECT_EQ(trial.diagnostics().flow.kinetic_substeps, 1);
+        const auto& flow = trial.diagnostics().flow;
+        EXPECT_EQ(flow.family_transport, family_transport);
+        if (linear)
+        {
+            EXPECT_EQ(flow.linear_substeps, 1);
+            EXPECT_EQ(flow.linear_stages, 2u);
+            EXPECT_GT(flow.maximum_linear_cfl, 0.);
+            EXPECT_LE(flow.maximum_linear_cfl, .5);
+            EXPECT_LE(flow.maximum_linear_stage_residual, 1.);
+            EXPECT_LE(flow.maximum_linear_step_residual, 1.);
+        }
+        else
+            EXPECT_EQ(flow.kinetic_substeps, 1);
         EXPECT_NEAR(totals[5],
             trial.diagnostics().flow.pressure_impulse.z + trial.diagnostics().flow.external_impulse.z, 2e-11);
         int local_empty = accepted.cells.empty(), empty = 0;
@@ -1260,9 +1324,14 @@ void exercise_coherent_transport(bool kinetic)
         const auto callbacks = std::array{f.law_calls, f.constitutive_calls, f.slip_calls};
         const auto earlier = controller.qbmm_report(trial);
         ASSERT_TRUE(earlier.interval);
-        EXPECT_EQ(earlier.interval->kinetic_substeps, 1);
+        EXPECT_EQ(earlier.interval->family_transport, family_transport);
+        EXPECT_EQ(earlier.interval->kinetic_substeps, kinetic ? 1 : 0);
+        EXPECT_EQ(earlier.interval->linear_substeps, linear ? 1 : 0);
+        EXPECT_EQ(earlier.interval->linear_stages, flow.linear_stages);
+        EXPECT_EQ(earlier.interval->maximum_linear_stage_residual, flow.maximum_linear_stage_residual);
+        EXPECT_EQ(earlier.interval->maximum_linear_step_residual, flow.maximum_linear_step_residual);
         EXPECT_EQ(earlier.interval->local_face_transport.size(), f.mesh->num_owned_faces());
-        EXPECT_EQ(earlier.interval->local_kinetic_law_receipts.size(), 2 * accepted.cells.size());
+        EXPECT_EQ(earlier.interval->local_kinetic_law_receipts.size(), kinetic ? 2 * accepted.cells.size() : 0);
         EXPECT_EQ((std::array{f.law_calls, f.constitutive_calls, f.slip_calls}), callbacks);
     }
     const std::array calls{f.law_calls, f.constitutive_calls, f.slip_calls};
@@ -1275,7 +1344,7 @@ void exercise_coherent_transport(bool kinetic)
         local_flux = std::max(local_flux, std::abs(f.flow->volume_flux().owned_value(static_cast<LO>(face))));
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_flux, &global_flux);
     EXPECT_GT(global_flux, 1e-8);
-    const auto archive = f.flow->serialize_qbmm_restart();
+    const auto archive = explicit_family ? controller.serialize_qbmm_restart() : f.flow->serialize_qbmm_restart();
     Flow restored(f.mesh, std::vector{f.liquid, f.gas, f.gas, f.gas}, f.flow->options());
     restored.restore_qbmm_restart(archive);
     EXPECT_EQ(restored.state().time, f.flow->state().time);
@@ -1298,14 +1367,34 @@ void exercise_coherent_transport(bool kinetic)
     for (size_t face = 0; face < f.mesh->num_owned_faces(); ++face)
         EXPECT_EQ(restored.volume_flux().owned_value(static_cast<LO>(face)),
             f.flow->volume_flux().owned_value(static_cast<LO>(face)));
-    if (kinetic)
+    if (explicit_family)
     {
+        const auto expect_mismatched_policy = [&](const Flow::Options& controls)
+        {
+            Flow incompatible(f.mesh, std::vector{f.liquid, f.gas, f.gas, f.gas}, controls);
+            const auto before_restore = f.slip_calls;
+            EXPECT_THROW(incompatible.restore_qbmm_restart(archive), std::exception);
+            EXPECT_FALSE(incompatible.initialized());
+            EXPECT_EQ(f.slip_calls, before_restore);
+        };
         auto different_policy = f.flow->options();
-        different_policy.qbmm_model.kinetic_cfl /= 2;
-        Flow incompatible(f.mesh, std::vector{f.liquid, f.gas, f.gas, f.gas}, different_policy);
-        const auto before_restore = f.slip_calls;
-        EXPECT_THROW(incompatible.restore_qbmm_restart(archive), std::exception);
-        EXPECT_EQ(f.slip_calls, before_restore);
+        if (linear)
+        {
+            different_policy.qbmm_model.linear_cfl /= 2;
+            expect_mismatched_policy(different_policy);
+            different_policy = f.flow->options();
+            --different_policy.qbmm_model.maximum_linear_substeps;
+        }
+        else
+            different_policy.qbmm_model.kinetic_cfl /= 2;
+        expect_mismatched_policy(different_policy);
+        const auto portable_report = restored.qbmm_report();
+        EXPECT_EQ(portable_report.family_transport, family_transport);
+        EXPECT_EQ(portable_report.receipt_history, Flow::QbmmReceiptHistory::UnavailableAfterPortableRestart);
+        EXPECT_FALSE(portable_report.interval);
+        const auto& statistics = trial.diagnostics().flow;
+        EXPECT_EQ(portable_report.linear_stages, statistics.linear_stages);
+        EXPECT_EQ(portable_report.maximum_linear_stage_residual, statistics.maximum_linear_stage_residual);
         const auto saved = controller.checkpoint();
         controller.advance(dt);
         const auto next_state = f.flow->state();
@@ -1315,7 +1404,8 @@ void exercise_coherent_transport(bool kinetic)
         EXPECT_EQ((std::array{f.law_calls, f.constitutive_calls, f.slip_calls}), callbacks);
         EXPECT_EQ(restored_report.receipt_history, Flow::QbmmReceiptHistory::Available);
         ASSERT_TRUE(restored_report.interval);
-        EXPECT_EQ(restored_report.interval->local_kinetic_law_receipts.size(), 2 * accepted.cells.size());
+        EXPECT_EQ(restored_report.interval->local_kinetic_law_receipts.size(), kinetic ? 2 * accepted.cells.size() : 0);
+        EXPECT_EQ(restored_report.interval->local_face_transport.size(), f.mesh->num_owned_faces());
         controller.advance(dt);
         expect_same_state(f.flow->state(), next_state);
     }
@@ -1323,12 +1413,48 @@ void exercise_coherent_transport(bool kinetic)
 
 TEST(ReactingMixtureQbmmSourcesTest, MovingTransportFeedsCoherentEventsThermalsCommitAndRestart)
 {
-    exercise_coherent_transport(false);
+    exercise_coherent_transport(FamilyTransport::NativeImplicit);
 }
 
 TEST(ReactingMixtureQbmmSourcesTest, KineticTransportFeedsCoherentEventsThermalsCommitAndRestart)
 {
-    exercise_coherent_transport(true);
+    exercise_coherent_transport(FamilyTransport::KineticEuler);
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, LinearTransportFeedsCoherentEventsThermalsCommitAndRestart)
+{
+    exercise_coherent_transport(FamilyTransport::RealizableLinearSSPRK2);
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, CountOnlyMigrationReportsTheReceivingLinearTransportMode)
+{
+    Fixture f({{4, 1}}, false, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, false, true,
+        FamilyTransport::RealizableLinearSSPRK2);
+    auto options = f.flow->options();
+    options.qbmm_families.clear();
+    options.qbmm_model.family_transport = FamilyTransport::NativeImplicit;
+    Flow previous(f.mesh, {f.liquid, f.gas, f.gas, f.gas}, options);
+    auto count_only = f.flow->state();
+    count_only.qbmm_families.clear();
+    for (auto& cell : count_only.cells)
+        cell.qbmm_shape.clear();
+    previous.initialize(count_only);
+    previous.advance(.01);
+
+    Flow::QbmmInitialization shapes;
+    shapes.cells.resize(count_only.cells.size());
+    for (auto& cell : shapes.cells)
+        cell = {std::nullopt, Flow::QbmmMonodisperse{}, std::nullopt, std::nullopt};
+    Coupler controller(f.flow, f.options([](const auto&) { return Ops{}; }));
+    EXPECT_EQ(controller.diagnostics().flow.family_transport, FamilyTransport::RealizableLinearSSPRK2);
+    controller.restore_qbmm_checkpoint(previous, previous.checkpoint(), shapes);
+    const auto& migrated = controller.diagnostics().flow;
+    EXPECT_EQ(migrated.family_transport, f.flow->diagnostics().family_transport);
+    EXPECT_EQ(migrated.family_transport, FamilyTransport::RealizableLinearSSPRK2);
+    EXPECT_EQ(migrated.correctors, previous.diagnostics().correctors);
+    EXPECT_EQ(migrated.linear_substeps, 0);
+    EXPECT_EQ(migrated.linear_stages, 0);
+    EXPECT_EQ(migrated.maximum_linear_cfl, 0.);
 }
 
 TEST(ReactingMixtureQbmmSourcesTest, HeatingPreservesAUnitImpulseBetweenOpposingKineticFamilies)
