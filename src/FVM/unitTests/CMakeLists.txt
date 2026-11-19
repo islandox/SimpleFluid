@@ -49,6 +49,14 @@ simplefluid_add_mpi_test(
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(
+    NAME QbmmPlanarAleGcl_4procs
+    TARGET testALETransport
+    PROCS 4
+    ARGS "--gtest_filter=ALETransportTest.GclPreservesUniformPopulationChannelsWithCompatibleTraces"
+    LABELS "mpi;qbmm;ale;transport;conservation;empty_rank"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
     NAME NonOrthogonalPartitionFaces_2procs
     TARGET testFvmOperators
     PROCS 2
