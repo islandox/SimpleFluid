@@ -2,6 +2,7 @@
  * @brief Immutable ordered page construction, traversal and sparse edits.
  */
 #include "geometry/mesh/AMR/AdaptiveLeafPages.hh"
+#include "geometry/details/AllocationDomain.hh"
 #include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 
@@ -51,9 +52,11 @@ template<class T> struct ScratchAllocator
 {
     using value_type = T;
     Budget* arena;
+    geometry_detail::DomainAllocator<T, geometry_detail::AllocationDomain::LeafPages> memory;
 
     explicit ScratchAllocator(Budget& budget) noexcept : arena(&budget) {}
-    template<class U> ScratchAllocator(const ScratchAllocator<U>& other) noexcept : arena(other.arena) {}
+    template<class U> ScratchAllocator(const ScratchAllocator<U>& other) noexcept
+        : arena(other.arena), memory(other.memory) {}
     T* allocate(std::size_t count)
     {
         if (count > arena->limit / sizeof(T))
@@ -62,7 +65,7 @@ template<class T> struct ScratchAllocator
         arena->add(bytes);
         try
         {
-            return std::allocator<T>{}.allocate(count);
+            return memory.allocate(count);
         }
         catch (...)
         {
@@ -72,10 +75,13 @@ template<class T> struct ScratchAllocator
     }
     void deallocate(T* value, std::size_t count) noexcept
     {
-        std::allocator<T>{}.deallocate(value, count);
+        memory.deallocate(value, count);
         arena->used -= count * sizeof(T);
     }
-    template<class U> bool operator==(const ScratchAllocator<U>& other) const noexcept { return arena == other.arena; }
+    template<class U> bool operator==(const ScratchAllocator<U>& other) const noexcept
+    {
+        return arena == other.arena && memory == other.memory;
+    }
 };
 
 template<class T> using ScratchVector = std::vector<T, ScratchAllocator<T>>;
@@ -134,8 +140,8 @@ struct AdaptiveLeafPages::Node
     }
 
     PageCharge charge; // Release only after records and child owners.
-    std::vector<AdaptiveLeaf> rows;
-    std::vector<NodePtr> children;
+    geometry_detail::DomainVector<AdaptiveLeaf, geometry_detail::AllocationDomain::LeafPages> rows;
+    geometry_detail::DomainVector<NodePtr, geometry_detail::AllocationDomain::LeafPages> children;
     const AdaptiveCellKey* maximum = nullptr;
     std::size_t size = 0, subtree_bytes = 0;
 };
@@ -178,8 +184,15 @@ struct AdaptiveLeafPageBuilder
     [[nodiscard]] std::shared_ptr<Node> allocate()
     {
         PageCharge charge(arena);
+#if defined(__GLIBCXX__)
+        static_assert(sizeof(std::_Sp_counted_ptr_inplace<Node,
+                          geometry_detail::DomainAllocator<Node, geometry_detail::AllocationDomain::LeafPages>,
+                          __gnu_cxx::__default_lock_policy>) <= sizeof(Node) + 4 * sizeof(void*),
+            "Adaptive leaf control exceeds its unchanged allowance.");
+#endif
         charge.add(sizeof(Node) + 4 * sizeof(void*));
-        auto node = std::make_shared<Node>(std::move(charge));
+        auto node = geometry_detail::domain_shared<geometry_detail::AllocationDomain::LeafPages, Node>(
+            std::move(charge));
         record_pipeline_work(PipelineWork::LeafPageCreated);
         ++stats.new_nodes;
         return node;
@@ -650,6 +663,19 @@ AdaptiveLeafPages::Storage AdaptiveLeafPages::storage() const
                 result.maximum_fanout = std::max(result.maximum_fanout, page.children.size());
         });
     return result;
+}
+
+void AdaptiveLeafPages::visit_structure(const std::function<void(const AdaptiveLeafPageObservation&)>& visitor) const
+{
+    const auto visit = [&](const auto& self, const NodePtr& node, const void* parent) -> void
+    {
+        visitor({node.get(), node, parent, *node->maximum, node->rows,
+            node->terminal() ? node->rows.capacity() : node->children.capacity(), node->children.size()});
+        for (const auto& child : node->children)
+            self(self, child, node.get());
+    };
+    if (root_)
+        visit(visit, root_, nullptr);
 }
 
 std::size_t AdaptiveLeafPages::retained_bytes() const noexcept

@@ -239,6 +239,15 @@ TEST(NativeStaticMixedPublication, JoinedStaticSourceSurvivesChangedIncidenceFro
     if (rank == 0)
         marks.push_back({cartesian, A::AdaptiveSplit::Isotropic});
     const auto edited = bound->apply(bound->plan_adaptation(marks));
+    std::vector<const A::AdaptiveLeaf*> geometry_rows;
+    for (const auto& leaf : edited->owned_leaves())
+        geometry_rows.push_back(&leaf);
+    std::size_t geometry_bytes = 0;
+    const auto warmed = edited->geometry_snapshot(geometry_rows, ArithmeticMode::Ordinary,
+        A::GeometrySnapshotPurpose::State, geometry_bytes, edited->options().byte_budget);
+    ASSERT_TRUE(warmed);
+    for (const auto* leaf : geometry_rows)
+        EXPECT_TRUE(warmed->find(*leaf));
     const auto after = publish(*edited);
     parity(after, A::assemble_adaptive_native(*edited, edited->configuration_descriptor()));
     // Cartesian adaptation refines the whole 2-by-2-by-2 companion block.

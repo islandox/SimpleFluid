@@ -41,5 +41,6 @@ flowchart TD
     - `MixedAMRGrid`: Facilitates mixed-region assemblies through conservative interfaces and nonconforming join operators.
 
 For implementation details on specific algorithms, refer to:
+- **Heap attribution:** [AMR requested-heap attribution](amr_heap_attribution.md) distinguishes allocation domains, admission budgets, and retained generations.
 - **PLIC/Clipping:** [plic.md](../modeling/plic.md)
 - **VoF/Flow Algorithms:** [adaptive_vof.md](../modeling/adaptive_vof.md)

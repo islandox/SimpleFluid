@@ -108,7 +108,8 @@ private:
     {
         ContactGroupAllocation charge(imported_.keeper());
         charge.add(sizeof(Page) + 128);
-        auto result = std::make_shared<Page>(std::move(charge));
+        auto result = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, Page>(
+            std::move(charge));
         ++allocated_pages_;
         return result;
     }

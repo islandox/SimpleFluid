@@ -70,7 +70,7 @@ public:
             ++readers_->active;
         }
         ContactGroupAllocation allocation_;
-        std::vector<ContactGroupId> ids_;
+        ContactVector<ContactGroupId> ids_;
         std::shared_ptr<Readers> readers_;
     };
     explicit ContactPointGroups(std::shared_ptr<Budget>, Hasher = {});
@@ -153,8 +153,8 @@ private:
     std::shared_ptr<ContactFanCatalog> catalog_;
     std::shared_ptr<Readers> readers_;
     [[no_unique_address]] Hasher hasher_;
-    std::vector<Group> groups_;
-    std::vector<std::size_t> free_, buckets_;
+    ContactVector<Group> groups_;
+    ContactVector<std::size_t> free_, buckets_;
     PhysicalOwnerIndex<std::shared_ptr<const ContactFanOwner>> fan_owners_;
     std::size_t live_ = 0;
     std::size_t duplicate_work_ = 0, fork_owner_work_ = 0;

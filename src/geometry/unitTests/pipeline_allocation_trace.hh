@@ -1,9 +1,10 @@
 /** @file pipeline_allocation_trace.hh
- * @brief Requested C++ allocation interposition and partial graph attribution.
+ * @brief Requested C++ allocation interposition with allocation-time domains.
  */
 /** Test-only requested C++ allocation trace. No tracing callback allocates.
  * C/MPI/MPFR malloc traffic and allocator RSS remain outside this instrument. */
 #pragma once
+#include "geometry/details/AllocationDomainScope.hh"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -15,6 +16,8 @@
 
 namespace pipeline_trace
 {
+using SimpleFluid::geometry_detail::AllocationDomain;
+inline constexpr std::size_t domains = static_cast<unsigned>(AllocationDomain::Count);
 enum class Phase : unsigned
 {
     Candidate,
@@ -36,11 +39,13 @@ struct Entry
     std::uint64_t serial = 0, epoch = 0;
     Phase phase = Phase::Candidate;
     unsigned membership = 0;
+    AllocationDomain domain = AllocationDomain::Unattributed;
     bool live = false, used = false;
 };
 struct Summary
 {
     std::array<Totals, phases> phase{}, retained_phase{};
+    std::array<Totals, domains> domain{};
     std::size_t live_allocations = 0, unattributed_live_allocations = 0, unattributed_live_bytes = 0;
     std::size_t all_live = 0, all_peak = 0, incremental_peak = 0, retained_allocations = 0, retained_bytes = 0;
     std::size_t retained_streaming_bytes = 0, shared_allocations = 0, shared_bytes = 0;
@@ -53,8 +58,11 @@ inline std::atomic_flag lock = ATOMIC_FLAG_INIT;
 inline std::atomic<bool> recording = false, overflow = false;
 inline std::uint64_t serial = 0, epoch = 0;
 inline std::array<Totals, phases> totals{};
+inline std::array<Totals, domains> domain_totals{};
 inline std::size_t all_live = 0, all_peak = 0, baseline_live = 0;
 inline thread_local Phase phase = Phase::Candidate;
+inline thread_local bool paused = false;
+inline bool capturing() noexcept { return !paused && recording.load(std::memory_order_relaxed); }
 struct Guard
 {
     Guard() noexcept
@@ -74,7 +82,7 @@ inline std::size_t bucket(const void* value) noexcept
 }
 inline void allocated(const void* value, std::size_t bytes) noexcept
 {
-    if (!recording.load(std::memory_order_relaxed))
+    if (!capturing())
         return;
     const Guard guard;
     auto position = bucket(value);
@@ -83,12 +91,15 @@ inline void allocated(const void* value, std::size_t bytes) noexcept
         auto& entry = table[position];
         if (entry.live)
             continue;
-        entry = {value, bytes, ++serial, epoch, phase, 0, true, true};
-        auto& count = totals[static_cast<unsigned>(phase)];
-        ++count.allocations;
-        count.bytes += bytes;
-        count.live += bytes;
-        count.peak = count.peak > count.live ? count.peak : count.live;
+        const auto domain = SimpleFluid::geometry_detail::allocation_domain_slot();
+        entry = {value, bytes, ++serial, epoch, phase, 0, domain, true, true};
+        for (auto* count : {&totals[static_cast<unsigned>(phase)], &domain_totals[static_cast<unsigned>(domain)]})
+        {
+            ++count->allocations;
+            count->bytes += bytes;
+            count->live += bytes;
+            count->peak = std::max(count->peak, count->live);
+        }
         all_live += bytes;
         all_peak = all_peak > all_live ? all_peak : all_live;
         return;
@@ -111,6 +122,9 @@ inline void freed(const void* value) noexcept
             auto& count = totals[static_cast<unsigned>(entry.phase)];
             count.live -= entry.bytes;
             ++count.deallocations;
+            auto& domain = domain_totals[static_cast<unsigned>(entry.domain)];
+            domain.live -= entry.bytes;
+            ++domain.deallocations;
             all_live -= entry.bytes;
             entry.live = false;
             return;
@@ -119,8 +133,11 @@ inline void freed(const void* value) noexcept
 }
 struct Pause
 {
-    bool previous = recording.exchange(false);
-    ~Pause() { recording.store(previous); }
+    bool previous = std::exchange(paused, true);
+    Pause() = default;
+    Pause(const Pause&) = delete;
+    Pause& operator=(const Pause&) = delete;
+    ~Pause() { paused = previous; }
 };
 inline void begin(std::size_t capacity = slots)
 {
@@ -131,19 +148,26 @@ inline void begin(std::size_t capacity = slots)
     ordered_size = 0;
     serial = epoch = 0;
     totals = {};
+    domain_totals = {};
     all_live = all_peak = baseline_live = 0;
     overflow.store(false);
+    paused = false;
     recording.store(true);
 }
 inline void next_epoch()
 {
     const Guard guard;
     ++epoch;
-    for (auto& count : totals)
+    const auto reset_epoch = [](auto& channels)
     {
-        count.allocations = count.bytes = count.deallocations = 0;
-        count.peak = count.live;
-    }
+        for (auto& count : channels)
+        {
+            count.allocations = count.bytes = count.deallocations = 0;
+            count.peak = count.live;
+        }
+    };
+    reset_epoch(totals);
+    reset_epoch(domain_totals);
     all_peak = baseline_live = all_live;
 }
 inline Summary summary()
@@ -151,6 +175,7 @@ inline Summary summary()
     const Guard guard;
     Summary result;
     result.phase = totals;
+    result.domain = domain_totals;
     result.all_live = all_live;
     result.all_peak = all_peak;
     result.incremental_peak = all_peak - baseline_live;
@@ -159,7 +184,7 @@ inline Summary summary()
         if (!entry.live)
             continue;
         ++result.live_allocations;
-        if (!entry.membership)
+        if (entry.domain == AllocationDomain::Unattributed)
         {
             ++result.unattributed_live_allocations;
             result.unattributed_live_bytes += entry.bytes;
@@ -210,9 +235,8 @@ inline const Entry* mark(const void* object, unsigned membership)
     entry->membership |= membership;
     return entry;
 }
-/** Raw captured live extents that no observed graph owner identified. These
- * remain included in all-live, peak, and retained operation totals. */
-inline std::pair<std::size_t, std::size_t> unattributed()
+/** Only for tests of an explicit owner's address inventory, not domain attribution. */
+inline std::pair<std::size_t, std::size_t> unmarked_graph_extents()
 {
     const Guard guard;
     std::pair<std::size_t, std::size_t> result{};

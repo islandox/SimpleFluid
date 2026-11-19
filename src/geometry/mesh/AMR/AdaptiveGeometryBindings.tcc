@@ -39,7 +39,7 @@ template<class T> struct BindingColumn
     };
     T first{}, step{};
     std::uint8_t repeat = 1, period = binding_page_size;
-    std::variant<std::monostate, std::vector<Override>, std::vector<T>> exceptions;
+    std::variant<std::monostate, SnapshotVector<Override>, SnapshotVector<T>> exceptions;
 
     template<class Value> void build(std::size_t count, Value value, adaptive_detail::Budget& budget)
     {
@@ -75,23 +75,23 @@ template<class T> struct BindingColumn
             return;
         if (mismatches * sizeof(Override) < count * sizeof(T))
         {
-            auto& overrides = exceptions.template emplace<std::vector<Override>>();
+            auto& overrides = exceptions.template emplace<SnapshotVector<Override>>();
             reserve_checked(overrides, mismatches, budget);
             for (std::size_t row = 1; row < count; ++row)
                 if (differs(row))
                     overrides.push_back({std::uint8_t(row), value(row)});
             return;
         }
-        auto& dense = exceptions.template emplace<std::vector<T>>();
+        auto& dense = exceptions.template emplace<SnapshotVector<T>>();
         reserve_checked(dense, count, budget);
         for (std::size_t row = 0; row < count; ++row)
             dense.push_back(value(row));
     }
     T at(std::size_t row) const noexcept
     {
-        if (const auto* dense = std::get_if<std::vector<T>>(&exceptions))
+        if (const auto* dense = std::get_if<SnapshotVector<T>>(&exceptions))
             return (*dense)[row];
-        if (const auto* overrides = std::get_if<std::vector<Override>>(&exceptions))
+        if (const auto* overrides = std::get_if<SnapshotVector<Override>>(&exceptions))
         {
             const auto found = std::lower_bound(overrides->begin(), overrides->end(), row,
                 [](const Override& item, std::size_t wanted) { return item.row < wanted; });
@@ -102,9 +102,9 @@ template<class T> struct BindingColumn
     }
     std::size_t bytes() const noexcept
     {
-        if (const auto* dense = std::get_if<std::vector<T>>(&exceptions))
+        if (const auto* dense = std::get_if<SnapshotVector<T>>(&exceptions))
             return dense->capacity() * sizeof(T);
-        if (const auto* overrides = std::get_if<std::vector<Override>>(&exceptions))
+        if (const auto* overrides = std::get_if<SnapshotVector<Override>>(&exceptions))
             return overrides->capacity() * sizeof(Override);
         return 0;
     }
@@ -183,7 +183,7 @@ struct BindingSourceLess
         return a->domain < b->domain;
     }
 };
-using SourceTable = std::map<const AdaptiveLeaf*, std::shared_ptr<const BindingSource>, BindingSourceLess>;
+using SourceTable = SnapshotMap<const AdaptiveLeaf*, std::shared_ptr<const BindingSource>, BindingSourceLess>;
 struct CartesianBindingKeys
 {
     BindingColumn<unsigned> level;
@@ -210,8 +210,8 @@ struct ProductBindingKeys
         Key key;
         std::shared_ptr<const AdaptiveBytes> capsule;
     };
-    std::vector<Factor<BaseCellKey>> bases;
-    std::vector<Factor<AxialIntervalKey>> axes;
+    SnapshotVector<Factor<BaseCellKey>> bases;
+    SnapshotVector<Factor<AxialIntervalKey>> axes;
     BindingColumn<std::uint8_t> base, axis;
     std::size_t bytes() const noexcept
     {
@@ -226,7 +226,7 @@ struct ProductBindingKeys
 };
 struct ExplicitBindingKeys
 {
-    std::vector<ConvexCellAncestry> keys;
+    SnapshotVector<ConvexCellAncestry> keys;
     std::size_t bytes() const noexcept
     {
         auto total = keys.capacity() * sizeof(ConvexCellAncestry);
@@ -239,17 +239,17 @@ struct BindingCertificate
 {
     std::uint8_t row;
     PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry;
-    std::vector<GeometrySnapshotSurface> surfaces;
+    SnapshotVector<GeometrySnapshotSurface> surfaces;
 };
 struct BindingPage
 {
     std::size_t row_count = 0;
-    std::vector<std::shared_ptr<const BindingSource>> sources;
+    SnapshotVector<std::shared_ptr<const BindingSource>> sources;
     BindingColumn<std::uint8_t> source, policy;
     BindingColumn<std::uint64_t> native_cell;
     std::variant<CartesianBindingKeys, ExplicitBindingKeys, ProductBindingKeys, StaticBindingKeys> keys;
     std::optional<std::array<BindingColumn<double>, 4>> metrics;
-    std::vector<BindingCertificate> certificates;
+    SnapshotVector<BindingCertificate> certificates;
 
     [[nodiscard]] std::size_t bytes() const noexcept;
     [[nodiscard]] std::strong_ordering compare(std::size_t, const AdaptiveCellKey&) const;
@@ -393,7 +393,7 @@ AdaptiveLeaf BindingPage::copy_leaf(std::size_t row, AdaptiveCellKey key, adapti
         const auto& axis = product.axes[product.axis.at(row)].capsule;
         budget.add(sizeof(AdaptiveFactorRecipe));
         leaf.factor_recipe =
-            std::make_shared<const AdaptiveFactorRecipe>(AdaptiveFactorRecipe{descriptor.product_root, base, axis});
+            snapshot_shared<const AdaptiveFactorRecipe>(AdaptiveFactorRecipe{descriptor.product_root, base, axis});
     }
     if (const auto* stored = certificate(row))
     {
@@ -408,7 +408,7 @@ AdaptiveLeaf BindingPage::copy_leaf(std::size_t row, AdaptiveCellKey key, adapti
     return leaf;
 }
 template<class Factor, class Get>
-void product_factors(std::vector<Factor>& dictionary, BindingColumn<std::uint8_t>& column, std::size_t count, Get get,
+void product_factors(SnapshotVector<Factor>& dictionary, BindingColumn<std::uint8_t>& column, std::size_t count, Get get,
     adaptive_detail::Budget& budget)
 {
     std::array<std::uint8_t, binding_page_size> selectors;
@@ -441,7 +441,7 @@ std::shared_ptr<const BindingPage> make_binding_page(std::span<const AdaptiveLea
     std::span<const std::size_t> rows, const BuildFacts& facts, SourceTable& known, adaptive_detail::Budget& budget)
 {
     budget.add(sizeof(BindingPage));
-    auto page = std::make_shared<BindingPage>();
+    auto page = snapshot_shared<BindingPage>();
     const auto get = [&](auto row) -> const AdaptiveLeaf& { return *leaves[rows[row]]; };
     const auto count = rows.size();
     page->row_count = count;
@@ -456,7 +456,7 @@ std::shared_ptr<const BindingPage> make_binding_page(std::span<const AdaptiveLea
         {
             budget.add(
                 sizeof(SourceTable::value_type) + 4 * sizeof(void*) + sizeof(BindingSource) + leaf.domain.capacity());
-            auto source = std::make_shared<const BindingSource>(BindingSource{leaf.key.region, leaf.material,
+            auto source = snapshot_shared<const BindingSource>(BindingSource{leaf.key.region, leaf.material,
                 leaf.revision, leaf.provider, factorized(leaf), leaf.domain, leaf.native_recipe, leaf.join_recipe,
                 factorized(leaf) ? leaf.factor_recipe->root : nullptr,
                 factorized(leaf) ? nullptr : leaf.factor_recipe});
@@ -596,7 +596,7 @@ G::Admission binding_admission(adaptive_detail::Budget& budget)
 }
 struct BindingKeyPage
 {
-    std::vector<std::shared_ptr<const BindingPage>> sources;
+    SnapshotVector<std::shared_ptr<const BindingPage>> sources;
     BindingColumn<std::uint8_t> source, row;
     BindingColumn<std::uint64_t> generation, position;
     std::size_t count = 0;
@@ -633,7 +633,7 @@ struct BindingKeyPage
             selectors[slot] = std::uint8_t(index);
         }
         budget.add(sizeof(BindingKeyPage));
-        auto result = std::make_shared<BindingKeyPage>();
+        auto result = snapshot_shared<BindingKeyPage>();
         reserve_checked(result->sources, unique, budget);
         result->sources.assign(owners.begin(), owners.begin() + unique);
         result->count = rows.size();
@@ -660,7 +660,8 @@ struct BindingKeyLess
 class BindingSelection
 {
 public:
-    using Pages = G::OrderedPages<BindingKeyGroup, BindingKeyLess>;
+    using Pages = G::OrderedPages<BindingKeyGroup, BindingKeyLess, false, G::NoLeafWitnesses,
+        geometry_detail::AllocationDomain::GeometrySnapshot>;
     Pages::Ptr keys;
     /** A one-group key index is held inline: a singleton key page needs no B+
      * tree node, so it owns and charges no index-page layer. */
@@ -676,7 +677,7 @@ public:
         std::uint8_t kind = 0;
         std::shared_ptr<const BindingPage> below, tail;
     };
-    std::vector<FluidTrail> trails;
+    SnapshotVector<FluidTrail> trails;
 
     [[nodiscard]] const FluidTrail* trail(std::size_t kind) const
     {
@@ -827,7 +828,7 @@ public:
         std::span<const SharedLocator> selected, adaptive_detail::Budget& budget)
     {
         budget.add(sizeof(BindingSelection));
-        auto result = std::make_shared<BindingSelection>();
+        auto result = snapshot_shared<BindingSelection>();
         constexpr auto kinds = std::variant_size_v<decltype(AdaptiveCellKey::ancestry)>;
         // Bounded construction scratch stays on the stack; larger selections
         // fall back to an exactly reserved buffer.
@@ -838,7 +839,7 @@ public:
         // the reference count, never by duplicate owner rows. The page table is
         // built in one pass so a cold build stays O(N log pages).
         {
-            std::map<const BindingPage*, std::pair<SharedLocator, std::size_t>> pages;
+            SnapshotMap<const BindingPage*, std::pair<SharedLocator, std::size_t>> pages;
             for (const auto& value : selected)
             {
                 const auto found = pages.find(value.page.get());
@@ -945,7 +946,7 @@ public:
     }
     [[nodiscard]] std::size_t unselected(std::span<const AdaptiveLeaf* const>) const;
     void append_unselected(std::span<const AdaptiveLeaf* const>, const AdaptiveLeafLayout&,
-        std::vector<std::unique_ptr<AdaptiveLeaf>>&, std::vector<const AdaptiveLeaf*>&, adaptive_detail::Budget&) const;
+        SnapshotVector<std::unique_ptr<AdaptiveLeaf>>&, SnapshotVector<const AdaptiveLeaf*>&, adaptive_detail::Budget&) const;
 
     /** Independent full diagnostic graph; never invokes the delta editor. */
     template<class Edge, class Buffers, class PageKeys>
@@ -1057,26 +1058,24 @@ public:
     {
         if (!editor.external(selection_, selection_->exclusive_bytes(), retain, true))
             return;
-        const auto visit_recipe = [&](const auto& owner, std::size_t bytes)
-        { return owner && editor.external(owner, bytes, retain); };
+        // A binding and the accepted native source can hold the same recipe
+        // control. Project its authenticated extent and children in both graphs.
+        adaptive_detail::NativePublicationOwnerGraph::Context native(editor, retain, false);
+        const auto bytes = [&](const std::shared_ptr<const AdaptiveBytes>& owner)
+        {
+            if (owner && !adaptive_detail::NativeAdaptivePayloadAccess::bytes(owner, native.sink))
+                (void) editor.external(owner, sizeof(*owner) + owner->capacity(), retain);
+        };
         const auto visit_source = [&](const std::shared_ptr<const BindingSource>& source)
         {
             if (!editor.external(source, source->bytes(), retain, true))
                 return;
-            if (source->native &&
-                visit_recipe(source->native, sizeof(*source->native) + source->native->view.capacity() +
-                                                 source->native->parts.capacity() * sizeof(source->native->parts[0])))
-                for (const auto& part : source->native->parts)
-                    if (part)
-                        (void) visit_recipe(part, sizeof(*part) + part->capacity());
-            const auto bytes = [&](const auto& owner)
-            {
-                if (owner)
-                    (void) visit_recipe(owner, sizeof(*owner) + owner->capacity());
-            };
+            adaptive_detail::NativePublicationOwnerGraph::descriptor(source->native, editor, retain);
             bytes(source->join);
             bytes(source->product_root);
-            if (source->factor && visit_recipe(source->factor, sizeof(*source->factor)))
+            if (source->factor && !adaptive_detail::NativeAdaptivePayloadAccess::factor(source->factor, native.sink) &&
+                native.sink.structural(source->factor, geometry_detail::NativeConstructorOwnerKind::NativeMesh,
+                    sizeof(*source->factor)))
             {
                 bytes(source->factor->root);
                 bytes(source->factor->base);
@@ -1094,8 +1093,7 @@ public:
                 const auto factors = [&](const auto& values)
                 {
                     for (const auto& value : values)
-                        if (value.capsule)
-                            (void) visit_recipe(value.capsule, sizeof(*value.capsule) + value.capsule->capacity());
+                        bytes(value.capsule);
                 };
                 factors(product->bases);
                 factors(product->axes);
@@ -1230,7 +1228,7 @@ std::size_t Bindings::unselected(std::span<const AdaptiveLeaf* const> wanted) co
     return size() - selected;
 }
 void Bindings::append_unselected(std::span<const AdaptiveLeaf* const> wanted, const AdaptiveLeafLayout& layout,
-    std::vector<std::unique_ptr<AdaptiveLeaf>>& detached, std::vector<const AdaptiveLeaf*>& output,
+    SnapshotVector<std::unique_ptr<AdaptiveLeaf>>& detached, SnapshotVector<const AdaptiveLeaf*>& output,
     adaptive_detail::Budget& budget) const
 {
     // Cross-purpose cold initialization retains the established full-selection
@@ -1259,7 +1257,7 @@ std::shared_ptr<const Bindings> Bindings::build(std::span<const AdaptiveLeaf* co
     const Bindings* previous, bool, adaptive_detail::Budget& budget)
 {
     budget.add(sizeof(Bindings));
-    auto result = std::make_shared<Bindings>();
+    auto result = snapshot_shared<Bindings>();
     G::ScratchRows<std::size_t, binding_page_size> order(leaves.size(), budget.used, budget.limit);
     std::iota(order.data(), order.data() + order.size(), std::size_t{0});
     std::sort(
@@ -1325,7 +1323,7 @@ void apply_page_holds(PLIC::details::geometry_demand::GeometryOwnerManifest& pag
 {
     using namespace PLIC::details::geometry_demand;
     const auto admission = binding_admission(budget);
-    std::vector<std::pair<std::shared_ptr<const BindingPage>, std::size_t>> released;
+    SnapshotVector<std::pair<std::shared_ptr<const BindingPage>, std::size_t>> released;
     for (const auto& value : replaced)
     {
         const auto found = std::find_if(
@@ -1347,7 +1345,7 @@ std::shared_ptr<const Bindings> Bindings::extended(const Bindings& previous,
 {
     if (previous.selection_->order.generation() == std::numeric_limits<std::uint64_t>::max())
         throw std::invalid_argument("Binding demand generation overflows.");
-    std::vector<std::size_t> sorted;
+    SnapshotVector<std::size_t> sorted;
     reserve_checked(sorted, leaves.size(), budget);
     sorted.resize(leaves.size());
     std::iota(sorted.begin(), sorted.end(), 0);
@@ -1356,15 +1354,15 @@ std::shared_ptr<const Bindings> Bindings::extended(const Bindings& previous,
         if (leaves[sorted[row - 1]]->key == leaves[sorted[row]]->key)
             throw std::invalid_argument("Duplicate geometry demand key.");
     budget.add(sizeof(Bindings) + sizeof(BindingSelection));
-    auto result = std::make_shared<Bindings>();
+    auto result = snapshot_shared<Bindings>();
     charge_items(budget, previous.selection_->trails.size(), sizeof(BindingSelection::FluidTrail));
-    auto next = std::make_shared<BindingSelection>(*previous.selection_);
+    auto next = snapshot_shared<BindingSelection>(*previous.selection_);
     if (next->trails.capacity() != previous.selection_->trails.size())
         throw PLIC::GeometryError(
             PLIC::GeometryErrorCode::ResourceLimit, "Binding selection trail copy capacity is unqualified.");
-    std::vector<SharedLocator> prefix;
-    std::vector<std::optional<SelectedBinding>> original;
-    std::vector<unsigned char> needs_data;
+    SnapshotVector<SharedLocator> prefix;
+    SnapshotVector<std::optional<SelectedBinding>> original;
+    SnapshotVector<unsigned char> needs_data;
     reserve_checked(prefix, leaves.size(), budget);
     reserve_checked(original, leaves.size(), budget);
     reserve_checked(needs_data, leaves.size(), budget);
@@ -1373,7 +1371,7 @@ std::shared_ptr<const Bindings> Bindings::extended(const Bindings& previous,
     needs_data.resize(leaves.size(), 1);
     constexpr auto kinds = std::variant_size_v<decltype(AdaptiveCellKey::ancestry)>;
     std::array<std::size_t, kinds> added{};
-    std::vector<G::OrderStamp> retired;
+    SnapshotVector<G::OrderStamp> retired;
     reserve_checked(retired, leaves.size(), budget);
     for (std::size_t slot = 0; slot < leaves.size(); ++slot)
     {
@@ -1400,8 +1398,8 @@ std::shared_ptr<const Bindings> Bindings::extended(const Bindings& previous,
         if (needs_data[slot])
             ++added[leaves[slot]->key.ancestry.index()];
     }
-    std::vector<SelectedBinding> key_changes;
-    std::vector<G::OrderedSourceSlot> rebound;
+    SnapshotVector<SelectedBinding> key_changes;
+    SnapshotVector<G::OrderedSourceSlot> rebound;
     std::array<std::array<std::shared_ptr<const BindingPage>, 2>, kinds> fluid{};
     std::size_t repacked_rows = 0;
     for (std::size_t kind = 0; kind < kinds; ++kind)
@@ -1441,9 +1439,9 @@ std::shared_ptr<const Bindings> Bindings::extended(const Bindings& previous,
             std::optional<SelectedBinding> old;
         };
         const auto capacity = old_rows + added[kind];
-        std::vector<const AdaptiveLeaf*> assembled;
-        std::vector<std::unique_ptr<AdaptiveLeaf>> detached;
-        std::vector<RowOrigin> origins;
+        SnapshotVector<const AdaptiveLeaf*> assembled;
+        SnapshotVector<std::unique_ptr<AdaptiveLeaf>> detached;
+        SnapshotVector<RowOrigin> origins;
         BuildFacts packed;
         reserve_checked(assembled, capacity, budget);
         reserve_checked(detached, old_rows, budget);
@@ -1504,7 +1502,7 @@ std::shared_ptr<const Bindings> Bindings::extended(const Bindings& previous,
         // rows) and force every compressed key/order column into its dense
         // fallback. Rank the merged rows once; pages then index through it
         // without materializing permuted copies of the row metadata.
-        std::vector<std::size_t> rank;
+        SnapshotVector<std::size_t> rank;
         reserve_checked(rank, assembled.size(), budget);
         rank.resize(assembled.size());
         std::iota(rank.begin(), rank.end(), 0);
@@ -1516,8 +1514,8 @@ std::shared_ptr<const Bindings> Bindings::extended(const Bindings& previous,
                 entry.tail.reset();
                 entry.below.reset();
             }
-        std::vector<SharedLocator> replaced;
-        std::vector<RetainedPage> inserted;
+        SnapshotVector<SharedLocator> replaced;
+        SnapshotVector<RetainedPage> inserted;
         reserve_checked(replaced, assembled.size(), budget);
         reserve_checked(inserted, assembled.size(), budget);
         for (std::size_t begin = 0; begin < assembled.size(); begin += binding_page_size)
@@ -1554,7 +1552,7 @@ std::shared_ptr<const Bindings> Bindings::extended(const Bindings& previous,
             trail.below = inserted.size() > 1 ? inserted[inserted.size() - 2].page : nullptr;
         }
     }
-    std::vector<G::SourceSlot> physical;
+    SnapshotVector<G::SourceSlot> physical;
     reserve_checked(physical, prefix.size(), budget);
     for (const auto& row : prefix)
     {

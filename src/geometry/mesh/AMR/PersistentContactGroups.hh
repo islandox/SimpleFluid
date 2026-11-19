@@ -109,7 +109,7 @@ public:
         result.group_metadata = groups_.storage_bytes();
         result.owner_index_metadata = group_ids_.storage_bytes();
         result.domain_metadata = domains_.storage_bytes() + domain_ids_.storage_bytes();
-        std::set<const void*> owners;
+        ContactSet<const void*> owners;
         visit_domain_owners(
             [&](const auto& owner, const auto&, std::size_t bytes)
             {
@@ -212,7 +212,7 @@ private:
         ContactGroupAllocation charge(arena_);
         charge.add(sizeof(Domain) + 128 + domain.size());
         const auto slot = free_domain_ == absent ? domains_.size() : free_domain_;
-        auto owner = std::make_shared<Domain>(std::move(charge), domain);
+        auto owner = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, Domain>(std::move(charge), domain);
         residency_.retain(ContactPhysicalResidency::Role::GroupDomain, owner, owner->admission.bytes(), arena_.get());
         auto& entry = domains_.edit(slot);
         free_domain_ = entry.next_free;

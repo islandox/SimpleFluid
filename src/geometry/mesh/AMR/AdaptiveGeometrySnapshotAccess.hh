@@ -15,6 +15,7 @@ namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 class DistributedAdaptiveContactHalo;
 struct Budget;
+struct AdaptiveLeafPageObservation;
 struct PipelineGraphOwner
 {
     enum class Kind
@@ -90,6 +91,9 @@ public:
      * generic provider internals and separate shared controls may be unmatched.
      * Visitors acquire no pins. Raw allocation tracing remains authoritative. */
     static void visit_pipeline_graph(const DistributedAdaptiveHierarchy&, const PipelineGraphVisit&);
+    /** Visit the immutable leaf tree while the accepted layout is retained. */
+    static void visit_pipeline_leaf_pages(const DistributedAdaptiveHierarchy&,
+        const std::function<void(const AdaptiveLeafPageObservation&)>&);
     /** Observe the Mesh library image's actual PLIC domain without double counting callers. */
     [[nodiscard]] static PLIC::GeometryStatistics pipeline_geometry_statistics();
     [[nodiscard]] static const void* pipeline_geometry_statistics_domain();

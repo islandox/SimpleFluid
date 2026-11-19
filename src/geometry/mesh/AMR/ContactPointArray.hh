@@ -1,4 +1,5 @@
 #pragma once
+#include "ContactDomainStorage.hh"
 #include "ContactPayloadCensus.hh"
 #include "ContactPointPageView.hh"
 #include <algorithm>
@@ -30,18 +31,18 @@ class ContactPointArray
 {
     struct Owning
     {
-        std::vector<ContactPointIdentity> physical, normalized;
+        ContactFixedVector<ContactPointIdentity> physical, normalized;
     };
     template<class UInt> struct Pooled
     {
         using Reference = CapturedPointReference;
-        std::vector<UInt> physical, normalized;
+        ContactFixedVector<UInt> physical, normalized;
         std::shared_ptr<const ContactPointPageView> view;
     };
     template<class UInt> struct Sourced
     {
         using Reference = CapturedSourcePointReference;
-        std::vector<UInt> physical, normalized;
+        ContactFixedVector<UInt> physical, normalized;
         std::shared_ptr<const ContactSourcePointView> view;
     };
 
@@ -198,7 +199,7 @@ public:
         }
         if (normalized.empty() && point.normalized != point.physical)
         {
-            std::vector<ContactPointIdentity> next;
+            ContactFixedVector<ContactPointIdentity> next;
             next.reserve(physical.capacity());
             next.assign(physical.begin(), physical.end());
             next.push_back(std::move(point.normalized));
@@ -413,13 +414,14 @@ private:
             },
             storage_);
     }
-    template<class Value> static std::size_t buffer_bytes(const std::vector<Value>& array)
+    template<class Value> static std::size_t buffer_bytes(const ContactFixedVector<Value>& array)
     {
         if (array.capacity() > std::numeric_limits<std::size_t>::max() / sizeof(Value))
             throw std::length_error("Contact point capacity overflows.");
         return array.capacity() * sizeof(Value);
     }
-    template<class UInt> static void reserve_references(std::vector<UInt>& array, std::size_t capacity, Budget& budget)
+    template<class UInt>
+    static void reserve_references(ContactFixedVector<UInt>& array, std::size_t capacity, Budget& budget)
     {
         if (capacity <= array.capacity())
             return;
@@ -428,7 +430,7 @@ private:
         const auto previous = buffer_bytes(array), next_bytes = capacity * sizeof(UInt);
         budget.add(next_bytes);
         {
-            std::vector<UInt> next;
+            ContactFixedVector<UInt> next;
             try
             {
                 next.reserve(capacity);
@@ -438,7 +440,7 @@ private:
             }
             catch (...)
             {
-                std::vector<UInt>().swap(next);
+                ContactFixedVector<UInt>().swap(next);
                 budget.used -= next_bytes;
                 throw;
             }
@@ -446,7 +448,8 @@ private:
         }
         budget.used -= previous;
     }
-    template<class UInt> static void append_reference(std::vector<UInt>& array, std::uint64_t value, Budget& budget)
+    template<class UInt>
+    static void append_reference(ContactFixedVector<UInt>& array, std::uint64_t value, Budget& budget)
     {
         if (value > std::numeric_limits<UInt>::max())
             throw std::invalid_argument("Contact reference narrowing would lose identity.");
@@ -476,8 +479,8 @@ private:
         }
         catch (...)
         {
-            std::vector<std::uint64_t>().swap(wide.physical);
-            std::vector<std::uint64_t>().swap(wide.normalized);
+            ContactFixedVector<std::uint64_t>().swap(wide.physical);
+            ContactFixedVector<std::uint64_t>().swap(wide.normalized);
             budget.used -= admitted;
             throw;
         }
@@ -504,8 +507,8 @@ private:
         }
         catch (...)
         {
-            std::vector<std::uint64_t>().swap(wide.physical);
-            std::vector<std::uint64_t>().swap(wide.normalized);
+            ContactFixedVector<std::uint64_t>().swap(wide.physical);
+            ContactFixedVector<std::uint64_t>().swap(wide.normalized);
             budget.used -= admitted;
             throw;
         }

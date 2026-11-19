@@ -50,10 +50,12 @@ class AdaptiveFamilyLayout
 
     struct FamilyLess
     {
+        static constexpr auto allocation_domain = geometry_detail::AllocationDomain::FamilyStorage;
         bool operator()(const Row& a, const Row& b) const noexcept { return a->value.key < b->value.key; }
     };
     struct AnchorLess
     {
+        static constexpr auto allocation_domain = geometry_detail::AllocationDomain::FamilyStorage;
         bool operator()(const Row& a, const Row& b) const noexcept
         {
             return a->value.anchor == b->value.anchor ? a->value.key < b->value.key : a->value.anchor < b->value.anchor;
@@ -256,7 +258,7 @@ public:
     {
         Layout next(std::move(arena), topology);
         Charge scratch(next.inherited_.keeper());
-        std::vector<Row> rows;
+        geometry_detail::DomainVector<Row, geometry_detail::AllocationDomain::FamilyStorage> rows;
         scratch.add(persistent_ordered_detail::checked_product(count, sizeof(Row)));
         rows.reserve(count);
         if (rows.capacity() != count)
@@ -430,9 +432,16 @@ private:
             !PLIC::geometry_encoding_capacity_profile_supported())
             throw std::invalid_argument("Incomplete saved family or unqualified capacity profile.");
         constexpr auto header = sizeof(Record) + control_bytes;
+#if defined(__GLIBCXX__)
+        static_assert(sizeof(std::_Sp_counted_ptr_inplace<Record,
+                          geometry_detail::DomainAllocator<Record, geometry_detail::AllocationDomain::FamilyStorage>,
+                          __gnu_cxx::__default_lock_policy>) <= header,
+            "Adaptive family control exceeds its unchanged allowance.");
+#endif
         Charge admission(arena);
         admission.add(checked_sum(header, buffers(family)));
-        auto record = std::make_shared<Record>(arena, family);
+        auto record = geometry_detail::domain_shared<geometry_detail::AllocationDomain::FamilyStorage, Record>(
+            arena, family);
         const auto actual = checked_sum(header, buffers(record->value));
         if (actual > admission.bytes)
             throw std::invalid_argument("Saved family row capacity exceeds preadmission.");

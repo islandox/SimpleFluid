@@ -1,4 +1,5 @@
 #pragma once
+#include "ContactDomainStorage.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveClosureRecords.hh"
 #include <map>
 #include <memory>
@@ -35,7 +36,7 @@ private:
         bool operator()(const Owner&, std::span<const AdaptiveTraceFace>) const noexcept;
         bool operator()(std::span<const AdaptiveTraceFace>, const Owner&) const noexcept;
     };
-    using Lookup = std::map<Owner, std::size_t, Less>;
+    using Lookup = ContactMap<Owner, std::size_t, Less>;
     [[nodiscard]] static constexpr std::size_t node_bytes() noexcept
     {
         return sizeof(Lookup::value_type) + 4 * sizeof(void*);

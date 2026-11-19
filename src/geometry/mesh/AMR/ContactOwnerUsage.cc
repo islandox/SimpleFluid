@@ -103,7 +103,8 @@ struct ContactOwnerUsageEditor
     {
         ContactGroupAllocation charge(arena);
         charge.add(sizeof(Node) + 128);
-        auto result = std::make_shared<const Node>(std::move(charge), key, std::move(entry), left, right, editor);
+        auto result = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, const Node>(
+            std::move(charge), key, std::move(entry), left, right, editor);
         ++work.created_nodes;
         return result;
     }

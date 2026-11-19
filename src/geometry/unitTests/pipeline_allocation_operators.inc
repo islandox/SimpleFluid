@@ -2,6 +2,7 @@
  * @brief All replaceable global C++ allocation and deallocation forms.
  */
 #include "pipeline_allocation_trace.hh"
+#include "pipeline_allocation_domain.inc"
 #include <cstdlib>
 #include <new>
 

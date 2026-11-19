@@ -151,7 +151,7 @@ public:
             }
         }
         const auto bytes = retired_.capacity() * sizeof(ContactPointRef);
-        std::vector<ContactPointRef>().swap(retired_);
+        ContactVector<ContactPointRef>().swap(retired_);
         scratch_.release(bytes);
     }
 
@@ -166,7 +166,7 @@ public:
     {
         result.fact_metadata += facts_.storage_bytes() + fact_ids_.storage_bytes();
         result.fact_view_metadata += pages_.storage_bytes() + page_ids_.storage_bytes();
-        std::set<const void*> metadata, bodies;
+        ContactSet<const void*> metadata, bodies;
         const auto credit = [&](const void* owner, const void* body, std::size_t bytes, std::size_t payload)
         {
             if (owner && metadata.insert(owner).second)
@@ -323,7 +323,7 @@ private:
     ContactSlotPages<Page> pages_;
     ContactSlotPages<Fact> facts_;
     ContactSlotIndex page_ids_, fact_ids_;
-    std::vector<ContactPointRef> retired_;
+    ContactVector<ContactPointRef> retired_;
     std::size_t free_page_ = absent, free_fact_ = absent, tail_ = absent;
 };
 
@@ -394,11 +394,12 @@ inline ContactPointRef PersistentContactFacts::retain(const ContactPointIdentity
     {
         ContactGroupAllocation staging(scratch_.keeper());
         staging.add(sizeof(Credit) + 128);
-        auto owner = std::make_shared<Credit>(scratch_.keeper());
+        auto owner = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, Credit>(
+            scratch_.keeper());
         owner->metadata.transfer_from(staging, sizeof(Credit) + 128);
         owner->body_admission.add(sizeof(Body) + 128 +
             PointFactDirectory::fallback_records_per_page * sizeof(ContactPointIdentity));
-        owner->body = std::make_shared<Body>();
+        owner->body = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, Body>();
         PageBody input;
         input.identity = owner->body.get();
         input.fallback = std::move(owner);

@@ -137,8 +137,8 @@ struct ContactCoverIndex::Impl
     };
     Budget& budget;
     int owner;
-    std::unique_ptr<Leaf[]> leaves;
-    std::unique_ptr<Branch[]> branches;
+    ContactArray<Leaf> leaves;
+    ContactArray<Branch> branches;
     std::optional<ContactSlotPages<Leaf>> leaf_pages;
     std::optional<ContactSlotPages<Branch>> branch_pages;
     GroupResolver groups{};
@@ -244,8 +244,8 @@ struct ContactCoverIndex::Impl
         budget.add(next_bytes);
         try
         {
-            auto next_leaves = std::make_unique<Leaf[]>(requested);
-            auto next_branches = requested > 1 ? std::make_unique<Branch[]>(requested - 1) : nullptr;
+            auto next_leaves = contact_array<Leaf>(requested);
+            auto next_branches = contact_array<Branch>(requested - 1);
             if (leaf_slots)
                 std::copy_n(leaves.get(), leaf_slots, next_leaves.get());
             if (branch_slots)

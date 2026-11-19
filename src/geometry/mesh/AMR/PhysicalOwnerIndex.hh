@@ -1,5 +1,6 @@
 #pragma once
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "ContactDomainStorage.hh"
 #include "ContactPayloadCensus.hh"
 #include <algorithm>
 #include <cstdint>
@@ -66,7 +67,7 @@ public:
         capacity = std::max(capacity, buckets_.size());
         const auto bytes = product(capacity), old = charged_;
         budget_->add(bytes);
-        std::vector<Bucket> next;
+        ContactVector<Bucket> next;
         try
         {
             next.reserve(capacity);
@@ -149,7 +150,7 @@ private:
     }
     Budget* budget_;
     [[no_unique_address]] Hasher hasher_;
-    std::vector<Bucket> buckets_;
+    ContactVector<Bucket> buckets_;
     std::size_t size_ = 0, charged_ = 0, retired_ = 0;
     mutable std::size_t probes_ = 0;
 };

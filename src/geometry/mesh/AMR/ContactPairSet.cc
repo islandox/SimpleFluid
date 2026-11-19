@@ -88,12 +88,12 @@ void ContactPairSet::rebuild(std::size_t capacity, bool wide)
     Admission admission(*budget_, bytes);
     // Declare arrays after admission so failed construction destroys temporary
     // buffers before the admission guard returns their live credit.
-    std::unique_ptr<std::uint64_t[]> compact;
-    std::unique_ptr<Pair[]> expanded;
+    ContactArray<std::uint64_t> compact;
+    ContactArray<Pair> expanded;
     if (wide)
-        expanded = std::make_unique<Pair[]>(capacity);
+        expanded = contact_array<Pair>(capacity);
     else
-        compact = std::make_unique<std::uint64_t[]>(capacity);
+        compact = contact_array<std::uint64_t>(capacity);
     for (std::size_t i = 0; i < capacity_; ++i)
     {
         if (wide_ ? !wide_[i].second : !compact_[i])
@@ -157,12 +157,12 @@ ContactPairSet::SortedPairs ContactPairSet::take_sorted()
     // Declare temporary arrays after admission so allocation failure keeps the
     // table unchanged and releases only this temporary live admission.
     Admission admission(*budget_, bytes);
-    std::unique_ptr<std::uint64_t[]> compact;
-    std::unique_ptr<Pair[]> expanded;
+    ContactArray<std::uint64_t> compact;
+    ContactArray<Pair> expanded;
     if (wide_)
-        expanded = std::make_unique<Pair[]>(size_);
+        expanded = contact_array<Pair>(size_);
     else
-        compact = std::make_unique<std::uint64_t[]>(size_);
+        compact = contact_array<std::uint64_t>(size_);
     std::size_t next = 0;
     for (std::size_t i = 0; i < capacity_; ++i)
         if (wide_)

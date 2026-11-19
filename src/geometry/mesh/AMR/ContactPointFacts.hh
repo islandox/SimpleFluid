@@ -163,7 +163,7 @@ private:
     static constexpr std::size_t fallback_records_per_page = 16;
     struct FallbackBody
     {
-        std::vector<ContactPointIdentity> values;
+        ContactVector<ContactPointIdentity> values;
         std::size_t size = 0;
         bool sealed = false;
         FallbackBody()
@@ -225,12 +225,12 @@ private:
     static constexpr auto tombstone = empty - 1;
     static constexpr auto page_node_bytes = sizeof(std::pair<const void* const, std::size_t>) + 4 * sizeof(void*);
     ContactGroupAllocation allocation_;
-    std::vector<Page> pages_;
-    std::vector<Entry> entries_;
-    std::vector<std::size_t> free_entries_;
-    std::vector<std::size_t> free_pages_;
-    std::vector<std::size_t> buckets_;
-    std::map<const void*, std::size_t> page_index_;
+    ContactVector<Page> pages_;
+    ContactVector<Entry> entries_;
+    ContactVector<std::size_t> free_entries_;
+    ContactVector<std::size_t> free_pages_;
+    ContactVector<std::size_t> buckets_;
+    ContactMap<const void*, std::size_t> page_index_;
     std::size_t retained_ = 0;
     std::size_t fallback_tail_ = empty;
 };

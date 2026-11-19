@@ -252,6 +252,7 @@ public:
 private:
     struct ScalarOrder
     {
+        static constexpr auto allocation_domain = geometry_detail::AllocationDomain::ContactHalo;
         Reader read{};
         unsigned axis = 0;
         Probe* work = nullptr;
@@ -265,6 +266,7 @@ private:
     };
     struct PointOrder
     {
+        static constexpr auto allocation_domain = geometry_detail::AllocationDomain::ContactHalo;
         Reader read{};
         Probe* work = nullptr;
         bool operator()(std::size_t a, std::size_t b) const
@@ -281,6 +283,7 @@ private:
     };
     struct RoutedOrder
     {
+        static constexpr auto allocation_domain = geometry_detail::AllocationDomain::ContactHalo;
         Reader read{};
         Probe* work = nullptr;
         bool operator()(const Routed& a, const Routed& b) const { return PointOrder{read, work}(a.slot, b.slot); }

@@ -268,6 +268,7 @@ private:
     using Block = std::shared_ptr<const ValueBlock>;
     struct BlockLess
     {
+        static constexpr auto allocation_domain = geometry_detail::AllocationDomain::ContactHalo;
         bool operator()(const Block& a, const Block& b) const noexcept { return a->first < b->first; }
     };
     using BlockDirectory = persistent_ordered_detail::OrderedPages<Block, BlockLess>;

@@ -12,7 +12,8 @@ std::shared_ptr<ContactFanCatalog> ContactFanCatalog::create(std::shared_ptr<Bud
 {
     ContactGroupAllocation admission(arena);
     admission.add(sizeof(ContactFanCatalog) + 128);
-    auto result = std::shared_ptr<ContactFanCatalog>(new ContactFanCatalog(std::move(arena)));
+    auto result = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, ContactFanCatalog>(
+        std::move(arena));
     result->allocation_.transfer_from(admission, sizeof(ContactFanCatalog) + 128);
     return result;
 }
@@ -21,7 +22,8 @@ std::shared_ptr<ContactFanCatalog> ContactFanCatalog::create(
 {
     ContactGroupAllocation admission(arena);
     admission.add(sizeof(ContactFanCatalog) + 128);
-    auto result = std::shared_ptr<ContactFanCatalog>(new ContactFanCatalog(source, std::move(arena), target_pool));
+    auto result = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, ContactFanCatalog>(
+        source, std::move(arena), target_pool);
     result->allocation_.transfer_from(admission, sizeof(ContactFanCatalog) + 128);
     return result;
 }
@@ -123,7 +125,7 @@ void ContactFanCatalog::ensure_binding_lookup()
         throw std::invalid_argument("Contact binding lookup capacity overflows.");
     const auto capacity = old ? 2 * old : 8;
     ContactGroupAllocation scratch(allocation_.keeper());
-    std::vector<std::size_t> replacement;
+    ContactVector<std::size_t> replacement;
     scratch.reserve(replacement, capacity);
     replacement.assign(capacity, empty_binding);
     for (std::size_t slot = 0; slot < bindings_.size(); ++slot)
@@ -139,7 +141,7 @@ void ContactFanCatalog::ensure_binding_lookup()
         }
     allocation_.transfer_from(scratch, capacity * sizeof(std::size_t));
     buckets_.swap(replacement);
-    std::vector<std::size_t>().swap(replacement);
+    ContactVector<std::size_t>().swap(replacement);
     allocation_.release(old * sizeof(std::size_t));
 }
 void ContactFanCatalog::pin(ContactBindingId id)
@@ -231,7 +233,8 @@ std::shared_ptr<const ContactFanBlock> ContactFanBlock::build(
     }
     wide = wide || needs_wide(locals) || needs_wide(remotes);
     staged.add(sizeof(ContactFanBlock) + 128);
-    auto result = std::shared_ptr<ContactFanBlock>(new ContactFanBlock(allocation.keeper()));
+    auto result = contact_shared_object<ContactFanBlock>(
+        [&](ContactFanBlock* storage) { ::new (storage) ContactFanBlock(allocation.keeper()); });
     if (wide)
         result->data_.emplace<Arrays<std::uint64_t>>();
     std::visit(
@@ -315,7 +318,8 @@ std::shared_ptr<ContactFanOwner> ContactFanOwner::create(std::shared_ptr<Contact
 {
     ContactGroupAllocation admission(catalog->arena());
     admission.add(sizeof(ContactFanOwner) + 128);
-    auto result = std::shared_ptr<ContactFanOwner>(new ContactFanOwner(std::move(catalog)));
+    auto result = contact_shared_object<ContactFanOwner>(
+        [&](ContactFanOwner* storage) { ::new (storage) ContactFanOwner(std::move(catalog)); });
     result->allocation_.transfer_from(admission, sizeof(ContactFanOwner) + 128);
     return result;
 }

@@ -2,6 +2,7 @@
  * @brief Direct authority-verified sparse shards into native field/halo maps.
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "geometry/details/AllocationDomainScope.hh"
 #include "parallel/CompositePartition.hh"
 #include <Tpetra_Map.hpp>
 #include <atomic>
@@ -100,13 +101,21 @@ CompositePartition<Pack> CompositePartition<Pack>::from_sparse_native(std::share
             plan.d_nodes.assign(nodes.begin(), nodes.end());
         });
     std::vector<GO> gids(owned.begin(), owned.end());
-    const auto map = Teuchos::rcp(new typename Pack::map_type(
-        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(), Teuchos::arrayViewFromVector(gids), GO{}, comm));
+    const auto map = [&]
+    {
+        const geometry_detail::AllocationDomainScope domain(geometry_detail::AllocationDomain::ExternalThirdParty);
+        return Teuchos::rcp(new typename Pack::map_type(
+            Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(), Teuchos::arrayViewFromVector(gids), GO{}, comm));
+    }();
     // Tpetra may classify a globally empty map as replicated on multiple
     // ranks. Its ownership is vacuously unique only for an entirely empty
     // utility domain; every nonempty domain still uses the full map check.
     const bool empty_domain = plan.d_global_cells == 0;
-    const bool unique = empty_domain || map->isOneToOne();
+    const bool unique = empty_domain || [&]
+    {
+        const geometry_detail::AllocationDomainScope domain(geometry_detail::AllocationDomain::ExternalThirdParty);
+        return map->isOneToOne();
+    }();
     SimpleFluid::Meshes::AMR::adaptive_detail::collective(*comm,
         [&]
         {
@@ -118,7 +127,10 @@ CompositePartition<Pack> CompositePartition<Pack>::from_sparse_native(std::share
     std::vector<GO> ghost_ids(ghosts.begin(), ghosts.end());
     std::vector<int> owners(ghosts.size(), -1);
     if (!empty_domain)
+    {
+        const geometry_detail::AllocationDomainScope domain(geometry_detail::AllocationDomain::ExternalThirdParty);
         (void) map->getRemoteIndexList(Teuchos::arrayViewFromVector(ghost_ids), Teuchos::arrayViewFromVector(owners));
+    }
     SimpleFluid::Meshes::AMR::adaptive_detail::collective(*comm,
         [&]
         {

@@ -83,5 +83,7 @@ public:
     template<ArithmeticMode M>
     static void visit_dependencies(
         const CellGeometryCatalog<M>&, geometry_demand::MetadataSink, geometry_demand::SourceSink);
+private:
+    template<ArithmeticMode M> static std::shared_ptr<CellGeometryCatalog<M>> make_catalog();
 };
 } // namespace SimpleFluid::PLIC::details

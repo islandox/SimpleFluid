@@ -10,22 +10,27 @@ std::shared_ptr<typename ContactPointGroups<H>::Readers> ContactPointGroups<H>::
 {
     constexpr auto bytes = sizeof(Readers) + 128;
     arena->add(bytes);
-    Readers* readers;
+    ContactAllocator<Readers> memory;
+    Readers* readers = nullptr;
     try
     {
-        readers = new Readers;
+        readers = memory.allocate(1);
+        std::construct_at(readers);
     }
     catch (...)
     {
+        if (readers)
+            memory.deallocate(readers, 1);
         arena->used -= bytes;
         throw;
     }
     return std::shared_ptr<Readers>(readers,
-        [arena](Readers* value)
+        [arena, memory](Readers* value) mutable
         {
-            delete value;
+            std::destroy_at(value);
+            memory.deallocate(value, 1);
             arena->used -= bytes;
-        });
+        }, memory);
 }
 template<class H>
 ContactPointGroups<H>::ContactPointGroups(std::shared_ptr<Budget> arena, H hash)
@@ -86,7 +91,7 @@ template<class H> ContactPointGroups<H>::~ContactPointGroups()
         if (group.live || group.retired)
             catalog_->points.release(group.normalized);
     // Fan owners must drop their pins before the group's catalog owner dies.
-    std::vector<Group>().swap(groups_);
+    ContactVector<Group>().swap(groups_);
 }
 template<class H>
 const typename ContactPointGroups<H>::Group& ContactPointGroups<H>::checked(ContactGroupId id, bool retired) const
@@ -190,7 +195,7 @@ template<class H> void ContactPointGroups<H>::ensure_lookup()
     const auto capacity = old ? 2 * old : 8;
     // Rehash a distinct admitted array; a failure leaves the current table intact.
     ContactGroupAllocation scratch(allocation_.keeper());
-    std::vector<std::size_t> replacement;
+    ContactVector<std::size_t> replacement;
     scratch.reserve(replacement, capacity);
     replacement.assign(capacity, empty);
     for (std::size_t slot = 0; slot < groups_.size(); ++slot)
@@ -204,7 +209,7 @@ template<class H> void ContactPointGroups<H>::ensure_lookup()
     // The replacement's admission transfers to this owner without re-admission.
     allocation_.transfer_from(scratch, capacity * sizeof(std::size_t));
     buckets_.swap(replacement);
-    std::vector<std::size_t>().swap(replacement);
+    ContactVector<std::size_t>().swap(replacement);
     allocation_.release(old * sizeof(std::size_t));
 }
 template<class H>
@@ -258,14 +263,14 @@ void ContactPointGroups<H>::replace_fans_generated(std::size_t count, EditAt&& e
     ContactGroupAllocation scratch(allocation_.keeper());
     struct Prepared
     {
-        std::vector<ContactLocalOccurrence> local;
-        std::vector<ContactRemoteOccurrence> remote;
+        ContactVector<ContactLocalOccurrence> local;
+        ContactVector<ContactRemoteOccurrence> remote;
     };
-    std::vector<Prepared> prepared;
-    std::vector<ContactFanBlock::Input> inputs;
+    ContactVector<Prepared> prepared;
+    ContactVector<ContactFanBlock::Input> inputs;
     scratch.reserve(prepared, count);
     scratch.reserve(inputs, count);
-    std::vector<std::size_t> ordered;
+    ContactVector<std::size_t> ordered;
     scratch.reserve(ordered, count);
     for (std::size_t i = 0; i < count; ++i)
         ordered.push_back(i);
@@ -374,7 +379,7 @@ template<class H> void ContactPointGroups<H>::reclaim(const std::function<void(s
         }
     }
     ContactGroupAllocation scratch(allocation_.keeper());
-    std::vector<const void*> dead;
+    ContactVector<const void*> dead;
     scratch.reserve(dead, fan_owners_.size());
     fan_owners_.visit(
         [&](const void* identity, const auto& owner)

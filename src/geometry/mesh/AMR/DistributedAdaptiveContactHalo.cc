@@ -131,7 +131,8 @@ struct ContactOwnedIdentity
     {
         ContactGroupAllocation charge(arena);
         charge.add(sizeof(ContactOwnedIdentity) + 128 + key_capacity(key) + domain.size());
-        auto result = std::make_shared<ContactOwnedIdentity>(std::move(charge), key, domain, revision);
+        auto result = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, ContactOwnedIdentity>(
+            std::move(charge), key, domain, revision);
         const auto actual = sizeof(ContactOwnedIdentity) + 128 + key_capacity(result->key) + result->domain.capacity();
         if (actual > result->admission.bytes())
             throw std::invalid_argument("Contact identity capacity differs from admission.");
@@ -158,7 +159,7 @@ public:
             admission_.reserve(wide_, compact_.capacity());
             wide_.assign(compact_.begin(), compact_.end());
             const auto bytes = compact_.capacity() * sizeof(std::uint32_t);
-            std::vector<std::uint32_t>().swap(compact_);
+            ContactVector<std::uint32_t>().swap(compact_);
             admission_.release(bytes);
         }
         if (!wide_.capacity())
@@ -174,7 +175,7 @@ public:
     void visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>&) const;
 
 private:
-    template<class T> std::size_t reserve_row(std::vector<T>& values, std::size_t points)
+    template<class T, class Allocator> std::size_t reserve_row(std::vector<T, Allocator>& values, std::size_t points)
     {
         const auto start = values.size();
         if (points > values.max_size() - start)
@@ -187,8 +188,8 @@ private:
         return start;
     }
     ContactGroupAllocation admission_;
-    std::vector<std::uint32_t> compact_;
-    std::vector<std::size_t> wide_;
+    ContactVector<std::uint32_t> compact_;
+    ContactVector<std::size_t> wide_;
     std::size_t rows_ = 0;
 };
 struct FrozenContactGroup
@@ -318,9 +319,9 @@ struct DistributedAdaptiveContactHalo::Impl
     struct PendingFanEdit
     {
         GroupId group;
-        std::vector<ContactBindingId> removed;
-        std::vector<ContactLocalOccurrence> appended;
-        std::vector<ContactRemoteOccurrence> remote;
+        ContactVector<ContactBindingId> removed;
+        ContactVector<ContactLocalOccurrence> appended;
+        ContactVector<ContactRemoteOccurrence> remote;
         bool replace_remote = false;
     };
     struct DirectoryNode
@@ -338,7 +339,8 @@ struct DistributedAdaptiveContactHalo::Impl
     ContactHaloContext context;
     ContactHaloBeforeSend before_send;
     std::shared_ptr<Budget> arena;
-    std::shared_ptr<std::size_t> external_lease_bytes = std::make_shared<std::size_t>(0);
+    std::shared_ptr<std::size_t> external_lease_bytes = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, std::size_t>(
+        0);
     bool native_source_floors_sealed = false;
     Budget& budget;
     DeferredOwnerCharges deferred_owners;
@@ -352,25 +354,25 @@ struct DistributedAdaptiveContactHalo::Impl
     std::shared_ptr<const AdaptiveLeafLayout> pending_contact_layout;
     std::size_t unbound_owned_records = 0;
     std::unique_ptr<DistributedAdaptiveIncidenceSession> incidence;
-    std::set<GroupId, GroupIdLess> dirty_points;
+    ContactSet<GroupId, GroupIdLess> dirty_points;
     ContactPairSet affected_pairs;
-    std::set<std::size_t> possibly_unused_records;
-    std::set<std::pair<int, std::size_t>> missing_records;
-    std::map<std::pair<std::size_t, std::size_t>, ClosureRequirements> failing_pairs;
+    ContactSet<std::size_t> possibly_unused_records;
+    ContactSet<std::pair<int, std::size_t>> missing_records;
+    ContactMap<std::pair<std::size_t, std::size_t>, ClosureRequirements> failing_pairs;
     std::size_t free_record = no_slot, free_row = no_slot;
-    std::vector<std::size_t> retired_records;
+    ContactVector<std::size_t> retired_records;
     std::unique_ptr<Groups> groups;
     std::shared_ptr<ContactPhysicalResidency> physical_owners;
     std::optional<PersistentContactTraces> persistent_traces;
     std::unique_ptr<PersistentContactGroups> persistent_groups;
-    std::vector<std::size_t> retired_row_slots;
-    std::map<GroupId, std::size_t, GroupIdLess> pending_group_positions;
-    std::vector<PendingFanEdit> pending_edits;
-    std::vector<std::size_t> pending_positions;
+    ContactVector<std::size_t> retired_row_slots;
+    ContactMap<GroupId, std::size_t, GroupIdLess> pending_group_positions;
+    ContactVector<PendingFanEdit> pending_edits;
+    ContactVector<std::size_t> pending_positions;
     std::unique_ptr<ContactCoverIndex> index;
     std::vector<ClosedContactCover> covers;
-    std::map<int, DirectoryNode> directory;
-    using CoverMap = std::map<int, std::vector<ClosedContactCover>>;
+    ContactMap<int, DirectoryNode> directory;
+    using CoverMap = ContactMap<int, std::vector<ClosedContactCover>>;
     CoverMap neighbors, previous_neighbors;
     std::shared_ptr<const ContactRankCoverReceipts> frozen_neighbors, frozen_previous_neighbors;
     Bounds local_cover;
@@ -399,7 +401,8 @@ struct DistributedAdaptiveContactHalo::Impl
         std::size_t caller_live_bytes)
         : kernel(kernel_), comm(std::move(comm_)), options(options_), context(context_),
           before_send(std::move(before_send_)),
-          arena(std::make_shared<Budget>(Budget{options.byte_budget, caller_live_bytes,
+          arena(geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, Budget>(
+              Budget{options.byte_budget, caller_live_bytes,
               caller_live_bytes, caller_live_bytes})),
           budget(*arena), deferred_owners(budget), trace_pool(std::in_place, budget), affected_pairs(budget),
           work(std::in_place, arena), ranks(comm.is_null() ? 0 : comm->getSize()),
@@ -410,7 +413,8 @@ struct DistributedAdaptiveContactHalo::Impl
         groups = std::make_unique<Groups>(arena);
         ContactGroupAllocation charge(arena);
         charge.add(sizeof(AdaptiveContactSnapshot::Storage) + 128);
-        query = std::make_shared<AdaptiveContactSnapshot::Storage>(std::move(charge), rank);
+        query = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, AdaptiveContactSnapshot::Storage>(
+            std::move(charge), rank);
     }
     void initialize_collective()
     {
@@ -1255,15 +1259,15 @@ void DistributedAdaptiveContactHalo::Impl::commit_edits()
                  edit.appended.capacity() * sizeof(ContactLocalOccurrence) +
                  edit.remote.capacity() * sizeof(ContactRemoteOccurrence);
     }
-    std::vector<PendingFanEdit>().swap(pending_edits);
+    ContactVector<PendingFanEdit>().swap(pending_edits);
     budget.used -= bytes;
 }
 void DistributedAdaptiveContactHalo::Impl::commit_persistent_edits()
 {
     struct Prepared
     {
-        std::vector<ContactLocalOccurrence> local;
-        std::vector<ContactRemoteOccurrence> remote;
+        ContactVector<ContactLocalOccurrence> local;
+        ContactVector<ContactRemoteOccurrence> remote;
     };
     auto& facts = persistent_groups->facts;
     facts.seal_fallback();
@@ -1272,8 +1276,8 @@ void DistributedAdaptiveContactHalo::Impl::commit_persistent_edits()
     {
         const auto count = std::min(groups_per_block, pending_edits.size() - offset);
         ContactGroupAllocation scratch(arena);
-        std::vector<Prepared> prepared;
-        std::vector<ContactFanBlock::Input> inputs;
+        ContactVector<Prepared> prepared;
+        ContactVector<ContactFanBlock::Input> inputs;
         scratch.reserve(prepared, count);
         scratch.reserve(inputs, count);
         for (const auto& edit : std::span(pending_edits).subspan(offset, count))
@@ -1367,9 +1371,9 @@ void DistributedAdaptiveContactHalo::Impl::commit_persistent_edits()
         bytes += edit.removed.capacity() * sizeof(ContactBindingId) +
                  edit.appended.capacity() * sizeof(ContactLocalOccurrence) +
                  edit.remote.capacity() * sizeof(ContactRemoteOccurrence);
-    std::vector<std::size_t>().swap(retired_row_slots);
+    ContactVector<std::size_t>().swap(retired_row_slots);
     pending_group_positions.clear();
-    std::vector<PendingFanEdit>().swap(pending_edits);
+    ContactVector<PendingFanEdit>().swap(pending_edits);
     budget.used -= bytes;
 }
 void DistributedAdaptiveContactHalo::Impl::touch_point(GroupId id)
@@ -1469,7 +1473,8 @@ void DistributedAdaptiveContactHalo::Impl::install_row(
             seal_row_groups(selectors);
             ContactGroupAllocation charge(arena);
             charge.add(sizeof(ContactRowGroups) + 128);
-            selectors = std::make_shared<ContactRowGroups>(std::move(charge));
+            selectors = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, ContactRowGroups>(
+                std::move(charge));
         }
         row_slot.group_start = selectors->begin_row(row.points.size());
         row_slot.groups = selectors;
@@ -1992,14 +1997,14 @@ void DistributedAdaptiveContactHalo::Impl::fetch_records()
         auto cursor = missing_records.lower_bound({destination, 0});
         const auto end = missing_records.lower_bound({destination + 1, 0});
         std::uint64_t next_query = 0, expected_query = 0, page = 0, expected_page = 0;
-        std::set<std::size_t> served;
+        ContactSet<std::size_t> served;
         while (true)
         {
             if (!any(cursor != end))
                 break;
             const auto cap = credit();
             const auto first_query = next_query;
-            std::vector<std::size_t> pending;
+            ContactVector<std::size_t> pending;
             Writer outgoing;
             int peer = -1;
             collective(*comm,
@@ -2228,7 +2233,7 @@ void DistributedAdaptiveContactHalo::Impl::fetch_records()
                         throw std::invalid_argument("Missing contact record terminal completion.");
                 });
             const auto scratch = pending.capacity() * sizeof(std::size_t) + requests.capacity() * sizeof(Request);
-            std::vector<std::size_t>().swap(pending);
+            ContactVector<std::size_t>().swap(pending);
             std::vector<Request>().swap(requests);
             budget.used -= scratch;
         }
@@ -2456,7 +2461,7 @@ std::vector<AdaptiveMark> DistributedAdaptiveContactHalo::Impl::evaluate(bool re
     collective(*comm,
         [&]
         {
-            std::map<std::size_t, std::optional<AdaptiveSplit>> required;
+            ContactMap<std::size_t, std::optional<AdaptiveSplit>> required;
             for (const auto& [ids, requests] : failing_pairs)
             {
                 auto join = [&](std::size_t id, const auto& request)
@@ -2979,7 +2984,7 @@ void DistributedAdaptiveContactHalo::bootstrap(
             if (state.ready || owned.size() != input.size())
                 throw std::invalid_argument("Invalid or repeated spatial contact bootstrap.");
             state.budget.add(input.capacity() * sizeof(ContactIncidenceRow));
-            std::map<AdaptiveCellKey, const AdaptiveLeaf*> source;
+            ContactMap<AdaptiveCellKey, const AdaptiveLeaf*> source;
             std::size_t source_bytes = 0;
             for (const auto& leaf : owned)
             {
@@ -3054,7 +3059,8 @@ void DistributedAdaptiveContactHalo::bootstrap_canonical(
                 state.groups.reset();
                 state.budget.used -= sizeof(Impl::Groups);
                 state.budget.add(sizeof(PersistentContactGroups) + sizeof(ContactPhysicalResidency) + 128);
-                state.physical_owners = std::make_shared<ContactPhysicalResidency>(state.arena, native_source);
+                state.physical_owners = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, ContactPhysicalResidency>(
+                    state.arena, native_source);
                 state.trace_pool.reset();
                 state.persistent_traces.emplace(state.arena, *state.physical_owners);
                 state.persistent_groups = std::make_unique<PersistentContactGroups>(state.arena, *state.physical_owners);
@@ -3282,7 +3288,8 @@ std::unique_ptr<DistributedAdaptiveContactHalo> DistributedAdaptiveContactHalo::
             if (source.physical_owners)
             {
                 state.budget.add(sizeof(ContactPhysicalResidency) + 128);
-                state.physical_owners = std::make_shared<ContactPhysicalResidency>(*source.physical_owners, state.arena);
+                state.physical_owners = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, ContactPhysicalResidency>(
+                    *source.physical_owners, state.arena);
             }
         });
     // Every rank finishes the incidence fork before selective group imports can
@@ -3306,7 +3313,8 @@ std::unique_ptr<DistributedAdaptiveContactHalo> DistributedAdaptiveContactHalo::
                 state.trace_pool.emplace(*source.trace_pool, state.budget);
             ContactGroupAllocation charge(state.arena);
             charge.add(sizeof(AdaptiveContactSnapshot::Storage) + 128);
-            state.query = std::make_shared<AdaptiveContactSnapshot::Storage>(std::move(charge), *source.query);
+            state.query = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, AdaptiveContactSnapshot::Storage>(
+                std::move(charge), *source.query);
             state.work.emplace(*source.work, state.arena);
             state.unbound_owned_records = source.unbound_owned_records;
             auto copy_vector = [&](auto& target, const auto& from)

@@ -4,6 +4,7 @@
 #include "geometry/PLIC/details/GeometryDemandOrder.hh"
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryDemandPages.tcc"
+#include "geometry/PLIC/details/GeometrySnapshotAllocation.hh"
 #include <limits>
 #include <variant>
 
@@ -38,7 +39,7 @@ public:
 private:
     std::size_t count_;
     std::array<T, leaf_capacity> inline_{};
-    std::vector<T> heap_;
+    GeometrySnapshotVector<T> heap_;
 };
 bool before(OrderStamp a, OrderStamp b) noexcept
 {
@@ -58,7 +59,7 @@ template<class T> struct Column
     };
     T first{}, step{};
     std::uint8_t repeat = 1, period = leaf_capacity;
-    std::variant<std::monostate, std::vector<Override>, std::vector<T>> exceptions;
+    std::variant<std::monostate, GeometrySnapshotVector<Override>, GeometrySnapshotVector<T>> exceptions;
 
     T pattern(std::size_t row) const noexcept { return T(first + step * T((row / repeat) % period)); }
     template<class Value> void build(std::size_t count, Value value, Admission admission)
@@ -85,7 +86,7 @@ template<class T> struct Column
             return;
         if (mismatches * sizeof(Override) < count * sizeof(T))
         {
-            auto& overrides = exceptions.template emplace<std::vector<Override>>();
+            auto& overrides = exceptions.template emplace<GeometrySnapshotVector<Override>>();
             admission.charge(mismatches, sizeof(Override));
             overrides.reserve(mismatches);
             if (overrides.capacity() != mismatches)
@@ -96,7 +97,7 @@ template<class T> struct Column
         }
         else
         {
-            auto& dense = exceptions.template emplace<std::vector<T>>();
+            auto& dense = exceptions.template emplace<GeometrySnapshotVector<T>>();
             admission.charge(count, sizeof(T));
             dense.reserve(count);
             if (dense.capacity() != count)
@@ -107,9 +108,9 @@ template<class T> struct Column
     }
     T at(std::size_t row) const noexcept
     {
-        if (const auto* dense = std::get_if<std::vector<T>>(&exceptions))
+        if (const auto* dense = std::get_if<GeometrySnapshotVector<T>>(&exceptions))
             return (*dense)[row];
-        if (const auto* overrides = std::get_if<std::vector<Override>>(&exceptions))
+        if (const auto* overrides = std::get_if<GeometrySnapshotVector<Override>>(&exceptions))
         {
             const auto found = std::lower_bound(overrides->begin(), overrides->end(), row,
                 [](const Override& value, std::size_t target) { return value.row < target; });
@@ -120,17 +121,17 @@ template<class T> struct Column
     }
     DemandPageBuffer buffer() const noexcept
     {
-        if (const auto* dense = std::get_if<std::vector<T>>(&exceptions))
+        if (const auto* dense = std::get_if<GeometrySnapshotVector<T>>(&exceptions))
             return {dense->data(), dense->capacity() * sizeof(T)};
-        if (const auto* overrides = std::get_if<std::vector<Override>>(&exceptions))
+        if (const auto* overrides = std::get_if<GeometrySnapshotVector<Override>>(&exceptions))
             return {overrides->data(), overrides->capacity() * sizeof(Override)};
         return {};
     }
     std::size_t payload_bytes() const noexcept
     {
-        if (const auto* dense = std::get_if<std::vector<T>>(&exceptions))
+        if (const auto* dense = std::get_if<GeometrySnapshotVector<T>>(&exceptions))
             return dense->capacity() * sizeof(T);
-        if (const auto* overrides = std::get_if<std::vector<Override>>(&exceptions))
+        if (const auto* overrides = std::get_if<GeometrySnapshotVector<Override>>(&exceptions))
             return overrides->capacity() * sizeof(Override);
         return 0;
     }
@@ -164,7 +165,7 @@ struct SourceOwner
 };
 struct SelectorPage
 {
-    std::vector<SourceOwner> sources;
+    GeometrySnapshotVector<SourceOwner> sources;
     Column<std::uint8_t> owner;
     Column<std::uint64_t> row, generation, position;
     std::size_t count = 0;
@@ -203,7 +204,7 @@ struct SelectorPage
             selected[slot] = std::uint8_t(source);
         }
         admission.charge(1, sizeof(SelectorPage) + control_bytes);
-        auto result = std::make_shared<SelectorPage>();
+        auto result = geometry_snapshot_shared<SelectorPage>();
         admission.charge(sources, sizeof(result->sources[0]));
         result->sources.reserve(sources);
         if (result->sources.capacity() != sources)
@@ -239,7 +240,8 @@ struct GroupLess
 {
     bool operator()(const Group& a, const Group& b) const noexcept { return before(a.maximum, b.maximum); }
 };
-using Pages = OrderedPages<Group, GroupLess>;
+using Pages = OrderedPages<Group, GroupLess, false, NoLeafWitnesses,
+    geometry_detail::AllocationDomain::GeometrySnapshot>;
 Group group(std::shared_ptr<const SelectorPage> page, PageWork* work)
 {
     const auto last = page->at(page->count - 1, work).stamp;
@@ -413,7 +415,7 @@ GeometryDemandOrder GeometryDemandOrder::prepended(
     if (root || next_generation)
     {
         admission.charge(1, sizeof(State) + control_bytes);
-        result.state_ = std::make_shared<const State>(std::move(root), next_generation);
+        result.state_ = geometry_snapshot_shared<const State>(std::move(root), next_generation);
     }
     return result;
 }
@@ -456,7 +458,7 @@ GeometryDemandOrder GeometryDemandOrder::rebound(
     }
     admission.charge(1, sizeof(State) + control_bytes);
     GeometryDemandOrder result;
-    result.state_ = std::make_shared<const State>(std::move(root), generation());
+    result.state_ = geometry_snapshot_shared<const State>(std::move(root), generation());
     return result;
 }
 void GeometryDemandOrder::visit_dependencies(MetadataSink metadata, SourceSink sources) const

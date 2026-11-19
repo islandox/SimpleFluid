@@ -100,9 +100,9 @@ private:
     static constexpr auto empty_binding = std::numeric_limits<std::size_t>::max();
     static constexpr auto retired_bucket = empty_binding - 1;
     ContactGroupAllocation allocation_;
-    std::vector<Binding> bindings_;
-    std::vector<std::size_t> free_;
-    std::vector<std::size_t> buckets_;
+    ContactVector<Binding> bindings_;
+    ContactVector<std::size_t> free_;
+    ContactVector<std::size_t> buckets_;
     std::size_t retained_ = 0;
 };
 /** Immutable, multi-group flat arrays. Each compact occurrence is eight bytes;
@@ -164,9 +164,9 @@ public:
 private:
     template<class UInt> struct Arrays
     {
-        std::vector<Local<UInt>> local;
-        std::vector<Remote<UInt>> remote;
-        std::vector<Slice<UInt>> slices;
+        ContactVector<Local<UInt>> local;
+        ContactVector<Remote<UInt>> remote;
+        ContactVector<Slice<UInt>> slices;
     };
     explicit ContactFanBlock(std::shared_ptr<Budget> arena) : admission_(std::move(arena)) {}
     ContactGroupAllocation admission_;
@@ -218,7 +218,7 @@ private:
     ContactGroupAllocation body_admission_;
     std::shared_ptr<ContactFanCatalog> catalog_;
     std::shared_ptr<const ContactFanBlock> block_;
-    mutable std::vector<std::size_t> views_;
+    mutable ContactVector<std::size_t> views_;
     mutable bool staging_ = true;
 };
 struct ContactFanView

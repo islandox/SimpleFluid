@@ -26,7 +26,8 @@ namespace SimpleFluid::Meshes::AMR::geometry_snapshot_detail
 {
 namespace
 {
-template<class T> void reserve_checked(std::vector<T>& values, std::size_t count, adaptive_detail::Budget& budget)
+template<class T, class Allocator>
+void reserve_checked(std::vector<T, Allocator>& values, std::size_t count, adaptive_detail::Budget& budget)
 {
     if (count > values.max_size())
         throw PLIC::GeometryError(
@@ -104,7 +105,7 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
      * traversed and sorted by axis index before slot assignment; a vector costs
      * a quarter of a map node per coordinate and keeps the description scratch
      * proportional to the actual axis endpoints. */
-    using BoundAxis = std::vector<std::pair<std::uint64_t, BoundCoordinate>>;
+    using BoundAxis = SnapshotVector<std::pair<std::uint64_t, BoundCoordinate>>;
     const auto lower_coordinate = [](const BoundAxis& values, std::uint64_t index)
     {
         return std::lower_bound(values.begin(), values.end(), index,
@@ -116,9 +117,9 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
         RecipeAxes axes;
         std::array<BoundAxis, 3> raw_coordinates;
         std::size_t count = 0, source_ordinal = 0;
-        std::vector<std::size_t> slots;
+        SnapshotVector<std::size_t> slots;
     };
-    std::map<const Meshes::NativeFragmentDescriptor*, Group> groups;
+    SnapshotMap<const Meshes::NativeFragmentDescriptor*, Group> groups;
     using ReusedSource = std::pair<std::size_t, std::shared_ptr<const PLIC::CartesianCellSource>>;
     struct SourceBinding
     {
@@ -131,7 +132,7 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
             return std::less<const NativeFragmentDescriptor*>{}(recipe, other.recipe);
         }
     };
-    std::map<SourceBinding, ReusedSource> reused_sources;
+    SnapshotMap<SourceBinding, ReusedSource> reused_sources;
     /** Raw rows whose previous context is a prepared page: they adopt a deferred
      * subset of that page's immutable base instead of rebuilding a source. */
     struct SubsetRequest
@@ -140,14 +141,14 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
         std::shared_ptr<const PLIC::CartesianCellSource> source;
         std::uint64_t cell = 0;
     };
-    std::vector<SubsetRequest> subset_requests;
-    std::vector<unsigned char> reused_slots;
+    SnapshotVector<SubsetRequest> subset_requests;
+    SnapshotVector<unsigned char> reused_slots;
     reserve_checked(reused_slots, leaves.size(), budget);
     reused_slots.resize(leaves.size(), 0);
-    std::vector<unsigned char> native_slots;
+    SnapshotVector<unsigned char> native_slots;
     reserve_checked(native_slots, leaves.size(), budget);
     native_slots.resize(leaves.size(), 0);
-    std::vector<unsigned char> subset_rows;
+    SnapshotVector<unsigned char> subset_rows;
     reserve_checked(subset_rows, leaves.size(), budget);
     subset_rows.resize(leaves.size(), 0);
     const auto require_separate_ordinary = [&]
@@ -414,7 +415,7 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
         sources.at(record.first) = record.second;
     // One deferred subset body per previous prepared source, ordered by cell.
     {
-        std::map<const PLIC::CartesianCellSource*, std::vector<std::size_t>> by_source;
+        SnapshotMap<const PLIC::CartesianCellSource*, SnapshotVector<std::size_t>> by_source;
         for (std::size_t index = 0; index < subset_requests.size(); ++index)
         {
             const auto* source = subset_requests[index].source.get();
@@ -429,7 +430,7 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
         }
         for (const auto& [address, rows] : by_source)
         {
-            std::vector<std::uint64_t> cells;
+            SnapshotVector<std::uint64_t> cells;
             reserve_checked(cells, rows.size(), budget);
             for (const auto row : rows)
                 cells.push_back(subset_requests[row].cell);
@@ -452,7 +453,7 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
         }
     }
 
-    std::vector<const Meshes::NativeFragmentDescriptor*> recipe_order;
+    SnapshotVector<const Meshes::NativeFragmentDescriptor*> recipe_order;
     reserve_checked(recipe_order, groups.size(), budget);
     recipe_order.resize(groups.size());
     for (const auto& [recipe, group] : groups)

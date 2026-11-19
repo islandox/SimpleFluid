@@ -1,4 +1,5 @@
 #pragma once
+#include "ContactDomainStorage.hh"
 #include "IncidencePointDirectory.hh"
 #include <limits>
 #include <memory>
@@ -36,7 +37,8 @@ public:
         cartesian_detail::Allocation memory(budget);
         memory.retain(sizeof(ContactSourcePointView) + 128);
         cartesian_detail::CreditConstruction credits(arena);
-        auto result = std::shared_ptr<ContactSourcePointView>(new ContactSourcePointView);
+        auto result = contact_shared_object<ContactSourcePointView>(
+            [](ContactSourcePointView* storage) { ::new (storage) ContactSourcePointView; });
         result->source_ = std::move(source);
         result->budget_ = &budget;
         result->keeper_ = std::move(keeper);

@@ -12,6 +12,7 @@
 #include "geometry/PLIC/details/NativeIdentityOwnerAccess.hh"
 #include "geometry/PLIC/details/OriginalSupportAuthority.hh"
 #include "geometry/details/NativeAllocationGraph.hh"
+#include "geometry/details/AllocationDomain.hh"
 #include "geometry/details/NativeObjectOwnerAccess.hh"
 #include <algorithm>
 #include <cstddef>
@@ -412,14 +413,18 @@ public:
         if (!tracker_ || !tracker_->state)
         {
             details::ordinary_kernel::NativeSplitCppProfile::request(count, sizeof(T));
-            return std::allocator<T>{}.allocate(count);
+            return geometry_detail::domain_allocate<T>(geometry_detail::AllocationDomain::OwnerUnion, count);
         }
         constexpr auto alignment = std::max(alignof(T), alignof(NativeLedgerAllocationTracker::Allocation));
         constexpr auto prefix = (sizeof(NativeLedgerAllocationTracker::Allocation) + alignment - 1) / alignment * alignment;
         const auto bytes = allocation_detail::add(prefix, allocation_detail::product(count, sizeof(T)));
         tracker_->state->add(bytes);
         void* memory = nullptr;
-        try { memory = ::operator new(bytes, std::align_val_t(alignment)); }
+        try
+        {
+            const geometry_detail::AllocationDomainScope domain(geometry_detail::AllocationDomain::OwnerUnion);
+            memory = ::operator new(bytes, std::align_val_t(alignment));
+        }
         catch (...) { tracker_->state->retire(bytes); throw; }
         auto* receipt = ::new (memory) NativeLedgerAllocationTracker::Allocation{nullptr, tracker_->allocations, bytes};
         if (receipt->next) receipt->next->previous = receipt;
@@ -429,7 +434,11 @@ public:
     }
     void deallocate(T* pointer, std::size_t count) noexcept
     {
-        if (!tracker_ || !tracker_->state) { std::allocator<T>{}.deallocate(pointer, count); return; }
+        if (!tracker_ || !tracker_->state)
+        {
+            geometry_detail::domain_deallocate(geometry_detail::AllocationDomain::OwnerUnion, pointer, count);
+            return;
+        }
         constexpr auto alignment = std::max(alignof(T), alignof(NativeLedgerAllocationTracker::Allocation));
         constexpr auto prefix = (sizeof(NativeLedgerAllocationTracker::Allocation) + alignment - 1) / alignment * alignment;
         auto* receipt = reinterpret_cast<NativeLedgerAllocationTracker::Allocation*>(
@@ -441,7 +450,10 @@ public:
         if (receipt->next) receipt->next->previous = receipt->previous;
         tracker_->allocation_bytes -= bytes;
         std::destroy_at(receipt);
-        ::operator delete(receipt, std::align_val_t(alignment));
+        {
+            const geometry_detail::AllocationDomainScope domain(geometry_detail::AllocationDomain::OwnerUnion);
+            ::operator delete(receipt, std::align_val_t(alignment));
+        }
         tracker_->state->retire(bytes);
     }
     template<class U> bool operator==(const NativeLedgerAllocator<U>& other) const noexcept

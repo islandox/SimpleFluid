@@ -1,12 +1,12 @@
 /** @file testAdaptivePipelineStorage.cc
  * @brief Whole-pipeline baseline observations and trace invariants.
  */
-/** Whole retained C++ allocations across actual hierarchy transactions.
- * Explicit physical-owner census supplements allocations outside operator new.
- * Native publication is measured independently while its scope is unresolved. */
+/** Allocation-time domains measure requested C++ extents across actual hierarchy
+ * transactions. Page identity and weak probes independently check sharing and release. */
 #include "adaptive_storage_test_helpers.hh"
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryOwnerImportAccess.hh"
+#include "geometry/details/AllocationDomain.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotAccess.hh"
 #include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveContactHalo.hh"
@@ -27,6 +27,7 @@
 #include <numeric>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace
@@ -37,9 +38,13 @@ namespace F = SimpleFluid::test::adaptive_storage;
 using State = std::shared_ptr<const A::DistributedAdaptiveHierarchy>;
 using Access = D::GeometrySnapshotAccess;
 using OwnerAccess = SimpleFluid::PLIC::details::GeometryAllocationOwnerAccess;
+using AllocationDomain = SimpleFluid::geometry_detail::AllocationDomain;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 inline std::array<std::size_t, static_cast<unsigned>(D::PipelineWork::Count)> pipeline_work{};
 constexpr std::size_t ample = 256 * 1024 * 1024;
+constexpr std::array domain_names{"unattributed", "leaf_pages", "family_storage", "contact_halo", "geometry_snapshot",
+    "owner_union", "native_publication", "external_third_party"};
+static_assert(domain_names.size() == static_cast<std::size_t>(AllocationDomain::Count));
 constexpr std::array phase_names{"candidate", "transport", "directory", "native_publication", "native_cell_routes"};
 constexpr std::array work_names{"active_leaf_callback_visits", "leased_directory_wire_keys", "numeric_output_rows",
     "cell_geometry_requests", "surface_batch_requests", "exact_cell_shell_calls", "native_materialization_requests",
@@ -85,42 +90,23 @@ struct ObserverScope
     }
     ~ObserverScope() { (void) D::set_pipeline_observer(previous); }
 };
-struct Graph
+/** Borrow identities and payload diagnostics without attributing allocations. */
+struct GenerationObservation
 {
-    std::size_t owners = 0, traced_owners = 0, untraced_owner_bytes = 0;
-    std::set<const void*> identities;
-    std::map<std::uint64_t, std::size_t> allocations;
-    std::map<std::uint64_t, std::size_t> scalar_numeric_allocations;
-    std::array<std::size_t, static_cast<unsigned>(D::ContactPayloadRole::Count)> role_bytes{}, role_entries{},
-        role_extent_bytes{};
+    std::set<const void*> owners, leaf_pages;
+    std::array<std::size_t, static_cast<unsigned>(D::ContactPayloadRole::Count)> role_bytes{}, role_entries{};
 };
-Graph graph(const State& state, unsigned membership)
+GenerationObservation observe_generation(const State& state)
 {
-    pipeline_trace::Pause pause;
-    pipeline_trace::prepare_census();
-    Graph result;
-    Access::visit_pipeline_graph(*state,
-        [&](const D::PipelineGraphOwner& owner)
-        {
-            // Only exact standalone scalar-buffer extents qualify. An interior
-            // numeric address never exempts its enclosing nonnumeric allocation.
-            if (owner.kind == D::PipelineGraphOwner::Kind::NumericOutput)
-                if (const auto* allocation = pipeline_trace::mark(owner.identity, membership);
-                    allocation && allocation->address == owner.identity && allocation->bytes == owner.bytes)
-                    result.scalar_numeric_allocations.emplace(allocation->serial, allocation->bytes);
-            if (!result.identities.insert(owner.identity).second)
-                return;
-            ++result.owners;
-            if (const auto* allocation = pipeline_trace::mark(owner.identity, membership))
-            {
-                ++result.traced_owners;
-                result.allocations.emplace(allocation->serial, allocation->bytes);
-            }
-            else
-                result.untraced_owner_bytes += owner.bytes;
-        });
+    const pipeline_trace::Pause pause;
+    GenerationObservation result;
+    // Preserve the independent shared-owner gate, including fixtures smaller
+    // than one leaf page. These identities never classify a traced extent.
+    Access::visit_pipeline_graph(
+        *state, [&](const D::PipelineGraphOwner& owner) { result.owners.insert(owner.identity); });
+    Access::visit_pipeline_leaf_pages(
+        *state, [&](const D::AdaptiveLeafPageObservation& page) { result.leaf_pages.insert(page.address); });
     std::set<std::pair<const void*, D::ContactPayloadRole>> payloads;
-    std::map<std::uint64_t, std::pair<unsigned, std::size_t>> role_extents;
     D::contact_cache(*state).for_each_borrowed_contact_payload(
         [&](const D::ContactPayloadAllocation& value)
         {
@@ -129,21 +115,54 @@ Graph graph(const State& state, unsigned membership)
                 const auto role = static_cast<unsigned>(value.identity.role);
                 result.role_bytes[role] += value.payload_bytes;
                 ++result.role_entries[role];
-                if (const auto* allocation = pipeline_trace::mark(value.identity.address, membership))
-                {
-                    auto [entry, inserted] =
-                        role_extents.emplace(allocation->serial, std::pair{role, allocation->bytes});
-                    if (!inserted)
-                        entry->second.first = std::min(entry->second.first, role);
-                }
             }
         });
-    // Each real allocation contributes to exactly one role, choosing the
-    // lowest enum role when subobjects/aliases have several roles.
-    for (const auto& [serial, value] : role_extents)
-        result.role_extent_bytes[value.first] += value.second;
     return result;
 }
+/** Observe the implementation's actual rebound type without setting a domain. */
+struct RequestedExtents
+{
+    std::size_t bytes = 0, allocations = 0, deallocations = 0;
+};
+template<class T, AllocationDomain Domain> struct ObservedDomainAllocator
+{
+    using value_type = T;
+    template<class U> struct rebind
+    {
+        using other = ObservedDomainAllocator<U, Domain>;
+    };
+
+    SimpleFluid::geometry_detail::AllocationAccount* account;
+    RequestedExtents* requested;
+
+    ObservedDomainAllocator(SimpleFluid::geometry_detail::AllocationAccount& funding, RequestedExtents& extents)
+        : account(&funding), requested(&extents)
+    {
+    }
+    template<class U>
+    ObservedDomainAllocator(const ObservedDomainAllocator<U, Domain>& other) noexcept
+        : account(other.account), requested(other.requested)
+    {
+    }
+    T* allocate(std::size_t count)
+    {
+        SimpleFluid::geometry_detail::DomainAllocator<T, Domain> allocator(*account);
+        auto* result = allocator.allocate(count);
+        requested->bytes += count * sizeof(T);
+        ++requested->allocations;
+        return result;
+    }
+    void deallocate(T* value, std::size_t count) noexcept
+    {
+        SimpleFluid::geometry_detail::DomainAllocator<T, Domain> allocator(*account);
+        allocator.deallocate(value, count);
+        ++requested->deallocations;
+    }
+    template<class U> bool operator==(const ObservedDomainAllocator<U, Domain>& other) const noexcept
+    {
+        return account == other.account && requested == other.requested;
+    }
+};
 std::vector<A::AdaptiveBytes> encoded(const State& source)
 {
     std::vector<A::AdaptiveBytes> rows;
@@ -156,8 +175,11 @@ std::vector<A::AdaptiveBytes> encoded(const State& source)
 void warm(const State& source)
 {
     std::vector<const A::AdaptiveLeaf*> rows;
-    for (const auto& leaf : source->owned_leaves())
-        rows.push_back(&leaf);
+    {
+        const pipeline_trace::Pause pause;
+        for (const auto& leaf : source->owned_leaves())
+            rows.push_back(&leaf);
+    }
     std::size_t used = 0;
     (void) source->geometry_snapshot(
         rows, SimpleFluid::ArithmeticMode::Ordinary, A::GeometrySnapshotPurpose::State, used, ample);
@@ -228,18 +250,14 @@ struct Measurement
     SimpleFluid::PLIC::GeometryStatistics adapt_geometry{}, migrate_geometry{}, native_geometry{}, initial_geometry{},
         repeat_geometry{};
     decltype(pipeline_work) adapt_work{}, migrate_work{}, native_work{}, initial_work{}, repeat_work{};
-    std::array<std::size_t, 3> scalar_numeric_bytes{}, scalar_numeric_allocations{};
     std::array<decltype(pipeline_work), 3> warm_work{};
     D::ContactHaloStatistics contact{};
     D::ContactStorageBreakdown breakdown{};
-    decltype(Graph::role_bytes) role_bytes{}, role_entries{}, role_extent_bytes{};
-    std::array<std::size_t, 8> graph_attributed_live_extent_bytes{};
-    std::size_t raw_unattributed_live_allocations = 0, raw_unattributed_live_bytes = 0;
-    std::size_t live_unclassified_cpp_bytes = 0;
+    decltype(GenerationObservation::role_bytes) role_bytes{}, role_entries{};
     A::AdaptiveBytes migrated_key;
     std::array<SimpleFluid::PLIC::details::GeometryAllocationWork, 8> owner_work_events{};
-    std::size_t graph_owners = 0, shared_owners = 0, family_count = 0, history_count = 0, saved_history_count = 0;
-    std::size_t owner_work = 0, cover_work = 0, cache_censuses = 0, untraced_owner_bytes = 0;
+    std::size_t shared_owners = 0, shared_leaf_pages = 0, family_count = 0, history_count = 0, saved_history_count = 0;
+    std::size_t owner_work = 0, cover_work = 0, cache_censuses = 0;
 };
 
 Measurement run(F::Provider provider, std::size_t components)
@@ -263,7 +281,11 @@ Measurement run(F::Provider provider, std::size_t components)
         result.warm_cache_after[generation] = Access::cache_admission_statistics(*state);
     };
     {
-        auto input = refined(provider, components);
+        auto input = [&]
+        {
+            const pipeline_trace::Pause pause;
+            return refined(provider, components);
+        }();
         A::DistributedAdaptiveOptions options;
         options.byte_budget = ample;
         auto source = std::make_shared<const A::DistributedAdaptiveHierarchy>(
@@ -305,14 +327,7 @@ Measurement run(F::Provider provider, std::size_t components)
             source = std::move(bound);
         }
         EXPECT_NE(source->native_partition(), nullptr);
-        const auto source_graph = graph(source, 1);
-        const auto numeric_output = [&](const Graph& value, std::size_t generation)
-        {
-            result.scalar_numeric_allocations[generation] = value.scalar_numeric_allocations.size();
-            for (const auto& [serial, bytes] : value.scalar_numeric_allocations)
-                result.scalar_numeric_bytes[generation] += bytes;
-        };
-        numeric_output(source_graph, 0);
+        const auto source_observation = observe_generation(source);
         result.warm_live_generations[0] = pipeline_trace::summary();
         std::vector<A::AdaptiveBytes> before;
         {
@@ -322,7 +337,7 @@ Measurement run(F::Provider provider, std::size_t components)
             // Generic providers retain ordinary Layer history. SavedLayer is
             // specific to the trusted Cartesian incidence-source protocol.
             result.history_count =
-                source_graph.role_entries[static_cast<unsigned>(D::ContactPayloadRole::IncidenceLayerObject)];
+                source_observation.role_entries[static_cast<unsigned>(D::ContactPayloadRole::IncidenceLayerObject)];
             result.saved_history_count = D::contact_cache(*source).statistics().retained_saved_layers;
         }
         EXPECT_TRUE(comm->getRank() >= 2 || result.family_count > 0);
@@ -335,8 +350,11 @@ Measurement run(F::Provider provider, std::size_t components)
         const auto cache_before = Access::cache_admission_statistics(*source);
         // One physical component has the same requested family at N and 2N.
         std::vector<A::AdaptiveBytes> coarsen;
-        if (comm->getRank() == 0)
-            coarsen.push_back(input.changed_family);
+        {
+            const pipeline_trace::Pause pause;
+            if (comm->getRank() == 0)
+                coarsen.push_back(input.changed_family);
+        }
         pipeline_work = {};
         pipeline_trace::next_epoch();
         Access::reset_pipeline_geometry_statistics();
@@ -348,24 +366,18 @@ Measurement run(F::Provider provider, std::size_t components)
         result.owner_work_events[2] = OwnerAccess::work_statistics();
         EXPECT_LT(second->global_cells(), source->global_cells());
         measured_warm(second, 1);
-        const auto second_graph = graph(second, 2);
-        numeric_output(second_graph, 1);
+        const auto second_observation = observe_generation(second);
         result.warm_live_generations[1] = pipeline_trace::summary();
-        result.role_bytes = second_graph.role_bytes;
-        result.role_entries = second_graph.role_entries;
-        result.role_extent_bytes = second_graph.role_extent_bytes;
+        result.role_bytes = second_observation.role_bytes;
+        result.role_entries = second_observation.role_entries;
         {
             pipeline_trace::Pause pause;
             result.breakdown = D::contact_cache(*second).contact_storage_breakdown();
         }
-        std::size_t classified = 0;
-        for (const auto& [serial, bytes] : second_graph.allocations)
-            classified += bytes;
-        result.live_unclassified_cpp_bytes = pipeline_trace::summary().all_live - classified;
-        result.graph_owners = second_graph.owners;
-        result.untraced_owner_bytes = second_graph.untraced_owner_bytes;
-        for (const auto* identity : second_graph.identities)
-            result.shared_owners += source_graph.identities.contains(identity);
+        for (const auto* identity : second_observation.leaf_pages)
+            result.shared_leaf_pages += source_observation.leaf_pages.contains(identity);
+        for (const auto* identity : second_observation.owners)
+            result.shared_owners += source_observation.owners.contains(identity);
         const auto& statistics = D::contact_cache(*second).statistics();
         result.contact = statistics;
         result.owner_work = statistics.contact_owner_admission_work;
@@ -380,7 +392,11 @@ Measurement run(F::Provider provider, std::size_t components)
         }
 
         // Real ownership change for one retained leaf, including Static rows.
-        std::vector<int> destinations(second->owned_leaves().size(), comm->getRank());
+        std::vector<int> destinations;
+        {
+            const pipeline_trace::Pause pause;
+            destinations.assign(second->owned_leaves().size(), comm->getRank());
+        }
         if (comm->getSize() > 1 && comm->getRank() == 0)
         {
             EXPECT_FALSE(destinations.empty());
@@ -430,19 +446,8 @@ Measurement run(F::Provider provider, std::size_t components)
             }
         }
         measured_warm(third, 2);
-        const auto third_graph = graph(third, 4);
-        numeric_output(third_graph, 2);
         result.warm_live_generations[2] = pipeline_trace::summary();
-        const auto union_before_release = pipeline_trace::physical_unions();
-        result.graph_attributed_live_extent_bytes = union_before_release;
-        const auto unattributed = pipeline_trace::unattributed();
-        result.raw_unattributed_live_allocations = unattributed.first;
-        result.raw_unattributed_live_bytes = unattributed.second;
-        // Graph attribution is a lower bound: generic provider internals,
-        // separate control blocks and aggregate PLIC child buffers may remain
-        // unclassified. All captured extents stay in the raw operation totals.
-
-        EXPECT_GT(std::accumulate(union_before_release.begin(), union_before_release.end(), std::size_t(0)), 0u);
+        EXPECT_GT(result.warm_live_generations[2].all_live, 0u);
         const std::weak_ptr<const A::DistributedAdaptiveHierarchy> weak_source = source, weak_second = second;
         const std::weak_ptr<const A::AdaptiveLeafLayout> weak_source_layout = source->leaf_layout();
         source.reset();
@@ -491,6 +496,21 @@ void report(std::string prefix, const pipeline_trace::Summary& value)
     record_property(prefix + "_retained_stream_phase_bytes", std::to_string(value.retained_streaming_bytes));
     record_property(prefix + "_all_live_requested_cpp_peak", std::to_string(value.all_peak));
     record_property(prefix + "_incremental_live_requested_cpp_peak", std::to_string(value.incremental_peak));
+    std::size_t live = 0;
+    for (std::size_t i = 0; i != domain_names.size(); ++i)
+    {
+        const auto& domain = value.domain[i];
+        live += domain.live;
+        const auto key = prefix + "_domain_" + domain_names[i];
+        record_property(key + "_live_bytes", std::to_string(domain.live));
+        record_property(key + "_requested_bytes", std::to_string(domain.bytes));
+        record_property(key + "_allocations", std::to_string(domain.allocations));
+        record_property(key + "_deallocations", std::to_string(domain.deallocations));
+        record_property(key + "_peak_bytes", std::to_string(domain.peak));
+    }
+    EXPECT_EQ(live, value.all_live);
+    EXPECT_EQ(
+        value.domain[static_cast<std::size_t>(AllocationDomain::Unattributed)].live, value.unattributed_live_bytes);
     for (std::size_t i = 0; i != pipeline_trace::phases; ++i)
     {
         record_property(prefix + "_phase_" + phase_names[i] + "_requests", std::to_string(value.phase[i].allocations));
@@ -503,7 +523,7 @@ TEST(AdaptivePipelineStorage, WholePipelineBaselineReportsExistingWork)
 {
     record_property("plic_mesh_domain_matches_calling_image",
         Access::pipeline_geometry_statistics_domain() == SimpleFluid::PLIC::geometry_statistics_domain() ? "1" : "0");
-    record_property("graph_attribution_scope", "partial_lower_bound_all_unmatched_extents_remain_in_raw_totals");
+    record_property("allocation_attribution_scope", "allocation_time_domains_requested_cpp_bytes");
     record_property("scaling_gate_status", "baseline_observation_only_future_stage6_unqualified");
     for (const auto provider : F::providers)
     {
@@ -525,8 +545,6 @@ TEST(AdaptivePipelineStorage, WholePipelineBaselineReportsExistingWork)
         report(std::string(F::name(provider)) + "_large_native", large.native);
         if (Tpetra::getDefaultComm()->getRank() < 2)
             EXPECT_GT(large.shared_owners, small.shared_owners);
-        record_property(std::string(F::name(provider)) + "_large_untraced_reported_owner_payload",
-            std::to_string(large.untraced_owner_bytes));
         const auto work_report = [&](const std::string& size, const Measurement& measured)
         {
             const auto prefix = std::string(F::name(provider)) + "_" + size;
@@ -534,12 +552,6 @@ TEST(AdaptivePipelineStorage, WholePipelineBaselineReportsExistingWork)
             {
                 report(prefix + "_warm_live_generation_" + std::to_string(generation + 1),
                     measured.warm_live_generations[generation]);
-                record_property(prefix + "_warm_live_generation_" + std::to_string(generation + 1) +
-                                    "_standalone_scalar_numeric_buffer_bytes",
-                    std::to_string(measured.scalar_numeric_bytes[generation]));
-                record_property(prefix + "_warm_live_generation_" + std::to_string(generation + 1) +
-                                    "_standalone_scalar_numeric_buffer_allocations",
-                    std::to_string(measured.scalar_numeric_allocations[generation]));
                 const auto warm_prefix = prefix + "_warm_operation_" + std::to_string(generation + 1);
                 report(warm_prefix, measured.warm_operations[generation]);
                 const auto& before = measured.warm_cache_before[generation];
@@ -632,12 +644,8 @@ TEST(AdaptivePipelineStorage, WholePipelineBaselineReportsExistingWork)
             property("_saved_family_count", measured.family_count);
             property("_retained_incidence_history_layers", measured.history_count);
             property("_retained_saved_incidence_layers", measured.saved_history_count);
-            property("_raw_live_cpp_bytes_outside_current_graph", measured.live_unclassified_cpp_bytes);
-            property("_raw_unattributed_live_allocations", measured.raw_unattributed_live_allocations);
-            property("_raw_unattributed_live_bytes", measured.raw_unattributed_live_bytes);
-            for (std::size_t mask = 1; mask != 8; ++mask)
-                record_property(prefix + "_partial_graph_membership_" + std::to_string(mask) + "_cpp_bytes",
-                    std::to_string(measured.graph_attributed_live_extent_bytes[mask]));
+            property("_shared_leaf_pages", measured.shared_leaf_pages);
+            property("_shared_owners", measured.shared_owners);
             const auto& b = measured.breakdown;
             property("_group_metadata", b.group_metadata);
             property("_owner_index_metadata", b.owner_index_metadata);
@@ -660,10 +668,6 @@ TEST(AdaptivePipelineStorage, WholePipelineBaselineReportsExistingWork)
                 record_property(prefix + "_payload_role_" +
                                     D::contact_payload_role_name(static_cast<D::ContactPayloadRole>(role)) + "_entries",
                     std::to_string(measured.role_entries[role]));
-                record_property(prefix + "_payload_role_" +
-                                    D::contact_payload_role_name(static_cast<D::ContactPayloadRole>(role)) +
-                                    "_unique_traced_extent_bytes",
-                    std::to_string(measured.role_extent_bytes[role]));
             }
         };
         work_report("small", small);
@@ -726,25 +730,24 @@ TEST(AdaptivePipelineStorage, RequestedCppTraceCountsAlignedBuffersAndExceptionP
     EXPECT_FALSE(pipeline_trace::overflow.load());
 }
 
-TEST(AdaptivePipelineStorage, TraceSerialsDeduplicateAliasesAndRejectTableExhaustion)
+TEST(AdaptivePipelineStorage, TraceSerialsDistinguishAddressReuseAndRejectTableExhaustion)
 {
     const TraceLifetime trace;
     alignas(64) std::array<std::byte, 256> storage{};
     pipeline_trace::begin(8);
+    const auto allocation_serial = [&]
+    {
+        for (const auto& entry : pipeline_trace::table)
+            if (entry.live && entry.address == storage.data())
+                return entry.serial;
+        return std::uint64_t(0);
+    };
     pipeline_trace::allocated(storage.data(), 64);
-    pipeline_trace::prepare_census();
-    const auto* first = pipeline_trace::mark(storage.data(), 1);
-    ASSERT_NE(first, nullptr);
-    const auto serial = first->serial;
-    EXPECT_EQ(pipeline_trace::mark(storage.data() + 16, 2)->serial, serial);
-    EXPECT_EQ(pipeline_trace::physical_unions()[3], 64u);
+    const auto first = allocation_serial();
+    EXPECT_NE(first, 0u);
     pipeline_trace::freed(storage.data());
     pipeline_trace::allocated(storage.data(), 64);
-    pipeline_trace::prepare_census();
-    const auto* reused = pipeline_trace::mark(storage.data(), 4);
-    ASSERT_NE(reused, nullptr);
-    EXPECT_NE(reused->serial, serial);
-    EXPECT_EQ(reused->membership, 4u);
+    EXPECT_NE(allocation_serial(), first);
     for (unsigned i = 1; i != 9; ++i)
         pipeline_trace::allocated(storage.data() + 16 * i, 1);
     EXPECT_TRUE(pipeline_trace::overflow.load());
@@ -786,15 +789,22 @@ TEST(AdaptivePipelineStorage, TrustedCartesianSourceWarmCacheSpansPreparedPages)
         A::AMRGrid grid;
         grid.root_blocks = {cells / 8, 1, 1};
         grid.block_cells = {2, 2, 2};
-        const A::CartesianAMR mesh(grid);
-        std::vector<std::uint64_t> indices(mesh.geometry()->num_cells());
-        std::iota(indices.begin(), indices.end(), 0);
-        auto input = mesh.detach_owned(indices, {'p', 'i', 'p', 'e'});
+        auto input = [&]
+        {
+            const pipeline_trace::Pause pause;
+            const A::CartesianAMR mesh(grid);
+            std::vector<std::uint64_t> indices(mesh.geometry()->num_cells());
+            std::iota(indices.begin(), indices.end(), 0);
+            return mesh.detach_owned(indices, {'p', 'i', 'p', 'e'});
+        }();
         auto source = std::make_shared<const A::DistributedAdaptiveHierarchy>(
             std::move(input.owned), std::move(input.families), std::move(input.kernel), Tpetra::getDefaultComm());
         std::vector<const A::AdaptiveLeaf*> selected;
-        for (const auto& leaf : source->owned_leaves())
-            selected.push_back(&leaf);
+        {
+            const pipeline_trace::Pause pause;
+            for (const auto& leaf : source->owned_leaves())
+                selected.push_back(&leaf);
+        }
         // Prepared pages are optional look-ahead for streaming State requests.
         // A single all-cell demand intentionally constructs no prepared pages.
         for (std::size_t first = 0; first < selected.size(); first += 4)
@@ -810,11 +820,12 @@ TEST(AdaptivePipelineStorage, TrustedCartesianSourceWarmCacheSpansPreparedPages)
         std::size_t prepared = 0;
         snapshot->visit_prepared_cartesian_sources([&](const auto& page) { prepared += page.size(); });
         EXPECT_EQ(prepared, cells);
-        const auto owners = graph(source, 1);
-        EXPECT_GT(owners.traced_owners, 0u);
+        EXPECT_FALSE(observe_generation(source).leaf_pages.empty());
         pipeline_trace::next_epoch();
         warm(source);
-        report("trusted_cartesian_" + std::to_string(cells) + "_warm", pipeline_trace::summary());
+        const auto captured = pipeline_trace::summary();
+        const pipeline_trace::Pause pause;
+        report("trusted_cartesian_" + std::to_string(cells) + "_warm", captured);
         record_property("trusted_cartesian_" + std::to_string(cells) + "_prepared_cells", std::to_string(prepared));
         EXPECT_FALSE(pipeline_trace::overflow.load());
     }
@@ -869,26 +880,220 @@ TEST(AdaptivePipelineStorage, AllocationOwnerWorkCountsActualEnumerationAndPreAd
     EXPECT_EQ(OwnerAccess::work_statistics().export_rows, 0u);
 }
 
-TEST(AdaptivePipelineStorage, SharedAliasesMarkOneRealControlAllocation)
+TEST(AdaptivePipelineStorage, DomainAllocatorCountsExactReboundNodeAndControlBytes)
+{
+    using SimpleFluid::geometry_detail::AllocationAccount;
+    using Value = std::pair<const int, int>;
+    using Nodes = ObservedDomainAllocator<Value, AllocationDomain::LeafPages>;
+    using Object = std::array<std::uint64_t, 7>;
+    using Control = ObservedDomainAllocator<Object, AllocationDomain::GeometrySnapshot>;
+    AllocationAccount node_account{ample}, control_account{ample};
+    RequestedExtents nodes, controls;
+    const TraceLifetime trace;
+    {
+        std::map<int, int, std::less<int>, Nodes> tree(std::less<int>{}, Nodes(node_account, nodes));
+        tree.emplace(1, 11);
+        tree.emplace(2, 22);
+        tree.emplace(3, 33);
+        auto owner = std::allocate_shared<Object>(Control(control_account, controls));
+        const auto captured = pipeline_trace::summary();
+        const pipeline_trace::Pause pause;
+        const auto& leaf = captured.domain[static_cast<std::size_t>(AllocationDomain::LeafPages)];
+        const auto& snapshot = captured.domain[static_cast<std::size_t>(AllocationDomain::GeometrySnapshot)];
+        // Expected bytes come from sizeof(actual rebound node/control type),
+        // independently of both the account statistics and global interposer.
+        EXPECT_EQ(nodes.allocations, 3u);
+        EXPECT_GT(nodes.bytes, 3 * sizeof(Value));
+        EXPECT_EQ(leaf.allocations, nodes.allocations);
+        EXPECT_EQ(leaf.bytes, nodes.bytes);
+        EXPECT_EQ(leaf.live, nodes.bytes);
+        EXPECT_EQ(node_account.statistics().live, nodes.bytes);
+        EXPECT_EQ(node_account.statistics().peak, nodes.bytes);
+        EXPECT_EQ(node_account.statistics().allocations, nodes.allocations);
+        EXPECT_EQ(controls.allocations, 1u);
+        EXPECT_GT(controls.bytes, sizeof(Object));
+        EXPECT_EQ(snapshot.allocations, controls.allocations);
+        EXPECT_EQ(snapshot.bytes, controls.bytes);
+        EXPECT_EQ(snapshot.live, controls.bytes);
+        EXPECT_EQ(control_account.statistics().live, controls.bytes);
+        EXPECT_EQ(control_account.statistics().peak, controls.bytes);
+        EXPECT_EQ(control_account.statistics().allocations, controls.allocations);
+        EXPECT_EQ(captured.all_live, nodes.bytes + controls.bytes);
+        EXPECT_EQ(captured.unattributed_live_allocations, 0u);
+        EXPECT_EQ(captured.unattributed_live_bytes, 0u);
+    }
+    const auto released = pipeline_trace::summary();
+    const pipeline_trace::Pause pause;
+    EXPECT_EQ(released.all_live, 0u);
+    EXPECT_EQ(nodes.deallocations, nodes.allocations);
+    EXPECT_EQ(controls.deallocations, controls.allocations);
+    EXPECT_EQ(node_account.statistics().live, 0u);
+    EXPECT_EQ(node_account.statistics().deallocations, nodes.allocations);
+    EXPECT_EQ(control_account.statistics().live, 0u);
+    EXPECT_EQ(control_account.statistics().deallocations, controls.allocations);
+    EXPECT_EQ(released.domain[static_cast<std::size_t>(AllocationDomain::LeafPages)].deallocations, nodes.allocations);
+    EXPECT_EQ(released.domain[static_cast<std::size_t>(AllocationDomain::GeometrySnapshot)].deallocations,
+        controls.allocations);
+    EXPECT_FALSE(pipeline_trace::overflow.load());
+}
+
+TEST(AdaptivePipelineStorage, PlainAllocationRemainsUnattributedBesideDomainStorage)
+{
+    using Allocator = SimpleFluid::geometry_detail::DomainAllocator<std::uint64_t, AllocationDomain::FamilyStorage>;
+    struct Nested
+    {
+        std::vector<std::byte> plain = std::vector<std::byte>(37);
+    };
+    SimpleFluid::geometry_detail::AllocationAccount account;
+    const TraceLifetime trace;
+    {
+        const Allocator allocator(account);
+        std::vector<std::uint64_t, Allocator> tagged(5, 0, allocator);
+        const auto control = std::allocate_shared<Nested>(allocator);
+        const auto captured = pipeline_trace::summary();
+        const pipeline_trace::Pause pause;
+        const auto& family = captured.domain[static_cast<std::size_t>(AllocationDomain::FamilyStorage)];
+        const auto& escape = captured.domain[static_cast<std::size_t>(AllocationDomain::Unattributed)];
+        EXPECT_EQ(family.allocations, 2u);
+        EXPECT_GT(family.bytes, tagged.capacity() * sizeof(std::uint64_t));
+        EXPECT_EQ(family.live, account.statistics().live);
+        EXPECT_EQ(family.live, family.bytes);
+        EXPECT_EQ(escape.allocations, 1u);
+        EXPECT_EQ(escape.bytes, control->plain.capacity());
+        EXPECT_EQ(escape.live, escape.bytes);
+        EXPECT_EQ(captured.unattributed_live_allocations, 1u);
+        EXPECT_EQ(captured.unattributed_live_bytes, escape.live);
+        EXPECT_EQ(captured.all_live, family.live + escape.live);
+    }
+    const auto released = pipeline_trace::summary();
+    const pipeline_trace::Pause pause;
+    EXPECT_EQ(account.statistics().live, 0u);
+    EXPECT_EQ(released.all_live, 0u);
+    EXPECT_EQ(released.unattributed_live_allocations, 0u);
+    EXPECT_EQ(released.unattributed_live_bytes, 0u);
+    EXPECT_FALSE(pipeline_trace::overflow.load());
+}
+
+TEST(AdaptivePipelineStorage, DomainSharedAliasesAndWeakControlRetireAtTheirActualLifetimes)
 {
     struct Object
     {
         std::array<char, 64> payload{};
     };
+    using Allocator = SimpleFluid::geometry_detail::DomainAllocator<Object, AllocationDomain::GeometrySnapshot>;
     const TraceLifetime trace;
-    auto owner = std::make_shared<Object>();
+    auto owner = std::allocate_shared<Object>(Allocator{});
     std::shared_ptr<char> alias(owner, &owner->payload[17]);
-    pipeline_trace::prepare_census();
-    const auto* object = pipeline_trace::mark(owner.get(), 1);
-    ASSERT_NE(object, nullptr);
-    const auto serial = object->serial;
-    const auto extent = object->bytes;
-    const auto* member = pipeline_trace::mark(alias.get(), 2);
-    ASSERT_NE(member, nullptr);
-    EXPECT_EQ(member->serial, serial);
-    EXPECT_EQ(pipeline_trace::physical_unions()[3], extent);
+    std::weak_ptr<Object> weak = owner;
+    const auto captured = pipeline_trace::summary();
+    const auto domain = static_cast<std::size_t>(AllocationDomain::GeometrySnapshot);
+    const auto extent = captured.domain[domain].live;
+    {
+        const pipeline_trace::Pause pause;
+        EXPECT_GT(extent, sizeof(Object));
+        EXPECT_EQ(captured.domain[domain].allocations, 1u);
+        EXPECT_EQ(captured.all_live, extent);
+        EXPECT_EQ(captured.unattributed_live_bytes, 0u);
+    }
     owner.reset();
-    EXPECT_EQ(pipeline_trace::summary().all_live, extent);
+    {
+        const pipeline_trace::Pause pause;
+        EXPECT_FALSE(weak.expired());
+        EXPECT_EQ(pipeline_trace::summary().domain[domain].live, extent);
+    }
     alias.reset();
-    EXPECT_EQ(pipeline_trace::summary().all_live, 0u);
+    {
+        const pipeline_trace::Pause pause;
+        EXPECT_TRUE(weak.expired());
+        EXPECT_EQ(pipeline_trace::summary().domain[domain].live, extent);
+    }
+    weak.reset();
+    const auto released = pipeline_trace::summary();
+    const pipeline_trace::Pause pause;
+    EXPECT_EQ(released.domain[domain].live, 0u);
+    EXPECT_EQ(released.domain[domain].deallocations, 1u);
+    EXPECT_EQ(released.all_live, 0u);
+    EXPECT_FALSE(pipeline_trace::overflow.load());
+}
+
+TEST(AdaptivePipelineStorage, FixturePauseDoesNotHideWorkerAllocationsOrCrossThreadRelease)
+{
+    using Memory = SimpleFluid::geometry_detail::DomainAllocator<std::uint64_t, AllocationDomain::ContactHalo>;
+    SimpleFluid::geometry_detail::AllocationAccount account;
+    const TraceLifetime trace;
+    std::uint64_t* buffer = nullptr;
+    {
+        const pipeline_trace::Pause fixture;
+        std::thread worker([&] { buffer = Memory(account).allocate(13); });
+        worker.join();
+    }
+    const auto captured = pipeline_trace::summary();
+    Memory(account).deallocate(buffer, 13);
+    const auto released = pipeline_trace::summary();
+    const pipeline_trace::Pause pause;
+    constexpr auto domain = static_cast<std::size_t>(AllocationDomain::ContactHalo);
+    EXPECT_EQ(captured.domain[domain].live, 13 * sizeof(*buffer));
+    EXPECT_EQ(captured.domain[domain].allocations, 1u);
+    EXPECT_EQ(released.domain[domain].live, 0u);
+    EXPECT_EQ(released.domain[domain].deallocations, 1u);
+    EXPECT_EQ(account.statistics().live, 0u);
+}
+
+TEST(AdaptivePipelineStorage, DomainEpochsPreserveLiveExtentsAndAllocationTimePhase)
+{
+    using Allocator = SimpleFluid::geometry_detail::DomainAllocator<std::uint64_t, AllocationDomain::ContactHalo>;
+    const TraceLifetime trace;
+    const ObserverScope observer;
+    Allocator allocator;
+    std::uint64_t* old = nullptr;
+    {
+        const D::PipelinePhaseScope directory(D::PipelinePhase::Directory);
+        old = allocator.allocate(4);
+    }
+    pipeline_trace::next_epoch();
+    const auto retained = pipeline_trace::summary();
+    const auto domain = static_cast<std::size_t>(AllocationDomain::ContactHalo);
+    const auto directory = static_cast<std::size_t>(pipeline_trace::Phase::Directory);
+    {
+        const pipeline_trace::Pause pause;
+        EXPECT_EQ(retained.domain[domain].live, 4 * sizeof(std::uint64_t));
+        EXPECT_EQ(retained.domain[domain].peak, retained.domain[domain].live);
+        EXPECT_EQ(retained.domain[domain].allocations, 0u);
+        EXPECT_EQ(retained.domain[domain].bytes, 0u);
+        EXPECT_EQ(retained.shared_allocations, 1u);
+        EXPECT_EQ(retained.shared_bytes, retained.all_live);
+        EXPECT_EQ(retained.retained_bytes, 0u);
+        EXPECT_EQ(retained.incremental_peak, 0u);
+    }
+    {
+        const D::PipelinePhaseScope transport(D::PipelinePhase::Transport);
+        auto* current = allocator.allocate(2);
+        const auto coexist = pipeline_trace::summary();
+        {
+            const pipeline_trace::Pause pause;
+            EXPECT_EQ(coexist.domain[domain].live, 6 * sizeof(std::uint64_t));
+            EXPECT_EQ(coexist.domain[domain].bytes, 2 * sizeof(std::uint64_t));
+            EXPECT_EQ(coexist.domain[domain].allocations, 1u);
+            EXPECT_EQ(coexist.shared_allocations, 1u);
+            EXPECT_EQ(coexist.retained_allocations, 1u);
+            EXPECT_EQ(coexist.retained_bytes + coexist.shared_bytes, coexist.all_live);
+        }
+        allocator.deallocate(old, 4);
+        const auto old_released = pipeline_trace::summary();
+        {
+            const pipeline_trace::Pause pause;
+            EXPECT_EQ(old_released.domain[domain].live, 2 * sizeof(std::uint64_t));
+            EXPECT_EQ(old_released.domain[domain].deallocations, 1u);
+            EXPECT_EQ(old_released.phase[directory].live, 0u);
+            EXPECT_EQ(old_released.phase[directory].deallocations, 1u);
+            EXPECT_EQ(old_released.shared_allocations, 0u);
+        }
+        allocator.deallocate(current, 2);
+    }
+    const auto released = pipeline_trace::summary();
+    const pipeline_trace::Pause pause;
+    EXPECT_EQ(released.all_live, 0u);
+    EXPECT_EQ(released.domain[domain].deallocations, 2u);
+    EXPECT_EQ(released.unattributed_live_bytes, 0u);
+    EXPECT_FALSE(pipeline_trace::overflow.load());
 }

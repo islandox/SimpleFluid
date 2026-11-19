@@ -10,6 +10,7 @@
 #include <memory>
 #include <span>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace SimpleFluid::PLIC::details::geometry_demand
@@ -22,6 +23,49 @@ inline constexpr std::size_t control_bytes = 128, leaf_capacity = 64, branch_cap
  * Arbitrary/custom rows keep their unmodified numeric admission field. */
 template<class Row> inline constexpr bool native_flag_in_owned_admission = false;
 template<class Row> inline constexpr bool stack_safe_default = std::is_trivially_default_constructible_v<Row>;
+
+/** Role is a type policy, independent of the arena funding the request. The
+ * native allocator still retains its original detached strong State owner. */
+template<class T, geometry_detail::AllocationDomain Domain> class SIMPLEFLUID_LOCAL PageAllocationAllocator
+{
+    template<class, geometry_detail::AllocationDomain> friend class PageAllocationAllocator;
+public:
+    using value_type = T;
+    template<class U> struct rebind { using other = PageAllocationAllocator<U, Domain>; };
+    explicit PageAllocationAllocator(geometry_detail::NativeConstructionAllocator<T> value) noexcept
+        : allocator_(std::move(value)) {}
+    template<class U> PageAllocationAllocator(const PageAllocationAllocator<U, Domain>& other) noexcept
+        : allocator_(other.allocator_) {}
+    T* allocate(std::size_t count) { return allocator_.allocate_for(Domain, count); }
+    void deallocate(T* address, std::size_t count) noexcept { allocator_.deallocate_for(Domain, address, count); }
+    template<class U> bool operator==(const PageAllocationAllocator<U, Domain>& other) const noexcept
+    { return allocator_ == other.allocator_; }
+private:
+    geometry_detail::NativeConstructionAllocator<T> allocator_;
+};
+/** Bounded editing buffers already retain State in their editor. Preserve the
+ * existing borrowed allocator footprint while selecting the storage role. */
+template<class T, geometry_detail::AllocationDomain Domain>
+class SIMPLEFLUID_LOCAL PageBufferAllocator : public geometry_detail::NativeAdministrationAllocator<T>
+{
+    using Base = geometry_detail::NativeAdministrationAllocator<T>;
+public:
+    using value_type = T;
+    template<class U> struct rebind { using other = PageBufferAllocator<U, Domain>; };
+    PageBufferAllocator() noexcept = default;
+    explicit PageBufferAllocator(const std::shared_ptr<const geometry_detail::NativeAllocationState>& state) noexcept
+        : Base(state) {}
+    template<class U> PageBufferAllocator(const PageBufferAllocator<U, Domain>& other) noexcept
+        : Base(static_cast<const geometry_detail::NativeAdministrationAllocator<U>&>(other)) {}
+    T* allocate(std::size_t count) { return this->allocate_for(Domain, count); }
+    void deallocate(T* address, std::size_t count) noexcept { this->deallocate_for(Domain, address, count); }
+    template<class U> bool operator==(const PageBufferAllocator<U, Domain>& other) const noexcept
+    { return Base::operator==(static_cast<const geometry_detail::NativeAdministrationAllocator<U>&>(other)); }
+};
+static_assert(sizeof(PageAllocationAllocator<std::byte, geometry_detail::AllocationDomain::OwnerUnion>) ==
+              sizeof(geometry_detail::NativeConstructionAllocator<std::byte>));
+static_assert(sizeof(PageBufferAllocator<std::byte, geometry_detail::AllocationDomain::OwnerUnion>) ==
+              sizeof(geometry_detail::NativeAdministrationAllocator<std::byte>));
 
 /** The edit callbacks are borrowed. Native pages may retain detached scalar State; no page retains its caller. */
 struct Admission
@@ -37,7 +81,8 @@ struct Admission
     {
         return geometry_detail::NativeAdministrationAllocator<T>(native);
     }
-    template<class T, class... Args> [[nodiscard]] std::shared_ptr<T> shared(Args&&...) const;
+    template<class T, geometry_detail::AllocationDomain Domain = geometry_detail::AllocationDomain::OwnerUnion,
+        class... Args> [[nodiscard]] std::shared_ptr<T> shared(Args&&...) const;
     void created(const std::shared_ptr<const void>& owner, std::size_t payload, std::size_t admitted) const
     {
         if (native && native_owner_created)
@@ -224,5 +269,6 @@ private:
  * Include GeometryDemandPages.tcc only from a compiled implementation provider
  * or a private component test that owns its template instantiation. */
 struct NoLeafWitnesses {};
-template<class Row, class Less, bool CompactBranches = false, class Witnesses = NoLeafWitnesses> class OrderedPages;
+template<class Row, class Less, bool CompactBranches = false, class Witnesses = NoLeafWitnesses,
+    geometry_detail::AllocationDomain Domain = geometry_detail::AllocationDomain::OwnerUnion> class OrderedPages;
 } // namespace SimpleFluid::PLIC::details::geometry_demand

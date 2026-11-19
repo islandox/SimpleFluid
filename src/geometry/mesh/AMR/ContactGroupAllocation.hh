@@ -1,4 +1,5 @@
 #pragma once
+#include "ContactDomainStorage.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <cstddef>
 #include <exception>
@@ -57,7 +58,7 @@ public:
             throw std::invalid_argument("Contact storage capacity overflows.");
         return count * size;
     }
-    template<class T> void reserve(std::vector<T>& values, std::size_t count)
+    template<class T, class Allocator> void reserve(std::vector<T, Allocator>& values, std::size_t count)
     {
         if (count <= values.capacity())
             return;
@@ -65,7 +66,7 @@ public:
         add(next);
         try
         {
-            std::vector<T> replacement;
+            std::vector<T, Allocator> replacement(values.get_allocator());
             replacement.reserve(count);
             if (replacement.capacity() != count)
                 throw std::invalid_argument("Contact storage capacity differs from admission.");
@@ -79,7 +80,7 @@ public:
         }
         release(old);
     }
-    template<class T> void append(std::vector<T>& values)
+    template<class T, class Allocator> void append(std::vector<T, Allocator>& values)
     {
         if (values.size() < values.capacity())
             return;

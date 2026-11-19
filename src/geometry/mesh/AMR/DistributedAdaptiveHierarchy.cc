@@ -2,6 +2,7 @@
  * @brief Distributed complete-family transactions with immutable local state.
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
+#include "geometry/details/AllocationDomain.hh"
 #include "geometry/details/NativeAllocationGraph.hh"
 #include "geometry/PLIC/details/CellCatalogDemandAccess.hh"
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
@@ -51,6 +52,8 @@ namespace SimpleFluid::Meshes::AMR
 using namespace adaptive_detail;
 namespace
 {
+using geometry_detail::AllocationDomain;
+using geometry_detail::domain_shared;
 constexpr auto family_layout_header_bytes = sizeof(AdaptiveFamilyLayout) + 4 * sizeof(void*);
 struct RejectGeometryAdmission
 {
@@ -238,9 +241,11 @@ struct AdaptiveGeometrySnapshotCache
 };
 struct DistributedAdaptiveHierarchy::Data
 {
-    using LeafMap = std::map<AdaptiveCellKey, AdaptiveLeaf>;
+    using LeafMap = std::map<AdaptiveCellKey, AdaptiveLeaf, std::less<AdaptiveCellKey>,
+        geometry_detail::DomainAllocator<std::pair<const AdaptiveCellKey, AdaptiveLeaf>, AllocationDomain::LeafPages>>;
 
-    std::shared_ptr<AdaptiveGeometrySnapshotCache> geometry_cache = std::make_shared<AdaptiveGeometrySnapshotCache>();
+    std::shared_ptr<AdaptiveGeometrySnapshotCache> geometry_cache =
+        domain_shared<AllocationDomain::GeometrySnapshot, AdaptiveGeometrySnapshotCache>();
     // Bootstrap stages a bounded import. Adaptation and migration stage only
     // edits over an accepted immutable root.
     std::variant<LeafMap, std::shared_ptr<AdaptiveLeafOverlay>, std::shared_ptr<const AdaptiveLeafLayout>> leaves;
@@ -430,9 +435,9 @@ struct DistributedAdaptiveHierarchy::Data
         auto family_admission = std::make_shared<ContactExternalResidencyLease>(arena, external);
         family_admission->resize(family_layout_header_bytes);
         auto family_row = staged_families.begin();
-        family_layout = std::make_shared<const AdaptiveFamilyLayout>(AdaptiveFamilyStorage::build_from(
-            staged_families.size(), [&]() -> const AdaptiveFamily& { return (family_row++)->second; }, arena,
-            topology));
+        family_layout = domain_shared<AllocationDomain::FamilyStorage, const AdaptiveFamilyLayout>(
+            AdaptiveFamilyStorage::build_from(staged_families.size(),
+                [&]() -> const AdaptiveFamily& { return (family_row++)->second; }, arena, topology));
         staged_families.clear();
         const auto leaf_bytes = body_usage.leaf_payload_bytes();
         const auto family_bytes = body_usage.payload_bytes() - leaf_bytes;
@@ -2252,7 +2257,8 @@ void seal_candidate_families(DistributedAdaptiveHierarchy::Data& candidate,
     candidate_memory.held += shared + new_payload;
     // The outer source lease retains replaced allocations through acceptance.
     AdaptiveFamilyStorage::finish_overlap(layout);
-    candidate.family_layout = std::make_shared<const AdaptiveFamilyLayout>(std::move(layout));
+    candidate.family_layout =
+        domain_shared<AllocationDomain::FamilyStorage, const AdaptiveFamilyLayout>(std::move(layout));
     const bool retained_keeper = arena.use_count() > 1;
     leaf_storage.arena.reset();
     if (!retained_keeper)
@@ -2892,7 +2898,7 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
             binding_overlap.add(sizeof(AdaptivePublishedAdmission) + 4 * sizeof(void*));
             bound = std::make_shared<Data>(*data_);
             bound->admission.reset();
-            bound->geometry_cache = std::make_shared<AdaptiveGeometrySnapshotCache>();
+            bound->geometry_cache = domain_shared<AllocationDomain::GeometrySnapshot, AdaptiveGeometrySnapshotCache>();
             {
                 std::lock_guard lock(data_->geometry_cache->mutex);
                 if (data_->geometry_cache->revision != revision)
@@ -2914,7 +2920,8 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
             if (!exact_receipt)
             {
                 binding_overlap.add(sizeof(NativeSourceBoundInput::Map) + 4 * sizeof(void*));
-                bound->map_token = std::make_shared<const NativeSourceBoundInput::Map>(map);
+                bound->map_token =
+                    domain_shared<AllocationDomain::NativePublication, const NativeSourceBoundInput::Map>(map);
             }
             bound->native_epoch = bound->native->geometry()->geometry_epoch();
         });
@@ -5649,6 +5656,11 @@ const void* GeometrySnapshotAccess::pipeline_geometry_statistics_domain()
 void GeometrySnapshotAccess::reset_pipeline_geometry_statistics()
 {
     PLIC::reset_geometry_statistics();
+}
+void GeometrySnapshotAccess::visit_pipeline_leaf_pages(const DistributedAdaptiveHierarchy& hierarchy,
+    const std::function<void(const AdaptiveLeafPageObservation&)>& visit)
+{
+    hierarchy.data_->pages().visit_structure(visit);
 }
 void GeometrySnapshotAccess::visit_pipeline_graph(
     const DistributedAdaptiveHierarchy& hierarchy, const PipelineGraphVisit& visitor)

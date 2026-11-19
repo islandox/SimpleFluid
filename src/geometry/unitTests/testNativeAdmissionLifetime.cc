@@ -557,7 +557,7 @@ TEST(NativeAdmissionLifetime, FixedGraphAndDynamicChildrenMatchRawLifetimesAcros
         raw_matches(admission);
         {
             const pipeline_trace::Pause pause;
-            EXPECT_EQ(pipeline_trace::unattributed().second, 0u);
+            EXPECT_EQ(pipeline_trace::unmarked_graph_extents().second, 0u);
             EXPECT_TRUE(raw_extent_live(buffer, buffer_bytes));
             EXPECT_TRUE(raw_extent_live(object, sizeof(DestroyedChild)));
         }

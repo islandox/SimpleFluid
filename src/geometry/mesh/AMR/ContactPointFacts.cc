@@ -129,7 +129,7 @@ void PointFactDirectory::ensure_lookup()
         throw std::invalid_argument("Contact-point lookup capacity overflows.");
     const auto capacity = old ? 2 * old : 8;
     ContactGroupAllocation scratch(allocation_.keeper());
-    std::vector<std::size_t> replacement;
+    ContactVector<std::size_t> replacement;
     scratch.reserve(replacement, capacity);
     replacement.assign(capacity, empty);
     for (std::size_t slot = 0; slot < entries_.size(); ++slot)
@@ -142,7 +142,7 @@ void PointFactDirectory::ensure_lookup()
         }
     allocation_.transfer_from(scratch, capacity * sizeof(std::size_t));
     buckets_.swap(replacement);
-    std::vector<std::size_t>().swap(replacement);
+    ContactVector<std::size_t>().swap(replacement);
     allocation_.release(old * sizeof(std::size_t));
 }
 ContactPointIdentity PointFactDirectory::Page::get(Reference reference) const
@@ -161,15 +161,17 @@ std::shared_ptr<PointFactDirectory::FallbackCredit> PointFactDirectory::make_fal
     // and share their body with an independent target-arena credit.
     ContactGroupAllocation staging(allocation_.keeper());
     staging.add(sizeof(FallbackCredit) + 128);
-    auto result = std::shared_ptr<FallbackCredit>(new FallbackCredit(allocation_.keeper()));
+    auto result = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, FallbackCredit>(
+        allocation_.keeper());
     result->metadata.transfer_from(staging, sizeof(FallbackCredit) + 128);
     result->body_admission.add(sizeof(FallbackBody) + 128 + fallback_records_per_page * sizeof(ContactPointIdentity));
     if (source && source->body->sealed)
         result->body = source->body;
     else if (source)
-        result->body = std::make_shared<FallbackBody>(*source->body);
+        result->body = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, FallbackBody>(
+            *source->body);
     else
-        result->body = std::make_shared<FallbackBody>();
+        result->body = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, FallbackBody>();
     return result;
 }
 std::size_t PointFactDirectory::add_page(Page page)

@@ -16,6 +16,16 @@ namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 struct Budget;
 struct AdaptiveLeafPageBuilder;
+struct AdaptiveLeafPageObservation
+{
+    const void* address;
+    std::weak_ptr<const void> control;
+    const void* parent;
+    const AdaptiveCellKey& maximum;
+    std::span<const AdaptiveLeaf> rows;
+    std::size_t capacity;
+    std::size_t child_count;
+};
 
 /** A persistent, sized range of canonical leaves in complete typed-key order.
  * Each record stores its key once. Interior bounds borrow immutable child keys.
@@ -136,6 +146,8 @@ public:
     void visit_pages(const std::function<void(const void*, std::size_t)>&) const;
     /** Actual object and vector buffers. No admission/control allowance. */
     void visit_payload(const std::function<void(const void*, std::size_t)>&) const;
+    /** Independent quiescent traversal of the actual page edges and backing storage. */
+    void visit_structure(const std::function<void(const AdaptiveLeafPageObservation&)>&) const;
     [[nodiscard]] Storage storage() const;
     [[nodiscard]] std::size_t retained_bytes() const noexcept;
     [[nodiscard]] const void* page_identity(const AdaptiveCellKey&) const;

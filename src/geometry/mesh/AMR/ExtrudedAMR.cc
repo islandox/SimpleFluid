@@ -2650,8 +2650,8 @@ void emit_side_support(std::span<const char> edge, std::size_t surface, bool ext
     emit(context, surface, key.data, exterior);
 }
 
-void emit_cap_support(const AxialIntervalKey& axis, bool upper, bool exterior, const NativeAdmission& admission,
-    void* context, SupportVisit emit)
+void emit_cap_support(std::uint64_t base_root, const AxialIntervalKey& axis, bool upper, bool exterior,
+    const NativeAdmission& admission, void* context, SupportVisit emit)
 {
     if (!emit) return;
     auto storage = geometry_detail::native_constructor_storage(admission);
@@ -2666,8 +2666,9 @@ void emit_cap_support(const AxialIntervalKey& axis, bool upper, bool exterior, c
     }
     AdaptiveCellKey ancestry{0, ProductCellAncestry{{}, std::move(creator)}};
     Writer key;
-    storage.owner->reserve(key.data, 4 * sizeof(std::uint64_t) + encoded_adaptive_key_size(ancestry));
+    storage.owner->reserve(key.data, 5 * sizeof(std::uint64_t) + encoded_adaptive_key_size(ancestry));
     key.word(0x5346504341503631ULL);
+    key.word(base_root);
     key.word(std::uint64_t(kind));
     key.word(depth ? 0 : axis.root + upper);
     adaptive_detail::NativeAdaptiveKeyCodec::write(key, ancestry);
@@ -2942,7 +2943,7 @@ public:
                 if (id < 0 || topology.boundary_batch_name(id) != root.boundary(upper ? "zmax" : "zmin"))
                     throw std::invalid_argument("Product native cap loses its original physical boundary alias.");
             }
-            emit_cap_support(ancestry.axial, upper, exterior, admission, context, emit);
+            emit_cap_support(ancestry.base.root, ancestry.axial, upper, exterior, admission, context, emit);
         }
         return metrics;
     }
@@ -3239,6 +3240,7 @@ public:
             AdaptiveSurface s;
             Writer w;
             w.word(0x5346504341503631ULL);
+            w.word(key.base.root);
             w.word(std::uint64_t(plane.kind));
             w.word(plane.root_point);
             product_detail::key(w, plane.creator);

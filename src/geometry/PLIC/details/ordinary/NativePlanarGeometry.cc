@@ -537,8 +537,8 @@ details::NativePlanarOwnerAccess::Pointer details::NativePlanarOwnerAccess::inte
     const bool common = *first.impl_->support == *second.impl_->support;
     if (!common && !coplanar(first.points(), second.points()))
         on::reject("native planar intersection has distinct supports.");
-    geometry_detail::NativeAdministrationVector<on::WidePoint> polygon(
-        geometry_detail::NativeAdministrationAllocator<on::WidePoint>(admission.state()));
+    geometry_detail::NativeGeometryScratchVector<on::WidePoint> polygon(
+        geometry_detail::NativeGeometryScratchAllocator<on::WidePoint>(admission.state()));
     polygon.assign(first.points().begin(), first.points().end());
     const auto normal = on::polygon_vector(second.points());
     for (std::size_t i = 0; i < second.points().size() && !polygon.empty(); ++i)
@@ -716,9 +716,9 @@ void OrdinaryFace::certify_partition_impl(
     };
     charge(impl_->polygon.size(), sizeof(on::WidePoint) + 4 * sizeof(void*));
     const auto state = admission ? admission->state() : std::shared_ptr<const geometry_detail::NativeAllocationState>{};
-    std::set<on::WidePoint, std::less<on::WidePoint>, geometry_detail::NativeAdministrationAllocator<on::WidePoint>>
+    std::set<on::WidePoint, std::less<on::WidePoint>, geometry_detail::NativeGeometryScratchAllocator<on::WidePoint>>
         vertices(impl_->polygon.begin(), impl_->polygon.end(), std::less<on::WidePoint>{},
-            geometry_detail::NativeAdministrationAllocator<on::WidePoint>(state));
+            geometry_detail::NativeGeometryScratchAllocator<on::WidePoint>(state));
     for (std::size_t i = 0; i < tiles.size(); ++i)
     {
         if (!tiles[i] || !contains(*tiles[i]))
@@ -737,9 +737,9 @@ void OrdinaryFace::certify_partition_impl(
     // vertex. No area tolerance can authorize a missing sliver or duplicate edge.
     using Edge = std::pair<on::WidePoint, on::WidePoint>;
     std::map<Edge, std::int64_t, std::less<Edge>,
-        geometry_detail::NativeAdministrationAllocator<std::pair<const Edge, std::int64_t>>>
+        geometry_detail::NativeGeometryScratchAllocator<std::pair<const Edge, std::int64_t>>>
         chain(std::less<Edge>{},
-            geometry_detail::NativeAdministrationAllocator<std::pair<const Edge, std::int64_t>>(state));
+            geometry_detail::NativeGeometryScratchAllocator<std::pair<const Edge, std::int64_t>>(state));
     const auto source_normal = on::polygon_vector(impl_->polygon);
     const auto add_boundary = [&](const Polygon& polygon, int contribution)
     {
@@ -751,8 +751,8 @@ void OrdinaryFace::certify_partition_impl(
             const auto a = polygon[e], b = polygon[(e + 1) % polygon.size()], delta = on::sub(b, a);
             const auto axis = axis_of(delta);
             charge(vertices.size(), sizeof(on::WidePoint));
-            geometry_detail::NativeAdministrationVector<on::WidePoint> points{
-                geometry_detail::NativeAdministrationAllocator<on::WidePoint>(state)};
+            geometry_detail::NativeGeometryScratchVector<on::WidePoint> points{
+                geometry_detail::NativeGeometryScratchAllocator<on::WidePoint>(state)};
             for (const auto& point : vertices)
             {
                 pair();
@@ -1146,20 +1146,20 @@ std::vector<OrdinaryFacePtr> subtract_planar_faces<ArithmeticMode::Ordinary>(
         result.push_back(OrdinaryFace::from_retained_support(p, source.impl_->normal, *source.impl_->support));
     return result;
 }
-geometry_detail::NativeAdministrationVector<OrdinaryFacePtr> details::NativePlanarOwnerAccess::subtract(
+geometry_detail::NativeGeometryScratchVector<OrdinaryFacePtr> details::NativePlanarOwnerAccess::subtract(
     const Face& source, std::span<const Pointer> removed, const geometry_detail::NativeConstructionAdmission& admission)
 {
-    using geometry_detail::NativeAdministrationAllocator;
-    using geometry_detail::NativeAdministrationVector;
-    using Loop = NativeAdministrationVector<on::WidePoint>;
+    using geometry_detail::NativeGeometryScratchAllocator;
+    using geometry_detail::NativeGeometryScratchVector;
+    using Loop = NativeGeometryScratchVector<on::WidePoint>;
     const auto& state = admission.state();
-    NativeAdministrationVector<Loop> remains{NativeAdministrationAllocator<Loop>(state)};
-    remains.emplace_back(source.points().begin(), source.points().end(), NativeAdministrationAllocator<on::WidePoint>(state));
+    NativeGeometryScratchVector<Loop> remains{NativeGeometryScratchAllocator<Loop>(state)};
+    remains.emplace_back(source.points().begin(), source.points().end(), NativeGeometryScratchAllocator<on::WidePoint>(state));
     for (const auto& face : removed)
     {
         if (!face || (*source.impl_->support != *face->impl_->support && !coplanar(source.points(), face->points())))
             on::reject("native face subtraction has foreign support.");
-        NativeAdministrationVector<Loop> next{NativeAdministrationAllocator<Loop>(state)};
+        NativeGeometryScratchVector<Loop> next{NativeGeometryScratchAllocator<Loop>(state)};
         const auto& clip = face->points();
         const auto normal = on::polygon_vector(clip);
         for (auto& poly : remains)
@@ -1174,7 +1174,7 @@ geometry_detail::NativeAdministrationVector<OrdinaryFacePtr> details::NativePlan
             }
         remains = std::move(next);
     }
-    NativeAdministrationVector<Pointer> result{NativeAdministrationAllocator<Pointer>(state)};
+    NativeGeometryScratchVector<Pointer> result{NativeGeometryScratchAllocator<Pointer>(state)};
     result.reserve(remains.size());
     for (const auto& loop : remains)
         result.push_back(retained(loop, source.impl_->normal, *source.impl_->support, admission));

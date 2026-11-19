@@ -9,7 +9,7 @@ template<class T>
 void CompactTileIndex<E, C>::Array<T>::DestroyArray::operator()(T* values) const noexcept
 {
     std::destroy_n(values, count);
-    std::allocator<T>{}.deallocate(values, count);
+    geometry_detail::domain_deallocate(geometry_detail::AllocationDomain::ContactHalo, values, count);
 }
 template<class E, std::size_t C> template<class T> CompactTileIndex<E, C>::Array<T>::~Array()
 {
@@ -34,7 +34,7 @@ template<class E, std::size_t C> template<class T> void CompactTileIndex<E, C>::
     {
         // allocator::allocate requests exactly n*sizeof(T); new T[n] can add
         // an ABI array cookie for nontrivially destructible directory entries.
-        auto* values = std::allocator<T>{}.allocate(n);
+        auto* values = geometry_detail::domain_allocate<T>(geometry_detail::AllocationDomain::ContactHalo, n);
         try
         {
             std::uninitialized_value_construct_n(values, n);
@@ -42,7 +42,7 @@ template<class E, std::size_t C> template<class T> void CompactTileIndex<E, C>::
         catch (...)
         {
             // uninitialized_value_construct_n destroys its constructed prefix.
-            std::allocator<T>{}.deallocate(values, n);
+            geometry_detail::domain_deallocate(geometry_detail::AllocationDomain::ContactHalo, values, n);
             throw;
         }
         next.reset(values);

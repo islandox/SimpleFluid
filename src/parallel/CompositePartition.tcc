@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "parallel/MeshPartitioner.hh"
+#include "geometry/details/AllocationDomainScope.hh"
 #include <cmath>
 #include <atomic>
 #include <map>
@@ -326,7 +327,12 @@ CompositePartitionPlan<Pack> MeshPartitioner<Pack>::make_plan(
         detail::collective_check(*comm,[&]
         {
             if (rank != root) return;
-            const Teuchos::RCP<const Teuchos::Comm<int>> serial = Teuchos::rcp(new Teuchos::SerialComm<int>);
+            const Teuchos::RCP<const Teuchos::Comm<int>> serial = []
+            {
+                const geometry_detail::AllocationDomainScope domain(
+                    geometry_detail::AllocationDomain::ExternalThirdParty);
+                return Teuchos::rcp(new Teuchos::SerialComm<int>);
+            }();
             std::vector<std::shared_ptr<Meshes::MultiRegionMesh>> shards;
             std::vector<unsigned char> supplied;
             for (const auto& message : incoming)

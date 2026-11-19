@@ -60,6 +60,7 @@ class ContactRankCoverReceipts : public std::enable_shared_from_this<ContactRank
     }
     struct Less
     {
+        static constexpr auto allocation_domain = geometry_detail::AllocationDomain::ContactHalo;
         bool operator()(const Row& a, const Row& b) const { return before(a.selector(), b.selector()); }
     };
     using Tree = persistent_ordered_detail::OrderedPages<Row, Less>;
@@ -255,7 +256,8 @@ public:
     {
         ContactGroupAllocation memory(arena);
         memory.add(sizeof(Snapshot) + 128);
-        result_ = std::shared_ptr<Snapshot>(new Snapshot(std::move(memory)));
+        result_ = contact_shared_object<Snapshot>(
+            [&](Snapshot* storage) { ::new (storage) Snapshot(std::move(memory)); });
         if (previous_)
         {
             result_->root_ = previous_->root_;
@@ -305,7 +307,8 @@ public:
             ContactGroupAllocation memory(scratch_.keeper());
             memory.add(sizeof(Snapshot::Domain) + 128 + domain.size());
             result_->work_.copied_domain_bytes += memory.bytes();
-            domain_owner = std::make_shared<Snapshot::Domain>(std::move(memory), domain);
+            domain_owner = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, Snapshot::Domain>(
+                std::move(memory), domain);
         }
         const Row row{owner, std::move(domain_owner), selector.packets, bounds, 1};
         result_->root_ = tree_.edit(result_->root_, row, &row, false);

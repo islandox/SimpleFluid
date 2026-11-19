@@ -11,6 +11,8 @@
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotAccess.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotInternal.hh"
 #include "geometry/mesh/AMR/AdaptivePreparedCartesianPages.tcc"
+#include "geometry/mesh/AMR/NativeAdaptivePayloadAccess.hh"
+#include "geometry/mesh/AMR/NativePublicationOwnerGraph.hh"
 #include <algorithm>
 #include <array>
 #include <cfenv>
@@ -707,7 +709,7 @@ void AdaptiveGeometrySnapshot::rebind_prepared_slots(std::span<const std::size_t
     namespace G = PLIC::details::geometry_demand;
     if (ordinals.empty())
         return;
-    std::vector<G::SourceSlot> slots;
+    geometry_snapshot_detail::SnapshotVector<G::SourceSlot> slots;
     const auto slot_bytes = geometry_snapshot_detail::checked_product(physical.size(), sizeof(G::SourceSlot));
     if (used > limit || slot_bytes > limit - used)
         throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "Prepared slot scratch exceeds admission.");
@@ -919,7 +921,7 @@ std::shared_ptr<AdaptiveGeometrySnapshot> AdaptiveGeometrySnapshot::build(const 
     // Across layouts reuse is restricted to exact matches of requested cells.
     const bool extend = previous && previous->matches_layout(hierarchy.leaf_layout());
     const bool sparse = extend && previous->purpose_ == purpose && publication.empty();
-    std::vector<std::optional<std::size_t>> previous_slots;
+    geometry_snapshot_detail::SnapshotVector<std::optional<std::size_t>> previous_slots;
     if (sparse)
     {
         geometry_snapshot_detail::reserve_checked(previous_slots, leaves.size(), budget);
@@ -930,14 +932,14 @@ std::shared_ptr<AdaptiveGeometrySnapshot> AdaptiveGeometrySnapshot::build(const 
             previous_slots.push_back(previous->bindings_->find_key(leaf->key));
         }
     }
-    std::vector<std::unique_ptr<AdaptiveLeaf>> trailing;
-    std::vector<const AdaptiveLeaf*> expanded;
+    geometry_snapshot_detail::SnapshotVector<std::unique_ptr<AdaptiveLeaf>> trailing;
+    geometry_snapshot_detail::SnapshotVector<const AdaptiveLeaf*> expanded;
     geometry_snapshot_detail::reserve_checked(expanded, leaves.size(), budget);
     expanded.insert(expanded.end(), leaves.begin(), leaves.end());
     if (std::any_of(leaves.begin(), leaves.end(), [](const auto* leaf) { return !leaf; }))
         throw std::invalid_argument("Geometry snapshot lacks an authenticated source leaf.");
     {
-        std::vector<const AdaptiveLeaf*> requested_order;
+        geometry_snapshot_detail::SnapshotVector<const AdaptiveLeaf*> requested_order;
         geometry_snapshot_detail::reserve_checked(requested_order, leaves.size(), budget);
         requested_order.assign(leaves.begin(), leaves.end());
         std::sort(requested_order.begin(), requested_order.end(),
@@ -948,7 +950,7 @@ std::shared_ptr<AdaptiveGeometrySnapshot> AdaptiveGeometrySnapshot::build(const 
     }
     if (extend && !sparse)
     {
-        std::vector<const AdaptiveLeaf*> ordered;
+        geometry_snapshot_detail::SnapshotVector<const AdaptiveLeaf*> ordered;
         geometry_snapshot_detail::reserve_checked(ordered, leaves.size(), budget);
         ordered.assign(leaves.begin(), leaves.end());
         const auto less = [](const AdaptiveLeaf* first, const AdaptiveLeaf* second)
@@ -1098,7 +1100,7 @@ std::shared_ptr<AdaptiveGeometrySnapshot> AdaptiveGeometrySnapshot::build(const 
     result.record_owner_work(ordinary_work);
     result.record_owner_work(bounded_work);
     budget.add(sizeof(AdaptiveGeometrySnapshot));
-    auto snapshot = std::make_shared<AdaptiveGeometrySnapshot>(std::move(result));
+    auto snapshot = geometry_snapshot_detail::snapshot_shared<AdaptiveGeometrySnapshot>(std::move(result));
     PLIC::details::GeometryAllocationOwnerAccess::admit_prepaid(
         ordinary_owners, snapshot, sizeof(*snapshot), budget.used, limit);
     return snapshot;

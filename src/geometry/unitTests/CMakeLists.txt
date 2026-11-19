@@ -20,6 +20,9 @@ list(FILTER TEST_SOURCES EXCLUDE REGEX
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
+  if(TEST_NAME MATCHES "^testAdaptivePipeline(Storage|Scaling)$" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(${TEST_NAME} PRIVATE "LINKER:--export-dynamic-symbol=simplefluid_test_allocation_domain")
+  endif()
   if(TEST_NAME STREQUAL "testMeshTraverse")
     target_sources(${TEST_NAME} PRIVATE
         mesh_traverse/SelectionAndLifetimeCases.cc
@@ -68,6 +71,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testAdaptiveContactSnapshot"
       OR TEST_NAME STREQUAL "testAdaptiveSubfaceSnapshot"
       OR TEST_NAME STREQUAL "testAdaptivePipelineStorage"
+      OR TEST_NAME STREQUAL "testAdaptivePipelineScaling"
       OR TEST_NAME STREQUAL "testGeometryOwnerUnion"
       OR TEST_NAME STREQUAL "testGeometryOwnerGraph"
       OR TEST_NAME STREQUAL "testAdaptiveSnapshotOwnerManifest"
@@ -105,6 +109,9 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   elseif(TEST_NAME STREQUAL "testNativeProductPublication")
     simplefluid_discover_tests(${TEST_NAME}
         TEST_FILTER "NativeProductPublication.*")
+  elseif(TEST_NAME STREQUAL "testAdaptivePipelineScaling")
+    simplefluid_discover_tests(${TEST_NAME}
+        PROPERTIES TIMEOUT 900 LABELS "amr\\;storage\\;scaling")
   else()
     simplefluid_discover_tests(${TEST_NAME})
   endif()
@@ -448,6 +455,18 @@ foreach(_pipeline_ranks IN ITEMS 2 4)
     TARGET testAdaptivePipelineStorage PROCS ${_pipeline_ranks}
     ARGS "--gtest_filter=AdaptivePipelineStorage.WholePipelineBaselineReportsExistingWork:AdaptivePipelineStorage.WarmAcceptedCacheAdmissionExactLimitAndOneByteShort"
     LABELS "mpi;amr;storage;baseline;empty_rank" TIMEOUT 900)
+endforeach()
+
+# The scaling cases share one binary but have explicit rank counts and filters.
+foreach(_scaling_case IN ITEMS CartesianFixedEdit ProductFixedEdit PolyhedralFixedEdit StaticCompanionFixedEdit
+    MixedFixedEdit JoinedHistoryPreservesDistantWitnesses PeriodicCartesianSavedLayers SmallFullPublicationOracle
+    CollectiveRejectionPreservesAcceptedGraphs RetainedAllocationDomainsAcrossThreePublications)
+  foreach(_scaling_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME AdaptivePipelineScaling_${_scaling_case}_${_scaling_ranks}procs
+      TARGET testAdaptivePipelineScaling PROCS ${_scaling_ranks}
+      ARGS "--gtest_filter=AdaptivePipelineScaling.${_scaling_case}"
+      LABELS "mpi;amr;storage;scaling;empty_rank" TIMEOUT 900)
+  endforeach()
 endforeach()
 
 # Run the distributed producer fixture at its registered communicator sizes.

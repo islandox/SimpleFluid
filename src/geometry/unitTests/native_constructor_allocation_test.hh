@@ -27,7 +27,7 @@ inline void before_allocate(size_t bytes)
         }
         --*fail_after;
     }
-    if (admitted_used && pipeline_trace::recording.load() &&
+    if (admitted_used && pipeline_trace::capturing() &&
         (*admitted_used < admitted_prefix || *admitted_used - admitted_prefix < pipeline_trace::all_live + bytes))
         ++uncovered;
 }

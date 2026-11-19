@@ -1,3 +1,4 @@
+#include "geometry/details/NativeGeometryScratchAllocator.hh"
 #include "geometry/mesh/AMR/AdaptiveBoundaryProof.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
@@ -117,8 +118,8 @@ static void certify_boundary_impl(const PLIC::ConvexGeometryPtr<ArithmeticMode::
         if (whole)
             retain(whole);
     ConstructionLease vertex_memory(budget, 0);
-    std::set<WidePoint, std::less<WidePoint>, geometry_detail::NativeAdministrationAllocator<WidePoint>> all_vertices(
-        std::less<WidePoint>{}, geometry_detail::NativeAdministrationAllocator<WidePoint>(state));
+    std::set<WidePoint, std::less<WidePoint>, geometry_detail::NativeGeometryScratchAllocator<WidePoint>> all_vertices(
+        std::less<WidePoint>{}, geometry_detail::NativeGeometryScratchAllocator<WidePoint>(state));
     for (const auto& piece : pieces)
         for (const auto& point : piece->points())
             if (!all_vertices.contains(point))
@@ -128,15 +129,15 @@ static void certify_boundary_impl(const PLIC::ConvexGeometryPtr<ArithmeticMode::
                 vertex_memory.add(sizeof(WidePoint) + 4 * sizeof(void*));
                 all_vertices.insert(point);
             }
-    geometry_detail::NativeAdministrationVector<SupportFace> source_faces{
-        geometry_detail::NativeAdministrationAllocator<SupportFace>(state)};
+    geometry_detail::NativeGeometryScratchVector<SupportFace> source_faces{
+        geometry_detail::NativeGeometryScratchAllocator<SupportFace>(state)};
     reserve(source_faces, source_count, budget);
-    using Row = geometry_detail::NativeAdministrationVector<SupportFace>;
-    geometry_detail::NativeAdministrationVector<Row> coverage{
-        geometry_detail::NativeAdministrationAllocator<Row>(state)};
+    using Row = geometry_detail::NativeGeometryScratchVector<SupportFace>;
+    geometry_detail::NativeGeometryScratchVector<Row> coverage{
+        geometry_detail::NativeGeometryScratchAllocator<Row>(state)};
     reserve(coverage, source_count, budget);
     for (std::size_t i = 0; i < source_count; ++i)
-        coverage.emplace_back(geometry_detail::NativeAdministrationAllocator<SupportFace>(state));
+        coverage.emplace_back(geometry_detail::NativeGeometryScratchAllocator<SupportFace>(state));
     for (std::size_t face = 0; face < source_count; ++face)
     {
         if (source)
@@ -203,8 +204,8 @@ static void certify_boundary_impl(const PLIC::ConvexGeometryPtr<ArithmeticMode::
         const auto source_points = source_faces[face]->points().size();
         std::size_t edge_count = source_points;
         ConstructionLease row_memory(budget, 0);
-        std::set<WidePoint, std::less<WidePoint>, geometry_detail::NativeAdministrationAllocator<WidePoint>> vertices(
-            std::less<WidePoint>{}, geometry_detail::NativeAdministrationAllocator<WidePoint>(state));
+        std::set<WidePoint, std::less<WidePoint>, geometry_detail::NativeGeometryScratchAllocator<WidePoint>> vertices(
+            std::less<WidePoint>{}, geometry_detail::NativeGeometryScratchAllocator<WidePoint>(state));
         const auto insert_points = [&](const auto& points)
         {
             for (const auto& point : points)

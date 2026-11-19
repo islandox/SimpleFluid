@@ -2,6 +2,7 @@
  * @brief Immutable ordered metadata pages with exact subtree allocation totals.
  */
 #pragma once
+#include "geometry/details/AllocationDomain.hh"
 #include "geometry/details/NativeConstructionAdmission.hh"
 #include "geometry/details/NativeConstructorOwnerSink.hh"
 #include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
@@ -21,6 +22,16 @@
 namespace SimpleFluid::Meshes::AMR::adaptive_detail::persistent_ordered_detail
 {
 inline constexpr auto control_bytes = 4 * sizeof(void*);
+
+/** Consumers opt in at their private comparator; unrelated page users retain
+ * their own allocation policy. A phase or the retaining arena is not a domain. */
+template<class Less> inline constexpr auto allocation_domain = []
+{
+    if constexpr (requires { Less::allocation_domain; })
+        return Less::allocation_domain;
+    else
+        return geometry_detail::AllocationDomain::Unattributed;
+}();
 
 inline std::size_t checked_sum(std::size_t a, std::size_t b)
 {
@@ -369,12 +380,25 @@ private:
     {
         if (charge.native)
         {
-            charge.native->storage.owner->reserve(values, count);
+            if constexpr (allocation_domain<Less> == geometry_detail::AllocationDomain::Unattributed)
+                charge.native->storage.owner->reserve(values, count);
+            else
+                charge.native->storage.owner->reserve_for(allocation_domain<Less>, values, count);
             charge.bytes = charge.allocator_bytes = charge.native->bytes();
             return;
         }
         charge.add(checked_product(count, sizeof(Value)));
-        values.reserve(count);
+        // Page and build buffers are empty here. Keep the scope to the
+        // upstream buffer request; row construction happens after it returns.
+        if constexpr (allocation_domain<Less> == geometry_detail::AllocationDomain::Unattributed)
+            values.reserve(count);
+        else
+        {
+            if (!values.empty() || values.capacity())
+                throw std::logic_error("Ordered page reserve requires a fresh buffer.");
+            const geometry_detail::AllocationDomainScope scope(allocation_domain<Less>);
+            values.reserve(count);
+        }
         if (values.capacity() != count)
             throw std::invalid_argument("Ordered metadata page capacity differs from admission.");
     }
@@ -399,7 +423,16 @@ private:
         if (native_)
         {
             const auto admission = geometry_detail::NativeConstructionAdmission::from_state(native_);
-            auto tracked = geometry_detail::NativeAllocationEnvelopeAccess::make<Node>(admission, arena_);
+            // The comparator selects the payload role independently of its
+            // funding. Keep receipt administration on the native helper path.
+            auto tracked = [&]
+            {
+                if constexpr (allocation_domain<Less> == geometry_detail::AllocationDomain::Unattributed)
+                    return geometry_detail::NativeAllocationEnvelopeAccess::make<Node>(admission, arena_);
+                else
+                    return geometry_detail::NativeAllocationEnvelopeAccess::make_for<allocation_domain<Less>, Node>(
+                        admission, arena_);
+            }();
             auto node = std::move(tracked.owner);
             PageCharge charge(arena_, native_);
             charge.native->node = std::move(tracked.envelope);
@@ -410,7 +443,21 @@ private:
         }
         PageCharge initial(arena_);
         initial.add(sizeof(Node) + control_bytes);
-        auto node = std::make_shared<Node>(arena_);
+        auto node = [&]
+        {
+            if constexpr (allocation_domain<Less> == geometry_detail::AllocationDomain::Unattributed)
+                return std::make_shared<Node>(arena_);
+            else
+            {
+#if defined(__GLIBCXX__)
+                static_assert(sizeof(std::_Sp_counted_ptr_inplace<Node,
+                                  geometry_detail::DomainAllocator<Node, allocation_domain<Less>>,
+                                  __gnu_cxx::__default_lock_policy>) <= sizeof(Node) + control_bytes,
+                    "Ordered page control exceeds its unchanged allowance.");
+#endif
+                return geometry_detail::domain_shared<allocation_domain<Less>, Node>(arena_);
+            }
+        }();
         node->charge.bytes = std::exchange(initial.bytes, 0);
         return node;
     }

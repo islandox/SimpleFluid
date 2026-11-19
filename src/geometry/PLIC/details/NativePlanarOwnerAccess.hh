@@ -1,5 +1,6 @@
 /** Exact native planar ownership, separate from geometric/source authority. */
 #pragma once
+#include "geometry/details/NativeGeometryScratchAllocator.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/details/NativeConstructorStorage.hh"
 namespace SimpleFluid::PLIC::details
@@ -34,7 +35,7 @@ public:
         const Pointer&, GeometryPoint, const geometry_detail::NativeConstructionAdmission&);
     [[nodiscard]] static Pointer intersection(
         const Face&, const Face&, const geometry_detail::NativeConstructionAdmission&);
-    [[nodiscard]] static geometry_detail::NativeAdministrationVector<Pointer> subtract(
+    [[nodiscard]] static geometry_detail::NativeGeometryScratchVector<Pointer> subtract(
         const Face&, std::span<const Pointer>, const geometry_detail::NativeConstructionAdmission&);
     static void certify_partition(
         const Face&, std::span<const Pointer>, const geometry_detail::NativeConstructionAdmission&);

@@ -26,7 +26,7 @@ namespace A = SimpleFluid::Meshes::AMR;
 using SimpleFluid::ArithmeticMode;
 using Snapshot = A::AdaptiveGeometrySnapshot;
 using Hierarchy = A::DistributedAdaptiveHierarchy;
-constexpr std::size_t cap = 128 * 1024 * 1024;
+constexpr std::size_t cap = 512 * 1024 * 1024;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 auto source()
 {
@@ -36,8 +36,8 @@ auto source()
     std::vector<std::uint64_t> ids(native.geometry()->num_cells());
     std::iota(ids.begin(), ids.end(), 0);
     auto input = native.detach_owned(ids, {'u', 'n', 'i', 'o', 'n'});
-    return std::make_shared<const Hierarchy>(
-        std::move(input.owned), std::move(input.families), std::move(input.kernel), Tpetra::getDefaultComm());
+    return std::make_shared<const Hierarchy>(std::move(input.owned), std::move(input.families), std::move(input.kernel),
+        Tpetra::getDefaultComm(), A::DistributedAdaptiveOptions{.byte_budget = cap});
 }
 auto acquire(const Hierarchy& hierarchy, std::span<const A::AdaptiveLeaf* const> selected)
 {
@@ -1034,8 +1034,8 @@ auto many_recipe_source()
     std::vector<std::uint64_t> ids(native.geometry()->num_cells());
     std::iota(ids.begin(), ids.end(), 0);
     auto input = native.detach_owned(ids, {'u', 'n', 'i', 'o', 'n', '-', 'w', 'o', 'r', 'k'});
-    return std::make_shared<const Hierarchy>(
-        std::move(input.owned), std::move(input.families), std::move(input.kernel), Tpetra::getDefaultComm());
+    return std::make_shared<const Hierarchy>(std::move(input.owned), std::move(input.families), std::move(input.kernel),
+        Tpetra::getDefaultComm(), A::DistributedAdaptiveOptions{.byte_budget = cap});
 }
 } // namespace union_work_oracle
 
@@ -1044,21 +1044,21 @@ TEST(GeometryOwnerUnion, FixedEditWorkMatchesIndependentPhysicalFrontierAtTwoDem
     if (Tpetra::getDefaultComm()->getSize() != 1 || !A::geometry_construction_controls().supported)
         GTEST_SKIP() << "Requires one rank and inspectable construction controls.";
     namespace W = union_work_oracle;
-    bool nonvacuous_copy_bound = false;
+    bool nonvacuous_copy_bound = false, nonvacuous_untouched = false;
+    auto hierarchy = W::many_recipe_source();
+    std::vector<const A::AdaptiveLeaf*> rows;
+    for (const auto& leaf : hierarchy->owned_leaves())
+        rows.push_back(&leaf);
+    const auto get = [&](std::span<const A::AdaptiveLeaf* const> wanted)
+    {
+        std::size_t used = 37;
+        return hierarchy->geometry_snapshot(
+            wanted, ArithmeticMode::Ordinary, A::GeometrySnapshotPurpose::OriginalSources, used, cap);
+    };
     for (const std::size_t demand : {512, 1024})
     {
         SCOPED_TRACE(demand);
-        auto hierarchy = W::many_recipe_source();
-        std::vector<const A::AdaptiveLeaf*> rows;
-        for (const auto& leaf : hierarchy->owned_leaves())
-            rows.push_back(&leaf);
         ASSERT_GT(rows.size(), demand);
-        const auto get = [&](std::span<const A::AdaptiveLeaf* const> wanted)
-        {
-            std::size_t used = 37;
-            return hierarchy->geometry_snapshot(
-                wanted, ArithmeticMode::Ordinary, A::GeometrySnapshotPurpose::OriginalSources, used, cap);
-        };
         const auto first = get(std::span(rows).first(demand)), second = get(std::span(rows).subspan(demand, 1));
         ASSERT_EQ(first->ordinary_catalog()->size(), demand);
         ASSERT_EQ(second->ordinary_catalog()->size(), demand + 1);
@@ -1160,7 +1160,11 @@ TEST(GeometryOwnerUnion, FixedEditWorkMatchesIndependentPhysicalFrontierAtTwoDem
             EXPECT_GT(D::GeometryAllocationOwnerAccess::work_statistics().control_table_enumeration_rows, 0u);
             W::exact_rows(updated, new_graph);
             const auto new_index = W::index(updated.manifests().owners[0]);
-            W::untouched(old_index, new_index, bounds);
+            if (W::has_untouched(old_index, bounds))
+            {
+                W::untouched(old_index, new_index, bounds);
+                nonvacuous_untouched = true;
+            }
             // Check every physically shared input index node's control and
             // backing buffers, not just a single reused buffer/address.
             std::size_t input_shared = 0;
@@ -1182,6 +1186,7 @@ TEST(GeometryOwnerUnion, FixedEditWorkMatchesIndependentPhysicalFrontierAtTwoDem
         }
     }
     EXPECT_TRUE(nonvacuous_copy_bound);
+    EXPECT_TRUE(nonvacuous_untouched);
 }
 
 TEST(GeometryOwnerUnion, FixedControlTableRemoveAddPreservesUntouchedPagesAtTwoCardinalities)

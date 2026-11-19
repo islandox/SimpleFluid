@@ -121,7 +121,7 @@ std::size_t ContactTracePool::adopt(ContactBody& record)
     std::shared_ptr<Inventory> owner;
     try
     {
-        owner = std::make_shared<Inventory>();
+        owner = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, Inventory>();
         owner->swap(record.traces);
         const auto [position, inserted] = inventories_.emplace(owner, bytes);
         if (!inserted)

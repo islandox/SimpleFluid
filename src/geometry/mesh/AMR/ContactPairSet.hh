@@ -2,6 +2,7 @@
  * @brief Exact, budgeted contact deduplication with ascending pair traversal.
  */
 #pragma once
+#include "ContactDomainStorage.hh"
 #include "utils/export_helper.hh"
 #include <cstddef>
 #include <cstdint>
@@ -70,8 +71,8 @@ public:
         friend class ContactPairSet;
         Budget* budget_ = nullptr;
         std::size_t size_ = 0, charged_ = 0;
-        std::unique_ptr<std::uint64_t[]> compact_;
-        std::unique_ptr<Pair[]> wide_;
+        ContactArray<std::uint64_t> compact_;
+        ContactArray<Pair> wide_;
     };
 
     explicit ContactPairSet(Budget&) noexcept;
@@ -93,7 +94,7 @@ private:
     void clear() noexcept;
     Budget* budget_;
     std::size_t size_ = 0, capacity_ = 0, charged_ = 0;
-    std::unique_ptr<std::uint64_t[]> compact_;
-    std::unique_ptr<Pair[]> wide_;
+    ContactArray<std::uint64_t> compact_;
+    ContactArray<Pair> wide_;
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

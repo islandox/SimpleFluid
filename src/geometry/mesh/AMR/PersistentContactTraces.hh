@@ -66,7 +66,8 @@ public:
         auto& entry = slots_.edit(id);
         ContactGroupAllocation charge(arena_);
         charge.add(sizeof(Owner) + 128);
-        auto owner = std::make_shared<Owner>(std::move(charge));
+        auto owner = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, Owner>(
+            std::move(charge));
         owner->admission.adopt_precharged(bytes);
         owner->values.swap(record.traces);
         residency_.retain(ContactPhysicalResidency::Role::TraceInventory, owner, owner->admission.bytes(), arena_.get());

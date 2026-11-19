@@ -4,6 +4,7 @@
 #pragma once
 #include "geometry/PLIC/details/CellCatalogDemandAccess.hh"
 #include "geometry/PLIC/details/GeometryDemandPages.tcc"
+#include "geometry/PLIC/details/GeometrySnapshotAllocation.hh"
 #include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include <algorithm>
 #include <array>
@@ -18,7 +19,7 @@ template<ArithmeticMode M> struct CellGeometryCatalog<M>::DemandState
     details::geometry_demand::GeometryDemandOrder order;
     details::geometry_demand::GeometryOwnerManifest native_sources;
     std::shared_ptr<const ExplicitPage> tail;
-    std::vector<details::geometry_demand::OrderStamp> tail_stamps;
+    details::GeometrySnapshotVector<details::geometry_demand::OrderStamp> tail_stamps;
 
     std::size_t exclusive_payload_bytes() const noexcept
     {
@@ -105,6 +106,30 @@ std::size_t native_body_bytes(const std::shared_ptr<const void>& owner)
     return geometry_demand::checked_sum(geometry_demand::checked_sum(bytes[0], bytes[1]), bytes[2]);
 }
 } // namespace catalog_demand_detail
+template<ArithmeticMode M>
+std::shared_ptr<CellGeometryCatalog<M>> CellCatalogDemandAccess::make_catalog()
+{
+    using Catalog = CellGeometryCatalog<M>;
+    auto* storage = geometry_detail::domain_allocate<Catalog>(geometry_detail::AllocationDomain::GeometrySnapshot, 1);
+    try
+    {
+        // Constructor work is outside the allocation-time domain scope.
+        ::new (static_cast<void*>(storage)) Catalog;
+    }
+    catch (...)
+    {
+        geometry_detail::domain_deallocate(geometry_detail::AllocationDomain::GeometrySnapshot, storage, 1);
+        throw;
+    }
+    // Preserve the separate body/control lifetimes and their empty allocator
+    // and deleter footprints. Control construction failure also destroys body.
+    return std::shared_ptr<Catalog>(storage,
+        [](Catalog* value) noexcept
+        {
+            std::destroy_at(value);
+            geometry_detail::domain_deallocate(geometry_detail::AllocationDomain::GeometrySnapshot, value, 1);
+        }, GeometrySnapshotAllocator<Catalog>{});
+}
 template<ArithmeticMode M> bool CellCatalogDemandAccess::persistent(const CellGeometryCatalog<M>& catalog) noexcept
 {
     return bool(catalog.demand_);
@@ -138,10 +163,10 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::initializ
     const auto admitted = catalog_demand_detail::admission(memory);
     memory.charge(1, sizeof(Catalog));
     memory.charge(1, sizeof(typename Catalog::DemandState) + G::control_bytes);
-    auto state = std::make_shared<typename Catalog::DemandState>();
+    auto state = details::geometry_snapshot_shared<typename Catalog::DemandState>();
     // Bounded capture scratch stays off the heap for the common 64-row page.
     std::array<G::SourceSlot, G::leaf_capacity> slot_stack{};
-    std::vector<G::SourceSlot> slot_heap;
+    details::GeometrySnapshotVector<G::SourceSlot> slot_heap;
     std::span<G::SourceSlot> slots;
     if (original->size() <= slot_stack.size())
         slots = std::span(slot_stack).first(original->size());
@@ -158,7 +183,7 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::initializ
     // whole manifest is built in a single persistent edit instead of one
     // whole-path copy per selected slot.
     std::array<G::OwnerRecord, G::leaf_capacity> owner_stack{};
-    std::vector<G::OwnerRecord> owner_heap;
+    details::GeometrySnapshotVector<G::OwnerRecord> owner_heap;
     G::OwnerRecord* owners = owner_stack.data();
     if (original->size() > owner_stack.size())
     {
@@ -169,7 +194,7 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::initializ
         owners = owner_heap.data();
     }
     std::size_t owner_count = 0;
-    std::map<const void*, std::size_t> owner_slots;
+    details::GeometrySnapshotMap<const void*, std::size_t> owner_slots;
     for (std::size_t slot = 0; slot < original->size(); ++slot)
     {
         ++measure.pages.visited_source_rows;
@@ -230,9 +255,9 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::initializ
                           [](const auto& value) { return value.generation != 0; }))
             state->tail = std::move(tail);
         else
-            std::vector<G::OrderStamp>().swap(state->tail_stamps);
+            details::GeometrySnapshotVector<G::OrderStamp>().swap(state->tail_stamps);
     }
-    auto result = std::shared_ptr<Catalog>(new Catalog);
+    auto result = make_catalog<M>();
     result->size_ = state->order.size();
     result->demand_ = std::move(state);
     return result;
@@ -267,26 +292,26 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::extended_
     CellCatalogAdmission memory(limits, construction.context, construction.retain_bytes);
     DemandMeasurement measure{memory, measured, {}};
     const auto admitted = catalog_demand_detail::admission(memory);
-    const auto reserve = [&]<class T>(std::vector<T>& target, std::size_t count)
+    const auto reserve = [&]<class T, class Allocator>(std::vector<T, Allocator>& target, std::size_t count)
     {
         memory.charge(count, sizeof(T));
-        target.reserve(count);
+        details::geometry_snapshot_reserve(target, count);
         if (target.capacity() != count)
             throw GeometryError(GeometryErrorCode::ResourceLimit, "Unqualified catalog demand buffer capacity.");
     };
-    std::vector<G::SourceSlot> prefix;
+    details::GeometrySnapshotVector<G::SourceSlot> prefix;
     reserve(prefix, requested->size());
-    std::vector<G::OrderStamp> retired;
+    details::GeometrySnapshotVector<G::OrderStamp> retired;
     const auto retired_count =
         std::count_if(previous_slots.begin(), previous_slots.end(), [](const auto& value) { return bool(value); });
     reserve(retired, retired_count);
     memory.charge(1, sizeof(Catalog));
     memory.charge(1, sizeof(typename Catalog::DemandState) + G::control_bytes);
-    auto state = std::make_shared<typename Catalog::DemandState>();
+    auto state = details::geometry_snapshot_shared<typename Catalog::DemandState>();
     state->native_sources = old.native_sources;
 
     bool changes_tail = false;
-    std::vector<std::uint8_t> pack;
+    details::GeometrySnapshotVector<std::uint8_t> pack;
     reserve(pack, requested->size());
     for (std::size_t slot = 0; slot < requested->size(); ++slot)
     {
@@ -336,7 +361,7 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::extended_
     }
     // Validate duplicate old ordinals before constructing replacement shell pages.
     {
-        std::vector<G::OrderStamp> unique;
+        details::GeometrySnapshotVector<G::OrderStamp> unique;
         reserve(unique, retired.size());
         unique.assign(retired.begin(), retired.end());
         const auto before = [](const auto& a, const auto& b)
@@ -352,8 +377,8 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::extended_
         G::OrderStamp stamp;
         std::size_t prefix = std::numeric_limits<std::size_t>::max();
     };
-    std::vector<ExplicitCell> cells;
-    std::vector<G::OrderedSourceSlot> rebound;
+    details::GeometrySnapshotVector<ExplicitCell> cells;
+    details::GeometrySnapshotVector<G::OrderedSourceSlot> rebound;
     if (changes_tail)
     {
         const auto old_count = old.tail ? old.tail->cells.size() : 0;
@@ -375,7 +400,7 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::extended_
         {
             const auto count = std::min(G::leaf_capacity, cells.size() - offset);
             memory.charge(1, sizeof(typename Catalog::ExplicitPage));
-            auto page = std::make_shared<typename Catalog::ExplicitPage>();
+            auto page = details::geometry_snapshot_shared<typename Catalog::ExplicitPage>();
             reserve(page->cells, count);
             for (std::size_t row = 0; row < count; ++row)
                 page->cells.push_back(cells[offset + row].geometry);
@@ -409,7 +434,7 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::extended_
     state->order = old.order.prepended(prefix, retired, admitted, &measure.pages);
     if (!rebound.empty())
         state->order = state->order.rebound(rebound, admitted, &measure.pages);
-    auto result = std::shared_ptr<Catalog>(new Catalog);
+    auto result = make_catalog<M>();
     result->size_ = state->order.size();
     result->demand_ = std::move(state);
     return result;
@@ -488,16 +513,16 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::rebound_p
     CellCatalogAdmission memory(limits, construction.context, construction.retain_bytes);
     DemandMeasurement measure{memory, measured, {}};
     const auto admitted = catalog_demand_detail::admission(memory);
-    const auto reserve = [&]<class T>(std::vector<T>& target, std::size_t count)
+    const auto reserve = [&]<class T, class Allocator>(std::vector<T, Allocator>& target, std::size_t count)
     {
         memory.charge(count, sizeof(T));
-        target.reserve(count);
+        details::geometry_snapshot_reserve(target, count);
         if (target.capacity() != count)
             throw GeometryError(GeometryErrorCode::ResourceLimit, "Unqualified catalog rebind capacity.");
     };
     memory.charge(1, sizeof(Catalog));
     memory.charge(1, sizeof(typename Catalog::DemandState) + G::control_bytes);
-    auto state = std::make_shared<typename Catalog::DemandState>();
+    auto state = details::geometry_snapshot_shared<typename Catalog::DemandState>();
     state->native_sources = old.native_sources;
     if (old.tail)
     {
@@ -505,7 +530,7 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::rebound_p
         reserve(state->tail_stamps, old.tail_stamps.size());
         state->tail_stamps.assign(old.tail_stamps.begin(), old.tail_stamps.end());
     }
-    std::vector<G::OrderedSourceSlot> rebound;
+    details::GeometrySnapshotVector<G::OrderedSourceSlot> rebound;
     reserve(rebound, ordinals.size());
     for (std::size_t index = 0; index < ordinals.size(); ++index)
     {
@@ -519,7 +544,7 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::rebound_p
         rebound.push_back({old.order.at(ordinals[index], &measure.pages).stamp, physical[index]});
     }
     state->order = old.order.rebound(rebound, admitted, &measure.pages);
-    auto result = std::shared_ptr<Catalog>(new Catalog);
+    auto result = make_catalog<M>();
     result->size_ = state->order.size();
     result->demand_ = std::move(state);
     return result;
@@ -547,7 +572,7 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::exported(
     memory.charge(1, sizeof(Catalog));
     if (permutation)
     {
-        std::vector<std::uint8_t> seen;
+        details::GeometrySnapshotVector<std::uint8_t> seen;
         memory.charge(slots.size(), sizeof(std::uint8_t));
         seen.resize(slots.size());
         if (seen.capacity() != slots.size())
@@ -557,7 +582,7 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::exported(
                 throw GeometryError(GeometryErrorCode::InvalidInput, "Catalog permutation is not one-to-one.");
     }
     using Source = typename Catalog::SourcePtr;
-    using OwnerTable = std::map<const void*, std::pair<Source, std::size_t>>;
+    using OwnerTable = details::GeometrySnapshotMap<const void*, std::pair<Source, std::size_t>>;
     OwnerTable owners;
     for (const auto slot : slots)
     {

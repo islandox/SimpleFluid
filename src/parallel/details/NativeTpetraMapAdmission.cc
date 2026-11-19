@@ -1,4 +1,5 @@
 #include "parallel/details/NativeTpetraMapAdmission.hh"
+#include "geometry/details/AllocationDomain.hh"
 #include "geometry/details/NativeAllocationGraph.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/AMR/NativePublicationOwnerGraph.hh"
@@ -127,8 +128,11 @@ std::shared_ptr<const LibraryContext> initialize_context(const Admission& admiss
     auto candidate = prepare_context(admission, environment_context_bytes());
     // These exact functions create two outer and two DEFAULT inner tree nodes
     // in Teuchos_EnvVariables.cpp. Retain the upper context until process exit.
-    (void) Tpetra::Details::Behavior::debug("Map");
-    (void) Tpetra::Details::Behavior::verbose("Map");
+    {
+        const AllocationDomainScope domain(AllocationDomain::ExternalThirdParty);
+        (void) Tpetra::Details::Behavior::debug("Map");
+        (void) Tpetra::Details::Behavior::verbose("Map");
+    }
     environment_context = candidate;
     return candidate;
 }
@@ -426,10 +430,13 @@ NativeTpetraMapAdmission::Owner NativeTpetraMapAdmission::construct(Prepared& pr
     auto* raw = prepared.allocation->raw;
     try
     {
-        if (prepared.plan.kind == Kind::ContiguousOwned)
-            std::construct_at(raw, global, gids.size(), GO{}, comm);
-        else
-            std::construct_at(raw, global, Teuchos::ArrayView<const GO>(gids.data(), gids.size()), GO{}, comm);
+        {
+            const AllocationDomainScope domain(AllocationDomain::ExternalThirdParty);
+            if (prepared.plan.kind == Kind::ContiguousOwned)
+                std::construct_at(raw, global, gids.size(), GO{}, comm);
+            else
+                std::construct_at(raw, global, Teuchos::ArrayView<const GO>(gids.data(), gids.size()), GO{}, comm);
+        }
         prepared.allocation->constructed = true;
     }
     catch (...)
@@ -443,7 +450,10 @@ NativeTpetraMapAdmission::Owner NativeTpetraMapAdmission::construct(Prepared& pr
         const auto serial = capture_serial_context(prepared.pending_serial);
         NativeMapDelete deleter{prepared.allocation, prepared.envelope, std::move(prepared.control),
             std::move(prepared.control_envelope), prepared.environment, serial};
-        map = Teuchos::rcpWithDealloc(raw, std::move(deleter), true);
+        {
+            const AllocationDomainScope domain(AllocationDomain::ExternalThirdParty);
+            map = Teuchos::rcpWithDealloc(raw, std::move(deleter), true);
+        }
     });
     prepared.phase.finish_scratch();
     return {std::move(map), prepared.plan};

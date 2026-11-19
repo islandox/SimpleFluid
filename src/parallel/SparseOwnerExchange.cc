@@ -3,6 +3,7 @@
  */
 #include "parallel/SparseOwnerExchange.hh"
 #include "parallel/NativePacketAdmission.hh"
+#include "geometry/details/AllocationDomainScope.hh"
 #include <Teuchos_DefaultMpiComm.hpp>
 #include <Teuchos_DefaultSerialComm.hpp>
 #include "parallel/SparseOwnerExchangeFraming.hh"
@@ -409,9 +410,17 @@ OwnerExchange owner_exchange_detail::exchange_owner_packets_with_round_limit(std
                 throw std::length_error("Owner packet planning capacities exceed byte budget.");
         });
     std::unique_ptr<Tpetra::Distributor> distributor_owner;
-    collectively(*comm, [&] { distributor_owner = std::make_unique<Tpetra::Distributor>(comm); });
+    collectively(*comm, [&]
+    {
+        const geometry_detail::AllocationDomainScope domain(geometry_detail::AllocationDomain::ExternalThirdParty);
+        distributor_owner = std::make_unique<Tpetra::Distributor>(comm);
+    });
     auto& distributor = *distributor_owner;
-    const auto imports = distributor.createFromSends(Teuchos::arrayViewFromVector(peers));
+    const auto imports = [&]
+    {
+        const geometry_detail::AllocationDomainScope domain(geometry_detail::AllocationDomain::ExternalThirdParty);
+        return distributor.createFromSends(Teuchos::arrayViewFromVector(peers));
+    }();
     std::vector<Word> recv_header;
     std::vector<int> senders;
     collectively(*comm,
@@ -438,7 +447,12 @@ OwnerExchange owner_exchange_detail::exchange_owner_packets_with_round_limit(std
             if (senders.size() != imports)
                 throw std::invalid_argument("Owner exchange sender routing differs from Distributor imports.");
         });
-    distributor.doPostsAndWaits(read_view(send_header), std::size_t(2), write_view(recv_header));
+    {
+        const auto export_view = read_view(send_header);
+        const auto import_view = write_view(recv_header);
+        const geometry_detail::AllocationDomainScope domain(geometry_detail::AllocationDomain::ExternalThirdParty);
+        distributor.doPostsAndWaits(export_view, std::size_t(2), import_view);
+    }
     std::vector<std::size_t> recv_sizes;
     std::size_t received_wire = 0, records = 0, metadata = 0;
     std::size_t retired_send_metadata = 0, planned_decode_metadata = 0, framed_record_bytes = 0;
@@ -664,8 +678,14 @@ OwnerExchange owner_exchange_detail::exchange_owner_packets_with_round_limit(std
                             }
                         }
                     });
-                distributor.doPostsAndWaits(read_view(send), Teuchos::arrayViewFromVector(send_sizes),
-                    write_view(*receive), Teuchos::arrayViewFromVector(round_receive_sizes));
+                {
+                    const auto export_view = read_view(send);
+                    const auto import_view = write_view(*receive);
+                    const geometry_detail::AllocationDomainScope domain(
+                        geometry_detail::AllocationDomain::ExternalThirdParty);
+                    distributor.doPostsAndWaits(export_view, Teuchos::arrayViewFromVector(send_sizes),
+                        import_view, Teuchos::arrayViewFromVector(round_receive_sizes));
+                }
                 ++output.stats.transport_rounds;
             }
         }
@@ -737,8 +757,13 @@ OwnerExchange owner_exchange_detail::exchange_owner_packets_with_round_limit(std
                         send.insert(send.end(), input[i].bytes.begin(), input[i].bytes.end());
                     }
             });
-        distributor.doPostsAndWaits(read_view(send), Teuchos::arrayViewFromVector(send_sizes), write_view(received),
-            Teuchos::arrayViewFromVector(recv_sizes));
+        {
+            const auto export_view = read_view(send);
+            const auto import_view = write_view(received);
+            const geometry_detail::AllocationDomainScope domain(geometry_detail::AllocationDomain::ExternalThirdParty);
+            distributor.doPostsAndWaits(export_view, Teuchos::arrayViewFromVector(send_sizes), import_view,
+                Teuchos::arrayViewFromVector(recv_sizes));
+        }
     } // Release packed sends before allocating any decoded packet storage.
     // These allocations were needed only to build/export the completed stream.
     // Destroy the real owners before using the smaller decode-phase charge.

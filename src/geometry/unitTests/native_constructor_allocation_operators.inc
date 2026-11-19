@@ -3,6 +3,7 @@
  */
 #include "native_constructor_allocation_test.hh"
 #include "pipeline_allocation_trace.hh"
+#include "pipeline_allocation_domain.inc"
 #include <cstdlib>
 #include <new>
 

@@ -1,13 +1,30 @@
 #pragma once
+#include "geometry/PLIC/details/GeometrySnapshotAllocation.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshot.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <map>
+#include <memory>
 #include <span>
+#include <utility>
+#include <vector>
 namespace SimpleFluid::Meshes::AMR::geometry_snapshot_detail
 {
+template<class T>
+using SnapshotVector = PLIC::details::GeometrySnapshotVector<T>;
+template<class Key, class Value, class Less = std::less<Key>>
+using SnapshotMap = PLIC::details::GeometrySnapshotMap<Key, Value, Less>;
+template<class T, class... Args> std::shared_ptr<T> snapshot_shared(Args&&... args)
+{
+    return PLIC::details::geometry_snapshot_shared<T>(std::forward<Args>(args)...);
+}
+// Attribution must not change the byte-admission model of the private stores.
+static_assert(sizeof(SnapshotVector<std::byte>) == sizeof(std::vector<std::byte>));
+static_assert(alignof(SnapshotVector<std::byte>) == alignof(std::vector<std::byte>));
 using CatalogBuild = AdaptiveGeometrySnapshot;
 using CatalogPurpose = GeometrySnapshotPurpose;
 /** Borrowed only during the private acquisition of an authenticated full draft. */
@@ -18,8 +35,8 @@ struct PublicationSource
 };
 struct BuildFacts
 {
-    std::vector<AdaptiveCellMetrics> metrics;
-    std::vector<GeometryEvaluationPolicy> policy;
+    SnapshotVector<AdaptiveCellMetrics> metrics;
+    SnapshotVector<GeometryEvaluationPolicy> policy;
 };
 struct Builder
 {

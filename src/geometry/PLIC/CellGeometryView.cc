@@ -8,6 +8,8 @@
 #include "geometry/PLIC/details/CellGeometryDemandCatalog.tcc"
 #include "geometry/PLIC/details/CellGeometryEvaluation.hh"
 #include "geometry/PLIC/details/GeometryAllocationLedgerInternal.hh"
+#include "geometry/PLIC/details/GeometrySnapshotAllocation.hh"
+#include "geometry/details/AllocationDomainScope.hh"
 #include "geometry/PLIC/details/LocalCoordinates.hh"
 #include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "geometry/PLIC/details/ordinary/FixedBoxGeometry.hh"
@@ -83,7 +85,7 @@ struct CartesianCellSource::Impl
     {
         Interval first, step;
         std::uint8_t repeat = 1, period = interval_page_size;
-        std::vector<Interval> explicit_intervals;
+        details::GeometrySnapshotVector<Interval> explicit_intervals;
 
         Interval at(std::size_t row) const noexcept
         {
@@ -101,11 +103,11 @@ struct CartesianCellSource::Impl
     struct Base
     {
         std::array<std::vector<double>, 3> axes;
-        std::array<std::vector<std::uint32_t>, 3> canonical_support_slots;
+        std::array<details::GeometrySnapshotVector<std::uint32_t>, 3> canonical_support_slots;
         std::vector<PlaneSupportIdentity<ordinary>> original_supports;
-        std::vector<std::array<IntervalColumn, 3>> intervals;
-        std::vector<SupportOverride> support_overrides;
-        std::vector<InitialFacts> initial;
+        details::GeometrySnapshotVector<std::array<IntervalColumn, 3>> intervals;
+        details::GeometrySnapshotVector<SupportOverride> support_overrides;
+        details::GeometrySnapshotVector<InitialFacts> initial;
 
         Interval interval(std::size_t cell, std::size_t axis) const
         {
@@ -135,21 +137,21 @@ struct CartesianCellSource::Impl
             if (data)
             {
                 std::destroy_n(data, count);
-                std::allocator<Facts>{}.deallocate(data, count);
+                geometry_detail::domain_deallocate(geometry_detail::AllocationDomain::GeometrySnapshot, data, count);
             }
         }
         void allocate(std::size_t n)
         {
             if (!n)
                 return;
-            auto* next = std::allocator<Facts>{}.allocate(n);
+            auto* next = geometry_detail::domain_allocate<Facts>(geometry_detail::AllocationDomain::GeometrySnapshot, n);
             try
             {
                 std::uninitialized_value_construct_n(next, n);
             }
             catch (...)
             {
-                std::allocator<Facts>{}.deallocate(next, n);
+                geometry_detail::domain_deallocate(geometry_detail::AllocationDomain::GeometrySnapshot, next, n);
                 throw;
             }
             data = next;
@@ -175,7 +177,7 @@ struct CartesianCellSource::Impl
     std::shared_ptr<const Base> base;
     /** Empty means this body owns every base cell. A subset view (deferred raw
      * context sharing a prepared base) lists the base cells it exposes. */
-    std::vector<std::uint32_t> slots;
+    details::GeometrySnapshotVector<std::uint32_t> slots;
     std::size_t cell(std::size_t slot) const
     {
         if (slots.empty())
@@ -305,8 +307,8 @@ std::shared_ptr<const CartesianCellSource> CartesianCellSource::make_authenticat
     }
     work.charge(description.cells.size(), sizeof(Impl::Facts));
     work.charge(description.cells.size(), sizeof(Impl::InitialFacts));
-    auto impl = std::make_shared<Impl>();
-    auto base = std::make_shared<Impl::Base>();
+    auto impl = details::geometry_snapshot_shared<Impl>();
+    auto base = details::geometry_snapshot_shared<Impl::Base>();
     base->axes = std::move(description.axes);
     base->original_supports = std::move(description.original_supports);
     const auto cell_count = description.cells.size();
@@ -524,7 +526,7 @@ std::array<std::size_t, 3> CartesianCellSource::base_retention_bytes() const
 {
     const auto& base = *impl_->base;
     std::size_t populated = 0, unused = 0;
-    const auto count = [&]<class T>(const std::vector<T>& buffer)
+    const auto count = [&]<class T, class Allocator>(const std::vector<T, Allocator>& buffer)
     {
         populated += buffer.size() * sizeof(T);
         unused += (buffer.capacity() - buffer.size()) * sizeof(T);
@@ -588,7 +590,7 @@ std::shared_ptr<const CartesianCellSource> CartesianCellSource::clone_deferred_s
     work.charge(1, sizeof(CartesianCellSource) + sizeof(Impl));
     work.charge(cells.size(), sizeof(Impl::Facts));
     work.charge(cells.size(), sizeof(std::uint32_t));
-    auto impl = std::make_shared<Impl>();
+    auto impl = details::geometry_snapshot_shared<Impl>();
     impl->base = original->impl_->base;
     impl->slots.reserve(cells.size());
     if (impl->slots.capacity() > cells.size())
@@ -615,7 +617,7 @@ std::shared_ptr<const CartesianCellSource> CartesianCellSource::clone_deferred(
     work.charge(1, sizeof(CartesianCellSource) + sizeof(Impl));
     work.charge(original->size(), sizeof(Impl::Facts));
     work.charge(original->impl_->slots.size(), sizeof(std::uint32_t));
-    auto impl = std::make_shared<Impl>();
+    auto impl = details::geometry_snapshot_shared<Impl>();
     impl->base = original->impl_->base;
     // Evaluation facts are fresh, but exposed slots keep the original immutable
     // base-cell mapping even when the original is already a deferred subset.

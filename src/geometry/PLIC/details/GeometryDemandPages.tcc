@@ -4,6 +4,7 @@
 #pragma once
 #include "geometry/PLIC/details/GeometryDemandPages.hh"
 #include "geometry/details/NativeAllocationGraph.hh"
+#include "geometry/details/AllocationDomain.hh"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -156,18 +157,19 @@ namespace native_page_detail
 {
 /** Captures actual rebound shared-control size into its admitted heap target.
  * Deallocation never dereferences the target after its destruction. */
-template<class T, class Owner> class ControlAllocator
+template<class T, class Owner, geometry_detail::AllocationDomain Domain> class SIMPLEFLUID_LOCAL ControlAllocator
 {
-    template<class, class> friend class ControlAllocator;
+    template<class, class, geometry_detail::AllocationDomain> friend class ControlAllocator;
 
 public:
     using value_type = T;
-    ControlAllocator(geometry_detail::NativeConstructionAllocator<T> allocator, Owner* owner)
+    template<class U> struct rebind { using other = ControlAllocator<U, Owner, Domain>; };
+    ControlAllocator(PageAllocationAllocator<T, Domain> allocator, Owner* owner)
         : allocator_(std::move(allocator)), owner_(owner)
     {
     }
     template<class U>
-    ControlAllocator(const ControlAllocator<U, Owner>& other) noexcept
+    ControlAllocator(const ControlAllocator<U, Owner, Domain>& other) noexcept
         : allocator_(other.allocator_), owner_(other.owner_)
     {
     }
@@ -179,25 +181,30 @@ public:
         return value;
     }
     void deallocate(T* address, std::size_t count) noexcept { allocator_.deallocate(address, count); }
-    template<class U> bool operator==(const ControlAllocator<U, Owner>& other) const noexcept
+    template<class U> bool operator==(const ControlAllocator<U, Owner, Domain>& other) const noexcept
     {
         return allocator_ == other.allocator_ && owner_ == other.owner_;
     }
 
 private:
-    geometry_detail::NativeConstructionAllocator<T> allocator_;
+    PageAllocationAllocator<T, Domain> allocator_;
     Owner* owner_;
 };
+static_assert(sizeof(ControlAllocator<std::byte, std::byte, geometry_detail::AllocationDomain::OwnerUnion>) ==
+              sizeof(ControlAllocator<std::byte, std::byte, geometry_detail::AllocationDomain::GeometrySnapshot>));
 } // namespace native_page_detail
-template<class T, class... Args> std::shared_ptr<T> Admission::shared(Args&&... args) const
+template<class T, geometry_detail::AllocationDomain Domain, class... Args>
+std::shared_ptr<T> Admission::shared(Args&&... args) const
 {
     if (!native)
-        return std::make_shared<T>(std::forward<Args>(args)...);
+        return std::allocate_shared<T>(
+            geometry_detail::FixedDomainAllocator<std::remove_cv_t<T>, Domain>{},
+            std::forward<Args>(args)...);
 #if !defined(__cpp_rtti)
     throw GeometryError(GeometryErrorCode::InvalidInput, "Native metadata requires authenticated shared-control RTTI.");
 #endif
     static_assert(sizeof(T) >= sizeof(std::size_t));
-    auto memory = geometry_detail::NativeConstructionAllocator<T>(native);
+    auto memory = PageAllocationAllocator<T, Domain>(geometry_detail::NativeConstructionAllocator<T>(native));
     auto* value = memory.allocate(1);
     NativeMetadataDelete deleter{native, value, 0, false,
         [](const void* raw, std::size_t control) noexcept
@@ -221,22 +228,24 @@ template<class T, class... Args> std::shared_ptr<T> Admission::shared(Args&&... 
             }
             if (buffers)
                 state->retire(buffers);
-            geometry_detail::NativeConstructionAllocator<T>(state).deallocate(object, 1);
+            geometry_detail::NativeConstructionAllocator<T>(state).deallocate_for(Domain, object, 1);
         }};
     // Capture into the unconstructed heap target, never a retained stack slot.
     // The control allocator never reads this target during deallocation.
-    std::shared_ptr<T> owner(value, std::move(deleter), native_page_detail::ControlAllocator<T, T>(memory, value));
+    std::shared_ptr<T> owner(value, std::move(deleter), native_page_detail::ControlAllocator<T, T, Domain>(memory, value));
     auto* proof = std::get_deleter<NativeMetadataDelete>(owner);
     std::memcpy(&proof->control_bytes, static_cast<const void*>(value), sizeof(proof->control_bytes));
     std::construct_at(value, std::forward<Args>(args)...);
     proof->constructed = true;
     return owner;
 }
-template<class Row, class Less, bool CompactBranches, class Witnesses> class OrderedPages
+template<class Row, class Less, bool CompactBranches, class Witnesses, geometry_detail::AllocationDomain Domain>
+class OrderedPages
 {
 public:
     struct Node;
     using Ptr = std::shared_ptr<const Node>;
+    template<class T> using Buffer = std::vector<T, PageBufferAllocator<T, Domain>>;
     static_assert(std::is_nothrow_copy_constructible_v<Row> && std::is_nothrow_copy_assignable_v<Row>);
     struct Node
     {
@@ -286,7 +295,7 @@ public:
             if (!Less{}(sorted[slot - 1], sorted[slot]))
                 throw GeometryError(
                     GeometryErrorCode::InvalidInput, "Ordered metadata index contains duplicate selectors.");
-        geometry_detail::NativeAdministrationVector<Ptr> pages(admission_.allocator<Ptr>());
+        Buffer<Ptr> pages(PageBufferAllocator<Ptr, Domain>(admission_.native));
         const auto groups = ceiling(sorted.size(), leaf_capacity);
         reserve(pages, groups);
         std::size_t offset = 0;
@@ -298,7 +307,7 @@ public:
         }
         while (pages.size() > 1)
         {
-            geometry_detail::NativeAdministrationVector<Ptr> parents(admission_.allocator<Ptr>());
+            Buffer<Ptr> parents(PageBufferAllocator<Ptr, Domain>(admission_.native));
             const auto count = ceiling(pages.size(), branch_capacity);
             reserve(parents, count);
             offset = 0;
@@ -309,7 +318,7 @@ public:
                 offset += width;
             }
             pages.swap(parents);
-            geometry_detail::NativeAdministrationVector<Ptr>().swap(parents);
+            Buffer<Ptr>().swap(parents);
         }
         return std::move(pages.front());
     }
@@ -636,8 +645,8 @@ private:
     {
         return count / groups + (group < count % groups);
     }
-    template<class Value>
-    void reserve(geometry_detail::NativeAdministrationVector<Value>& values, std::size_t count) const
+    template<class Value, class Allocator>
+    void reserve(std::vector<Value, Allocator>& values, std::size_t count) const
     {
         admission_.charge(count, sizeof(Value));
         values.reserve(count);
@@ -655,7 +664,14 @@ private:
         }
         try
         {
-            values.reserve(count);
+            if (!values.capacity())
+            {
+                // Empty concrete buffers invoke only the upstream allocator.
+                const geometry_detail::AllocationDomainScope domain(Domain);
+                values.reserve(count);
+            }
+            else
+                values.reserve(count);
         }
         catch (...)
         {
@@ -692,7 +708,7 @@ private:
         if (admission_.native)
             geometry_detail::NativeConstructorStorage::require_profile();
         admission_.charge(1, sizeof(Node) + control_bytes);
-        auto node = admission_.shared<Node>();
+        auto node = admission_.shared<Node, Domain>();
         node->bytes = sizeof(Node) + metadata_control_bytes(node);
         node->payload_bytes = sizeof(Node);
         if constexpr (native_flag_in_owned_admission<Row>)
@@ -853,9 +869,9 @@ private:
         end = std::copy(std::next(at), node.children.end(), end);
         return pack_branches(rebalance(std::span(children.begin(), end)));
     }
-    geometry_detail::NativeAdministrationVector<Ptr> pack_many_branches(std::span<const Ptr> children) const
+    Buffer<Ptr> pack_many_branches(std::span<const Ptr> children) const
     {
-        geometry_detail::NativeAdministrationVector<Ptr> result(admission_.allocator<Ptr>());
+        Buffer<Ptr> result(PageBufferAllocator<Ptr, Domain>(admission_.native));
         if (children.empty())
             return result;
         const auto groups = ceiling(children.size(), branch_capacity);
@@ -869,7 +885,7 @@ private:
         }
         return result;
     }
-    using PageBuffer = geometry_detail::NativeAdministrationVector<Ptr>;
+    using PageBuffer = Buffer<Ptr>;
 
     template<class Iterator, class Keep>
     PageBuffer patch_leaf(const Ptr& old, Iterator first, Iterator last, const Keep& keep) const
@@ -880,7 +896,7 @@ private:
         // Keep the final tail available so it can share rows with its predecessor.
         std::array<Slot, leaf_capacity + leaf_capacity / 2> pending{};
         std::size_t size = 0;
-        PageBuffer result(admission_.allocator<Ptr>());
+        PageBuffer result(PageBufferAllocator<Ptr, Domain>(admission_.native));
         const auto read = [](const Slot& slot) -> const Source&
         {
             if constexpr (stack_safe_default<Source>)
@@ -965,7 +981,7 @@ private:
         // An edit concentrated in one child can contribute thousands of rows
         // but only the resulting page pointers enter the parent.
         std::array<Ptr, branch_capacity> local;
-        PageBuffer overflow(admission_.allocator<Ptr>());
+        PageBuffer overflow(PageBufferAllocator<Ptr, Domain>(admission_.native));
         std::span<Ptr> children;
         if (count <= local.size())
             children = std::span(local).first(count);
@@ -991,7 +1007,7 @@ private:
         if (root && balanced.size() == 1)
         {
             // Only the root may lose a level.
-            PageBuffer result(admission_.allocator<Ptr>());
+            PageBuffer result(PageBufferAllocator<Ptr, Domain>(admission_.native));
             reserve(result, 1);
             result.push_back(std::move(children.front()));
             return result;

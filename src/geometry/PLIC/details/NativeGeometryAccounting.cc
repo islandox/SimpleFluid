@@ -560,7 +560,9 @@ void GeometryAllocationLedger::Impl::NativeContextDelete::operator()(NativeConte
         return;
     const auto state = value->state;
     std::destroy_at(value);
-    std::allocator<NativeContext>{}.deallocate(value, 1);
+    geometry_detail::domain_deallocate(
+        state ? geometry_detail::AllocationDomain::NativePublication : geometry_detail::AllocationDomain::OwnerUnion,
+        value, 1);
     if (state)
         state->retire(sizeof(NativeContext));
 }
@@ -587,7 +589,7 @@ void GeometryAllocationLedger::Impl::set_native_grant(
     if (!native && value.owner_count())
     {
         account(sizeof(NativeContext), true, used, limit);
-        auto* memory = std::allocator<NativeContext>{}.allocate(1);
+        auto* memory = geometry_detail::domain_allocate<NativeContext>(geometry_detail::AllocationDomain::OwnerUnion, 1);
         std::construct_at(memory);
         native = decltype(native)(memory, NativeContextDelete{});
     }

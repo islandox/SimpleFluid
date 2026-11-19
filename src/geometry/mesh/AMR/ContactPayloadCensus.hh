@@ -269,16 +269,18 @@ void contact_payload_object(
     visitor(ContactPayloadAllocation{
         {object, role}, object, ContactPayloadKind::Object, bytes, bytes, 1, 1, bytes, true, shared_control, false});
 }
-template<class Visitor, class T>
-void contact_payload_buffer(Visitor& visitor, const void* owner, ContactPayloadRole role, const std::vector<T>& values,
+template<class Visitor, class T, class Allocator>
+void contact_payload_buffer(Visitor& visitor, const void* owner, ContactPayloadRole role,
+    const std::vector<T, Allocator>& values,
     std::size_t live, bool opaque_element_payload = false)
 {
     if (values.capacity())
         visitor(ContactPayloadAllocation{{values.data(), role}, owner, ContactPayloadKind::Buffer, 0, sizeof(T), live,
             values.capacity(), sizeof(T) * values.capacity(), true, false, false, opaque_element_payload});
 }
-template<class Visitor, class T>
-void contact_payload_buffer(Visitor& visitor, const void* owner, ContactPayloadRole role, const std::vector<T>& values)
+template<class Visitor, class T, class Allocator>
+void contact_payload_buffer(Visitor& visitor, const void* owner, ContactPayloadRole role,
+    const std::vector<T, Allocator>& values)
 {
     contact_payload_buffer(visitor, owner, role, values, values.size());
 }

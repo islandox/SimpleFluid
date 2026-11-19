@@ -1,4 +1,5 @@
 #pragma once
+#include "ContactDomainStorage.hh"
 #include "ContactPayloadCensus.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <array>
@@ -116,6 +117,15 @@ private:
     };
     struct Page
     {
+        static void* operator new(std::size_t)
+        {
+            return geometry_detail::domain_allocate<Page>(geometry_detail::AllocationDomain::ContactHalo, 1);
+        }
+        static void operator delete(void* address) noexcept
+        {
+            geometry_detail::domain_deallocate(
+                geometry_detail::AllocationDomain::ContactHalo, static_cast<Page*>(address), 1);
+        }
         std::array<Cell, page_size> cells;
         std::uint16_t occupied = 0;
         std::size_t directory_slot = 0;
