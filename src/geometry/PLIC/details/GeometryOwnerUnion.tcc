@@ -1182,7 +1182,8 @@ std::size_t GeometryOwnerUnion::administration_byte_bound(std::size_t edges, std
     const auto frontier = std::min(edges, changed_keys);
     const auto typed_keys = anticipated_typed_additions ?
         std::min(changed_keys, add(accepted.typed_owner_count(), *anticipated_typed_additions)) : 0;
-    auto bytes = product(GeometryOwnerGraphEditor::edit_byte_bound(accepted, frontier, changed_keys, typed_keys), scale);
+    auto bytes = product(GeometryOwnerGraphEditor::edit_byte_bound(
+        accepted, frontier, changed_keys, typed_keys, anticipated_additions), scale);
     const auto owner_row =
         sizeof(typename decltype(GeometryAllocationLedger::Impl::owners)::value_type) + 4 * sizeof(void*);
     const auto credit_row =

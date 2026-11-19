@@ -531,7 +531,7 @@ TEST(AdaptivePipelineStorage, WholePipelineBaselineReportsExistingWork)
         Access::pipeline_geometry_statistics_domain() == SimpleFluid::PLIC::geometry_statistics_domain() ? "1" : "0");
     record_property("allocation_attribution_scope",
         SIMPLEFLUID_ENABLE_ALLOCATION_AUDIT ? "allocation_time_domains_requested_cpp_bytes" : "disabled");
-    record_property("scaling_gate_status", "baseline_observation_only_future_stage6_unqualified");
+    record_property("scaling_gate_status", "baseline_observation_only");
     for (const auto provider : F::providers)
     {
         SCOPED_TRACE(F::name(provider));

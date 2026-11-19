@@ -508,7 +508,7 @@ std::uint8_t GeometryOwnerGraphEditor::identity_payload_kind() noexcept
 }
 std::size_t GeometryOwnerGraphEditor::edit_byte_bound(
     const geometry_demand::GeometryOwnerManifest& accepted, std::size_t edges, std::size_t changed_keys,
-    std::size_t typed_keys)
+    std::size_t typed_keys, std::size_t prior_additions)
 {
     using namespace allocation_detail;
     const auto excess = edges > geometry_demand::leaf_capacity ? edges - geometry_demand::leaf_capacity : 0;
@@ -527,14 +527,14 @@ std::size_t GeometryOwnerGraphEditor::edit_byte_bound(
         pending_slots = add(pending_slots, capacity);
     }
     bytes = add(bytes, product(pending_slots, sizeof(PendingOwner)));
-    bytes = add(bytes, accepted.batch_edit_byte_bound(changed_keys, typed_keys));
+    bytes = add(bytes, accepted.batch_edit_byte_bound(changed_keys, typed_keys, prior_additions));
     // Each newly allocated index node/State produces at most one payload map
     // row and one metadata-credit registry row. Both are charged before insert.
     const auto bookkeeping_per_owner =
         sizeof(typename decltype(GeometryAllocationLedger::Impl::owners)::value_type) + 4 * sizeof(void*) +
         sizeof(typename decltype(GeometryAllocationLedger::Impl::metadata_credits)::value_type) + 4 * sizeof(void*);
-    bytes = add(bytes,
-        product(accepted.batch_edit_metadata_owner_bound(changed_keys, typed_keys), bookkeeping_per_owner));
+    const auto index_owners = accepted.batch_edit_metadata_owner_bound(changed_keys, typed_keys, prior_additions);
+    bytes = add(bytes, product(index_owners, bookkeeping_per_owner));
     // A second distinct graph certificate materializes the ledger's bounded
     // overflow buffer. Reserve it before optional graph mutation can begin.
     return add(bytes, GeometryAllocationLedger::Impl::subset_overflow_bytes());

@@ -263,3 +263,41 @@ TEST(GeometryOwnerGraph, PagedEditFoldsCancelledEdgesAndSharesDistantLeaves)
     EXPECT_TRUE(no_change.finish().same_root(second));
     EXPECT_GT(exact, measured);
 }
+
+TEST(GeometryOwnerGraph, SortedBatchReservationCoversPageSplitsAndRedistribution)
+{
+    // Fill more than one branch, then leave roughly a quarter of each leaf.
+    // This exercises intermediate merge allocations as well as the surviving pages.
+    std::vector<G::OwnerRecord> changes(2 * G::branch_capacity * G::leaf_capacity + 1);
+    for (auto& row : changes)
+    {
+        auto owner = std::make_shared<const char>('x');
+        row = {{0, Editor::external_kind(), owner.get()}, owner, sizeof(char), 1};
+    }
+    std::sort(changes.begin(), changes.end(),
+        [](const auto& a, const auto& b) { return G::OwnerKeyLess{}(a.key, b.key); });
+
+    const auto apply = [&](const G::GeometryOwnerManifest& before)
+    {
+        struct Count
+        {
+            std::size_t bytes = 0, owners = 0;
+        } count;
+        const G::Admission admission{&count,
+            [](void* raw, std::size_t bytes) { static_cast<Count*>(raw)->bytes += bytes; },
+            [](void* raw, const auto&, std::size_t, std::size_t) { ++static_cast<Count*>(raw)->owners; }};
+        const auto result = before.edited(changes, admission);
+        EXPECT_GT(count.bytes, 0u);
+        EXPECT_GT(count.owners, G::branch_capacity);
+        EXPECT_LE(count.bytes, before.batch_edit_byte_bound(changes.size()));
+        EXPECT_LE(count.owners, before.batch_edit_metadata_owner_bound(changes.size()));
+        return result;
+    };
+    const auto full = apply({});
+    ASSERT_EQ(full.owner_count(), changes.size());
+    for (std::size_t i = 0; i != changes.size(); ++i)
+        changes[i].references = i % 4 == 0;
+    const auto sparse = apply(full);
+    EXPECT_EQ(sparse.owner_count(), (changes.size() + 3) / 4);
+    EXPECT_EQ(full.owner_count(), changes.size());
+}

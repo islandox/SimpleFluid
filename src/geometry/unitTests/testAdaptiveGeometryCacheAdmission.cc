@@ -282,9 +282,11 @@ struct NativeCacheReference
             }});
     }
 };
-void expect_native_seal(const Hierarchy& source)
+void expect_native_seal(const Hierarchy& source,
+    std::span<const std::shared_ptr<const AMR::AdaptiveGeometrySnapshot>> preserved = {})
 {
     using Charge = NativeCacheReference::Charge;
+    const auto before = Access::cache_admission_statistics(source);
     NativeCacheReference expected;
     expected.owners = walked_owners(source);
     expected.arena = Access::contact_cache(source).allocation_arena();
@@ -318,6 +320,13 @@ void expect_native_seal(const Hierarchy& source)
                 NativeCacheReference::external(), owner, bytes); },
             [](void* raw, const Charge& value) { static_cast<Administration*>(raw)->expected.charge(value); },
             [](void*, const Charge&) {}});
+    for (const auto& snapshot : preserved)
+    {
+        const auto found = actual.find({NativeCacheReference::external(), snapshot.get()});
+        ASSERT_NE(found, actual.end());
+        EXPECT_FALSE(snapshot.owner_before(found->second.owner));
+        EXPECT_FALSE(found->second.owner.owner_before(snapshot));
+    }
     ASSERT_EQ(actual.size(), expected.owners.size());
     std::size_t resident = 0;
     for (const auto& [key, row] : expected.owners)
@@ -338,6 +347,8 @@ void expect_native_seal(const Hierarchy& source)
     for (const auto& [key, row] : expected.paid)
         paid += row.bytes;
     const auto seal = Access::cache_admission_statistics(source);
+    EXPECT_EQ(seal.union_censuses, before.union_censuses);
+    EXPECT_EQ(seal.census_root_visits, before.census_root_visits);
     EXPECT_EQ(seal.resident_bytes, resident);
     EXPECT_EQ(seal.lease_bytes + paid, resident);
 }
@@ -726,6 +737,7 @@ TEST(AdaptiveGeometryCacheAdmission, OptionalTwoBlockLookaheadReservesUnionAndRe
         const auto raw = acquire(*source, std::array{unrelated}, AMR::GeometrySnapshotPurpose::OriginalSources);
         const auto bounded = acquire(
             *source, std::array{unrelated}, AMR::GeometrySnapshotPurpose::State, ArithmeticMode::BoundedCertification);
+        const std::array preserved{raw, bounded};
         const auto before = Access::cache_admission_statistics(*source);
         auto blocker = Access::contact_cache(*source).external_residency_lease();
         const auto available = blocker.available();
@@ -754,7 +766,7 @@ TEST(AdaptiveGeometryCacheAdmission, OptionalTwoBlockLookaheadReservesUnionAndRe
             EXPECT_THROW(one.retain_external_owner(probe, sizeof(int), used, ample), P::GeometryError);
             EXPECT_EQ(used, spent);
             EXPECT_EQ(acquire(*source, std::array{initial}, AMR::GeometrySnapshotPurpose::State), accepted);
-            expect_exact_seal(*source);
+            expect_native_seal(*source, preserved);
             return Result{};
         }
         const auto work = P::details::GeometryAllocationOwnerAccess::work_statistics();
@@ -775,23 +787,7 @@ TEST(AdaptiveGeometryCacheAdmission, OptionalTwoBlockLookaheadReservesUnionAndRe
         EXPECT_LE(prepared, 2u);
         // Their exact header controls must still be part of the maintained
         // root union after this independent Ordinary replacement.
-        std::array<bool, 2> found{};
-        const std::array<std::shared_ptr<const AMR::AdaptiveGeometrySnapshot>, 2> preserved{raw, bounded};
-        Access::visit_cache_owner_union(*source,
-            [&](const auto& row)
-            {
-                for (std::size_t i = 0; i < preserved.size(); ++i)
-                    if (row.owner.get() == preserved[i].get())
-                    {
-                        EXPECT_FALSE(row.owner.owner_before(preserved[i]));
-                        EXPECT_FALSE(preserved[i].owner_before(row.owner));
-                        found[i] = true;
-                    }
-            },
-            {nullptr, [](void*, const auto&, std::size_t, std::size_t) { return true; }});
-        EXPECT_TRUE(found[0]);
-        EXPECT_TRUE(found[1]);
-        expect_exact_seal(*source);
+        expect_native_seal(*source, preserved);
         return Result{true, prepared};
     };
     std::optional<std::size_t> demand_only, one_page, two_pages;

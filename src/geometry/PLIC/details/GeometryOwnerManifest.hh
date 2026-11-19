@@ -191,12 +191,14 @@ public:
      * An engaged typed growth bound includes the sparse typed path. */
     [[nodiscard]] std::size_t edit_height_scale_bound(std::size_t anticipated_additions,
         std::optional<std::size_t> anticipated_typed_additions = {}) const;
-    /** Conservative allocation envelope for one sorted batch of changed keys. */
-    [[nodiscard]] std::size_t batch_edit_byte_bound(std::size_t changed_keys, std::size_t typed_keys = 0) const;
+    /** Conservative allocation envelope for one sorted batch. Include any primary
+     * rows an earlier stage can add before this batch is applied. */
+    [[nodiscard]] std::size_t batch_edit_byte_bound(
+        std::size_t changed_keys, std::size_t typed_keys = 0, std::size_t prior_additions = 0) const;
     /** New index allocations: changed search/rebalance paths, root State and
      * the possible inline-to-index promotion page. */
     [[nodiscard]] std::size_t batch_edit_metadata_owner_bound(
-        std::size_t changed_keys, std::size_t typed_keys = 0) const;
+        std::size_t changed_keys, std::size_t typed_keys = 0, std::size_t prior_additions = 0) const;
 
     /** Explicit diagnostic export. Source/cache mutation uses typed deltas. */
     void visit(const std::function<void(const OwnerRecord&)>&) const;

@@ -54,7 +54,7 @@ public:
     [[nodiscard]] static std::uint8_t identity_payload_kind() noexcept;
     [[nodiscard]] static std::size_t edit_byte_bound(
         const geometry_demand::GeometryOwnerManifest&, std::size_t incoming_edges, std::size_t changed_keys,
-        std::size_t typed_keys = 0);
+        std::size_t typed_keys = 0, std::size_t prior_additions = 0);
     /** One actual shared pointer edge. The result gates child traversal. */
     bool external(const std::shared_ptr<const void>&, std::size_t bytes, bool retain, bool prepaid = false);
     /** Admit the one physical shared pointer held by a manifest record.

@@ -26,6 +26,11 @@ in this dependency order:
 See [README.md](README.md) for capability overview and project status.
 Detailed workstream status is tracked in [docs/verification/](docs/verification/).
 
+- [x] **AMR storage Stage 6 — whole-pipeline scaling.** The serial and registered two- and four-rank gates cover
+  Cartesian, Product, Polyhedral, Static with a refinable companion, and Mixed providers. They exercise fixed edits,
+  migration, retained generations, and publication under the 512 MiB scaling fixture budget.
+  [AMR heap attribution](docs/architecture/amr_heap_attribution.md)
+
 ## Active roadmap
 
 See the specific project documentation for detailed implementation contracts and validation gates for active workstreams.

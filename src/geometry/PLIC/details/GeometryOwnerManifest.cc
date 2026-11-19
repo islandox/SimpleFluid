@@ -102,6 +102,25 @@ std::size_t typed_edit_nodes(std::size_t keys, std::size_t height)
     // neighbor into two pages at each level. Include one path for root growth.
     return bound_product(bound_product(4, checked_sum(keys, 1)), checked_sum(height, 1));
 }
+
+std::size_t primary_edit_nodes(std::size_t keys, std::size_t height, std::size_t existing_rows)
+{
+    const auto paths = bound_product(bound_product(2, checked_sum(keys, 1)), checked_sum(height, 1));
+    // patched_range merges a sorted batch once per old leaf. Rounding up the
+    // number of output pages for each leaf costs at most one page per old leaf.
+    // Include an empty root for insertion into an empty tree.
+    const auto old_pages = std::max(std::size_t{1}, tree_page_bound(existing_rows));
+    const auto full_leaves = checked_sum(existing_rows, keys) / leaf_capacity;
+    // At each higher level packing adds at most one partial page per old branch
+    // plus half the preceding level's pages (also true for growth above the root).
+    // Summing these levels doubles the old-page and full-leaf allowances.
+    const auto before_rebalance = bound_product(2, checked_sum(old_pages, full_leaves));
+    // At a given level each merge consumes a page and each two-page redistribution
+    // resolves an underfull page. Neither operation increases either count. This
+    // bounds all intermediate allocations, including repairs inside merged branches.
+    const auto packed = checked_sum(1, bound_product(4, before_rebalance)); // inline singleton promotion
+    return std::min(paths, packed);
+}
 } // namespace
 template<> inline constexpr bool stack_safe_default<TypedOwnerReference> = true;
 template<> inline constexpr bool native_flag_in_owned_admission<TypedOwnerReference> = true;
@@ -454,21 +473,20 @@ std::size_t GeometryOwnerManifest::edit_height_scale_bound(
     return scale;
 }
 std::size_t GeometryOwnerManifest::batch_edit_metadata_owner_bound(
-    std::size_t changed_keys, std::size_t typed_keys) const
+    std::size_t changed_keys, std::size_t typed_keys, std::size_t prior_additions) const
 {
     if (!changed_keys)
         return typed_keys ? checked_sum(state_ && state_->inline_row() ? 2 : 1,
             typed_edit_nodes(typed_keys, reservation_height(state_ ? state_->typed().get() : nullptr))) : 0;
     const auto height = reservation_height(state_ ? state_->root.get() : nullptr);
-    const auto paths = checked_sum(changed_keys, 1);
-    if (paths > (std::numeric_limits<std::size_t>::max() - 2) / 2 / checked_sum(height, 1))
-        throw GeometryError(GeometryErrorCode::ResourceLimit, "Geometry index-owner envelope overflows.");
-    auto owners = 2 * paths * (height + 1) + 2;
+    const auto nodes = primary_edit_nodes(changed_keys, height, checked_sum(owner_count(), prior_additions));
+    auto owners = checked_sum(nodes, 2);
     if (typed_keys)
         owners = checked_sum(owners, typed_edit_nodes(typed_keys, reservation_height(state_ ? state_->typed().get() : nullptr)));
     return owners;
 }
-std::size_t GeometryOwnerManifest::batch_edit_byte_bound(std::size_t changed_keys, std::size_t typed_keys) const
+std::size_t GeometryOwnerManifest::batch_edit_byte_bound(
+    std::size_t changed_keys, std::size_t typed_keys, std::size_t prior_additions) const
 {
     if (!changed_keys && !typed_keys)
         return 0;
@@ -478,9 +496,12 @@ std::size_t GeometryOwnerManifest::batch_edit_byte_bound(std::size_t changed_key
         const auto height = reservation_height(state_ ? state_->root.get() : nullptr);
         const auto maximum_node = sizeof(Pages::Node) + control_bytes +
             std::max(leaf_capacity * sizeof(OwnerRecord), branch_capacity * sizeof(Pages::Ptr));
-        // A changed key can split its complete path and merge an adjacent path.
-        const auto nodes = bound_product(bound_product(2, checked_sum(changed_keys, 1)), checked_sum(height, 1));
-        bytes = checked_sum(bytes, bound_product(nodes, maximum_node));
+        const auto nodes = primary_edit_nodes(changed_keys, height, checked_sum(owner_count(), prior_additions));
+        // Per pre-rebalance page, doubled leaf-result buffers charge fewer than
+        // four pointers. Branch overflow, packed results and root collapse each
+        // need at most one more. Two slots per node in the four-page allowance
+        // cover this scratch even when many distinct keys reach the same leaf.
+        bytes = checked_sum(bytes, bound_product(nodes, maximum_node + 2 * sizeof(Pages::Ptr)));
         bytes = checked_sum(bytes, bound_product(checked_sum(leaf_capacity, changed_keys), sizeof(OwnerRecord)));
         bytes = checked_sum(bytes, bound_product(bound_product(checked_sum(height, 2),
             checked_sum(branch_capacity, changed_keys)), 3 * sizeof(Pages::Ptr)));
