@@ -1,7 +1,9 @@
 /** @file testQbmmEvents.cc
  * @brief Constructive mass-coordinate events, gross receipts and finite pre-substep donor reservations.
  */
+#include "equations/QbmmLawInputs.hh"
 #include "equations/QbmmPopulationEvents.hh"
+#include "equations/QbmmPopulationLawAdapters.hh"
 
 #include <gtest/gtest.h>
 
@@ -113,7 +115,481 @@ protected:
         EXPECT_FALSE(result.endpoint);
         EXPECT_FALSE(result.diagnostic.empty());
     }
+
+    static R::QbmmQuadrature rate_quadrature()
+    {
+        // Independently specified positive measure: four mass-two and two mass-eight bubbles.
+        R::QbmmQuadrature result;
+        result.status = R::InversionStatus::TwoNodes;
+        result.active_atoms = 2;
+        result.atoms = {R::QbmmAtom{4, 2}, R::QbmmAtom{2, 8}};
+        return result;
+    }
+
+    R::QbmmLawInputs rate_inputs(std::optional<double> dt = .25, double volume = 2, double mass_scale = 1,
+        R::QbmmQuadrature quadrature = rate_quadrature(), const R::QbmmPopulationSchema* bound_family = nullptr) const
+    {
+        const auto& family = bound_family ? *bound_family : schema;
+        const bool absent = quadrature.status == R::InversionStatus::Absent;
+        return {quadrature, std::nullopt, mass_scale, volume, 100000,
+            absent ? std::nullopt : std::optional<double>(300), dt, absent ? 0. : .25, .5,
+            absent ? std::nullopt : std::optional<std::vector<double>>(std::vector<double>{7, 11}),
+            std::vector<double>{13, 17}, 310, 999, family.fingerprint(), family.catalog().fingerprint(),
+            family.population()};
+    }
+
+    R::QbmmEventBatch rate_batch(std::vector<R::QbmmEventOperation> operations) const
+    {
+        auto result = batch({});
+        result.duration = .25;
+        for (auto& operation : operations)
+            result.events.push_back({"supplied-SI-rate", 1, std::move(operation)});
+        return result;
+    }
+
+    static R::QbmmLawMetadata slip_metadata(R::QbmmApplicabilityGate gate = R::QbmmApplicabilityGate::RejectOutside)
+    {
+        return {"supplied-slip", 2, R::QbmmLawKind::PhaseSlip, "common family drift relative to carrier, m/s", "m/s",
+            gate, true, {{R::QbmmRangeVariable::SlipSpeedMPerS, 5, 5, std::nullopt}}};
+    }
 };
+
+TEST_F(QbmmEventsTest, BirthRateUsesBulkVolumeActualDurationAndExplicitMaterialSpectrum)
+{
+    R::QbmmQuadrature absent;
+    absent.status = R::InversionStatus::Absent;
+    const auto inputs = rate_inputs(.25, 2, 1, absent);
+    const std::array births{R::QbmmBirthRate{3, 2, R::QbmmPhaseExchange{P::Dissolved}},
+        R::QbmmBirthRate{0, 19, R::QbmmPhaseExchange{P::Dissolved}},
+        R::QbmmBirthRate{2, 8, R::QbmmPhaseExchange{P::Dissolved}}};
+    const auto operations = R::qbmm_birth_from_rate(schema, inputs, births);
+    ASSERT_EQ(operations.size(), 1u);
+    const auto& birth = std::get<R::QbmmBirth>(operations.front());
+    ASSERT_EQ(birth.atoms.size(), 2u);
+    EXPECT_EQ(birth.atoms[0].atom.count, 1.5);
+    EXPECT_EQ(birth.atoms[0].atom.mass_over_scale, 2);
+    EXPECT_EQ(birth.atoms[0].transfer.moles, (std::vector<double>{.75, 1.125}));
+    EXPECT_EQ(birth.atoms[1].atom.count, 1);
+    EXPECT_EQ(birth.atoms[1].atom.mass_over_scale, 8);
+    EXPECT_EQ(birth.atoms[1].transfer.moles, (std::vector<double>{2, 3}));
+    const auto result = advance(stock(0, 11), 0, {}, rate_batch(operations));
+    ASSERT_TRUE(result.endpoint) << result.diagnostic;
+    expect_block(*result.endpoint, {2.5, 11, 70, 524});
+    EXPECT_EQ(result.endpoint->species.amount(*catalog, 6, P::Dissolved), 0);
+    EXPECT_EQ(result.endpoint->species.amount(*catalog, 41, P::Dissolved), 0);
+    EXPECT_TRUE(R::qbmm_birth_from_rate(schema, rate_inputs(), {}).empty());
+}
+
+TEST_F(QbmmEventsTest, BirthRateRejectsInvalidMassRateScaleOverflowAndUnderflow)
+{
+    for (const double bad : {-1., std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()})
+    {
+        const std::array births{R::QbmmBirthRate{bad, 2, R::QbmmPhaseExchange{P::Dissolved}}};
+        EXPECT_THROW((void) R::qbmm_birth_from_rate(schema, rate_inputs(), births), std::invalid_argument);
+    }
+    for (const double bad : {0., -1., std::numeric_limits<double>::infinity()})
+    {
+        const std::array births{R::QbmmBirthRate{1, bad, R::QbmmPhaseExchange{P::Dissolved}}};
+        EXPECT_THROW((void) R::qbmm_birth_from_rate(schema, rate_inputs(), births), std::invalid_argument);
+    }
+    const std::array valid{R::QbmmBirthRate{1, 2, R::QbmmPhaseExchange{P::Dissolved}}};
+    EXPECT_THROW((void) R::qbmm_birth_from_rate(schema, rate_inputs(.25, 2, 2), valid), std::invalid_argument);
+    const std::array huge{R::QbmmBirthRate{std::numeric_limits<double>::max(), 2, R::QbmmPhaseExchange{P::Dissolved}}};
+    EXPECT_THROW((void) R::qbmm_birth_from_rate(schema, rate_inputs(1, 4), huge), std::invalid_argument);
+    const std::array tiny{
+        R::QbmmBirthRate{std::numeric_limits<double>::denorm_min(), 2, R::QbmmPhaseExchange{P::Dissolved}}};
+    EXPECT_THROW((void) R::qbmm_birth_from_rate(schema, rate_inputs(.25, .5), tiny), std::invalid_argument);
+}
+
+TEST_F(QbmmEventsTest, CoalescenceKernelUsesUnorderedExpectedPairsAndConservesMaterial)
+{
+    const std::array kernel{std::array{.5, .25}, std::array{.25, 1.}};
+    const auto operations = R::qbmm_coalescence_from_kernel(rate_inputs(), kernel);
+    ASSERT_EQ(operations.size(), 3u);
+    const auto& aa = std::get<R::QbmmCoalescence>(operations[0]);
+    const auto& ab = std::get<R::QbmmCoalescence>(operations[1]);
+    const auto& bb = std::get<R::QbmmCoalescence>(operations[2]);
+    EXPECT_EQ(aa.first, 0u);
+    EXPECT_EQ(aa.second, 0u);
+    EXPECT_EQ(aa.count, .5); // Expected N^2 pairs; an integer N*(N-1) law would give .375.
+    EXPECT_EQ(ab.first, 0u);
+    EXPECT_EQ(ab.second, 1u);
+    EXPECT_EQ(ab.count, .25);
+    EXPECT_EQ(bb.first, 1u);
+    EXPECT_EQ(bb.second, 1u);
+    EXPECT_EQ(bb.count, .25);
+    const auto result = advance(stock(24), 6, {144, 1056}, rate_batch(operations));
+    ASSERT_TRUE(result.endpoint) << result.diagnostic;
+    // Remaining atoms: 2.75 at 2 and 1.25 at 8. Products: .5 at 4, .25 at 10, .25 at 16.
+    expect_block(*result.endpoint, {5, 24, 188, 1968});
+    EXPECT_EQ(result.endpoint->species.dispersedPopulations[1].amounts, (std::vector<double>{6, 9}));
+    EXPECT_TRUE(R::qbmm_coalescence_from_kernel(rate_inputs(), {}).empty());
+}
+
+TEST_F(QbmmEventsTest, CoalescenceRejectsInvalidKernelsAndLeavesDonorOverdrawToTheOwner)
+{
+    for (const auto& kernel :
+        {std::array{std::array{1., .25}, std::array{.5, 1.}}, std::array{std::array{-1., 0.}, std::array{0., 1.}},
+            std::array{std::array{std::numeric_limits<double>::infinity(), 0.}, std::array{0., 1.}}})
+        EXPECT_THROW((void) R::qbmm_coalescence_from_kernel(rate_inputs(), kernel), std::invalid_argument);
+    const std::array excessive{std::array{100., 0.}, std::array{0., 0.}};
+    const auto operations = R::qbmm_coalescence_from_kernel(rate_inputs(), excessive);
+    ASSERT_EQ(operations.size(), 1u);
+    EXPECT_EQ(std::get<R::QbmmCoalescence>(operations[0]).count, 100);
+    rejected(advance(stock(24), 6, {144, 1056}, rate_batch(operations)), Status::CountDonorOverdraw);
+}
+
+TEST_F(QbmmEventsTest, BreakupFrequencyUsesPerParentDaughterFractionsAndConservesMass)
+{
+    const std::array frequencies{.5, 1.};
+    const std::array daughters{
+        std::vector<R::QbmmDaughterFraction>{{2, .5}}, std::vector<R::QbmmDaughterFraction>{{1, .25}, {1, .75}}};
+    const auto operations = R::qbmm_breakup_from_frequency(rate_inputs(), frequencies, daughters);
+    ASSERT_EQ(operations.size(), 2u);
+    const auto& first = std::get<R::QbmmBreakup>(operations[0]);
+    const auto& second = std::get<R::QbmmBreakup>(operations[1]);
+    EXPECT_EQ(first.donor, 0u);
+    EXPECT_EQ(first.count, .5);
+    ASSERT_EQ(first.daughters.size(), 1u);
+    EXPECT_EQ(first.daughters[0].count, 2);
+    EXPECT_EQ(first.daughters[0].mass_over_scale, 1);
+    EXPECT_EQ(second.donor, 1u);
+    EXPECT_EQ(second.count, .5);
+    ASSERT_EQ(second.daughters.size(), 2u);
+    EXPECT_EQ(second.daughters[0].mass_over_scale, 2);
+    EXPECT_EQ(second.daughters[1].mass_over_scale, 6);
+    const auto result = advance(stock(24), 6, {144, 1056}, rate_batch(operations));
+    ASSERT_TRUE(result.endpoint) << result.diagnostic;
+    expect_block(*result.endpoint, {7, 24, 131, 909});
+    EXPECT_TRUE(R::qbmm_breakup_from_frequency(rate_inputs(), std::array{0., 0.}, daughters).empty());
+}
+
+TEST_F(QbmmEventsTest, BreakupRejectsInvalidFrequencyDaughtersAndNodeLayout)
+{
+    const std::array daughters{
+        std::vector<R::QbmmDaughterFraction>{{2, .5}}, std::vector<R::QbmmDaughterFraction>{{2, .5}}};
+    EXPECT_THROW(
+        (void) R::qbmm_breakup_from_frequency(rate_inputs(), std::array{1.}, daughters), std::invalid_argument);
+    for (const double bad : {-1., std::numeric_limits<double>::infinity()})
+        EXPECT_THROW((void) R::qbmm_breakup_from_frequency(rate_inputs(), std::array{bad, 0.}, daughters),
+            std::invalid_argument);
+    for (const auto& bad : {std::vector<R::QbmmDaughterFraction>{}, std::vector<R::QbmmDaughterFraction>{{2, .25}},
+             std::vector<R::QbmmDaughterFraction>{{0, .5}}, std::vector<R::QbmmDaughterFraction>{{2, -1}},
+             std::vector<R::QbmmDaughterFraction>{{2, std::numeric_limits<double>::quiet_NaN()}}})
+    {
+        const std::array invalid{bad, daughters[1]};
+        EXPECT_THROW(
+            (void) R::qbmm_breakup_from_frequency(rate_inputs(), std::array{1., 0.}, invalid), std::invalid_argument);
+    }
+}
+
+TEST_F(QbmmEventsTest, SignedMassRatePairsGrowthAndShrinkageWithTheSameRoundedDestinations)
+{
+    const std::array rates{2., -4.};
+    const std::array<R::QbmmTransferCounterpart, 2> counterparts{
+        R::QbmmPhaseExchange{P::Dissolved}, R::QbmmPhaseExchange{P::Dissolved}};
+    const auto operations = R::qbmm_resize_from_mass_rate(schema, rate_inputs(), rates, counterparts);
+    ASSERT_EQ(operations.size(), 2u);
+    const auto& growth = std::get<R::QbmmResize>(operations[0]);
+    const auto& shrinkage = std::get<R::QbmmResize>(operations[1]);
+    EXPECT_EQ(growth.count, 4);
+    EXPECT_EQ(growth.mass_over_scale, 2.5);
+    EXPECT_EQ(shrinkage.count, 2);
+    EXPECT_EQ(shrinkage.mass_over_scale, 7);
+    EXPECT_EQ(growth.transfer.moles, (std::vector<double>{.5, .75}));
+    EXPECT_EQ(shrinkage.transfer.moles, (std::vector<double>{.5, .75}));
+    const auto result = advance(stock(24, 2), 6, {144, 1056}, rate_batch(operations));
+    ASSERT_TRUE(result.endpoint) << result.diagnostic;
+    expect_block(*result.endpoint, {6, 24, 123, 748.5});
+    EXPECT_EQ(result.endpoint->species.amount(*catalog, 6, P::Dissolved), .5);
+    EXPECT_EQ(result.endpoint->species.amount(*catalog, 41, P::Dissolved), .75);
+    EXPECT_TRUE(R::qbmm_resize_from_mass_rate(schema, rate_inputs(), std::array{0., 0.}, counterparts).empty());
+}
+
+TEST_F(QbmmEventsTest, MassRateRejectsZeroCrossingsUnrepresentableChangeAndIncompatibleLayout)
+{
+    const std::array<R::QbmmTransferCounterpart, 2> counterparts{
+        R::QbmmPhaseExchange{P::Dissolved}, R::QbmmPhaseExchange{P::Dissolved}};
+    for (const double bad :
+        {-8., -16., std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::denorm_min()})
+        EXPECT_THROW((void) R::qbmm_resize_from_mass_rate(schema, rate_inputs(), std::array{bad, 0.}, counterparts),
+            std::invalid_argument);
+    EXPECT_THROW((void) R::qbmm_resize_from_mass_rate(schema, rate_inputs(), std::array{1.}, counterparts),
+        std::invalid_argument);
+    EXPECT_THROW((void) R::qbmm_resize_from_mass_rate(schema, rate_inputs(.25, 2, 2), std::array{1., 0.}, counterparts),
+        std::invalid_argument);
+}
+
+TEST_F(QbmmEventsTest, SignedMassRateUsesTransferScaleWhenRoundingTheDestination)
+{
+    constexpr double count = 0x1p52;
+    R::QbmmQuadrature quadrature;
+    quadrature.status = R::InversionStatus::RankOne;
+    quadrature.active_atoms = 1;
+    quadrature.atoms[0] = {count, 1};
+    const auto inputs = rate_inputs(1, 2, 1, quadrature);
+    const std::array<R::QbmmTransferCounterpart, 1> counterparts{R::QbmmPhaseExchange{P::Dissolved}};
+
+    // The ±.75 kg requests cannot be represented by the adjacent destinations.
+    // At unit scaled mass the neighboring destinations move +1 kg or -.5 kg.
+    for (const double rate : {3 * 0x1p-54, -3 * 0x1p-54})
+        EXPECT_THROW((void) R::qbmm_resize_from_mass_rate(schema, inputs, std::array{rate}, counterparts),
+            std::invalid_argument);
+
+    for (const double rate : {std::nextafter(0x1p-52, 0.), std::nextafter(-0x1p-53, 0.)})
+    {
+        SCOPED_TRACE(rate);
+        const auto events = R::qbmm_resize_from_mass_rate(schema, inputs, std::array{rate}, counterparts);
+        ASSERT_EQ(events.size(), 1u);
+        const auto& resize = std::get<R::QbmmResize>(events[0]);
+        EXPECT_EQ(resize.count, count);
+        EXPECT_EQ(resize.mass_over_scale, std::nextafter(1., rate > 0 ? 2. : 0.));
+        EXPECT_EQ(resize.transfer.moles, moles(rate > 0 ? 1. : .5));
+    }
+}
+
+TEST_F(QbmmEventsTest, MaterialRateAdaptersRequireFrozenFamilyAndCatalogBinding)
+{
+    const auto inputs = rate_inputs();
+    const std::array births{R::QbmmBirthRate{3, 2, R::QbmmPhaseExchange{P::Dissolved}}};
+    const std::array<R::QbmmTransferCounterpart, 2> counterparts{
+        R::QbmmPhaseExchange{P::Dissolved}, R::QbmmPhaseExchange{P::Dissolved}};
+    const std::array rates{2., 0.};
+    const auto reject = [&](const char* label, const R::QbmmPopulationSchema& family, const R::QbmmLawInputs& frozen)
+    {
+        SCOPED_TRACE(label);
+        EXPECT_THROW((void) R::qbmm_birth_from_rate(family, frozen, births), std::invalid_argument);
+        EXPECT_THROW((void) R::qbmm_resize_from_mass_rate(family, frozen, rates, counterparts), std::invalid_argument);
+        EXPECT_THROW((void) R::qbmm_birth_from_rate(family, frozen, {}), std::invalid_argument);
+        EXPECT_THROW((void) R::qbmm_resize_from_mass_rate(family, frozen, std::array{0., 0.}, counterparts),
+            std::invalid_argument);
+    };
+    const R::QbmmPopulationSchema wrong_composition{catalog, catalog->fingerprint(), "small",
+        Binding{Binding::Role::DispersedGas, "small"}, 1, {{6, .75}, {41, .25}}};
+    const R::QbmmPopulationSchema wrong_population{catalog, catalog->fingerprint(), "large",
+        Binding{Binding::Role::DispersedGas, "large"}, 1, {{6, .25}, {41, .75}}};
+    reject("equal-scale family with different composition", wrong_composition, inputs);
+    reject("equal-scale family with different population", wrong_population, inputs);
+
+    const R::SpeciesCatalog other_catalog(catalog->species(), catalog->revision() + 1);
+    const auto restamp = [&](std::uint64_t family, std::uint64_t catalog_stamp, const std::string& population)
+    {
+        return R::QbmmLawInputs{inputs.quadrature, inputs.geometry, inputs.mass_scale_kg, inputs.bulk_volume_m3,
+            inputs.absolute_pressure_pa, inputs.temperature_K, inputs.time_step_s, inputs.phase_volume_fraction,
+            inputs.gas_volume_fraction, inputs.phase_concentration_mol_per_m3,
+            inputs.carrier_liquid_concentration_mol_per_m3, inputs.carrier_liquid_temperature_K,
+            inputs.slip_speed_m_per_s, family, catalog_stamp, population};
+    };
+    reject("wrong catalog stamp", schema, restamp(schema.fingerprint(), other_catalog.fingerprint(), "small"));
+    reject("wrong population stamp", schema, restamp(schema.fingerprint(), catalog->fingerprint(), "large"));
+    reject("missing binding", schema, restamp(0, 0, {}));
+
+    const auto birth = R::qbmm_birth_from_rate(schema, inputs, births);
+    const auto resize = R::qbmm_resize_from_mass_rate(schema, inputs, rates, counterparts);
+    ASSERT_EQ(birth.size(), 1u);
+    ASSERT_EQ(resize.size(), 1u);
+    EXPECT_EQ(std::get<R::QbmmBirth>(birth[0]).atoms.at(0).transfer.moles, moles(3));
+    EXPECT_EQ(std::get<R::QbmmResize>(resize[0]).transfer.moles, moles(2));
+}
+
+TEST_F(QbmmEventsTest, MaterialRateAdaptersRespectNonunitMassScaleAndExplicitReservoirHandoffs)
+{
+    const R::QbmmPopulationSchema scaled{catalog, catalog->fingerprint(), "small",
+        Binding{Binding::Role::DispersedGas, "small"}, 2, {{6, .25}, {41, .75}}};
+    const auto inputs = rate_inputs(.25, 2, 2, rate_quadrature(), &scaled);
+    const R::QbmmReservoirExchange reservoir{"supplied-feed", 7.25, {1, -2, 4}};
+    const std::array births{R::QbmmBirthRate{3, 4, reservoir}};
+    const auto birth_events = R::qbmm_birth_from_rate(scaled, inputs, births);
+    ASSERT_EQ(birth_events.size(), 1u);
+    const auto& birth = std::get<R::QbmmBirth>(birth_events[0]).atoms.at(0);
+    EXPECT_EQ(birth.atom.count, 1.5);
+    EXPECT_EQ(birth.atom.mass_over_scale, 2);
+    EXPECT_EQ(birth.transfer.moles, (std::vector<double>{1.5, 2.25})); // Six physical kilograms.
+    const auto& handoff = std::get<R::QbmmReservoirExchange>(birth.transfer.counterpart);
+    EXPECT_EQ(handoff.reservoir, "supplied-feed");
+    EXPECT_EQ(handoff.energy_j, 7.25);
+    EXPECT_EQ(handoff.momentum, (std::array<double, 3>{1, -2, 4}));
+
+    const std::array<R::QbmmTransferCounterpart, 2> counterparts{reservoir, reservoir};
+    const auto resize_events = R::qbmm_resize_from_mass_rate(scaled, inputs, std::array{4., -8.}, counterparts);
+    ASSERT_EQ(resize_events.size(), 2u);
+    EXPECT_EQ(std::get<R::QbmmResize>(resize_events[0]).mass_over_scale, 2.5);
+    EXPECT_EQ(std::get<R::QbmmResize>(resize_events[1]).mass_over_scale, 7);
+    for (const auto& event : resize_events)
+    {
+        const auto& transfer = std::get<R::QbmmResize>(event).transfer;
+        EXPECT_EQ(transfer.moles, (std::vector<double>{1, 1.5})); // Four physical kilograms each way.
+        EXPECT_EQ(std::get<R::QbmmReservoirExchange>(transfer.counterpart).energy_j, 7.25);
+        EXPECT_EQ(std::get<R::QbmmReservoirExchange>(transfer.counterpart).momentum, (std::array<double, 3>{1, -2, 4}));
+    }
+}
+
+TEST_F(QbmmEventsTest, RateAdaptersRejectMissingDurationAndInvalidFrozenPhysicalInputs)
+{
+    const auto check = [&](const R::QbmmLawInputs& input)
+    {
+        EXPECT_THROW((void) R::qbmm_birth_from_rate(schema, input, {}), std::invalid_argument);
+        EXPECT_THROW((void) R::qbmm_coalescence_from_kernel(input, {}), std::invalid_argument);
+        EXPECT_THROW((void) R::qbmm_breakup_from_frequency(input, {}, {}), std::invalid_argument);
+        EXPECT_THROW((void) R::qbmm_resize_from_mass_rate(schema, input, {}, {}), std::invalid_argument);
+    };
+    check(rate_inputs(std::nullopt));
+    check(rate_inputs(0));
+    check(rate_inputs(-1));
+    check(rate_inputs(std::numeric_limits<double>::quiet_NaN()));
+    check(rate_inputs(.25, 0));
+    check(rate_inputs(.25, 2, 0));
+    R::QbmmQuadrature invalid;
+    check(rate_inputs(.25, 2, 1, invalid));
+}
+
+TEST_F(QbmmEventsTest, SuppliedSlipUsesFieldMagnitudeInclusiveBoundsAndPreservesFrozenInputs)
+{
+    const auto inputs = rate_inputs(std::nullopt);
+    const auto result = R::evaluate_qbmm_supplied_slip(slip_metadata(), inputs, {3, -4, 0});
+    EXPECT_EQ(result.velocity_m_per_s, (std::array<double, 3>{3, -4, 0}));
+    EXPECT_TRUE(result.applicability.applicable);
+    EXPECT_TRUE(result.applicability.gate_passed);
+    ASSERT_EQ(result.applicability.ranges.size(), 1u);
+    EXPECT_EQ(result.applicability.ranges[0].status, R::QbmmRangeStatus::WithinRange);
+    EXPECT_EQ(result.applicability.ranges[0].observed_minimum, 5);
+    EXPECT_EQ(result.applicability.ranges[0].observed_maximum, 5);
+    EXPECT_EQ(inputs.slip_speed_m_per_s, 999);
+    EXPECT_FALSE(inputs.time_step_s); // Initialization needs no invented unit interval.
+}
+
+TEST_F(QbmmEventsTest, ApplicabilityKeepsPhysicalLiquidConcentrationsSeparateAndExactAbsenceUndefined)
+{
+    auto law = slip_metadata();
+    law.ranges = {{R::QbmmRangeVariable::PhaseConcentrationMolPerM3, 7, 7, 0},
+        {R::QbmmRangeVariable::CarrierLiquidConcentrationMolPerM3, 13, 13, 0},
+        {R::QbmmRangeVariable::CarrierLiquidTemperatureK, 310, 310, std::nullopt}};
+    const auto result = R::evaluate_qbmm_supplied_slip(law, rate_inputs(), {3, 4, 0});
+    ASSERT_EQ(result.applicability.ranges.size(), 3u);
+    EXPECT_TRUE(result.applicability.applicable);
+    EXPECT_EQ(result.applicability.ranges[0].observed_minimum, 7);
+    EXPECT_EQ(result.applicability.ranges[1].observed_minimum, 13);
+    const auto concentrations = R::qbmm_phase_concentrations(std::array{2., 0.}, .5);
+    ASSERT_TRUE(concentrations);
+    EXPECT_EQ(*concentrations, (std::vector<double>{4, 0}));
+    EXPECT_FALSE(R::qbmm_phase_concentrations(std::array{0., 0.}, 0));
+    EXPECT_THROW((void) R::qbmm_phase_concentrations(std::array{2., 0.}, 0), std::invalid_argument);
+    EXPECT_THROW((void) R::qbmm_phase_concentrations(std::array{0., 0.}, .5), std::invalid_argument);
+}
+
+TEST_F(QbmmEventsTest, SuppliedSlipRejectsNonfiniteFieldsAndHonorsReportOnlyAndMissingInputGates)
+{
+    const auto report_only = slip_metadata(R::QbmmApplicabilityGate::ReportOnly);
+    const auto result = R::evaluate_qbmm_supplied_slip(report_only, rate_inputs(), {0, 0, 6});
+    EXPECT_FALSE(result.applicability.applicable);
+    EXPECT_TRUE(result.applicability.gate_passed);
+    EXPECT_EQ(result.applicability.ranges[0].status, R::QbmmRangeStatus::OutsideRange);
+    EXPECT_THROW(
+        (void) R::evaluate_qbmm_supplied_slip(slip_metadata(), rate_inputs(), {0, 0, 6}), std::invalid_argument);
+    for (const double bad : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()})
+        EXPECT_THROW(
+            (void) R::evaluate_qbmm_supplied_slip(report_only, rate_inputs(), {bad, 0, 0}), std::invalid_argument);
+    EXPECT_THROW((void) R::evaluate_qbmm_supplied_slip(report_only, rate_inputs(),
+                     {std::numeric_limits<double>::max(), std::numeric_limits<double>::max(), 0}),
+        std::invalid_argument);
+    auto duration_gate = slip_metadata();
+    duration_gate.ranges.push_back({R::QbmmRangeVariable::TimeStepS, .1, .5, std::nullopt});
+    EXPECT_THROW((void) R::evaluate_qbmm_supplied_slip(duration_gate, rate_inputs(std::nullopt), {3, 4, 0}),
+        std::invalid_argument);
+    duration_gate.gate = R::QbmmApplicabilityGate::ReportOnly;
+    const auto missing = R::evaluate_qbmm_supplied_slip(duration_gate, rate_inputs(std::nullopt), {3, 4, 0});
+    EXPECT_EQ(missing.applicability.ranges[1].status, R::QbmmRangeStatus::MissingInput);
+    EXPECT_FALSE(missing.applicability.applicable);
+    EXPECT_TRUE(missing.applicability.gate_passed);
+    duration_gate.kind = R::QbmmLawKind::Coalescence;
+    EXPECT_THROW((void) R::evaluate_qbmm_supplied_slip(duration_gate, rate_inputs(), {3, 4, 0}), std::invalid_argument);
+}
+
+TEST_F(QbmmEventsTest, SuppliedSlipAtExactAbsenceSkipsPopulationRangesButAlwaysChecksFiniteField)
+{
+    R::QbmmQuadrature absent;
+    absent.status = R::InversionStatus::Absent;
+    const auto inputs = rate_inputs(std::nullopt, 2, 1, absent);
+    const auto skipped = R::evaluate_qbmm_supplied_slip(slip_metadata(), inputs, {0, 0, 6});
+    EXPECT_FALSE(skipped.applicability.applicable);
+    EXPECT_TRUE(skipped.applicability.gate_passed);
+    EXPECT_EQ(skipped.applicability.ranges[0].status, R::QbmmRangeStatus::NotApplicable);
+    auto always = slip_metadata();
+    always.requires_population = false;
+    EXPECT_THROW((void) R::evaluate_qbmm_supplied_slip(always, inputs, {0, 0, 6}), std::invalid_argument);
+    EXPECT_THROW((void) R::evaluate_qbmm_supplied_slip(
+                     slip_metadata(), inputs, {0, std::numeric_limits<double>::quiet_NaN(), 0}),
+        std::invalid_argument);
+}
+
+TEST_F(QbmmEventsTest, FrozenLawInputBuilderUsesPhysicalVolumesAndDoesNotInventDuration)
+{
+    const auto material = moles(24);
+    const auto inputs =
+        R::make_qbmm_law_inputs(schema, {rate_quadrature(), std::nullopt, material, 4, .5, 100000, 300, std::nullopt,
+                                            .25, std::vector<double>{13, 17}, 310, {3, -4, 0}});
+    EXPECT_EQ(inputs.phase_volume_fraction, .125);
+    EXPECT_EQ(inputs.phase_concentration_mol_per_m3, (std::optional<std::vector<double>>{{12, 18}}));
+    EXPECT_EQ(inputs.carrier_liquid_concentration_mol_per_m3, (std::optional<std::vector<double>>{{13, 17}}));
+    EXPECT_EQ(inputs.slip_speed_m_per_s, 5);
+    EXPECT_FALSE(inputs.time_step_s);
+    EXPECT_EQ(inputs.family_fingerprint, schema.fingerprint());
+    auto law = slip_metadata();
+    law.ranges.push_back({R::QbmmRangeVariable::TimeStepS, .1, .5, std::nullopt});
+    const auto evaluation = R::evaluate_qbmm_applicability(law, inputs);
+    EXPECT_EQ(evaluation.ranges[1].status, R::QbmmRangeStatus::MissingInput);
+    EXPECT_FALSE(evaluation.gate_passed);
+}
+
+TEST_F(QbmmEventsTest, FrozenLawInputBuilderPreservesExactPopulationAndLiquidAbsence)
+{
+    R::QbmmQuadrature absent;
+    absent.status = R::InversionStatus::Absent;
+    const auto material = moles(0);
+    R::QbmmFrozenLawState frozen{
+        absent, std::nullopt, material, 4, 0, 100000, 300, .025, 0, std::nullopt, std::nullopt, {0, 0, 0}};
+    const auto inputs = R::make_qbmm_law_inputs(schema, frozen);
+    EXPECT_EQ(inputs.phase_volume_fraction, 0);
+    EXPECT_FALSE(inputs.temperature_K);
+    EXPECT_FALSE(inputs.phase_concentration_mol_per_m3);
+    EXPECT_FALSE(inputs.carrier_liquid_concentration_mol_per_m3);
+    EXPECT_FALSE(inputs.carrier_liquid_temperature_K);
+    frozen.phase_volume_m3 = 1;
+    EXPECT_THROW((void) R::make_qbmm_law_inputs(schema, frozen), std::invalid_argument);
+}
+
+TEST_F(QbmmEventsTest, FamilyLawBindingsIncludeRangesGatesAndExactFamilyDeclarations)
+{
+    auto a = slip_metadata(R::QbmmApplicabilityGate::ReportOnly);
+    a.kind = R::QbmmLawKind::Coalescence;
+    a.input_basis = "bulk number density, count/m3";
+    a.output_units = "m3/s";
+    auto b = a;
+    b.ranges[0].maximum = 6; // Same identity/revision, distinct immutable family contract.
+    R::QbmmClosureVersions va, vb;
+    va.laws = {a};
+    vb.laws = {b};
+    const R::QbmmPopulationSchema fa{catalog, catalog->fingerprint(), "small",
+        Binding{Binding::Role::DispersedGas, "small"}, 1, {{6, .25}, {41, .75}}, va};
+    const R::QbmmPopulationSchema fb{catalog, catalog->fingerprint(), "large",
+        Binding{Binding::Role::DispersedGas, "large"}, 1, {{6, .25}, {41, .75}}, vb};
+    EXPECT_TRUE(fa.declares_law(a));
+    EXPECT_FALSE(fa.declares_law(b));
+    EXPECT_TRUE(fb.declares_law(b));
+    EXPECT_FALSE(fb.declares_law(a));
+    EXPECT_FALSE(schema.declares_law(a));
+    const R::QbmmPopulationSchema changed_ranges{catalog, catalog->fingerprint(), "small",
+        Binding{Binding::Role::DispersedGas, "small"}, 1, {{6, .25}, {41, .75}}, vb};
+    EXPECT_NE(fa.fingerprint(), changed_ranges.fingerprint());
+    EXPECT_NE(R::qbmm_law_signature(a), R::qbmm_law_signature(b));
+    b.gate = R::QbmmApplicabilityGate::RejectOutside;
+    EXPECT_FALSE(fb.declares_law(b));
+    EXPECT_NE(R::qbmm_law_signature(a), R::qbmm_law_signature(b));
+    vb.laws = {b};
+    const R::QbmmPopulationSchema changed_gate{catalog, catalog->fingerprint(), "small",
+        Binding{Binding::Role::DispersedGas, "small"}, 1, {{6, .25}, {41, .75}}, vb};
+    EXPECT_NE(changed_ranges.fingerprint(), changed_gate.fingerprint());
+}
 
 TEST_F(QbmmEventsTest, FiniteBirthCarriesIntegratedSpeciesAndProviderProvenanceExactlyOnce)
 {

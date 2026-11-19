@@ -73,6 +73,14 @@ std::uint64_t family_fingerprint(const QbmmPopulationSchema& schema)
     number(versions.transport);
     string(versions.source_identity);
     number(versions.source);
+    // Preserve the existing signature for families with no additional constitutive contracts.
+    if (!versions.laws.empty())
+    {
+        string("QBMM SI constitutive contracts v1");
+        number(versions.laws.size());
+        for (const auto& law : versions.laws)
+            string(qbmm_law_signature(law));
+    }
     return hash;
 }
 
@@ -135,6 +143,13 @@ QbmmPopulationSchema::QbmmPopulationSchema(std::shared_ptr<const SpeciesCatalog>
                 !d_versions.source_identity.empty() && d_versions.source != 0,
         "Unknown QBMM built-in policy version or missing source policy identity and revision.");
     const auto& species = d_catalog->species();
+    for (std::size_t i = 0; i < d_versions.laws.size(); ++i)
+    {
+        validate_qbmm_law_metadata(d_versions.laws[i], species.size());
+        for (std::size_t j = 0; j < i; ++j)
+            require(d_versions.laws[i].identity != d_versions.laws[j].identity,
+                "QBMM family law identities must be unique.");
+    }
     require(fractions.size() == species.size(), "The QBMM composition must declare every catalog species.");
 
     SimpleFluid::detail::CompensatedSum total_fraction, moles_per_kg;

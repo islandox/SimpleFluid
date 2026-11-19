@@ -3,9 +3,11 @@
  */
 #pragma once
 
+#include "equations/QbmmConstitutiveLaws.hh"
 #include "equations/QbmmMoments.hh"
 #include "equations/ReactionMechanism.hh"
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -29,6 +31,7 @@ struct QbmmClosureVersions
     std::uint64_t inversion = 1, thermodynamics = 1, transport = 1;
     std::string source_identity = "constructive"; ///< Caller-declared source policy identity.
     std::uint64_t source = 1;                     ///< Revision of that source policy.
+    std::vector<QbmmLawMetadata> laws; ///< Ordered supplied SI contracts, including ranges and rejection policy.
     bool operator==(const QbmmClosureVersions&) const = default;
 };
 
@@ -66,6 +69,10 @@ public:
     [[nodiscard]] double mass_scale_kg() const noexcept { return d_mass_scale_kg; }
     [[nodiscard]] std::span<const double> mass_fractions() const noexcept { return d_mass_fractions; }
     [[nodiscard]] const QbmmClosureVersions& closure_versions() const noexcept { return d_versions; }
+    [[nodiscard]] bool declares_law(const QbmmLawMetadata& law) const
+    {
+        return std::ranges::find(d_versions.laws, law) != d_versions.laws.end();
+    }
     [[nodiscard]] long double mixture_molar_mass_kg_per_mol() const noexcept { return d_mixture_molar_mass; }
 
     /** Derive H1 from the existing nonnegative mol/cell stock in catalog order.
