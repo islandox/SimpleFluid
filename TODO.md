@@ -33,6 +33,13 @@ Detailed workstream status is tracked in [docs/verification/](docs/verification/
 - [x] **AMR storage Stage 7 — caloric exception exports.** The Solvers library owns the vtables and type information
   for `CaloricDomainUnresolved` and `ThermalCaloricRangeError`. The shared-library exception and export checks
   passed in GCC Debug and LTO-enabled RelWithDebInfo.
+- [x] **Persistent geometry-demand storage and prepared-page policy.** The hierarchy maintains the exact owner union
+  across snapshot roots. The serial trusted Cartesian stream prepares all 256 and 512 cells under the 64 MiB
+  hierarchy budget. [Demand, admission and compatibility paths](docs/architecture/general_amr.md#persistent-geometry-demand-storage-and-prepared-page-policy)
+- [x] **Persistent owner-local topology with certified contact/subface reuse.** Stage 8 covers Cartesian, Product,
+  Polyhedral, Static and Mixed snapshots in serial and at two and four ranks. The four-rank cubic probes passed
+  at 64 MiB for explicit-row N32 and canonical N16, and at 96 MiB for full canonical N32 in RelWithDebInfo.
+  [Cubic halo measurements](docs/architecture/spatial_adaptive_closure.md#cubic-halo-storage)
 
 ## Active roadmap
 

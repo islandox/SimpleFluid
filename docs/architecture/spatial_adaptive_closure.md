@@ -264,15 +264,18 @@ candidate rather than added again as source-only metadata. Diagnostics separate
 occupied/live records, page/ring capacities, history storage, credit objects and
 deferred body storage.
 
-The persistent tile lookup uses compact ordered support/emission/entry-slot
-descriptors and stable sixteen-slot metadata pages. Full emission ordinals are
-retained; actual support and entry slots select the compact or wide descriptor
-form. A fetch stages all support replacements before one sorted publication.
-Old ordered keys remain readable until the merge succeeds, retired slots are
-not reused during that publication, and moving page-directory owners does not
-move the entries themselves. Actual array storage is allocated and constructed
-explicitly so admission includes its exact requested extent without an implicit
-array cookie. Index work changes metadata only; it does not replay geometry.
+The persistent tile index stores each full support/emission key with its entry
+in immutable ordered pages. A batch sorts its insertions and retired supports,
+builds the initial root or edits the affected paths of an existing root, then
+publishes the result. Successful publication destroys both staging buffers
+before releasing their live admission. A rejected batch preserves the old root.
+
+When bootstrap starts with an empty tile index, every published tile is new.
+The first replay layer reads its keys by ordinal in support/emission order, taking
+each key by value so that replacing an entry cannot invalidate a borrowed key.
+This avoids building a journal of empty predecessors and a duplicate pending
+set. Updates to populated indexes retain the predecessor evidence for removing
+old contributions. Later periodic rounds retain their ordered pending sets.
 
 Line replay streams edge edits and batches tile delivery in bounded pages.
 Stored subscribers use checked 32-bit fields for support and endpoint slots,
@@ -381,12 +384,15 @@ The returned face keeps the final first-cell physical loop. Node and face GIDs
 belong to native publication and are assigned through its existing authority
 rules.
 
-Ownership migration rebinds the candidate session by retiring moved memberships at
-old owners and inserting them at new owners, including when the key and revision
-are unchanged. Owner routing and dirty support/line state follow the new partition.
-A native partition binding may rebind an equivalent cache only after the existing
-per-cell native geometry check and with the canonical leaf, provider and support
-identities unchanged.
+Migration planning validates a destination for every owned leaf and scans those
+leaves for outgoing records. The candidate session retires moved memberships at
+old owners and inserts them at new owners, including when key and revision stay
+the same. Owner routing and dirty support and line state follow the new partition.
+Partition binding checks the communicator, map and cell counts, then validates
+GID order, owner and applicable family for each owned leaf. The exact native
+path authenticates the publication receipt and rechecks the current partition
+control under the geometry-cache lock. Compatibility binding requests each owned
+cell's geometry and checks equivalence before reusing the cache.
 
 One stable typed point-group catalog owns local and remote fan slices. Domains
 and complete normalized identities refer to immutable pooled facts; periodic
@@ -511,3 +517,41 @@ production fallback. The standalone closure call still creates a complete
 bootstrap for that invocation. The hierarchy session and its incremental replay
 are separate from that standalone invocation; neither is evidence of broader
 numerical or physical qualification.
+
+## Cubic halo storage
+
+The cubic Cartesian fixtures divide a uniform grid into four equal slabs. The
+explicit-row fixture supplies integer corner incidences. The canonical fixtures
+also construct and retain the incidence cache from native Cartesian recipes.
+The cap applies per rank to live arena admission. Peak includes temporary
+reservations for encoding and decoding, which can use all remaining headroom.
+Retained bytes measure the live charge after the first refinement query.
+Cumulative admission includes retired reservations and can exceed the cap.
+
+The measured values below are bytes, in **peak / retained** order. The N16
+canonical and N32 explicit-row measurements use GCC Debug at 64 MiB. The
+full canonical N32 measurement uses GCC RelWithDebInfo at 96 MiB. The same
+full N32 case reached its 1,800-second Debug timeout during construction.
+
+| Rank | Canonical N16 | Explicit-row N32 | Full canonical N32 |
+| ---: | ---: | ---: | ---: |
+| 0 | 67,108,864 / 13,227,574 | 23,041,944 / 19,924,388 | 100,663,296 / 88,614,998 |
+| 1 | 67,108,864 / 11,284,228 | 23,037,000 / 20,715,321 | 100,663,296 / 80,443,759 |
+| 2 | 67,108,864 / 13,260,793 | 23,037,000 / 20,713,122 | 100,663,296 / 88,809,622 |
+| 3 | 67,108,864 / 10,833,917 | 23,044,840 / 19,926,895 | 100,663,296 / 78,411,794 |
+
+At N16 each rank owns 1,024 records. Ranks 0 and 3 each fetch and decode 256
+remote records and ranks 1 and 2 each fetch and decode 512. At N32 each rank
+owns 8,192 records, with 1,024 remote records on each outer rank and 2,048
+on each inner rank. The two N32 construction paths use the same pair oracle.
+
+| Grid and rank | Unique cell pairs | Logical contact pairs | Pair work |
+| --- | ---: | ---: | ---: |
+| N16, 0 or 3 | 12,184 | 26,656 | 24,368 |
+| N16, 1 or 2 | 14,300 | 30,500 | 28,600 |
+| N32, 0 or 3 | 101,936 | 221,248 | 203,872 |
+| N32, 1 or 2 | 110,772 | 237,124 | 221,544 |
+
+Each unique pair incurs one span comparison and one trace comparison. A repeat
+query on the same halo adds zero pair work, record fetches, decoded replies,
+query bytes, record bytes and pages. Ranks still participate in collective checks.
