@@ -17,7 +17,7 @@
 namespace SimpleFluid::Reacting::qbmm_face_detail
 {
 
-class SIMPLEFLUID_SOLVERS_LOCAL ScaledFaceSum
+class SIMPLEFLUID_EQUATIONS_LOCAL ScaledFaceSum
 {
     static constexpr int digits = std::numeric_limits<double>::digits;
     static constexpr int quantum = std::numeric_limits<double>::min_exponent - digits;
@@ -209,6 +209,30 @@ class SIMPLEFLUID_SOLVERS_LOCAL ScaledFaceSum
     }
 
 public:
+    // Admit a finite significand whose binary64 value may require multiplication
+    // by another operand before it can be stored as a double.
+    void add_scaled_value(double fraction, int exponent)
+    {
+        auto term = operand(fraction);
+        term.exponent += exponent;
+        add(term);
+    }
+
+    [[nodiscard]] int sign() const noexcept { return (d_top.fraction > 0) - (d_top.fraction < 0); }
+
+    void add_scaled_weighted(const ScaledFaceSum& rate, double fraction, int exponent)
+    {
+        auto factor = operand(fraction);
+        factor.exponent += exponent;
+        if (this == &rate)
+        {
+            const auto copy = rate;
+            add_weighted_terms(copy, factor);
+        }
+        else
+            add_weighted_terms(rate, factor);
+    }
+
     void add_product(double lhs, double rhs, double weight = 1.)
     {
         const auto a = operand(lhs), b = operand(rhs), w = operand(weight);
@@ -248,7 +272,7 @@ struct MaterialVolumeRates
     double volume_flux;
 };
 
-[[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL inline MaterialVolumeRates material_volume_rates(
+[[nodiscard]] SIMPLEFLUID_EQUATIONS_LOCAL inline MaterialVolumeRates material_volume_rates(
     const ScaledFaceSum& mass_density, double eos_density, double phase_flux)
 {
     const double fraction = mass_density.rounded(eos_density);

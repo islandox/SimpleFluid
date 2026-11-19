@@ -575,13 +575,13 @@ simplefluid_require_population_process(make_population_conversion_process
 simplefluid_require_population_process(make_film_transfer_process
     "${simplefluid_surface_string}, ${simplefluid_bubble_film_law_vector}")
 
-# Stage 3 retains exactly 47 public definitions after mesh retirement:
+# Native low-Mach flow owns 48 public definitions including the Q7b momentum overload:
 # LowMachMixtureSolver (19) plus its move-only ControllerLease (5),
 # LowMachPressureEquation (5), ReactingMixtureCoupler including Trial queries
-# (14), and VariableDensityMomentumEquation (4 for the native mesh).
+# (14), and VariableDensityMomentumEquation (5 for the native mesh).
 # Complete/base constructors and nonvirtual destructors each have two entries.
 # Inline trial/checkpoint storage and private implementation helpers are not API.
-set(simplefluid_low_mach_public_symbol_budget 47)
+set(simplefluid_low_mach_public_symbol_budget 48)
 set(simplefluid_stage3_size "(unsigned long|unsigned long long)")
 set(simplefluid_stage3_native_mesh
     "SimpleFluid::MeshHandle<SimpleFluid::TpetraTypes<.*>[ ]*>")
@@ -683,6 +683,9 @@ foreach(simplefluid_stage3_mesh_kind IN ITEMS native)
         "^${simplefluid_stage3_momentum_class}::refresh_geometry[(][)]$" 1)
     simplefluid_require_variable_density_api(
         "^${simplefluid_stage3_momentum_class}::advance[(]${simplefluid_stage3_momentum_vector} const&, ${simplefluid_stage3_momentum_scalar} const&, ${simplefluid_stage3_momentum_scalar} const&, ${simplefluid_stage3_momentum_face} const&, ${simplefluid_stage3_momentum_scalar} const&, double, ${simplefluid_stage3_momentum_vector}&, ${simplefluid_stage3_force}, ${simplefluid_stage3_boundary}, ${simplefluid_stage3_boundary_value}, SimpleFluid::LinearSolverOptions const&, SimpleFluid::FVM::NonOrthogonalTreatment, SimpleFluid::FVM::ALEControlVolumeState const[*][)]$" 1)
+    # Q7b adds the optional two-way carrier mass coefficient while keeping the original entry point.
+    simplefluid_require_variable_density_api(
+        "^${simplefluid_stage3_momentum_class}::advance[(]${simplefluid_stage3_momentum_vector} const&, ${simplefluid_stage3_momentum_scalar} const&, ${simplefluid_stage3_momentum_scalar} const&, ${simplefluid_stage3_momentum_face} const&, ${simplefluid_stage3_momentum_scalar} const&, double, ${simplefluid_stage3_momentum_vector}&, ${simplefluid_stage3_force}, ${simplefluid_stage3_boundary}, ${simplefluid_stage3_boundary_value}, SimpleFluid::LinearSolverOptions const&, SimpleFluid::FVM::NonOrthogonalTreatment, SimpleFluid::FVM::ALEControlVolumeState const[*], ${simplefluid_stage3_momentum_face} const[*][)]$" 1)
 endforeach()
 
 # Transport-first source evaluation and accepted species-history reporting add
@@ -952,6 +955,10 @@ simplefluid_require_reacting_api("^${qbmm_ns}ReactingMixtureCoupler::Trial::owne
 math(EXPR simplefluid_qbmm_transport_public_symbol_budget "${simplefluid_qbmm_transport_public_symbol_budget} + 1")
 simplefluid_require_reacting_api(
     "^${qbmm_ns}LowMachPressureEquation::project_material_with_eos[(]${simplefluid_stage3_scalar_cell} const&, double, ${simplefluid_reacting_const_double_span}, ${simplefluid_reacting_const_double_span}, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face}&, ${simplefluid_stage3_scalar_cell}&, ${simplefluid_stage3_vector_cell}&, SimpleFluid::LinearSolverOptions const&, double, ${qbmm_ns}LowMachPressureEquation::CellPressureGradient[)]$" 1)
+# Fixed kinetic projection takes the measured material flux at its frozen carrier flux.
+math(EXPR simplefluid_qbmm_transport_public_symbol_budget "${simplefluid_qbmm_transport_public_symbol_budget} + 1")
+simplefluid_require_reacting_api(
+    "^${qbmm_ns}LowMachPressureEquation::project_kinetic_material_with_eos[(]${simplefluid_stage3_scalar_cell} const&, double, ${simplefluid_reacting_const_double_span}, ${simplefluid_reacting_const_double_span}, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face}&, ${simplefluid_stage3_scalar_cell}&, ${simplefluid_stage3_vector_cell}&, SimpleFluid::LinearSolverOptions const&, double[)]$" 1)
 
 # Q5 accepted and trial reporting entry points on the native flow and its controller.
 set(simplefluid_qbmm_report_public_symbol_budget 4)

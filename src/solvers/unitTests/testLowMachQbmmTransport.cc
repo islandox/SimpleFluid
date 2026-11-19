@@ -1,9 +1,9 @@
 /** Native common-map QBMM transport and owner-oriented receipt regressions. */
 #include "equations/CollectiveValidation.hh"
+#include "equations/details/LowMachScaledFaceSum.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/LowMachMixtureSolver.hh"
 #include "solvers/details/LowMachQbmmState.hh"
-#include "solvers/details/LowMachScaledFaceSum.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>

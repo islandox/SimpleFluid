@@ -4,10 +4,11 @@
 #pragma once
 #include "utils/export_helper.hh"
 
-#include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
 #include "equations/VariableDensityMomentumEquation.hh"
+#include "geometry/MeshConcepts.hh"
 
+#include <array>
 #include <cmath>
 #include <stdexcept>
 
@@ -36,6 +37,18 @@ LinearSolveSummary VariableDensityMomentumEquation<Pack, MeshType>::advance(cons
     boundary_type boundary, boundary_value_type boundary_value, const LinearSolverOptions& linear,
     FVM::NonOrthogonalTreatment treatment, const FVM::ALEControlVolumeState* ale)
 {
+    return advance(old_velocity, old_density, density, mass_flux, dynamic_viscosity, time_step, velocity,
+        std::move(force), std::move(boundary), std::move(boundary_value), linear, treatment, ale, nullptr);
+}
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+LinearSolveSummary VariableDensityMomentumEquation<Pack, MeshType>::advance(const velocity_field_type& old_velocity,
+    const field_type& old_density, const field_type& density, const face_field_type& mass_flux,
+    const field_type& dynamic_viscosity, scalar_type time_step, velocity_field_type& velocity, force_type force,
+    boundary_type boundary, boundary_value_type boundary_value, const LinearSolverOptions& linear,
+    FVM::NonOrthogonalTreatment treatment, const FVM::ALEControlVolumeState* ale,
+    const face_field_type* bidirectional_mass_flux)
+{
     collective_detail::collective_local_validation(*d_mesh, "Variable-density momentum inputs",
         [&]
         {
@@ -54,6 +67,17 @@ LinearSolveSummary VariableDensityMomentumEquation<Pack, MeshType>::advance(cons
             for (const auto face : mass_flux.owned_face_ids())
                 if (!std::isfinite(mass_flux.value(face)))
                     throw std::invalid_argument("Momentum mass flux must be finite.");
+            if (bidirectional_mass_flux)
+            {
+                same_mesh(*bidirectional_mass_flux);
+                for (const auto face : bidirectional_mass_flux->owned_face_ids())
+                {
+                    const auto rate = bidirectional_mass_flux->value(face);
+                    if (!std::isfinite(rate) || rate < 0 || (rate != 0 && !d_mesh->is_interior_face(face)))
+                        throw std::invalid_argument(
+                            "Momentum counterflow requires a finite nonnegative interior rate.");
+                }
+            }
             for (size_t c = 0; c < d_mesh->num_owned_cells(); ++c)
             {
                 const auto cell = static_cast<local_ordinal_type>(c);
@@ -70,7 +94,9 @@ LinearSolveSummary VariableDensityMomentumEquation<Pack, MeshType>::advance(cons
             }
         });
     collective_detail::require_uniform_value(*d_mesh, time_step, "Variable-density momentum timestep");
-    collective_detail::require_uniform_value(*d_mesh, int(ale != nullptr), "Variable-density momentum ALE selection");
+    collective_detail::require_uniform_value(*d_mesh,
+        int(ale != nullptr) | (int(bidirectional_mass_flux != nullptr) << 1),
+        "Variable-density momentum ALE and counterflow selection");
     collective_detail::require_uniform_value(*d_mesh, int(treatment), "Variable-density momentum correction policy");
     collective_detail::require_uniform_value(*d_mesh, linear.max_iterations, "Momentum linear iteration limit");
     collective_detail::require_uniform_value(*d_mesh, linear.tolerance, "Momentum linear tolerance");
@@ -113,6 +139,44 @@ LinearSolveSummary VariableDensityMomentumEquation<Pack, MeshType>::advance(cons
             typename FVM::TransportSystemFactory<Pack, MeshType>::WeightedScalarOptions{
                 .correction = {treatment, &d_old_component}},
             context);
+        if (bidirectional_mass_flux)
+        {
+            auto& matrix = *system.matrix;
+            const auto columns = matrix.getColMap();
+            const auto overlap = d_mesh->overlap_cell_map();
+            const auto& geometry = d_geometry.assembly_geometry();
+            matrix.resumeFill();
+            collective_detail::collective_local_validation(*d_mesh, "Variable-density momentum counterflow assembly",
+                [&]
+                {
+                    for (size_t c = 0; c < geometry.volumes.size(); ++c)
+                    {
+                        const auto row = static_cast<local_ordinal_type>(c);
+                        const auto diagonal = columns->getLocalElement(matrix.getRowMap()->getGlobalElement(row));
+                        for (size_t i = geometry.face_offsets[c]; i < geometry.face_offsets[c + 1]; ++i)
+                        {
+                            const auto& face = geometry.faces[i];
+                            if (!face.interior || face.other == row)
+                                continue;
+                            const auto rate = bidirectional_mass_flux->local_value(face.face_lid);
+                            if (!std::isfinite(rate) || rate < 0)
+                                throw std::invalid_argument(
+                                    "Momentum counterflow requires a synchronized interior rate.");
+                            if (rate == 0)
+                                continue;
+                            const auto other = columns->getLocalElement(overlap->getGlobalElement(face.other));
+                            // Net upwinding already supplies the larger stream's excess. The common
+                            // directional rate contributes rate * (u_cell - u_other) to each row.
+                            const std::array indices{diagonal, other};
+                            const std::array values{rate, -rate};
+                            if (matrix.sumIntoLocalValues(row, Teuchos::arrayView(indices.data(), 2),
+                                    Teuchos::arrayView(values.data(), 2)) != 2)
+                                throw std::logic_error("Momentum counterflow requires both adjacent matrix columns.");
+                        }
+                    }
+                });
+            matrix.fillComplete(matrix.getDomainMap(), matrix.getRangeMap());
+        }
         d_solver.notify_operator_values_changed();
         const auto statistics =
             d_solver.solve_with_statistics(system.matrix, *system.rhs, d_component.owned_data(), linear);

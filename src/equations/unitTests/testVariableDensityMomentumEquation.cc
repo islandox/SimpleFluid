@@ -1,16 +1,18 @@
 /** @file testVariableDensityMomentumEquation.cc
  * @brief Independent density-weighted momentum storage, force and rejection checks.
  */
-#include "geometry/MeshConcepts.hh"
 #include "equations/VariableDensityMomentumEquation.hh"
-#include "geometry/mesh/OrthogonalCartesian3D.hh"
+#include "geometry/MeshConcepts.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
+#include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
-#include <gtest/gtest.h>
 #include <Teuchos_CommHelpers.hpp>
-#include <limits>
 #include <array>
+#include <gtest/gtest.h>
+#include <iomanip>
+#include <limits>
+#include <sstream>
 #include <vector>
 
 namespace
@@ -22,15 +24,13 @@ testing::Environment* const environment = testing::AddGlobalTestEnvironment(new 
 
 SP<Handle> mesh()
 {
-    auto geometry = std::make_shared<Meshes::OrthogonalCartesian3D>(
-        Vec3D<ArrReal>{{{0, 1}, {0, 1}, {0, 1}}});
+    auto geometry = std::make_shared<Meshes::OrthogonalCartesian3D>(Vec3D<ArrReal>{{{0, 1}, {0, 1}, {0, 1}}});
     Handle::DistributionOptions distribution;
     distribution.allow_empty_partitions = true;
     return std::make_shared<Handle>(geometry, distribution);
 }
 
-template<SimpleFluid::MeshType MeshType>
-void momentum_balance(SP<const MeshType> grid)
+template<SimpleFluid::MeshType MeshType> void momentum_balance(SP<const MeshType> grid)
 {
     using Traits = MeshFieldTraits<Pack, MeshType>;
     typename Traits::scalar_cell_type old_density(grid, 2.0, "rho_old"), density(grid, 3.0, "rho"),
@@ -39,8 +39,8 @@ void momentum_balance(SP<const MeshType> grid)
     typename Traits::vector_cell_type old_velocity(grid, vec3<double>{1, -2, 3}, "old_u"),
         velocity(grid, vec3<double>{9, 9, 9}, "u");
     VariableDensityMomentumEquation<Pack, MeshType> equation(grid);
-    const auto statistics = equation.advance(old_velocity, old_density, density, mass_flux, viscosity,
-        0.25, velocity, [](auto) { return vec3<double>{4, 8, -4}; });
+    const auto statistics = equation.advance(old_velocity, old_density, density, mass_flux, viscosity, 0.25, velocity,
+        [](auto) { return vec3<double>{4, 8, -4}; });
     EXPECT_TRUE(statistics.converged);
     for (size_t c = 0; c < grid->num_owned_cells(); ++c)
     {
@@ -69,8 +69,7 @@ TEST(VariableDensityMomentumTest, CanonicalFaceMassFluxIsNotMultipliedByDensityA
     distribution.allow_empty_partitions = true;
     auto grid = std::make_shared<Handle>(geometry, distribution);
     using Traits = MeshFieldTraits<Pack, Handle>;
-    Traits::scalar_cell_type old_density(grid, 0.0, "old_rho"), density(grid, 0.0, "rho"),
-        viscosity(grid, 0.0, "mu");
+    Traits::scalar_cell_type old_density(grid, 0.0, "old_rho"), density(grid, 0.0, "rho"), viscosity(grid, 0.0, "mu");
     Traits::scalar_face_type flux(grid, 0.0, "mass_flux");
     Traits::vector_cell_type old_velocity(grid, vec3<double>{}, "old_u"), velocity(grid, vec3<double>{}, "u");
     for (size_t owned = 0; owned < grid->num_owned_cells(); ++owned)
@@ -103,10 +102,104 @@ TEST(VariableDensityMomentumTest, CanonicalFaceMassFluxIsNotMultipliedByDensityA
     EXPECT_NEAR(global_momentum, 2., 2e-12);
 }
 
+TEST(VariableDensityMomentumTest, TwoDirectionalStreamsAdvectTangentialVelocityEvenAtZeroNetMassFlux)
+{
+    auto geometry = std::make_shared<Handle::Cartesian>(Vec3D<ArrReal>{{{0, 1, 2}, {0, 1}, {0, 1}}});
+    auto grid = std::make_shared<Handle>(geometry, Handle::DistributionOptions{.allow_empty_partitions = true});
+    const auto comm = grid->owned_cell_map()->getComm();
+    using Traits = MeshFieldTraits<Pack, Handle>;
+    Traits::scalar_cell_type old_density(grid, 1., "old_rho"), density(grid, 1., "rho"), viscosity(grid, 0., "mu");
+    Traits::scalar_face_type net(grid, 0., "net_mass_flux"), common(grid, 0., "common_directional_mass_flux");
+    Traits::vector_cell_type old_velocity(grid, vec3<double>{}, "old_u"), velocity(grid, vec3<double>{}, "u");
+    std::array<int, 2> local_ownership{grid->num_owned_cells() == 0, 0}, ownership{};
+    for (const auto face : net.owned_face_ids())
+        if (grid->is_interior_face(face))
+        {
+            common.set_owned_value(face, .5);
+            if (!grid->is_owned_cell(grid->owner_cell(face)) || !grid->is_owned_cell(grid->neighbor_cell(face)))
+                ++local_ownership[1];
+        }
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 2, local_ownership.data(), ownership.data());
+    RecordProperty("mpi_ranks", comm->getSize());
+    RecordProperty("empty_owners", ownership[0]);
+    RecordProperty("partition_faces", ownership[1]);
+    EXPECT_EQ(ownership[0], std::max(0, comm->getSize() - 2));
+    EXPECT_EQ(ownership[1], int(comm->getSize() > 1));
+    for (size_t c = 0; c < grid->num_owned_cells(); ++c)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(c);
+        const bool left = grid->cell_centroid(cell).x < 1.;
+        old_velocity.set_owned_value(cell, {0., left ? 2. : -1., 0.});
+    }
+    old_velocity.sync_ghosts();
+    common.sync_ghosts();
+    VariableDensityMomentumEquation<Pack, Handle> equation(grid);
+    // The expected velocities solve the two directional convection rows with old masses one,
+    // dt=1 and new masses 1 - (forward-backward), 1 + (forward-backward).
+    const std::array cases{std::array{.5, .5, 1.25, -.25}, std::array{1., .5, 1.4, .2}, std::array{.5, 1., .8, -.4}};
+    double local_max_error = 0.;
+    for (const auto& [forward, backward, left_velocity, right_velocity] : cases)
+    {
+        const double rate = forward - backward;
+        SCOPED_TRACE(rate);
+        for (size_t c = 0; c < grid->num_owned_cells(); ++c)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(c);
+            density.set_owned_value(cell, 1. + (grid->cell_centroid(cell).x < 1. ? -rate : rate));
+        }
+        for (const auto face : net.owned_face_ids())
+            if (grid->is_interior_face(face))
+                net.set_owned_value(face, rate * grid->face_area_vector(face).x);
+        density.sync_ghosts();
+        net.sync_ghosts();
+        EXPECT_TRUE(equation
+                .advance(old_velocity, old_density, density, net, viscosity, 1., velocity, {}, {}, {}, {},
+                    FVM::NonOrthogonalTreatment::Implicit, nullptr, &common)
+                .converged);
+        double local_momentum = 0., momentum = 0.;
+        for (size_t c = 0; c < grid->num_owned_cells(); ++c)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(c);
+            const auto expected = grid->cell_centroid(cell).x < 1. ? left_velocity : right_velocity;
+            EXPECT_NEAR(velocity.value(cell).y, expected, 2e-12);
+            EXPECT_DOUBLE_EQ(velocity.value(cell).x, 0.);
+            EXPECT_DOUBLE_EQ(velocity.value(cell).z, 0.);
+            local_momentum += density.value(cell) * velocity.value(cell).y;
+            local_max_error = std::max(local_max_error, std::abs(velocity.value(cell).y - expected));
+        }
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_momentum, &momentum);
+        EXPECT_NEAR(momentum, 1., 2e-12);
+    }
+    double max_error = 0.;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_max_error, &max_error);
+    std::ostringstream velocity_error;
+    velocity_error << std::setprecision(17) << max_error;
+    RecordProperty("maximum_tangential_velocity_error_m_per_s", velocity_error.str());
+
+    if (comm->getSize() > 1)
+        EXPECT_THROW(equation.advance(old_velocity, old_density, density, net, viscosity, 1., velocity, {}, {}, {}, {},
+                         FVM::NonOrthogonalTreatment::Implicit, nullptr, comm->getRank() == 0 ? nullptr : &common),
+            std::exception);
+    if (comm->getRank() == 0)
+        for (const auto face : common.owned_face_ids())
+            if (grid->is_boundary_face(face))
+                common.set_owned_value(face, .5);
+    common.sync_ghosts();
+    EXPECT_THROW(equation.advance(old_velocity, old_density, density, net, viscosity, 1., velocity, {}, {}, {}, {},
+                     FVM::NonOrthogonalTreatment::Implicit, nullptr, &common),
+        std::exception);
+    for (size_t c = 0; c < grid->num_owned_cells(); ++c)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(c);
+        EXPECT_NEAR(velocity.value(cell).y, grid->cell_centroid(cell).x < 1. ? .8 : -.4, 2e-12);
+    }
+}
+
 TEST(VariableDensityMomentumTest, FactoryStorageRetainsTheSameMomentumBalance)
 {
     auto grid = test::build_mesh<Pack>(test::make_single_hex_database());
-    if (grid->owned_cell_map()->getComm()->getSize() != 1) GTEST_SKIP() << "Factory fixture is serial.";
+    if (grid->owned_cell_map()->getComm()->getSize() != 1)
+        GTEST_SKIP() << "Factory fixture is serial.";
     momentum_balance<MeshHandle<Pack>>(grid);
 }
 
@@ -116,14 +209,18 @@ TEST(VariableDensityMomentumTest, RejectsInvalidOwnedDensityCollectivelyWithoutP
     using Traits = MeshFieldTraits<Pack, Handle>;
     Traits::scalar_cell_type old_density(grid, 2.0, "old_rho"), density(grid, 2.0, "rho"), viscosity(grid, 0.0, "mu");
     Traits::scalar_face_type flux(grid, 0.0, "mass_flux");
-    Traits::vector_cell_type old_velocity(grid, vec3<double>{1, 2, 3}, "old_u"), velocity(grid, vec3<double>{4, 5, 6}, "u");
-    if (grid->num_owned_cells()) density.set_owned_value(0, -1);
+    Traits::vector_cell_type old_velocity(grid, vec3<double>{1, 2, 3}, "old_u"),
+        velocity(grid, vec3<double>{4, 5, 6}, "u");
+    if (grid->num_owned_cells())
+        density.set_owned_value(0, -1);
     VariableDensityMomentumEquation<Pack, Handle> equation(grid);
     EXPECT_THROW(equation.advance(old_velocity, old_density, density, flux, viscosity, 0.1, velocity), std::exception);
     for (size_t c = 0; c < grid->num_owned_cells(); ++c)
     {
         const auto actual = velocity.value(static_cast<typename Pack::local_ordinal_type>(c));
-        EXPECT_DOUBLE_EQ(actual.x, 4); EXPECT_DOUBLE_EQ(actual.y, 5); EXPECT_DOUBLE_EQ(actual.z, 6);
+        EXPECT_DOUBLE_EQ(actual.x, 4);
+        EXPECT_DOUBLE_EQ(actual.y, 5);
+        EXPECT_DOUBLE_EQ(actual.z, 6);
     }
 }
 

@@ -81,6 +81,20 @@ public:
         const FaceField& predictor_carrier_flux, FaceField& corrected_carrier_flux, ScalarField& mechanical_pressure,
         VectorField& velocity, const LinearSolverOptions& linear = {}, double continuity_tolerance = 1e-10);
 
+    /** Fixed closed kinetic material projection with the directly transported
+     * owner-oriented material rate W0 at the reference carrier flux phi0.
+     * Applies W(phi)=W0+theta*(phi-phi0) to predicted and corrected carrier rates.
+     * The nonnegative mobility and zero-mobility EOS anchoring gates are the
+     * same as in project_material_with_eos(). W0 remains prescribed when
+     * theta is zero, including when a rounded derivative vanishes.
+     */
+    Result project_kinetic_material_with_eos(const ScalarField& density, double time_step,
+        std::span<const double> integrated_material_volume_target, std::span<const double> volume_susceptibility,
+        const FaceField& material_carrier_fraction, const FaceField& anchored_material_rate,
+        const FaceField& reference_carrier_flux, const FaceField& predictor_carrier_flux,
+        FaceField& corrected_carrier_flux, ScalarField& mechanical_pressure, VectorField& velocity,
+        const LinearSolverOptions& linear = {}, double continuity_tolerance = 1e-10);
+
     /** Explicit fixed-material cell-gradient policy for a consistently reconstructed body-force predictor.
      * Changes only the cell velocity correction; face mobility, continuity and pressure gauge are unchanged.
      * Existing overloads retain their homogeneous-Neumann cell reconstruction.
@@ -106,13 +120,19 @@ public:
         double continuity_tolerance = 1e-10);
 
 private:
+    struct SIMPLEFLUID_SOLVERS_LOCAL MaterialAnchor
+    {
+        const FaceField& material_rate;
+        const FaceField& carrier_flux;
+    };
     SIMPLEFLUID_SOLVERS_LOCAL Result project_impl(const ScalarField& density, double time_step,
         std::span<const double> integrated_volume_target, std::span<const double> volume_susceptibility,
         bool linearize_eos, const FaceField* material_carrier_fraction, const FaceField* slip_material_flux,
         const FaceField& predictor_flux, FaceField& corrected_flux, ScalarField& mechanical_pressure,
         VectorField& velocity, const LinearSolverOptions& linear, double continuity_tolerance,
         const FVM::ALEControlVolumeState* ale = nullptr,
-        CellPressureGradient cell_gradient = CellPressureGradient::HomogeneousNeumann);
+        CellPressureGradient cell_gradient = CellPressureGradient::HomogeneousNeumann,
+        const MaterialAnchor* anchor = nullptr);
     struct SIMPLEFLUID_SOLVERS_LOCAL Implementation;
     std::unique_ptr<Implementation> d;
 };

@@ -5,6 +5,7 @@
 #include "FVM/CellOperators.hh"
 #include "equations/CollectiveValidation.hh"
 #include "equations/EquationValidation.hh"
+#include "equations/details/LowMachScaledFaceSum.hh"
 #include <Teuchos_Array.hpp>
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
@@ -62,6 +63,17 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_material_with_e
         velocity, options, tolerance);
 }
 
+LowMachPressureEquation::Result LowMachPressureEquation::project_kinetic_material_with_eos(const ScalarField& rho,
+    double dt, std::span<const double> target, std::span<const double> susceptibility, const FaceField& fraction,
+    const FaceField& anchored_material_rate, const FaceField& reference_carrier_flux, const FaceField& predictor,
+    FaceField& corrected, ScalarField& pressure, VectorField& velocity, const LinearSolverOptions& options,
+    double tolerance)
+{
+    const MaterialAnchor anchor{anchored_material_rate, reference_carrier_flux};
+    return project_impl(rho, dt, target, susceptibility, true, &fraction, nullptr, predictor, corrected, pressure,
+        velocity, options, tolerance, nullptr, CellPressureGradient::HomogeneousNeumann, &anchor);
+}
+
 LowMachPressureEquation::Result LowMachPressureEquation::project_material_ale_with_eos(const ScalarField& rho,
     double dt, std::span<const double> target, std::span<const double> susceptibility, const FaceField& fraction,
     const FaceField& slip, const FaceField& predictor, FaceField& corrected, ScalarField& pressure,
@@ -84,7 +96,7 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
     std::span<const double> target, std::span<const double> susceptibility, bool linearize_eos,
     const FaceField* fraction, const FaceField* slip, const FaceField& predictor, FaceField& corrected,
     ScalarField& pressure, VectorField& velocity, const LinearSolverOptions& options, double tolerance,
-    const FVM::ALEControlVolumeState* ale, CellPressureGradient cell_gradient)
+    const FVM::ALEControlVolumeState* ale, CellPressureGradient cell_gradient, const MaterialAnchor* anchor)
 {
     const auto& mesh = *d->mesh;
     using LO = Pack::local_ordinal_type;
@@ -93,7 +105,7 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
     collective_detail::require_uniform_value(mesh, tolerance, "Low-Mach continuity tolerance");
     collective_detail::require_uniform_value(mesh, int(linearize_eos), "Low-Mach EOS pressure linearization");
     const bool material = fraction != nullptr;
-    collective_detail::require_uniform_value(mesh, int(material), "Low-Mach material flux projection");
+    collective_detail::require_uniform_value(mesh, anchor ? 2 : int(material), "Low-Mach material flux projection");
     collective_detail::require_uniform_value(mesh, int(ale != nullptr), "Low-Mach moving-wall projection");
     collective_detail::require_uniform_value(mesh, int(cell_gradient), "Low-Mach cell pressure-gradient policy");
     if (ale)
@@ -110,20 +122,31 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
                 tolerance <= 0 || target.size() != mesh.num_owned_cells() ||
                 (linearize_eos && susceptibility.size() != mesh.num_owned_cells()))
                 throw std::invalid_argument("Invalid low-Mach projection timestep/target/tolerance.");
-            if (bool(fraction) != bool(slip))
-                throw std::invalid_argument("Material projection needs both fraction and slip packets.");
+            if (material != bool(slip || anchor) || (slip && anchor) ||
+                (anchor && (ale || cell_gradient != CellPressureGradient::HomogeneousNeumann)))
+                throw std::invalid_argument("Material projection needs a fraction and a compatible face flux law.");
             if (material)
             {
                 EquationValidation::require_mesh_match(mesh, *fraction, "LowMachPressureEquation");
-                EquationValidation::require_mesh_match(mesh, *slip, "LowMachPressureEquation");
+                if (anchor)
+                {
+                    EquationValidation::require_mesh_match(mesh, anchor->material_rate, "LowMachPressureEquation");
+                    EquationValidation::require_mesh_match(mesh, anchor->carrier_flux, "LowMachPressureEquation");
+                }
+                else
+                    EquationValidation::require_mesh_match(mesh, *slip, "LowMachPressureEquation");
                 for (size_t f = 0; f < mesh.num_faces(); ++f)
                 {
                     const LO face = static_cast<LO>(f);
-                    const double theta = fraction->local_value(face), source = slip->local_value(face);
-                    if (!std::isfinite(theta) || theta < 0 || !std::isfinite(source) || (theta == 0 && source != 0))
-                        throw std::invalid_argument("Material face fraction/slip packet is invalid.");
-                    if (mesh.is_geometry_exterior_face(face) && source != 0)
-                        throw std::invalid_argument("Closed material projection requires zero boundary slip flux.");
+                    const double theta = fraction->local_value(face);
+                    const double source = anchor ? anchor->material_rate.local_value(face) : slip->local_value(face);
+                    const double reference = anchor ? anchor->carrier_flux.local_value(face) : 0.;
+                    if (!std::isfinite(theta) || theta < 0 || !std::isfinite(source) || !std::isfinite(reference) ||
+                        (!anchor && theta == 0 && source != 0))
+                        throw std::invalid_argument("Material face fraction or flux data is invalid.");
+                    if (mesh.is_geometry_exterior_face(face) && (source != 0 || reference != 0))
+                        throw std::invalid_argument(
+                            "Closed material projection requires zero boundary material or reference flux.");
                 }
             }
             EquationValidation::require_mesh_match(mesh, rho, "LowMachPressureEquation");
@@ -170,6 +193,23 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
     collective_detail::require_uniform_value(mesh, int(options.backend), "Pressure linear backend");
     collective_detail::require_uniform_value(mesh, int(options.preconditioner), "Pressure preconditioner");
     collective_detail::require_uniform_value(mesh, int(options.reuse_preconditioner), "Pressure preconditioner reuse");
+    const auto evaluate_material_flux = [&](LO face, double phi)
+    {
+        const double theta = fraction->local_value(face);
+        if (!anchor)
+            return std::fma(theta, phi, slip->local_value(face));
+        const double datum = anchor->material_rate.local_value(face);
+        const double reference = anchor->carrier_flux.local_value(face);
+        if (theta == 0 || phi == reference)
+            return datum;
+        // Form the products before rounding so a finite weighted difference
+        // survives both cancellation and an overflowing bare phi-phi0.
+        qbmm_face_detail::ScaledFaceSum packet;
+        packet.add_product(datum, 1.);
+        packet.add_product(theta, phi);
+        packet.add_product(-theta, reference);
+        return packet.rounded();
+    };
     std::unique_ptr<FaceField> material_predictor, material_candidate;
     if (material)
     {
@@ -181,8 +221,7 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
                 for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
                 {
                     const LO face = static_cast<LO>(f);
-                    const double flux =
-                        fraction->local_value(face) * predictor.local_value(face) + slip->local_value(face);
+                    const double flux = evaluate_material_flux(face, predictor.local_value(face));
                     if (!std::isfinite(flux))
                         throw std::invalid_argument("Predicted material flux overflow.");
                     material_predictor->set_owned_value(face, flux);
@@ -365,8 +404,7 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
                 for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
                 {
                     const LO face = static_cast<LO>(f);
-                    const double flux =
-                        fraction->local_value(face) * candidate.local_value(face) + slip->local_value(face);
+                    const double flux = evaluate_material_flux(face, candidate.local_value(face));
                     if (!std::isfinite(flux))
                         throw std::invalid_argument("Corrected material flux overflow.");
                     material_candidate->set_owned_value(face, flux);

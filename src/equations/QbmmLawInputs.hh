@@ -9,7 +9,8 @@ namespace SimpleFluid::Reacting
 {
 [[nodiscard]] inline bool qbmm_is_transport_law(const QbmmLawMetadata& law)
 {
-    return law.kind == QbmmLawKind::PhaseSlip || law.kind == QbmmLawKind::TransportProperty;
+    return law.kind == QbmmLawKind::PhaseSlip || law.kind == QbmmLawKind::TransportProperty ||
+           law.kind == QbmmLawKind::NodeSlip;
 }
 
 [[nodiscard]] inline bool qbmm_uses_carrier_liquid(const QbmmLawMetadata& law)
@@ -57,5 +58,38 @@ struct QbmmFrozenLawState
         frozen.gas_volume_fraction, qbmm_phase_concentrations(frozen.family_moles, frozen.phase_volume_m3),
         std::move(frozen.carrier_liquid_concentration_mol_per_m3), frozen.carrier_liquid_temperature_K, speed,
         family.fingerprint(), family.catalog().fingerprint(), family.population(), frozen.location};
+}
+
+[[nodiscard]] inline QbmmNodeSlipInput make_qbmm_node_slip_input(
+    const QbmmLawInputs& input, std::size_t atom, double phase_volume_m3)
+{
+    if (!input.geometry || atom >= input.quadrature.active_atoms || atom >= input.geometry->active_atoms ||
+        !input.phase_concentration_mol_per_m3 || !input.temperature_K || !input.gas_volume_fraction ||
+        !std::isfinite(phase_volume_m3) || phase_volume_m3 <= 0 || !std::isfinite(input.absolute_pressure_pa) ||
+        input.absolute_pressure_pa <= 0 || !std::isfinite(*input.temperature_K) || *input.temperature_K <= 0 ||
+        !std::isfinite(*input.gas_volume_fraction) || *input.gas_volume_fraction <= 0)
+        throw std::invalid_argument("QBMM node slip needs an active atom and a physical donor thermodynamic trace.");
+    std::optional<std::span<const double>> liquid;
+    if (input.carrier_liquid_concentration_mol_per_m3)
+        liquid = *input.carrier_liquid_concentration_mol_per_m3;
+    return {input.geometry->mass_kg_per_bubble[atom], input.geometry->diameter_m[atom],
+        input.quadrature.atoms[atom].count, input.bulk_volume_m3, phase_volume_m3, input.absolute_pressure_pa,
+        *input.temperature_K, *input.gas_volume_fraction, input.geometry->number_density, input.geometry->area_density,
+        *input.phase_concentration_mol_per_m3, liquid, input.carrier_liquid_temperature_K, input.family_fingerprint,
+        input.catalog_fingerprint, input.population, input.location};
+}
+
+[[nodiscard]] inline QbmmApplicabilityEvaluation evaluate_qbmm_node_slip_applicability(
+    const QbmmLawMetadata& law, const QbmmLawInputs& input, std::size_t atom, std::optional<double> speed)
+{
+    if (law.kind != QbmmLawKind::NodeSlip || !input.geometry || atom >= input.quadrature.active_atoms ||
+        atom >= input.geometry->active_atoms)
+        throw std::invalid_argument("QBMM node slip applicability needs a node-slip contract and an active atom.");
+    const QbmmLawInputs frozen{input.quadrature, input.geometry, input.mass_scale_kg, input.bulk_volume_m3,
+        input.absolute_pressure_pa, input.temperature_K, input.time_step_s, input.phase_volume_fraction,
+        input.gas_volume_fraction, input.phase_concentration_mol_per_m3, input.carrier_liquid_concentration_mol_per_m3,
+        input.carrier_liquid_temperature_K, speed, input.family_fingerprint, input.catalog_fingerprint,
+        input.population, input.location, input.geometry->mass_kg_per_bubble[atom], input.geometry->diameter_m[atom]};
+    return evaluate_qbmm_applicability(law, frozen);
 }
 } // namespace SimpleFluid::Reacting

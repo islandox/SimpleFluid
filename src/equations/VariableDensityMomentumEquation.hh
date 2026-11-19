@@ -4,11 +4,11 @@
 #pragma once
 #include "utils/export_helper.hh"
 
-#include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystem.hh"
 #include "equations/CollectiveValidation.hh"
 #include "equations/EquationValidation.hh"
 #include "fields/MeshFieldTraits.hh"
+#include "geometry/MeshConcepts.hh"
 #include "geometry/MeshHandle.hh"
 #include "solvers/BelosLinearSolver.hh"
 
@@ -43,6 +43,14 @@ public:
         boundary_value_type boundary_value = {}, const LinearSolverOptions& linear = {},
         FVM::NonOrthogonalTreatment treatment = FVM::NonOrthogonalTreatment::Implicit,
         const FVM::ALEControlVolumeState* ale = nullptr);
+    /** The optional synchronized face field supplies min(forward mass rate, backward mass rate), kg/s.
+     * Values are independent of face orientation, nonnegative, and zero on physical boundaries.
+     */
+    LinearSolveSummary advance(const velocity_field_type& old_velocity, const field_type& old_density,
+        const field_type& density, const face_field_type& mass_flux, const field_type& dynamic_viscosity,
+        scalar_type time_step, velocity_field_type& velocity, force_type force, boundary_type boundary,
+        boundary_value_type boundary_value, const LinearSolverOptions& linear, FVM::NonOrthogonalTreatment treatment,
+        const FVM::ALEControlVolumeState* ale, const face_field_type* bidirectional_mass_flux);
 
 private:
     SP<const MeshType> d_mesh;

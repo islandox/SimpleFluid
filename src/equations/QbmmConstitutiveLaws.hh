@@ -12,11 +12,13 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -30,7 +32,8 @@ enum class QbmmLawKind
     Coalescence,
     Breakup,
     PhaseSlip,
-    TransportProperty
+    TransportProperty,
+    NodeSlip
 };
 
 /** Each variable fixes its SI basis. Diameter bounds apply to every active atom. */
@@ -48,7 +51,8 @@ enum class QbmmRangeVariable
     PhaseConcentrationMolPerM3,
     CarrierLiquidConcentrationMolPerM3,
     CarrierLiquidTemperatureK,
-    SlipSpeedMPerS
+    SlipSpeedMPerS,
+    NodeMassKgPerBubble
 };
 enum class QbmmApplicabilityGate
 {
@@ -90,7 +94,8 @@ struct QbmmLawMetadata
 inline void validate_qbmm_law_metadata(const QbmmLawMetadata& law, std::size_t species_count)
 {
     if (law.identity.empty() || law.revision == 0 || law.input_basis.empty() || law.output_units.empty() ||
-        law.kind < QbmmLawKind::IntegratedPopulation || law.kind > QbmmLawKind::TransportProperty ||
+        law.kind < QbmmLawKind::IntegratedPopulation || law.kind > QbmmLawKind::NodeSlip ||
+        (law.kind == QbmmLawKind::NodeSlip && (!law.requires_population || law.output_units != "m/s")) ||
         (law.gate != QbmmApplicabilityGate::ReportOnly && law.gate != QbmmApplicabilityGate::RejectOutside))
         throw std::invalid_argument("QBMM law needs an identity, revision and explicit SI input/output basis.");
     for (const auto& range : law.ranges)
@@ -98,9 +103,10 @@ inline void validate_qbmm_law_metadata(const QbmmLawMetadata& law, std::size_t s
         const bool concentration = range.variable == QbmmRangeVariable::PhaseConcentrationMolPerM3 ||
                                    range.variable == QbmmRangeVariable::CarrierLiquidConcentrationMolPerM3;
         if (range.variable < QbmmRangeVariable::AbsolutePressurePa ||
-            range.variable > QbmmRangeVariable::SlipSpeedMPerS || !std::isfinite(range.minimum) ||
-            !std::isfinite(range.maximum) || range.minimum < 0 || range.maximum < range.minimum ||
-            concentration != range.species_index.has_value() ||
+            range.variable > QbmmRangeVariable::NodeMassKgPerBubble ||
+            (range.variable == QbmmRangeVariable::NodeMassKgPerBubble && law.kind != QbmmLawKind::NodeSlip) ||
+            !std::isfinite(range.minimum) || !std::isfinite(range.maximum) || range.minimum < 0 ||
+            range.maximum < range.minimum || concentration != range.species_index.has_value() ||
             (concentration && *range.species_index >= species_count))
             throw std::invalid_argument("Invalid QBMM SI applicability range or concentration species index.");
     }
@@ -160,6 +166,30 @@ struct QbmmLawInputs
     const std::uint64_t family_fingerprint = 0, catalog_fingerprint = 0;
     const std::string population{}; ///< Stable family identity; quadrature indices carry no material identity.
     const std::optional<ReactionLocation> location{}; ///< Source-donor centroid, cell identity and geometry epoch.
+    const std::optional<double> node_mass_kg_per_bubble{}, node_diameter_m{};
+};
+
+/** Instantaneous SI input for a single active atom. Concentration spans are borrowed for this call.
+ * The law may depend on physical geometry and thermodynamic state. The numerical substep is not an input.
+ */
+struct QbmmNodeSlipInput
+{
+    double mass_kg_per_bubble, diameter_m, count;
+    double bulk_volume_m3, phase_volume_m3, absolute_pressure_pa, temperature_K;
+    double gas_volume_fraction, number_density_per_m3, area_density_per_m;
+    std::span<const double> phase_concentration_mol_per_m3; ///< Occupied donor gas EOS volume basis.
+    std::optional<std::span<const double>> carrier_liquid_concentration_mol_per_m3; ///< Liquid EOS basis.
+    std::optional<double> carrier_liquid_temperature_K;
+    std::uint64_t family_fingerprint, catalog_fingerprint;
+    std::string_view population;
+    std::optional<ReactionLocation> location;
+};
+
+/** Immutable transport closure. The supplied callback must be deterministic and MPI-free. */
+struct QbmmNodeSlipLaw
+{
+    const QbmmLawMetadata metadata;
+    const std::function<std::array<double, 3>(const QbmmNodeSlipInput&)> evaluate; ///< Relative velocity in m/s.
 };
 
 /** No epsilon volume or concentration exists for an absent phase. */
@@ -199,7 +229,7 @@ struct QbmmApplicabilityEvaluation
 {
     QbmmLawMetadata metadata;
     std::vector<QbmmRangeEvaluation> ranges;
-    bool applicable = false; ///< All declared ranges evaluated and satisfied; no empirical validation implied.
+    bool applicable = false; ///< All applicable declared ranges evaluated and satisfied.
     bool gate_passed = true;
 };
 
@@ -216,7 +246,10 @@ struct QbmmApplicabilityEvaluation
     for (const auto& range : law.ranges)
     {
         QbmmRangeEvaluation evaluation{range, QbmmRangeStatus::MissingInput, {}, {}};
-        if (absent && law.requires_population)
+        if ((absent && law.requires_population) ||
+            (law.kind == QbmmLawKind::NodeSlip &&
+                ((range.variable == QbmmRangeVariable::TimeStepS && !input.time_step_s) ||
+                    (range.variable == QbmmRangeVariable::SlipSpeedMPerS && !input.slip_speed_m_per_s))))
             evaluation.status = QbmmRangeStatus::NotApplicable;
         else
         {
@@ -250,7 +283,9 @@ struct QbmmApplicabilityEvaluation
                         lo = input.geometry->area_density;
                     break;
                 case QbmmRangeVariable::DiameterM:
-                    if (input.geometry)
+                    if (input.node_diameter_m)
+                        lo = input.node_diameter_m;
+                    else if (input.geometry)
                     {
                         lo = input.geometry->min_diameter;
                         hi = input.geometry->max_diameter;
@@ -271,6 +306,9 @@ struct QbmmApplicabilityEvaluation
                     break;
                 case QbmmRangeVariable::SlipSpeedMPerS:
                     lo = input.slip_speed_m_per_s;
+                    break;
+                case QbmmRangeVariable::NodeMassKgPerBubble:
+                    lo = input.node_mass_kg_per_bubble;
                     break;
             }
             if (!hi)
