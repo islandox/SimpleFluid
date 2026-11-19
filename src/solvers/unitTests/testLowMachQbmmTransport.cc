@@ -3,6 +3,7 @@
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/LowMachMixtureSolver.hh"
 #include "solvers/details/LowMachQbmmState.hh"
+#include "solvers/details/LowMachScaledFaceSum.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
@@ -12,6 +13,7 @@
 #include <limits>
 #include <numeric>
 #include <string>
+#include <type_traits>
 
 namespace
 {
@@ -19,6 +21,17 @@ using namespace SimpleFluid;
 namespace R = Reacting;
 using Flow = R::LowMachMixtureSolver;
 using LO = Flow::Pack::local_ordinal_type;
+using FaceFlux = Flow::QbmmFaceFlux;
+static_assert(std::is_same_v<decltype(FaceFlux::species_molar_flux), std::vector<double>>);
+static_assert(std::is_same_v<decltype(FaceFlux::population_number_flux), double>);
+static_assert(std::is_same_v<decltype(FaceFlux::shape_flux), R::QbmmShapeState>);
+static_assert(std::is_same_v<decltype(R::QbmmShapeState::H2), double>);
+static_assert(std::is_same_v<decltype(R::QbmmShapeState::H3), double>);
+static_assert(std::is_same_v<decltype(FaceFlux::internal_energy_flux), double>);
+static_assert(std::is_same_v<decltype(FaceFlux::material_volume_flux), double>);
+static_assert(std::is_same_v<decltype(FaceFlux::derived_mass_flux), double>);
+static_assert(std::is_same_v<decltype(FaceFlux::derived_drift_momentum_flux), vec3<double>>);
+
 constexpr size_t channels = 7; // nA,nB,H0,derived H1,H2,H3,U.
 constexpr double dt = .01;
 constexpr double gas_constant = 8.31446261815324;
@@ -440,6 +453,231 @@ TEST(LowMachQbmmTransportTest, SubnormalFacePacketsRequireRelativePrecisionAndRe
                 EXPECT_EQ(std::abs(packet.internal_energy_flux), 36000 * quantum);
             }
         EXPECT_EQ(f.flow->serialize_qbmm_restart(), accepted);
+    }
+}
+
+TEST(LowMachQbmmTransportTest, SubnormalCounterflowRoundsPhaseAndNativeMomentumPacketsIndependently)
+{
+    constexpr double quantum = std::numeric_limits<double>::denorm_min();
+    constexpr double pressure = 100000, temperature = 300, molar_mass = .25, gas_energy = 6000;
+    Flow::Mesh::DistributionOptions distribution;
+    distribution.allow_empty_partitions = true;
+    const auto geometry = std::make_shared<Meshes::OrthogonalCartesian3D>(
+        Vec3D<ArrReal>{ArrReal{0, 1}, ArrReal{0, 1}, ArrReal{0, .5, 1}});
+    const auto mesh = std::make_shared<Flow::Mesh>(geometry, distribution);
+    const auto catalog = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
+        {11, "A", molar_mass, {{"X", 1}}, {R::SpeciesPhase::Liquid, R::SpeciesPhase::Dispersed}}});
+    const R::ThermodynamicBounds bounds{250, 600, 10000, 2000000};
+    auto liquid = R::make_linear_compressible_mixture_liquid(catalog, bounds, [](std::span<const double>)
+        { return R::LinearCompressibleMixtureLiquid{300, 100000, 1000, 4000, 0, 5e-9, 1e6, 0, 0}; });
+    auto gas = R::make_ideal_gas_mixture(catalog, {{20, temperature, gas_energy}}, bounds);
+    Flow::Options options;
+    options.minimum_pressure = 20000;
+    options.maximum_pressure = 1000000;
+    options.linear.preconditioner = LinearPreconditioner::None;
+    options.linear.tolerance = 1e-12;
+    options.qbmm_model.velocity = R::QbmmModelOptions::Velocity::SuppliedPhaseSlip;
+    options.phase_roles = {{Flow::PhaseRole::BulkLiquid, "liquid"}, {Flow::PhaseRole::DispersedGas, "fine"},
+        {Flow::PhaseRole::DispersedGas, "coarse"}};
+    options.qbmm_families.resize(3);
+    for (size_t phase = 1; phase < 3; ++phase)
+        options.qbmm_families[phase] = std::make_shared<const R::QbmmPopulationSchema>(catalog, catalog->fingerprint(),
+            options.phase_roles[phase].identity, options.phase_roles[phase], .125,
+            std::vector<R::QbmmMassFraction>{{11, 1}});
+
+    for (const double direction : {1., -1.})
+    {
+        SCOPED_TRACE(direction);
+        Flow flow(mesh, {liquid, gas, gas}, options);
+        Flow::State input;
+        input.thermodynamic_pressure = pressure;
+        input.qbmm_families = {std::nullopt, Flow::qbmm_family_stamp(*options.qbmm_families[1]),
+            Flow::qbmm_family_stamp(*options.qbmm_families[2])};
+        input.cells.resize(mesh->num_owned_cells());
+        for (auto& cell : input.cells)
+        {
+            // Each gas has exactly one mole per bulk cubic metre and one unit-size node per cell.
+            const double liquid_mass = 1000 * (.5 - gas_constant * temperature / pressure);
+            cell.phases = {{liquid, {liquid_mass / molar_mass}, pressure, liquid_mass * 1e6, temperature},
+                {gas, {.5}, pressure, .5 * gas_energy, temperature},
+                {gas, {.5}, pressure, .5 * gas_energy, temperature}};
+            cell.phase_numbers = {std::nullopt, 1., 1.};
+            cell.qbmm_shape = {std::nullopt, R::QbmmShapeState{1, 1}, R::QbmmShapeState{1, 1}};
+            cell.drift_velocity = {{}, {0, 8, direction * quantum}, {0, -8, -direction * 3 * quantum}};
+        }
+        flow.initialize(std::move(input));
+        const auto trial = flow.preview(dt);
+        const auto receipts = trial.owned_phase_transport();
+        int local_interior = 0, global_interior = 0;
+        for (size_t f = 0; f < receipts.size(); ++f)
+        {
+            const LO face = static_cast<LO>(f);
+            if (mesh->is_geometry_exterior_face(face))
+                continue;
+            ++local_interior;
+            const auto& receipt = receipts[f];
+            const auto& fine = receipt.qbmm_flux.at(1).value();
+            const auto& coarse = receipt.qbmm_flux.at(2).value();
+            const double signed_quantum = direction * mesh->face_area_vector(face).z * quantum;
+            EXPECT_EQ(std::abs(signed_quantum), quantum);
+            EXPECT_EQ(receipt.relative_phase_volume_flux[0], 0);
+            EXPECT_EQ(receipt.relative_phase_volume_flux[1], signed_quantum);
+            EXPECT_EQ(receipt.relative_phase_volume_flux[2], -3 * signed_quantum);
+            EXPECT_EQ(fine.species_molar_flux.at(0), signed_quantum);
+            EXPECT_EQ(coarse.species_molar_flux.at(0), -3 * signed_quantum);
+            // In units of quantum the phase mass rates are +1/4 and -3/4.
+            EXPECT_EQ(fine.derived_mass_flux, 0);
+            EXPECT_EQ(coarse.derived_mass_flux, -signed_quantum);
+            EXPECT_EQ(fine.derived_drift_momentum_flux, (Flow::Vector{0, 2 * signed_quantum, 0}));
+            EXPECT_EQ(coarse.derived_drift_momentum_flux, (Flow::Vector{0, 6 * signed_quantum, 0}));
+            // The unrounded total is a half-quantum tie, which rounds to the even value zero.
+            EXPECT_EQ(receipt.momentum_mass_flux, 0);
+            EXPECT_EQ(receipt.drift_momentum_flux, (Flow::Vector{0, 8 * signed_quantum, 0}));
+        }
+        Teuchos::reduceAll(
+            *mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_interior, &global_interior);
+        EXPECT_EQ(global_interior, 1);
+    }
+}
+
+TEST(LowMachQbmmTransportTest, ScaledFaceArithmeticRetainsCancellationAndRoundsAtBinary64Boundaries)
+{
+    using FaceSum = R::qbmm_face_detail::ScaledFaceSum;
+    constexpr double q = std::numeric_limits<double>::denorm_min();
+    constexpr double max = std::numeric_limits<double>::max();
+    for (const double direction : {1., -1.})
+    {
+        SCOPED_TRACE(direction);
+        FaceSum mass, drift;
+        mass.add_product(direction * q, .25);
+        drift.add_weighted(mass, 8.);
+        EXPECT_EQ(mass.rounded(), 0);
+        EXPECT_EQ(drift.rounded(), direction * 2 * q);
+
+        FaceSum tiny, huge, opposite_half, total;
+        tiny.add_product(direction * q, 1.);
+        huge.add_product(direction * std::scalbn(1., 1000), std::scalbn(1., 897));
+        opposite_half.add_product(-direction * std::scalbn(1., 1000), std::scalbn(1., 896));
+        EXPECT_EQ(huge.rounded(), direction * std::numeric_limits<double>::infinity());
+        total.add_weighted(huge, 1.);
+        total.add_weighted(tiny, 1.);
+        total.add_weighted(opposite_half, 1.);
+        total.add_weighted(opposite_half, 1.);
+        EXPECT_EQ(total.rounded(), direction * q);
+
+        FaceSum three_scales;
+        for (const double term : {1., std::scalbn(1., -70), std::scalbn(1., -140), -1., -std::scalbn(1., -70)})
+            three_scales.add_product(direction, term);
+        EXPECT_EQ(three_scales.rounded(), direction * std::scalbn(1., -140));
+
+        FaceSum partial_cancellation;
+        const double remainder = std::scalbn(1., -10);
+        const double low_order = std::scalbn(1., -56);
+        partial_cancellation.add_product(direction, 1.);
+        partial_cancellation.add_product(direction, low_order);
+        partial_cancellation.add_product(-direction, 1. - remainder);
+        EXPECT_EQ(partial_cancellation.rounded(), direction * (remainder + low_order));
+        EXPECT_EQ(partial_cancellation.rounded(3.), direction * ((remainder + low_order) / 3.));
+
+        FaceSum product_residual;
+        constexpr double delta = std::numeric_limits<double>::epsilon();
+        product_residual.add_product(direction * (1. + delta), 1. - delta);
+        product_residual.add_product(-direction, 1.);
+        EXPECT_EQ(product_residual.rounded(), -direction * delta * delta);
+
+        FaceSum tie;
+        tie.add_product(direction * q, .5);
+        auto above = tie, below = tie;
+        above.add_product(direction * q, q);
+        below.add_product(-direction * q, q);
+        EXPECT_EQ(tie.rounded(), 0);
+        EXPECT_EQ(above.rounded(), direction * q);
+        EXPECT_EQ(below.rounded(), 0);
+
+        FaceSum normal_tie;
+        normal_tie.add_product(direction, 1.);
+        normal_tie.add_product(direction, std::scalbn(1., -53));
+        auto normal_above = normal_tie, normal_below = normal_tie;
+        normal_above.add_product(direction * q, q);
+        normal_below.add_product(-direction * q, q);
+        EXPECT_EQ(normal_tie.rounded(), direction);
+        EXPECT_EQ(normal_above.rounded(), direction * std::nextafter(1., 2.));
+        EXPECT_EQ(normal_below.rounded(), direction);
+
+        FaceSum divided_tie;
+        divided_tie.add_weighted(normal_tie, 3.);
+        auto divided_above = divided_tie, divided_below = divided_tie;
+        divided_above.add_product(direction * q, q);
+        divided_below.add_product(-direction * q, q);
+        EXPECT_EQ(divided_tie.rounded(3.), direction);
+        EXPECT_EQ(divided_above.rounded(3.), direction * std::nextafter(1., 2.));
+        EXPECT_EQ(divided_below.rounded(3.), direction);
+
+        FaceSum overflow_tie;
+        overflow_tie.add_product(direction, max);
+        overflow_tie.add_product(direction, std::scalbn(1., 970));
+        auto overflow_below = overflow_tie;
+        overflow_below.add_product(-direction * q, q);
+        EXPECT_EQ(overflow_tie.rounded(), direction * std::numeric_limits<double>::infinity());
+        EXPECT_EQ(overflow_below.rounded(), direction * max);
+    }
+}
+
+TEST(LowMachQbmmTransportTest, ScaledMaterialVolumeRetainsFluxBelowTheFractionFloor)
+{
+    using namespace R::qbmm_face_detail;
+    constexpr double q = std::numeric_limits<double>::denorm_min();
+    ScaledFaceSum tiny;
+    tiny.add_product(q, .25);
+    const auto [zero_fraction, recovered_flux] = material_volume_rates(tiny, 4., -32.);
+    EXPECT_EQ(zero_fraction, 0.);
+    EXPECT_EQ(recovered_flux, -2 * q);
+
+    ScaledFaceSum normal;
+    normal.add_product(1., 3.);
+    const auto [normal_fraction, normal_flux] = material_volume_rates(normal, 7., 3.);
+    EXPECT_EQ(normal_fraction, 3. / 7.);
+    EXPECT_EQ(normal_flux, 3. * normal_fraction);
+}
+
+TEST(LowMachQbmmTransportTest, ScaledRatioRetainsTheFullMassDenominator)
+{
+    using R::qbmm_face_detail::ScaledFaceSum;
+    constexpr double max = std::numeric_limits<double>::max();
+    constexpr double q = std::numeric_limits<double>::denorm_min();
+    const double tail = std::scalbn(1., -53);
+    ScaledFaceSum mass;
+    mass.add_product(1., 1.);
+    mass.add_product(1., tail);
+    ASSERT_EQ(mass.rounded(), 1.);
+
+    for (const double direction : {1., -1.})
+    {
+        SCOPED_TRACE(direction);
+        ScaledFaceSum momentum;
+        momentum.add_product(direction, max);
+        momentum.add_product(direction * max, tail);
+        EXPECT_EQ(momentum.rounded(mass.rounded()), direction * std::numeric_limits<double>::infinity());
+        EXPECT_EQ(momentum.rounded(mass), direction * max);
+
+        // (1 + tail)^2 / (1 + tail) is exactly the normal midpoint.
+        ScaledFaceSum normal_tie;
+        normal_tie.add_product(direction, 1.);
+        normal_tie.add_product(direction, 2 * tail);
+        normal_tie.add_product(direction * tail, tail);
+        auto normal_above = normal_tie;
+        normal_above.add_product(direction * q, q);
+        EXPECT_EQ(normal_tie.rounded(mass), direction);
+        EXPECT_EQ(normal_above.rounded(mass), direction * std::nextafter(1., 2.));
+
+        // (q/2)(1 + tail) / (1 + tail) is exactly the zero-to-q midpoint.
+        ScaledFaceSum tiny_tie;
+        tiny_tie.add_product(direction * q, .5);
+        tiny_tie.add_product(direction * q, .5, tail);
+        auto tiny_above = tiny_tie;
+        tiny_above.add_product(direction * q, q);
+        EXPECT_EQ(tiny_tie.rounded(mass), 0.);
+        EXPECT_EQ(tiny_above.rounded(mass), direction * q);
     }
 }
 

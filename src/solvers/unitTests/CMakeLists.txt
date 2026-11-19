@@ -45,6 +45,10 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       ${TEST_NAME}
       PROPERTIES LABELS "ale\\;free_surface\\;boussinesq\\;conservation\\;transaction"
     )
+  elseif(TEST_NAME MATCHES "^testQbmm(ApplicationBenchmarks|SlipAndGravity)$")
+    simplefluid_discover_tests(${TEST_NAME}
+      XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q6/$<CONFIG>"
+      PROPERTIES LABELS "qbmm\\;low_mach\\;application")
   else()
     simplefluid_discover_tests(${TEST_NAME})
   endif()
@@ -114,6 +118,12 @@ endforeach()
 
 # Conservative native mixture flow and its external reaction controller.
 foreach(_mixture_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME QbmmSlipAndGravity_${_mixture_ranks}procs
+        TARGET testQbmmSlipAndGravity PROCS ${_mixture_ranks}
+        LABELS "mpi;low_mach;reacting;qbmm;conservation;transaction;application;empty_rank" TIMEOUT 180)
+    simplefluid_add_mpi_test(NAME QbmmApplicationBenchmarks_${_mixture_ranks}procs
+        TARGET testQbmmApplicationBenchmarks PROCS ${_mixture_ranks}
+        LABELS "mpi;low_mach;reacting;qbmm;conservation;transaction;application;empty_rank" TIMEOUT 600)
     simplefluid_add_mpi_test(NAME LowMachQbmmState_${_mixture_ranks}procs
         TARGET testLowMachQbmmState PROCS ${_mixture_ranks}
         LABELS "mpi;low_mach;qbmm;population;transaction;empty_rank" TIMEOUT 180)

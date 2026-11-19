@@ -40,7 +40,8 @@ struct Fixture : Thermo::Fixture
     int law_calls = 0;
 
     explicit Fixture(std::vector<R::QbmmAtom> seed = {{4, 1}}, bool moving = false, bool bind_coarse = false,
-        R::EnergyConvention convention = R::EnergyConvention::IncludesFormationEnergy)
+        R::EnergyConvention convention = R::EnergyConvention::IncludesFormationEnergy,
+        R::QbmmClosureVersions policies = {}, double liquid_stock = liquid_moles)
         : Thermo::Fixture(0, 0, convention)
     {
         Flow::Mesh::DistributionOptions partition;
@@ -57,7 +58,7 @@ struct Fixture : Thermo::Fixture
         controls.phase_roles = {{Flow::PhaseRole::BulkLiquid, "liquid"}, {Flow::PhaseRole::DispersedGas, "vapor"},
             {Flow::PhaseRole::BulkGas, "inert"}, {Flow::PhaseRole::DispersedGas, "coarse"}};
         family = std::make_shared<const R::QbmmPopulationSchema>(catalog, catalog->fingerprint(), "vapor",
-            controls.phase_roles[1], scale, std::vector<R::QbmmMassFraction>{{44, 1}, {709, 0}});
+            controls.phase_roles[1], scale, std::vector<R::QbmmMassFraction>{{44, 1}, {709, 0}}, std::move(policies));
         controls.qbmm_families = {nullptr, family, nullptr, nullptr};
         if (bind_coarse)
             controls.qbmm_families[3] = std::make_shared<const R::QbmmPopulationSchema>(catalog, catalog->fingerprint(),
@@ -77,7 +78,7 @@ struct Fixture : Thermo::Fixture
             shape.H3 += weight * x * x * x;
         }
         const double inert =
-            (1 - liquid_moles) * Thermo::p_old / (Thermo::gas_constant * Thermo::T0) - vapor - coarse_moles;
+            (1 - liquid_stock) * Thermo::p_old / (Thermo::gas_constant * Thermo::T0) - vapor - coarse_moles;
         Flow::State state;
         state.thermodynamic_pressure = Thermo::p_old;
         state.qbmm_families = {std::nullopt, Flow::qbmm_family_stamp(*family), std::nullopt, std::nullopt};
@@ -86,7 +87,8 @@ struct Fixture : Thermo::Fixture
         state.cells.resize(mesh->num_owned_cells());
         for (auto& cell : state.cells)
         {
-            cell.phases = {{liquid, {liquid_moles, 0}, Thermo::p_old, liquid_moles * liquid_u0, Thermo::T0},
+            cell.phases = {
+                {liquid, {liquid_stock, 0}, Thermo::p_old, liquid_stock * liquid_u0, liquid_stock ? Thermo::T0 : 0},
                 {gas, {vapor, 0}, Thermo::p_old, vapor * Thermo::cv * Thermo::T0, vapor ? Thermo::T0 : 0},
                 {gas, {0, inert}, Thermo::p_old, inert * Thermo::cv * Thermo::T0, Thermo::T0},
                 {gas, {coarse_moles, 0}, Thermo::p_old, coarse_moles * Thermo::cv * Thermo::T0, Thermo::T0}};
@@ -136,6 +138,175 @@ struct Fixture : Thermo::Fixture
         return options;
     }
 };
+
+TEST(ReactingMixtureQbmmSourcesTest, DeclaredRangesDistinguishMissingLiquidOutsidePressureAndActualDuration)
+{
+    using Variable = R::QbmmRangeVariable;
+    using Status = R::QbmmRangeStatus;
+    for (const auto gate : {R::QbmmApplicabilityGate::ReportOnly, R::QbmmApplicabilityGate::RejectOutside})
+    {
+        R::QbmmClosureVersions policies;
+        policies.laws = {{"area-transfer", 2, R::QbmmLawKind::MassTransfer, "m2;mol/m3;s", "kg/cell", gate, true,
+            {{Variable::CarrierLiquidConcentrationMolPerM3, 0, 1, 0},
+                {Variable::AbsolutePressurePa, 110000, 200000, {}}, {Variable::TimeStepS, .025, .025, {}},
+                {Variable::TemperatureK, 299, 301, {}}, {Variable::DiameterM, 0, 4, {}}}}};
+        Fixture f({{2, 1}, {1, 3}}, false, false, R::EnergyConvention::IncludesFormationEnergy, policies, 0);
+        Coupler controller(f.flow, f.options(
+                                       [](const R::MixtureQbmmContext& ctx)
+                                       {
+                                           EXPECT_NE(ctx.law_inputs, nullptr);
+                                           const auto& inputs = *ctx.law_inputs;
+                                           EXPECT_FALSE(inputs.carrier_liquid_concentration_mol_per_m3);
+                                           EXPECT_FALSE(inputs.carrier_liquid_temperature_K);
+                                           EXPECT_EQ(inputs.time_step_s, .025);
+                                           EXPECT_EQ(inputs.quadrature.active_atoms, 2u);
+                                           EXPECT_GT(inputs.geometry->area_density, 0.0);
+                                           EXPECT_NEAR(inputs.phase_concentration_mol_per_m3->at(0),
+                                               Thermo::p_old / (Thermo::gas_constant * Thermo::T0), 1e-10);
+                                           return Ops{};
+                                       }));
+        const auto saved = controller.checkpoint();
+        const auto report = controller.qbmm_report();
+        ASSERT_EQ(report.families[1]->applicability_counts.size(), 1u);
+        EXPECT_EQ(report.families[1]->applicability_counts.front()[1], 1u);
+        if (gate == R::QbmmApplicabilityGate::RejectOutside)
+        {
+            EXPECT_THROW((void) controller.preview(.025), std::exception);
+            EXPECT_EQ(f.law_calls, 0);
+            EXPECT_EQ(f.flow->state().time, 0.0);
+            continue;
+        }
+        const auto trial = controller.preview(.025);
+        const auto endpoint = controller.qbmm_report(trial);
+        for (const auto& cell : endpoint.cells)
+        {
+            const auto& family = *cell.families.at(1);
+            const auto& result = family.applicability.at(0);
+            EXPECT_TRUE(family.closure_evaluated);
+            EXPECT_FALSE(family.closure_validated);
+            EXPECT_FALSE(result.applicable);
+            EXPECT_TRUE(result.gate_passed);
+            EXPECT_EQ(result.ranges[0].status, Status::MissingInput);
+            EXPECT_EQ(result.ranges[1].status, Status::OutsideRange);
+            EXPECT_EQ(result.ranges[2].status, Status::WithinRange);
+            EXPECT_EQ(result.ranges[3].status, Status::WithinRange);
+            EXPECT_EQ(result.ranges[4].status, Status::WithinRange);
+        }
+        const auto evaluated = f.law_calls;
+        controller.commit(trial);
+        controller.restore(saved);
+        EXPECT_EQ(f.law_calls, evaluated);
+    }
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, NativeTransportRejectsMissingLiquidAtEntryBeforePopulationCallbacks)
+{
+    using Variable = R::QbmmRangeVariable;
+    R::QbmmClosureVersions policies;
+    policies.laws = {{"liquid-property", 1, R::QbmmLawKind::TransportProperty, "physical liquid EOS", "Pa.s",
+        R::QbmmApplicabilityGate::RejectOutside, true,
+        {{Variable::CarrierLiquidConcentrationMolPerM3, 0, 1, 0},
+            {Variable::CarrierLiquidTemperatureK, 299, 301, {}}}}};
+    Fixture f({{4, 1}}, false, false, R::EnergyConvention::IncludesFormationEnergy, policies, 0);
+    const auto report = f.flow->qbmm_report();
+    for (const auto& cell : report.cells)
+    {
+        const auto& applicability = cell.families[1]->applicability.front();
+        for (const auto& range : applicability.ranges)
+        {
+            EXPECT_EQ(range.status, R::QbmmRangeStatus::MissingInput);
+            EXPECT_FALSE(range.observed_minimum);
+        }
+        EXPECT_FALSE(applicability.gate_passed);
+    }
+    const auto before = f.flow->serialize_qbmm_restart();
+    EXPECT_THROW((void) f.flow->preview(.01), std::exception);
+    EXPECT_EQ(f.flow->serialize_qbmm_restart(), before);
+    {
+        Coupler controller(f.flow, f.options([](const auto&) { return Ops{}; }));
+        const auto attached = f.flow->serialize_qbmm_restart();
+        EXPECT_THROW((void) controller.preview(.01), std::exception);
+        EXPECT_EQ(f.law_calls, 0);
+        EXPECT_EQ(f.flow->serialize_qbmm_restart(), attached);
+    }
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, TypedLawScopesCallbacksAndRestartToItsDeclaredFamily)
+{
+    constexpr double dt = .03125;
+    for (const bool occupied : {true, false})
+    {
+        R::QbmmClosureVersions policies;
+        const R::QbmmLawMetadata law{"occupied-population-law", 1, R::QbmmLawKind::Coalescence, "population and dt",
+            "events/cell", R::QbmmApplicabilityGate::RejectOutside, true,
+            {{R::QbmmRangeVariable::TimeStepS, dt, dt, {}}}};
+        policies.laws = {law};
+        const auto seed = occupied ? std::vector<R::QbmmAtom>{{4, 1}} : std::vector<R::QbmmAtom>{};
+        Fixture f(seed, false, true, R::EnergyConvention::IncludesFormationEnergy, policies);
+        int calls = 0;
+        auto config = f.options();
+        config.qbmm_population = std::make_shared<const R::MixtureQbmmProvider>(
+            R::MixtureQbmmProvider{{"constructive", 1, f.catalog->fingerprint()}, nullptr, {},
+                {std::make_shared<const R::MixtureQbmmLaw>(R::MixtureQbmmLaw{law, [&](const R::QbmmLawInputs& inputs)
+                    {
+                        ++calls;
+                        EXPECT_EQ(inputs.population, "vapor");
+                        EXPECT_EQ(inputs.time_step_s, dt);
+                        EXPECT_EQ(inputs.quadrature.active_atoms, 1u);
+                        return Ops{};
+                    }})}});
+        {
+            Coupler controller(f.flow, config);
+            const auto initialized = controller.checkpoint();
+            EXPECT_EQ(calls, 0);
+            if (occupied)
+            {
+                EXPECT_THROW((void) controller.preview(2 * dt), std::exception);
+                EXPECT_EQ(calls, 0);
+            }
+            const auto trial = controller.preview(occupied ? dt : 2 * dt);
+            const int evaluated =
+                occupied ? int(f.mesh->num_owned_cells()) * trial.diagnostics().flow.source_evaluations : 0;
+            EXPECT_EQ(calls, evaluated);
+            controller.commit(trial);
+            EXPECT_EQ(calls, evaluated);
+            controller.restore(initialized);
+            EXPECT_EQ(calls, evaluated);
+            controller.commit(controller.preview(dt));
+        }
+        const auto saved_calls = calls;
+        const auto archive = f.flow->serialize_qbmm_restart();
+        auto restored = std::make_shared<Flow>(f.mesh, std::vector{f.liquid, f.gas, f.gas, f.gas}, f.flow->options());
+        restored->restore_qbmm_restart(archive);
+        EXPECT_THROW((void) Coupler(restored, f.options()), std::exception);
+        Coupler matching(restored, config);
+        EXPECT_EQ(calls, saved_calls);
+        const auto continued = matching.preview(dt);
+        EXPECT_EQ(continued.state().time, 2 * dt);
+    }
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, BodyImpulseUsesEndMassAndDoesNotDuplicateReservoirImpulse)
+{
+    Fixture f;
+    constexpr double feed_mass = 2 * scale, feed_impulse = .034, gravity = -2.7, dt = .03125;
+    auto controls = f.options(
+        [](const auto&)
+        {
+            return Ops{R::QbmmBirth{
+                {{{1, 2}, {R::QbmmReservoirExchange{"feed", 1750, {feed_impulse, 0, 0}}, {feed_mass, 0}}}}}};
+        });
+    controls.body_acceleration = Flow::Vector{gravity, 0, 0};
+    Coupler controller(f.flow, controls);
+    const auto trial = controller.preview(dt);
+    const double vapor = 4 * scale;
+    const double inert =
+        (1 - liquid_moles) * Thermo::p_old / (Thermo::gas_constant * Thermo::T0) - vapor - coarse_moles;
+    const double mass = liquid_moles + vapor + coarse_moles + .028 * inert + feed_mass;
+    EXPECT_NEAR(trial.diagnostics().flow.external_impulse.component(0), feed_impulse + mass * gravity * dt, 3e-15);
+    EXPECT_EQ(trial.diagnostics().external_mass, feed_mass);
+    EXPECT_EQ(trial.diagnostics().external_heat, 0);
+}
 
 TEST(ReactingMixtureQbmmSourcesTest, ClosedBirthGrowthShrinkageAndDisappearanceMatchAnalyticCaloricEndpoint)
 {

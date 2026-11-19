@@ -4,6 +4,7 @@
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <gtest/gtest.h>
 #include <limits>
@@ -61,11 +62,11 @@ struct Fixture
         options.qbmm_families = {nullptr, family, nullptr};
     }
 
-    static Family make_family(
-        const std::shared_ptr<const R::SpeciesCatalog>& catalog, const Flow::PhaseRoleDescriptor& role, double scale)
+    static Family make_family(const std::shared_ptr<const R::SpeciesCatalog>& catalog,
+        const Flow::PhaseRoleDescriptor& role, double scale, R::QbmmClosureVersions versions = {})
     {
         return std::make_shared<const R::QbmmPopulationSchema>(catalog, catalog->fingerprint(), role.identity, role,
-            scale, std::vector<R::QbmmMassFraction>{{11, .5}, {29, .5}});
+            scale, std::vector<R::QbmmMassFraction>{{11, .5}, {29, .5}}, std::move(versions));
     }
 
     Flow::State initial(bool vacuum = false) const
@@ -152,6 +153,104 @@ void expect_identity(const Flow::Trial& trial, const Flow::State& accepted, R::I
             EXPECT_EQ(pre_source.internal_energy, before.phases[p].internal_energy);
         }
     }
+}
+
+void append_restart_word(std::vector<std::byte>& body, std::uint64_t value)
+{
+    for (unsigned shift = 0; shift < 64; shift += 8)
+        body.push_back(static_cast<std::byte>((value >> shift) & 0xff));
+}
+
+void append_restart_checksums(const Fixture& fixture, std::vector<std::byte>& body)
+{
+    std::uint64_t local = 14695981039346656037ULL, image = 0;
+    for (const auto byte : body)
+        local = (local ^ std::to_integer<std::uint64_t>(byte)) * 1099511628211ULL;
+    Teuchos::reduceAll(*fixture.mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local, &image);
+    append_restart_word(body, local);
+    append_restart_word(body, image);
+}
+
+std::vector<std::byte> restart_with_fourier_uncertainty(
+    const Fixture& fixture, std::vector<std::byte> bytes, std::optional<double> uncertainty, bool replacing = false)
+{
+    bytes.resize(bytes.size() - (replacing ? 3 : 2) * sizeof(std::uint64_t));
+    if (uncertainty)
+        append_restart_word(bytes, std::bit_cast<std::uint64_t>(*uncertainty));
+    append_restart_checksums(fixture, bytes);
+    return bytes;
+}
+
+std::vector<std::byte> earlier_restart(
+    const Fixture& fixture, std::vector<std::byte> bytes, unsigned version, bool has_fourier_uncertainty = false)
+{
+    constexpr auto word = sizeof(std::uint64_t);
+    if (version < 1 || version > 4 || bytes.size() < 19 * word || bytes[8] != std::byte{5})
+        throw std::invalid_argument("Test conversion requires a version 5 QBMM archive and a version in 1-4.");
+    bytes.resize(bytes.size() - (has_fourier_uncertainty ? 3 : 2) * word);
+    bytes[8] = static_cast<std::byte>(version);
+    // V5 inserted model + retained legacy restriction after V4's controller stamp.
+    bytes.erase(bytes.begin() + 15 * word, bytes.begin() + 17 * word);
+    if (version < 4)
+    {
+        bytes.erase(bytes.begin() + 13 * word, bytes.begin() + 15 * word);
+        // This fixture's advanced native image has two species and one element:
+        // presence, basis, mass, species-size + 2 values, element, shape-version.
+        constexpr unsigned balance_words = 8;
+        bytes.resize(bytes.size() - (balance_words + 3 - version) * word);
+    }
+    append_restart_checksums(fixture, bytes);
+    return bytes;
+}
+
+R::ReactingMixtureOptions restart_controller_options(const Fixture& fixture, int& calls)
+{
+    R::ReactingMixtureOptions options;
+    options.mechanism = std::make_shared<const R::ReactionMechanism>(
+        fixture.catalog, std::vector<R::ReactionDefinition>{}, fixture.eos[0]->energy_convention());
+    options.phases = {{R::SpeciesPhase::Liquid, {}, {}}, {R::SpeciesPhase::Dispersed, "fine", {}},
+        {R::SpeciesPhase::Dispersed, "coarse", {}}};
+    options.source_identity = "restart-source";
+    options.source = [&calls](const auto&, double)
+    {
+        ++calls;
+        return R::ReactionSourceInput{};
+    };
+    return options;
+}
+
+R::ReactingMixtureOptions fourier_restart_options(const Fixture& fixture, int& calls)
+{
+    auto options = restart_controller_options(fixture, calls);
+    const auto fingerprint = fixture.catalog->fingerprint();
+    options.face_transport = {{"restart Fourier face stage", 1, fingerprint, 0, std::nullopt,
+        R::MixtureFourierLaw{"restart liquid contact", 1, fingerprint, [](const auto&) { return 1.; }}}};
+    return options;
+}
+
+Flow::State fourier_restart_initial(const Fixture& fixture)
+{
+    auto state = fixture.initial();
+    for (size_t c = 0; c < state.cells.size(); ++c)
+    {
+        const auto cell = static_cast<LO>(c);
+        const double temperature = fixture.mesh->cell_centroid(cell).z < 1. ? 300. : 301.;
+        const double pressure = state.thermodynamic_pressure;
+        const double gas_volume = 2.5 * 8.31446261815324 * temperature / pressure;
+        auto& phases = state.cells[c].phases;
+        phases[0].moles[0] = 1000 * (fixture.mesh->cell_volume(cell) - gas_volume) / .02;
+        constexpr std::array molar_masses{.02, .04};
+        for (auto& phase : phases)
+        {
+            const double moles = phase.moles[0] + phase.moles[1];
+            const std::array fractions{phase.moles[0] / moles, phase.moles[1] / moles};
+            const double mass = phase.moles[0] * molar_masses[0] + phase.moles[1] * molar_masses[1];
+            phase.temperature = temperature;
+            phase.internal_energy =
+                mass * phase.thermodynamics->evaluate(temperature, pressure, fractions).internal_energy;
+        }
+    }
+    return state;
 }
 
 TEST(LowMachQbmmStateTest, FamilyBindingsRequireExactCatalogNamedRoleAndUniquePhase)
@@ -634,51 +733,535 @@ TEST(LowMachQbmmStateTest, PortableRestartRestoresFreshOwnersAndRejectsCorruptio
 
 TEST(LowMachQbmmStateTest, EarlierRestartVersionsRestoreTheirCanonicalHistory)
 {
-    Fixture f;
+    Fixture f(2);
     auto original = f.solver();
-    original->initialize(f.initial());
-    original->advance(.01);
+    original->initialize(fourier_restart_initial(f));
+    int calls = 0;
+    {
+        R::ReactingMixtureCoupler controller(original, fourier_restart_options(f, calls));
+        controller.advance(.01);
+    }
+    ASSERT_GT(original->diagnostics().maximum_fourier_gross_comparison_uncertainty_j.value_or(0.), 0.);
     const auto current = original->serialize_qbmm_restart();
     ASSERT_GT(current.size(), 5 * sizeof(std::uint64_t));
-    ASSERT_EQ(current[8], std::byte{4});
-    for (unsigned version : {1u, 2u, 3u})
+    ASSERT_EQ(current[8], std::byte{5});
+    for (unsigned version : {1u, 2u, 3u, 4u})
     {
-        // Q3 and Q4 each appended one binary64 diagnostic before the two checksum words.
-        auto bytes = current;
-        bytes[8] = static_cast<std::byte>(version);
-        constexpr auto word = sizeof(std::uint64_t);
-        // V4 inserted controller presence + fingerprint after the 13 original header
-        // words and appended the physical budget and shape diagnostics version.
-        bytes.erase(bytes.begin() + 13 * word, bytes.begin() + 15 * word);
-        constexpr unsigned v4_diagnostics_words = 4 + 2 + 1 + 1;
-        bytes.resize(bytes.size() - (2 + v4_diagnostics_words + 3 - version) * word);
-        std::uint64_t local = 14695981039346656037ULL, image = 0;
-        for (auto b : bytes)
-            local = (local ^ std::to_integer<std::uint64_t>(b)) * 1099511628211ULL;
-        Teuchos::reduceAll(*f.mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local, &image);
-        for (std::uint64_t word : {local, image})
-            for (int i = 0; i < 8; ++i)
-                bytes.push_back(static_cast<std::byte>((word >> (8 * i)) & 0xff));
+        const auto bytes = earlier_restart(f, current, version, true);
 
         auto restored = f.solver();
         restored->restore_qbmm_restart(bytes);
         expect_state(restored->state(), original->state());
-        EXPECT_EQ(restored->diagnostics().maximum_shape_transport_residual, 0);
+        EXPECT_EQ(restored->diagnostics().maximum_shape_transport_residual,
+            version < 3 ? 0 : original->diagnostics().maximum_shape_transport_residual);
         EXPECT_EQ(restored->diagnostics().maximum_shape_source_residual,
             version == 1 ? 0 : original->diagnostics().maximum_shape_source_residual);
         EXPECT_EQ(restored->diagnostics().correctors, original->diagnostics().correctors);
         const auto report = restored->qbmm_report();
         ASSERT_TRUE(report.convergence);
+        EXPECT_FALSE(restored->diagnostics().maximum_fourier_gross_comparison_uncertainty_j);
+        EXPECT_FALSE(report.convergence->maximum_fourier_gross_comparison_uncertainty_j);
         EXPECT_EQ(report.convergence->maximum_shape_source_residual.has_value(), version >= 2);
         EXPECT_EQ(report.convergence->maximum_shape_transport_residual.has_value(), version >= 3);
         const auto rearchived = f.solver();
         rearchived->restore_qbmm_restart(restored->serialize_qbmm_restart());
         const auto reread = rearchived->qbmm_report();
         ASSERT_TRUE(reread.convergence);
+        EXPECT_FALSE(rearchived->diagnostics().maximum_fourier_gross_comparison_uncertainty_j);
+        EXPECT_FALSE(reread.convergence->maximum_fourier_gross_comparison_uncertainty_j);
         EXPECT_EQ(reread.convergence->maximum_shape_source_residual, report.convergence->maximum_shape_source_residual);
         EXPECT_EQ(
             reread.convergence->maximum_shape_transport_residual, report.convergence->maximum_shape_transport_residual);
     }
+}
+
+TEST(LowMachQbmmStateTest, PortableFourierUncertaintyRoundTripsAnAcceptedContactStep)
+{
+    Fixture f(2);
+    auto original = f.solver();
+    original->initialize(fourier_restart_initial(f));
+    int calls = 0;
+    const auto options = fourier_restart_options(f, calls);
+    {
+        R::ReactingMixtureCoupler controller(original, options);
+        controller.advance(.01);
+    }
+    const double uncertainty = original->diagnostics().maximum_fourier_gross_comparison_uncertainty_j.value_or(0.);
+    ASSERT_GT(uncertainty, 0.);
+    // Both temperatures stay in the same binary64 binade. The comparison
+    // uses one operand-spacing bound per evaluation at dt * conductance = .01 J/K.
+    EXPECT_DOUBLE_EQ(uncertainty, .02 * (std::nextafter(300., 301.) - 300.));
+    ASSERT_GE(original->diagnostics().source_evaluations, 2);
+    const auto archive = original->serialize_qbmm_restart();
+    const auto old_v5 = restart_with_fourier_uncertainty(f, archive, std::nullopt, true);
+    auto unknown = f.solver();
+    unknown->restore_qbmm_restart(old_v5);
+    EXPECT_FALSE(unknown->diagnostics().maximum_fourier_gross_comparison_uncertainty_j);
+    const auto unknown_report = unknown->qbmm_report();
+    ASSERT_TRUE(unknown_report.convergence);
+    EXPECT_FALSE(unknown_report.convergence->maximum_fourier_gross_comparison_uncertainty_j);
+    const auto reencoded_unknown = unknown->serialize_qbmm_restart();
+    EXPECT_EQ(reencoded_unknown.size(), old_v5.size());
+
+    auto restored = f.solver();
+    const int before_restore = calls;
+    restored->restore_qbmm_restart(archive);
+    EXPECT_EQ(calls, before_restore);
+    expect_state(restored->state(), unknown->state());
+    EXPECT_EQ(restored->diagnostics().maximum_fourier_gross_comparison_uncertainty_j, uncertainty);
+    const auto report = restored->qbmm_report();
+    ASSERT_TRUE(report.convergence);
+    EXPECT_EQ(report.convergence->maximum_fourier_gross_comparison_uncertainty_j, uncertainty);
+    EXPECT_EQ(restored->serialize_qbmm_restart(), restart_with_fourier_uncertainty(f, reencoded_unknown, uncertainty));
+
+    R::ReactingMixtureCoupler controller(restored, options);
+    const auto checkpoint = controller.checkpoint();
+    const auto trial = controller.preview(.01);
+    const auto trial_report = controller.qbmm_report(trial);
+    ASSERT_TRUE(trial_report.convergence);
+    EXPECT_EQ(trial_report.convergence->maximum_fourier_gross_comparison_uncertainty_j,
+        trial.diagnostics().flow.maximum_fourier_gross_comparison_uncertainty_j);
+    controller.commit(trial);
+    EXPECT_EQ(restored->diagnostics().maximum_fourier_gross_comparison_uncertainty_j,
+        trial_report.convergence->maximum_fourier_gross_comparison_uncertainty_j);
+    controller.restore(checkpoint);
+    EXPECT_EQ(restored->diagnostics().maximum_fourier_gross_comparison_uncertainty_j, uncertainty);
+}
+
+TEST(LowMachQbmmStateTest, PortableFourierUncertaintyRetainsTheKnownZeroOfAnUnchangedContact)
+{
+    Fixture f(2);
+    auto original = f.solver();
+    original->initialize(f.initial());
+    int calls = 0;
+    {
+        R::ReactingMixtureCoupler controller(original, fourier_restart_options(f, calls));
+        controller.advance(.01);
+    }
+    ASSERT_GE(original->diagnostics().source_evaluations, 2);
+    ASSERT_EQ(original->diagnostics().maximum_fourier_gross_comparison_uncertainty_j, 0.);
+    auto restored = f.solver();
+    restored->restore_qbmm_restart(original->serialize_qbmm_restart());
+    EXPECT_EQ(restored->diagnostics().maximum_fourier_gross_comparison_uncertainty_j, 0.);
+    const auto report = restored->qbmm_report();
+    ASSERT_TRUE(report.convergence);
+    EXPECT_EQ(report.convergence->maximum_fourier_gross_comparison_uncertainty_j, 0.);
+}
+
+TEST(LowMachQbmmStateTest, PortableFourierUncertaintyRejectsInvalidOrLegacyTrailingWords)
+{
+    Fixture f(2);
+    auto flow = f.solver();
+    flow->initialize(f.initial());
+    const auto initial = flow->serialize_qbmm_restart();
+    EXPECT_THROW(flow->restore_qbmm_restart(restart_with_fourier_uncertainty(f, initial, 0.)), std::exception);
+    EXPECT_EQ(flow->serialize_qbmm_restart(), initial);
+    flow->advance(.01);
+    const auto accepted = flow->serialize_qbmm_restart();
+    const auto retained = flow->preview(.01);
+    EXPECT_THROW(flow->restore_qbmm_restart(restart_with_fourier_uncertainty(f, accepted, .125)), std::exception);
+    EXPECT_EQ(flow->serialize_qbmm_restart(), accepted);
+
+    auto fourier = f.solver();
+    fourier->initialize(fourier_restart_initial(f));
+    int calls = 0;
+    {
+        R::ReactingMixtureCoupler controller(fourier, fourier_restart_options(f, calls));
+        controller.advance(.01);
+    }
+    ASSERT_GT(fourier->diagnostics().maximum_fourier_gross_comparison_uncertainty_j.value_or(0.), 0.);
+    const auto valid = fourier->serialize_qbmm_restart();
+    const auto comm = f.mesh->owned_cell_map()->getComm();
+    for (const double invalid :
+        {-1., std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()})
+    {
+        const auto corrupt = restart_with_fourier_uncertainty(f, valid, comm->getRank() == 0 ? invalid : .125, true);
+        EXPECT_THROW(flow->restore_qbmm_restart(corrupt), std::exception);
+        EXPECT_EQ(flow->serialize_qbmm_restart(), accepted);
+    }
+    if (comm->getSize() > 1)
+    {
+        const auto inconsistent = restart_with_fourier_uncertainty(f, valid, comm->getRank() == 0 ? 0. : .125, true);
+        EXPECT_THROW(flow->restore_qbmm_restart(inconsistent), std::exception);
+        EXPECT_EQ(flow->serialize_qbmm_restart(), accepted);
+    }
+    const auto legacy = earlier_restart(f, accepted, 4);
+    EXPECT_THROW(flow->restore_qbmm_restart(restart_with_fourier_uncertainty(f, legacy, 0.)), std::exception);
+    EXPECT_EQ(flow->serialize_qbmm_restart(), accepted);
+    flow->commit(retained);
+}
+
+TEST(LowMachQbmmStateTest, RestartVelocityAndVersionMismatchPreserveAcceptedStateAndTrials)
+{
+    Fixture f;
+    auto shared = f.solver();
+    shared->initialize(f.initial());
+    const auto shared_bytes = shared->serialize_qbmm_restart();
+    auto slip_options = f.options;
+    slip_options.qbmm_model.velocity = R::QbmmModelOptions::Velocity::SuppliedPhaseSlip;
+    Flow slip(f.mesh, f.eos, slip_options);
+    slip.initialize(f.initial()); // Explicit slip mode differs even when every drift is zero.
+    const auto zero_slip_bytes = slip.serialize_qbmm_restart();
+    EXPECT_THROW(slip.restore_qbmm_restart(shared_bytes), std::exception);
+    EXPECT_EQ(slip.serialize_qbmm_restart(), zero_slip_bytes);
+    EXPECT_THROW(shared->restore_qbmm_restart(zero_slip_bytes), std::exception);
+    EXPECT_EQ(shared->serialize_qbmm_restart(), shared_bytes);
+    const auto old = earlier_restart(f, shared_bytes, 4);
+    EXPECT_THROW(slip.restore_qbmm_restart(old), std::exception);
+    if (f.mesh->owned_cell_map()->getComm()->getSize() > 1)
+    {
+        // Recompute a valid collective checksum for shards with different archive
+        // versions. Rejection must come from uniform provenance, before publishing.
+        auto mixed = f.mesh->owned_cell_map()->getComm()->getRank() == 0 ? old : shared_bytes;
+        mixed.resize(mixed.size() - 2 * sizeof(std::uint64_t));
+        append_restart_checksums(f, mixed);
+        EXPECT_THROW(shared->restore_qbmm_restart(mixed), std::exception);
+        EXPECT_EQ(shared->serialize_qbmm_restart(), shared_bytes);
+    }
+
+    auto drifting = f.initial();
+    for (auto& cell : drifting.cells)
+    {
+        cell.drift_velocity.resize(f.eos.size());
+        cell.drift_velocity[1] = Flow::Vector{.125, 0, -.25};
+    }
+    slip.initialize(drifting);
+    Flow resumed(f.mesh, f.eos, slip_options);
+    resumed.restore_qbmm_restart(slip.serialize_qbmm_restart());
+    expect_state(resumed.state(), slip.state());
+
+    const auto retained = shared->preview(.01);
+    for (const unsigned version : {0u, 6u})
+    {
+        auto invalid = shared_bytes;
+        invalid.resize(invalid.size() - 2 * sizeof(std::uint64_t));
+        invalid[8] = static_cast<std::byte>(version);
+        append_restart_checksums(f, invalid);
+        EXPECT_THROW(shared->restore_qbmm_restart(invalid), std::exception);
+        EXPECT_EQ(shared->serialize_qbmm_restart(), shared_bytes);
+    }
+    auto invalid_model = shared_bytes;
+    invalid_model.resize(invalid_model.size() - 2 * sizeof(std::uint64_t));
+    invalid_model[15 * sizeof(std::uint64_t)] = std::byte{2};
+    append_restart_checksums(f, invalid_model);
+    EXPECT_THROW(shared->restore_qbmm_restart(invalid_model), std::exception);
+    EXPECT_EQ(shared->serialize_qbmm_restart(), shared_bytes);
+    auto invalid_restriction = shared_bytes;
+    invalid_restriction.resize(invalid_restriction.size() - 2 * sizeof(std::uint64_t));
+    invalid_restriction[16 * sizeof(std::uint64_t)] = std::byte{2};
+    append_restart_checksums(f, invalid_restriction);
+    EXPECT_THROW(shared->restore_qbmm_restart(invalid_restriction), std::exception);
+    EXPECT_EQ(shared->serialize_qbmm_restart(), shared_bytes);
+    shared->commit(retained);
+}
+
+TEST(LowMachQbmmStateTest, LegacyDefaultOnlyRestrictionSurvivesRestoreAdvanceAndReencoding)
+{
+    Fixture f;
+    auto original = f.solver();
+    original->initialize(f.initial());
+    original->advance(.01);
+    const auto current = original->serialize_qbmm_restart();
+    int calls = 0;
+    auto forced = restart_controller_options(f, calls);
+    forced.body_acceleration = Flow::Vector{}; // Engaged zero is an explicit force configuration too.
+    for (const unsigned version : {1u, 2u, 3u, 4u})
+    {
+        auto restored = f.solver();
+        restored->restore_qbmm_restart(earlier_restart(f, current, version));
+        auto before = restored->serialize_qbmm_restart();
+        EXPECT_THROW((void) R::ReactingMixtureCoupler(restored, forced), std::exception);
+        EXPECT_EQ(restored->serialize_qbmm_restart(), before);
+        restored->advance(.01);
+        const auto saved = restored->checkpoint();
+        restored->advance(.01);
+        const auto eos_calls = *f.liquid_evaluations;
+        restored->restore(saved);
+        EXPECT_EQ(*f.liquid_evaluations, eos_calls);
+        before = restored->serialize_qbmm_restart();
+        EXPECT_THROW((void) R::ReactingMixtureCoupler(restored, forced), std::exception);
+        EXPECT_EQ(restored->serialize_qbmm_restart(), before);
+
+        auto reencoded = f.solver();
+        reencoded->restore_qbmm_restart(before);
+        const auto reencoded_before = reencoded->serialize_qbmm_restart();
+        EXPECT_THROW((void) R::ReactingMixtureCoupler(reencoded, forced), std::exception);
+        EXPECT_EQ(reencoded->serialize_qbmm_restart(), reencoded_before);
+        R::ReactingMixtureCoupler controller(reencoded, restart_controller_options(f, calls));
+        const auto coupled_saved = controller.checkpoint();
+        controller.restore(coupled_saved);
+        EXPECT_EQ(calls, 0);
+    }
+}
+
+TEST(LowMachQbmmStateTest, FreshInitializationClearsLegacyAndControllerProvenanceOnlyOnSuccess)
+{
+    Fixture f;
+    auto original = f.solver();
+    original->initialize(f.initial());
+    int calls = 0;
+    std::vector<std::byte> legacy;
+    {
+        R::ReactingMixtureCoupler controller(original, restart_controller_options(f, calls));
+        legacy = earlier_restart(f, original->serialize_qbmm_restart(), 4);
+    }
+    auto restored = f.solver();
+    restored->restore_qbmm_restart(legacy);
+    const auto before = restored->serialize_qbmm_restart();
+    EXPECT_TRUE(restored->qbmm_report().provenance.controller_configuration_signature);
+    auto forced = restart_controller_options(f, calls);
+    forced.body_acceleration = Flow::Vector{};
+    auto invalid = f.initial();
+    for (auto& cell : invalid.cells)
+        cell.phases[0].moles[0] *= .9;
+    EXPECT_THROW(restored->initialize(invalid), std::exception);
+    EXPECT_EQ(restored->serialize_qbmm_restart(), before);
+    EXPECT_THROW((void) restored->preview(.01), std::exception);
+    EXPECT_THROW((void) R::ReactingMixtureCoupler(restored, forced), std::exception);
+
+    restored->initialize(f.initial());
+    const auto report = restored->qbmm_report();
+    EXPECT_EQ(report.provenance.origin, Flow::QbmmStateOrigin::Initialized);
+    EXPECT_FALSE(report.provenance.controller_configuration_signature);
+    EXPECT_NO_THROW((void) restored->preview(.01));
+    EXPECT_NO_THROW((void) R::ReactingMixtureCoupler(restored, forced));
+    EXPECT_EQ(calls, 0);
+}
+
+TEST(LowMachQbmmStateTest, SignedRestartRequiresExactSourceAndForceMetadataWithoutCallbacks)
+{
+    Fixture f;
+    auto flow = f.solver();
+    flow->initialize(f.initial());
+    int calls = 0;
+    const auto options = restart_controller_options(f, calls);
+    std::vector<std::byte> signed_bytes;
+    {
+        R::ReactingMixtureCoupler controller(flow, options);
+        signed_bytes = flow->serialize_qbmm_restart();
+    }
+    for (const bool legacy : {false, true})
+    {
+        const auto bytes = legacy ? earlier_restart(f, signed_bytes, 4) : signed_bytes;
+        auto restored = f.solver();
+        restored->restore_qbmm_restart(bytes);
+        const auto before = restored->serialize_qbmm_restart();
+        auto changed = options;
+        ++changed.source_revision;
+        EXPECT_THROW((void) R::ReactingMixtureCoupler(restored, changed), std::exception);
+        changed = options;
+        changed.body_acceleration = Flow::Vector{0, 0, -1};
+        EXPECT_THROW((void) R::ReactingMixtureCoupler(restored, changed), std::exception);
+        EXPECT_EQ(restored->serialize_qbmm_restart(), before);
+        EXPECT_EQ(calls, 0);
+        R::ReactingMixtureCoupler matching(restored, options);
+        const auto checkpoint = matching.checkpoint();
+        matching.restore(checkpoint);
+        EXPECT_EQ(calls, 0);
+    }
+
+    auto forced_options = options;
+    forced_options.body_acceleration = Flow::Vector{0, 0, -1};
+    std::vector<std::byte> forced_bytes;
+    {
+        R::ReactingMixtureCoupler controller(flow, forced_options);
+        forced_bytes = flow->serialize_qbmm_restart();
+    }
+    auto restored = f.solver();
+    restored->restore_qbmm_restart(forced_bytes);
+    EXPECT_THROW((void) R::ReactingMixtureCoupler(restored, options), std::exception);
+    R::ReactingMixtureCoupler matching(restored, forced_options);
+    EXPECT_EQ(calls, 0);
+}
+
+TEST(LowMachQbmmStateTest, NativeCheckpointRejectsForeignSourceBindingWithoutInvalidatingTrial)
+{
+    Fixture f;
+    auto flow = f.solver();
+    flow->initialize(f.initial());
+    int calls = 0;
+    const auto signed_saved = [&]
+    {
+        R::ReactingMixtureCoupler controller(flow, restart_controller_options(f, calls));
+        return flow->checkpoint();
+    }();
+    auto lease = flow->acquire_controller();
+    const auto retained = flow->preview(.01, {}, &lease);
+    const auto before = flow->serialize_qbmm_restart();
+    const auto eos_calls = *f.liquid_evaluations;
+    EXPECT_THROW(flow->restore(signed_saved, &lease), std::exception);
+    EXPECT_EQ(flow->serialize_qbmm_restart(), before);
+    EXPECT_EQ(*f.liquid_evaluations, eos_calls);
+    EXPECT_EQ(calls, 0);
+    flow->commit(retained, &lease);
+}
+
+TEST(LowMachQbmmStateTest, CountOnlyMigrationRetainsCompatibleEosReplacementAndControllerAuthority)
+{
+    Fixture f;
+    auto count_options = f.options;
+    count_options.qbmm_families.clear();
+    Flow previous(f.mesh, f.eos, count_options);
+    auto count_state = f.initial();
+    count_state.qbmm_families.clear();
+    for (auto& cell : count_state.cells)
+        cell.qbmm_shape.clear();
+    previous.initialize(count_state);
+    int calls = 0;
+    R::ReactingMixtureCoupler prior_controller(
+        std::shared_ptr<Flow>(&previous, [](Flow*) {}), restart_controller_options(f, calls));
+    const auto saved = previous.checkpoint();
+    Flow::QbmmInitialization initialization;
+    initialization.cells.resize(count_state.cells.size());
+    for (auto& cell : initialization.cells)
+        cell = {std::nullopt, Flow::QbmmMonodisperse{}, std::nullopt};
+
+    auto replacement = f.eos;
+    const auto& bounds = f.eos[0]->bounds();
+    replacement[0] = R::make_linear_compressible_mixture_liquid(f.catalog, bounds, [](std::span<const double>)
+        { return R::LinearCompressibleMixtureLiquid{300, 100000, 1000, 4000, 0, 5e-9, 0, 0, 0}; });
+    Flow migrated(f.mesh, replacement, f.options);
+    auto lease = migrated.acquire_controller();
+    migrated.restore_qbmm_checkpoint(previous, saved, initialization, &lease);
+    EXPECT_EQ(calls, 0);
+    EXPECT_EQ(migrated.state().time, previous.state().time);
+    EXPECT_EQ(migrated.state().revision, previous.state().revision);
+    for (size_t c = 0; c < count_state.cells.size(); ++c)
+    {
+        EXPECT_EQ(migrated.state().cells[c].phases[0].moles, previous.state().cells[c].phases[0].moles);
+        EXPECT_EQ(
+            migrated.state().cells[c].phases[0].internal_energy, previous.state().cells[c].phases[0].internal_energy);
+        EXPECT_EQ(migrated.state().cells[c].phases[0].thermodynamics, replacement[0]);
+    }
+
+    // Identical kind/bounds are insufficient: a different caloric reference must
+    // reject, while the same live native mesh and all source callbacks remain intact.
+    replacement[0] = R::make_linear_compressible_mixture_liquid(f.catalog, bounds, [](std::span<const double>)
+        { return R::LinearCompressibleMixtureLiquid{300, 100000, 1000, 4000, 0, 5e-9, 1, 0, 0}; });
+    Flow incompatible(f.mesh, replacement, f.options);
+    EXPECT_THROW(incompatible.restore_qbmm_checkpoint(previous, saved, initialization), std::exception);
+    EXPECT_FALSE(incompatible.initialized());
+    EXPECT_EQ(calls, 0);
+}
+
+TEST(LowMachQbmmStateTest, CountOnlyMigrationRequiresTheSameSuppliedAcceleration)
+{
+    Fixture f;
+    auto count_options = f.options;
+    count_options.qbmm_families.clear();
+    auto previous = std::make_shared<Flow>(f.mesh, f.eos, count_options);
+    auto initial = f.initial();
+    initial.qbmm_families.clear();
+    for (auto& cell : initial.cells)
+        cell.qbmm_shape.clear();
+    previous->initialize(initial);
+    const auto unforced = previous->checkpoint();
+    Flow::QbmmInitialization shape;
+    shape.cells.resize(initial.cells.size(), {std::nullopt, Flow::QbmmMonodisperse{}, std::nullopt});
+    int calls = 0;
+    auto matching = restart_controller_options(f, calls);
+    matching.body_acceleration = Flow::Vector{0, 0, -1};
+    const auto live_checkpoint = [&]
+    {
+        R::ReactingMixtureCoupler controller(previous, matching);
+        const auto fresh = previous->checkpoint();
+        controller.advance(.01);
+        return fresh;
+    }();
+    const auto stepped_checkpoint = previous->checkpoint();
+    const auto saved_time = previous->state().time;
+
+    auto receiving_options = f.options;
+    const auto receiving_family = f.make_family(f.catalog, receiving_options.phase_roles[1], .04 / 28);
+    receiving_options.qbmm_families[1] = receiving_family;
+    auto receiving = std::make_shared<Flow>(f.mesh, f.eos, receiving_options);
+    receiving->initialize_qbmm(initial, shape);
+    const auto before = receiving->serialize_qbmm_restart();
+    EXPECT_THROW(receiving->restore_qbmm_checkpoint(*previous, live_checkpoint, shape), std::exception);
+    EXPECT_THROW(receiving->restore_qbmm_checkpoint(*previous, stepped_checkpoint, shape), std::exception);
+    EXPECT_EQ(receiving->serialize_qbmm_restart(), before);
+
+    auto changed = matching;
+    changed.body_acceleration = Flow::Vector{0, 0, -2};
+    {
+        R::ReactingMixtureCoupler controller(receiving, changed);
+        EXPECT_THROW(controller.restore_qbmm_checkpoint(*previous, stepped_checkpoint, shape), std::exception);
+    }
+    {
+        R::ReactingMixtureCoupler controller(receiving, restart_controller_options(f, calls));
+        const auto attached = receiving->serialize_qbmm_restart();
+        const auto kept = controller.preview(.01);
+        const int before_attempt = calls;
+        EXPECT_THROW(controller.restore_qbmm_checkpoint(*previous, stepped_checkpoint, shape), std::exception);
+        EXPECT_EQ(receiving->serialize_qbmm_restart(), attached);
+        EXPECT_EQ(calls, before_attempt);
+        controller.commit(kept);
+    }
+
+    previous->restore(unforced);
+    const auto restored_unforced = [&]
+    {
+        R::ReactingMixtureCoupler controller(previous, matching);
+        return previous->checkpoint();
+    }();
+
+    // The receiving QBMM family schema and source identity may differ from the count-only inputs.
+    matching.source_identity = "new paired QBMM source configuration";
+    {
+        R::ReactingMixtureCoupler controller(receiving, matching);
+        const int before_attempt = calls;
+        EXPECT_THROW(controller.restore_qbmm_checkpoint(*previous, unforced, shape), std::exception);
+        EXPECT_THROW(controller.restore_qbmm_checkpoint(*previous, restored_unforced, shape), std::exception);
+        EXPECT_NO_THROW(controller.restore_qbmm_checkpoint(*previous, live_checkpoint, shape));
+        EXPECT_EQ(receiving->state().time, 0);
+        EXPECT_NO_THROW(controller.restore_qbmm_checkpoint(*previous, stepped_checkpoint, shape));
+        EXPECT_EQ(receiving->state().time, saved_time);
+        EXPECT_EQ(receiving->state().qbmm_families.at(1), Flow::qbmm_family_stamp(*receiving_family));
+        EXPECT_EQ(calls, before_attempt);
+    }
+
+    previous->restore(stepped_checkpoint);
+    auto invalid = initial;
+    invalid.thermodynamic_pressure = 0;
+    EXPECT_THROW(previous->initialize(invalid), std::exception);
+    EXPECT_THROW(receiving->restore_qbmm_checkpoint(*previous, previous->checkpoint(), shape), std::exception);
+    previous->initialize(initial);
+    EXPECT_NO_THROW(receiving->restore_qbmm_checkpoint(*previous, previous->checkpoint(), shape));
+    EXPECT_EQ(receiving->state().time, 0);
+}
+
+TEST(LowMachQbmmStateTest, RestartRejectsChangedLawMetadataAndLegacyLawConfiguration)
+{
+    Fixture f;
+    auto options = f.options;
+    R::QbmmClosureVersions versions;
+    versions.laws = {{"declared-slip", 1, R::QbmmLawKind::PhaseSlip, "per physical phase", "m/s"}};
+    const auto family = [&]
+    {
+        return std::make_shared<const R::QbmmPopulationSchema>(f.catalog, f.catalog->fingerprint(), "fine",
+            options.phase_roles[1], f.family->mass_scale_kg(), std::vector<R::QbmmMassFraction>{{11, .5}, {29, .5}},
+            versions);
+    };
+    options.qbmm_families[1] = family();
+    Flow original(f.mesh, f.eos, options);
+    auto state = f.initial();
+    state.qbmm_families[1] = Flow::qbmm_family_stamp(*options.qbmm_families[1]);
+    original.initialize(state);
+    const auto bytes = original.serialize_qbmm_restart();
+    const auto old = earlier_restart(f, bytes, 4);
+    EXPECT_THROW(original.restore_qbmm_restart(old), std::exception);
+    EXPECT_EQ(original.serialize_qbmm_restart(), bytes);
+
+    ++versions.laws.front().revision;
+    options.qbmm_families[1] = family();
+    Flow changed(f.mesh, f.eos, options);
+    state.qbmm_families[1] = Flow::qbmm_family_stamp(*options.qbmm_families[1]);
+    changed.initialize(state);
+    const auto before = changed.serialize_qbmm_restart();
+    const auto eos_calls = *f.liquid_evaluations;
+    EXPECT_THROW(changed.restore_qbmm_restart(bytes), std::exception);
+    EXPECT_EQ(changed.serialize_qbmm_restart(), before);
+    EXPECT_EQ(*f.liquid_evaluations, eos_calls);
 }
 
 TEST(LowMachQbmmStateTest, DeferredModelRequestsRejectCollectivelyBeforeAdvance)
@@ -694,7 +1277,6 @@ TEST(LowMachQbmmStateTest, DeferredModelRequestsRejectCollectivelyBeforeAdvance)
         {"BDF2", [](Model& m) { m.transport.time = FVM::ScalarTimeScheme::BDF2; }},
         {"linear upwind", [](Model& m) { m.transport.convection = FVM::ScalarConvectionScheme::BoundedLinearUpwind; }},
         {"steady", [](Model& m) { m.transport.mode = FVM::AssemblyMode::Steady; }},
-        {"phase slip", [](Model& m) { m.velocity = Model::Velocity::SuppliedPhaseSlip; }},
         {"node slip", [](Model& m) { m.velocity = Model::Velocity::NodeDependentSlip; }},
         {"independent momentum", [](Model& m) { m.velocity = Model::Velocity::IndependentPhaseMomentum; }},
         {"variable composition", [](Model& m) { m.variable_composition = true; }},
@@ -789,6 +1371,188 @@ TEST(LowMachQbmmStateTest, LinearSolverOptionsMustAgreeOnEveryOwner)
     EXPECT_THROW((void) Flow(f.mesh, f.eos, options), std::exception);
 }
 
+void bind_native_laws(Fixture& fixture, std::vector<R::QbmmLawMetadata> laws)
+{
+    R::QbmmClosureVersions versions;
+    versions.laws = std::move(laws);
+    fixture.family = Fixture::make_family(
+        fixture.catalog, fixture.options.phase_roles[1], fixture.family->mass_scale_kg(), std::move(versions));
+    fixture.options.qbmm_families[1] = fixture.family;
+    fixture.options.qbmm_model.velocity = R::QbmmModelOptions::Velocity::SuppliedPhaseSlip;
+}
+
+R::QbmmLawMetadata native_slip_gate(double minimum = 0, double maximum = .125)
+{
+    return {"native-supplied-slip", 1, R::QbmmLawKind::PhaseSlip, "common family drift relative to carrier, m/s", "m/s",
+        R::QbmmApplicabilityGate::RejectOutside, true,
+        {{R::QbmmRangeVariable::SlipSpeedMPerS, minimum, maximum, std::nullopt},
+            {R::QbmmRangeVariable::TimeStepS, .005, .02, std::nullopt}}};
+}
+
+TEST(LowMachQbmmStateTest, NativeHardTransportGatesAdmitProviderFreePreviewAndDeferDurationUntilPreview)
+{
+    for (const unsigned owned_cells : {1u, 4u})
+    {
+        Fixture f(owned_cells);
+        const R::QbmmLawMetadata property{"native-property", 1, R::QbmmLawKind::TransportProperty,
+            "frozen physical p,T,phase geometry and liquid concentration", "supplied SI transport property",
+            R::QbmmApplicabilityGate::RejectOutside, true,
+            {{R::QbmmRangeVariable::AbsolutePressurePa, 90000, 110000, std::nullopt},
+                {R::QbmmRangeVariable::TemperatureK, 290, 310, std::nullopt},
+                {R::QbmmRangeVariable::PhaseVolumeFraction, 0, 1, std::nullopt},
+                {R::QbmmRangeVariable::GasVolumeFraction, 0, 1, std::nullopt},
+                {R::QbmmRangeVariable::DiameterM, 0, 1, std::nullopt},
+                {R::QbmmRangeVariable::CarrierLiquidConcentrationMolPerM3, 0, 100000, 0}}};
+        bind_native_laws(f, {native_slip_gate(), property});
+        auto flow = f.solver(); // No controller and no population provider.
+        auto initial = f.initial();
+        for (auto& cell : initial.cells)
+        {
+            cell.drift_velocity.resize(3);
+            cell.drift_velocity[1].x = .125; // Supplied field at the inclusive speed upper bound.
+        }
+        flow->initialize(initial);
+        const auto initialized = flow->qbmm_report();
+        for (const auto& cell : initialized.cells)
+        {
+            const auto& slip = cell.families[1]->applicability[0];
+            EXPECT_EQ(slip.ranges[1].status, R::QbmmRangeStatus::MissingInput);
+            EXPECT_FALSE(slip.gate_passed); // Reporting missing duration never rejects initialization.
+        }
+        const auto trial = flow->preview(.01);
+        const auto trial_report = flow->qbmm_report(trial);
+        for (const auto& cell : trial_report.cells)
+            for (const auto& law : cell.families[1]->applicability)
+                EXPECT_TRUE(law.gate_passed);
+        const unsigned calls = *f.liquid_evaluations;
+        flow->commit(trial);
+        EXPECT_EQ(*f.liquid_evaluations, calls);
+        const auto archive = flow->serialize_qbmm_restart();
+        flow->restore_qbmm_restart(archive);
+        // Portable restore revalidates the archived caloric state with the EOS.
+        if (f.mesh->num_owned_cells() > 0)
+            EXPECT_GT(*f.liquid_evaluations, calls);
+        const auto restarted = flow->qbmm_report();
+        for (const auto& cell : restarted.cells)
+            EXPECT_EQ(cell.families[1]->applicability[0].ranges[1].status, R::QbmmRangeStatus::MissingInput);
+        EXPECT_NO_THROW((void) flow->preview(.01));
+    }
+}
+
+TEST(LowMachQbmmStateTest, NativeHardSlipGatesRejectZeroAndBadDurationWithoutPublishing)
+{
+    Fixture f;
+    bind_native_laws(f, {native_slip_gate(.1, .2)});
+    auto flow = f.solver();
+    flow->initialize(f.initial()); // Exact zero slip is admissible state, outside this supplied law's range.
+    const auto original = flow->serialize_qbmm_restart();
+    EXPECT_THROW((void) flow->preview(.01), std::exception);
+    EXPECT_EQ(flow->serialize_qbmm_restart(), original);
+
+    bind_native_laws(f, {native_slip_gate()});
+    flow = f.solver();
+    flow->initialize(f.initial());
+    const auto origin = flow->serialize_qbmm_restart();
+    const auto retained = flow->preview(.01);
+    EXPECT_THROW((void) flow->preview(.04), std::exception);
+    EXPECT_EQ(flow->serialize_qbmm_restart(), origin);
+    flow->commit(retained);
+    EXPECT_EQ(flow->state().time, .01);
+}
+
+TEST(LowMachQbmmStateTest, NativeEndpointTransportGatesRejectSourceHeatedCandidateAndRetainEarlierTrial)
+{
+    // Independent admissibility control: the same heat packet has a valid numerical
+    // endpoint when the identical declared physical range is diagnostic-only.
+    for (const auto kind : {R::QbmmLawKind::TransportProperty, R::QbmmLawKind::PhaseSlip})
+    {
+        Fixture f;
+        const R::QbmmLawMetadata gate{"temperature-conditioned-transport", 1, kind,
+            "accepted and candidate physical temperature", kind == R::QbmmLawKind::PhaseSlip ? "m/s" : "Pa.s",
+            R::QbmmApplicabilityGate::RejectOutside, true,
+            {{R::QbmmRangeVariable::TemperatureK, 299, 300.00001, std::nullopt}}};
+        bind_native_laws(f, {gate});
+        auto flow = f.solver();
+        flow->initialize(f.initial());
+        const auto retained = flow->preview(.01);
+        const auto origin = flow->serialize_qbmm_restart();
+        std::vector<Flow::CellSources> heat(flow->state().cells.size());
+        for (auto& source : heat)
+            source.internal_energy = {4000, 0, 0};
+
+        auto diagnostic = gate;
+        diagnostic.gate = R::QbmmApplicabilityGate::ReportOnly;
+        bind_native_laws(f, {diagnostic});
+        auto reference = f.solver();
+        reference->initialize(f.initial());
+        const auto heated = reference->preview(.01, heat);
+        for (const auto& cell : reference->qbmm_report(heated).cells)
+        {
+            EXPECT_GT(*cell.families[1]->temperature_K, 300.00001);
+            const auto& applicability = cell.families[1]->applicability.front();
+            EXPECT_EQ(applicability.ranges.front().status, R::QbmmRangeStatus::OutsideRange);
+            EXPECT_TRUE(applicability.gate_passed);
+        }
+        EXPECT_THROW((void) flow->preview(.01, heat), std::exception);
+        EXPECT_EQ(flow->serialize_qbmm_restart(), origin);
+        flow->commit(retained);
+        EXPECT_EQ(flow->state().time, .01);
+    }
+}
+
+TEST(LowMachQbmmStateTest, NativeSlipGateFailureOnOneOwnerFencesBalancedAndEmptyPartitions)
+{
+    for (const unsigned owned_cells : {1u, 4u})
+    {
+        Fixture f(owned_cells);
+        bind_native_laws(f, {native_slip_gate(0, .2)});
+        auto flow = f.solver();
+        auto initial = f.initial();
+        const auto comm = f.mesh->owned_cell_map()->getComm();
+        for (auto& cell : initial.cells)
+        {
+            cell.drift_velocity.resize(3);
+            cell.drift_velocity[1].x = comm->getRank() == 0 ? .25 : .125;
+        }
+        flow->initialize(initial);
+        const auto origin = flow->serialize_qbmm_restart();
+        EXPECT_THROW((void) flow->preview(.01), std::exception);
+        EXPECT_EQ(flow->serialize_qbmm_restart(), origin);
+    }
+}
+
+TEST(LowMachQbmmStateTest, CountOnlyRankLocalPreviewDriftFailuresReachEveryOwnerWithoutAnyLawMetadata)
+{
+    for (const bool qbmm_enabled : {false, true})
+    {
+        Fixture f;
+        auto initial = f.initial();
+        if (!qbmm_enabled)
+        {
+            f.options.qbmm_families.clear();
+            initial.qbmm_families.clear();
+            for (auto& cell : initial.cells)
+                cell.qbmm_shape.clear();
+        }
+        auto flow = f.solver();
+        flow->initialize(initial);
+        const auto retained = flow->preview(.01);
+        const auto origin = flow->state();
+        // Deliberate fault injection at the preview boundary, not a supported state
+        // mutation API. The affected coarse phase has no family/shape metadata.
+        auto& injected = const_cast<Flow::State&>(flow->state());
+        const bool owner = f.mesh->owned_cell_map()->getComm()->getRank() == 0;
+        if (owner)
+            injected.cells[0].drift_velocity[2].z = std::numeric_limits<double>::quiet_NaN();
+        EXPECT_THROW((void) flow->preview(.01), std::exception);
+        if (owner)
+            injected.cells[0].drift_velocity[2].z = origin.cells[0].drift_velocity[2].z;
+        expect_state(flow->state(), origin);
+        flow->commit(retained);
+        EXPECT_EQ(flow->state().time, .01);
+    }
+}
+
 TEST(LowMachQbmmStateTest, OneCellFailuresReachAllRanksAndPreserveAnEarlierTrial)
 {
     Fixture f;
@@ -849,6 +1613,148 @@ TEST(LowMachQbmmStateTest, OneCellFailuresReachAllRanksAndPreserveAnEarlierTrial
         expect_state(flow->state(), retry.state());
         flow->commit(next);
         expect_state(flow->state(), next.state());
+    }
+}
+
+TEST(LowMachQbmmStateTest, NativeHardPropertyGateFencesCorrectorViscosityAndPreservesAcceptedState)
+{
+    Fixture f; // One cell leaves the other ranks empty in the registered MPI cases.
+    constexpr double ceiling = 300.00001;
+    const R::QbmmLawMetadata gate{"native-viscosity-spy", 1, R::QbmmLawKind::TransportProperty,
+        "recovered family temperature at viscosity evaluation", "Pa.s", R::QbmmApplicabilityGate::RejectOutside, true,
+        {{R::QbmmRangeVariable::TemperatureK, 299, ceiling, std::nullopt}}};
+    bind_native_laws(f, {gate});
+    unsigned calls = 0, outside = 0;
+    f.options.mixture_dynamic_viscosity = [&](std::span<const R::PhaseThermalState> phases, std::span<const double>)
+    {
+        ++calls;
+        const double temperature = phases[1].temperature;
+        if (temperature < 299 || temperature > ceiling)
+            ++outside;
+        return 0.;
+    };
+    auto flow = f.solver();
+    flow->initialize(f.initial());
+    const auto retained = flow->preview(.01);
+    const auto origin = flow->serialize_qbmm_restart();
+    const auto in_range_calls = calls;
+    std::vector<Flow::CellSources> heat(flow->state().cells.size());
+    for (auto& source : heat)
+        source.internal_energy = {4000, 0, 0};
+    if (!heat.empty())
+        EXPECT_GT(in_range_calls, 0u);
+    EXPECT_EQ(outside, 0u);
+    EXPECT_THROW((void) flow->preview(.01, heat), std::exception);
+    EXPECT_EQ(calls, in_range_calls);
+    EXPECT_EQ(outside, 0u);
+    EXPECT_EQ(flow->serialize_qbmm_restart(), origin);
+    flow->commit(retained);
+    expect_state(flow->state(), retained.state());
+
+    auto diagnostic = gate;
+    diagnostic.gate = R::QbmmApplicabilityGate::ReportOnly;
+    bind_native_laws(f, {diagnostic});
+    auto reference = f.solver();
+    reference->initialize(f.initial());
+    EXPECT_NO_THROW((void) reference->preview(.01, heat));
+    if (!heat.empty())
+        EXPECT_GT(outside, 0u);
+}
+
+TEST(LowMachQbmmStateTest, BarycentricReportPreservesAbsoluteMomentumAcrossCancellationAndOverflow)
+{
+    Fixture f;
+    f.family = Fixture::make_family(f.catalog, f.options.phase_roles[1], 1. / 14);
+    f.options.qbmm_families[1] = f.family;
+    f.options.qbmm_model.velocity = R::QbmmModelOptions::Velocity::SuppliedPhaseSlip;
+    // Fill one cubic metre with exactly 2 kg liquid and 1 kg bound gas at 300 K.
+    const double gas_volume = 37.5 * 8.31446261815324 * 300 / 100000;
+    f.eos[0] = R::make_linear_compressible_mixture_liquid(f.catalog, f.eos[0]->bounds(),
+        [density = 2 / (1 - gas_volume)](std::span<const double>)
+        { return R::LinearCompressibleMixtureLiquid{300, 100000, density, 4000, 0, 0, 0, 0, 0}; });
+    auto initial = f.initial();
+    const double next = std::nextafter(1., 2.);
+    const double largest = std::numeric_limits<double>::max();
+    const double smallest = std::numeric_limits<double>::denorm_min();
+    for (auto& cell : initial.cells)
+    {
+        cell.phases[0].moles = {100, 0};
+        cell.phases[1].moles = {25, 12.5};
+        cell.phases[2].moles = {0, 0};
+        cell.phases[2].temperature = 0;
+        cell.phase_numbers[2] = 0;
+        cell.velocity = {-1, largest, 0};
+        cell.drift_velocity = {{1, -largest, 0}, {next, largest, smallest}, {}};
+    }
+    auto flow = f.solver();
+    flow->initialize(initial);
+    const auto overflow_report = flow->qbmm_report();
+    ASSERT_EQ(overflow_report.cells.size(), f.mesh->num_owned_cells());
+    for (const auto& cell : overflow_report.cells)
+    {
+        // With masses 2 and 1, the signed absolute x momentum is exactly 2^-52.
+        // The y means divide a finite operand, even though their momenta overflow double.
+        EXPECT_EQ(cell.mass_weighted_drift.x, 1.);
+        EXPECT_EQ(cell.barycentric_velocity.x, 0x1.5555555555555p-54);
+        EXPECT_EQ(cell.mass_weighted_drift.y, -largest / 3.);
+        EXPECT_EQ(cell.barycentric_velocity.y, largest / 1.5);
+        EXPECT_EQ(cell.mass_weighted_drift.z, 0.);
+        EXPECT_EQ(cell.barycentric_velocity.z, 0.);
+    }
+
+    // Both per-phase velocity sums round away the carrier in binary64. The
+    // opposing drifts cancel exactly and the absolute velocity keeps it.
+    for (auto& cell : initial.cells)
+    {
+        cell.velocity = {smallest, 0, 0};
+        cell.drift_velocity = {{-largest / 2, 0, 0}, {largest, 0, 0}, {}};
+    }
+    flow->initialize(initial);
+    const auto cancellation_report = flow->qbmm_report();
+    ASSERT_EQ(cancellation_report.cells.size(), f.mesh->num_owned_cells());
+    for (const auto& cell : cancellation_report.cells)
+    {
+        EXPECT_EQ(cell.mass_weighted_drift.x, 0.);
+        EXPECT_EQ(cell.barycentric_velocity.x, smallest);
+    }
+}
+
+TEST(LowMachQbmmStateTest, BarycentricReportPreservesUniformExtremeVelocitiesWithUnequalMasses)
+{
+    Fixture f;
+    constexpr double gas_mass = 0x1p-53;
+    const double largest = std::numeric_limits<double>::max();
+    f.family = Fixture::make_family(f.catalog, f.options.phase_roles[1], gas_mass / 14);
+    f.options.qbmm_families[1] = f.family;
+    f.options.qbmm_model.velocity = R::QbmmModelOptions::Velocity::SuppliedPhaseSlip;
+    f.eos[0] = R::make_linear_compressible_mixture_liquid(f.catalog, f.eos[0]->bounds(), [](std::span<const double>)
+        { return R::LinearCompressibleMixtureLiquid{300, 100000, 1, 4000, 0, 0, 0, 0, 0}; });
+    auto initial = f.initial();
+    for (auto& cell : initial.cells)
+    {
+        cell.phases[0].moles = {50, 0};
+        cell.phases[1].moles = {25 * gas_mass, 12.5 * gas_mass};
+        cell.phases[2].moles = {0, 0};
+        cell.phases[2].temperature = 0;
+        cell.phase_numbers[2] = 0;
+        cell.velocity = {largest, 0, -largest};
+        cell.drift_velocity = {{0, largest, 0}, {0, largest, 0}, {}};
+    }
+
+    auto flow = f.solver();
+    flow->initialize(initial);
+    const auto report = flow->qbmm_report();
+    ASSERT_EQ(report.cells.size(), f.mesh->num_owned_cells());
+    for (const auto& cell : report.cells)
+    {
+        ASSERT_TRUE(cell.families[1]);
+        EXPECT_EQ(cell.families[1]->phase_mass_kg, gas_mass);
+        // The physical mass is 1 + 2^-53 kg. Its binary64 density rounds to 1 kg/m^3.
+        EXPECT_EQ(cell.mixture_density_kg_per_m3, 1.);
+        EXPECT_EQ(cell.mass_weighted_drift.y, largest);
+        EXPECT_EQ(cell.barycentric_velocity.x, largest);
+        EXPECT_EQ(cell.barycentric_velocity.y, largest);
+        EXPECT_EQ(cell.barycentric_velocity.z, -largest);
     }
 }
 } // namespace
