@@ -237,7 +237,7 @@ template<class T, class Counter> struct BootstrapAllocator
         catch (...) { mirror.retire(bytes); throw; }
         try
         {
-            auto* address = std::allocator<T>{}.allocate(count);
+            auto* address = domain_allocate<T>(AllocationDomain::NativePublication, count);
             if constexpr (requires { counter->native_allocation.most_recent_allocation; })
                 counter->native_allocation.most_recent_allocation = {address, bytes};
             return address;
@@ -251,7 +251,7 @@ template<class T, class Counter> struct BootstrapAllocator
     }
     void deallocate(T* value, std::size_t count) noexcept
     {
-        std::allocator<T>{}.deallocate(value, count);
+        domain_deallocate(AllocationDomain::NativePublication, value, count);
         const auto bytes = count * sizeof(T);
         if (counter->used < bytes)
             std::terminate();
@@ -288,6 +288,10 @@ public:
     }
     [[nodiscard]] T* allocate(std::size_t count)
     {
+        return allocate_for(AllocationDomain::NativePublication, count);
+    }
+    [[nodiscard]] T* allocate_for(AllocationDomain domain, std::size_t count)
+    {
         if (!state_ || count > std::numeric_limits<std::size_t>::max() / sizeof(T))
             throw std::bad_alloc();
         if (!count)
@@ -296,7 +300,7 @@ public:
         state_->add(bytes);
         try
         {
-            return std::allocator<T>{}.allocate(count);
+            return domain_allocate<T>(domain, count);
         }
         catch (...)
         {
@@ -306,13 +310,17 @@ public:
     }
     void deallocate(T* address, std::size_t count) noexcept
     {
+        deallocate_for(AllocationDomain::NativePublication, address, count);
+    }
+    void deallocate_for(AllocationDomain domain, T* address, std::size_t count) noexcept
+    {
         if (!count)
         {
             if (address)
                 std::terminate();
             return;
         }
-        std::allocator<T>{}.deallocate(address, count);
+        domain_deallocate(domain, address, count);
         state_->retire(count * sizeof(T));
     }
     template<class U> [[nodiscard]] bool operator==(const NativeConstructionAllocator<U>& other) const noexcept
@@ -352,6 +360,22 @@ public:
     }
     [[nodiscard]] T* allocate(std::size_t count)
     {
+        return allocate_for(AllocationDomain::OwnerUnion, count);
+    }
+    void deallocate(T* address, std::size_t count) noexcept
+    {
+        deallocate_for(AllocationDomain::OwnerUnion, address, count);
+    }
+    template<class U> [[nodiscard]] bool operator==(const NativeAdministrationAllocator<U>& other) const noexcept
+    {
+        return state_ == other.state_;
+    }
+
+    [[nodiscard]] std::shared_ptr<const NativeAllocationState> state() const noexcept { return state_ ? state_->self.lock() : std::shared_ptr<const NativeAllocationState>{}; }
+
+protected:
+    [[nodiscard]] T* allocate_for(AllocationDomain domain, std::size_t count)
+    {
         if (count > std::numeric_limits<std::size_t>::max() / sizeof(T))
             throw std::bad_alloc();
         if (!count)
@@ -361,7 +385,7 @@ public:
             state_->add(bytes);
         try
         {
-            return std::allocator<T>{}.allocate(count);
+            return domain_allocate<T>(domain, count);
         }
         catch (...)
         {
@@ -370,7 +394,7 @@ public:
             throw;
         }
     }
-    void deallocate(T* address, std::size_t count) noexcept
+    void deallocate_for(AllocationDomain domain, T* address, std::size_t count) noexcept
     {
         if (!count)
         {
@@ -378,17 +402,10 @@ public:
                 std::terminate();
             return;
         }
-        std::allocator<T>{}.deallocate(address, count);
+        domain_deallocate(domain, address, count);
         if (state_)
             state_->retire(count * sizeof(T));
     }
-    template<class U> [[nodiscard]] bool operator==(const NativeAdministrationAllocator<U>& other) const noexcept
-    {
-        return state_ == other.state_;
-    }
-
-    [[nodiscard]] std::shared_ptr<const NativeAllocationState> state() const noexcept { return state_ ? state_->self.lock() : std::shared_ptr<const NativeAllocationState>{}; }
-
 private:
     const NativeAllocationState* state_ = nullptr;
 };

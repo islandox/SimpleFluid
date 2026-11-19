@@ -2,6 +2,7 @@
  * @brief Pre-allocation receipts for concrete public vectors and private node containers.
  */
 #pragma once
+#include "geometry/details/AllocationDomainScope.hh"
 #include "geometry/details/NativeConstructionAdmission.hh"
 #include "geometry/details/NativeAllocationEnvelope.hh"
 #include <algorithm>
@@ -71,6 +72,10 @@ public:
      * moved only into an object whose storage field is destroyed after it. */
     template<class T> void reserve(std::vector<T>& destination, std::size_t count)
     {
+        reserve_for(AllocationDomain::NativePublication, destination, count);
+    }
+    template<class T> void reserve_for(AllocationDomain role, std::vector<T>& destination, std::size_t count)
+    {
         require_profile();
         if (!destination.empty() || destination.capacity())
             throw std::invalid_argument("Native concrete buffer must be empty before admission.");
@@ -81,7 +86,11 @@ public:
         auto receipt = admission_.unique<Buffer>();
         const auto bytes = count * sizeof(T);
         admission_.charge(bytes);
-        try { destination.reserve(count); }
+        try
+        {
+            const AllocationDomainScope domain(role);
+            destination.reserve(count);
+        }
         catch (...) { admission_.release(bytes); throw; }
         if (destination.capacity() != count)
         {
@@ -212,6 +221,7 @@ public:
         {
             // The range constructor calls _M_create(length, 0); assign/reserve
             // from SSO can instead grow to twice the local capacity.
+            const AllocationDomainScope domain(AllocationDomain::NativePublication);
             std::string exact(source.data(), source.size());
             destination.swap(exact);
         }
@@ -301,11 +311,14 @@ public:
     explicit NativeStorageAllocator(std::shared_ptr<NativeConstructorStorage> storage) : storage_(std::move(storage)) {}
     template<class U> NativeStorageAllocator(const NativeStorageAllocator<U>& other) noexcept : storage_(other.storage_) {}
     T* allocate(std::size_t count)
-    { return storage_ ? storage_->template allocate<T>(count) : std::allocator<T>().allocate(count); }
+    {
+        return storage_ ? storage_->template allocate<T>(count)
+                        : domain_allocate<T>(AllocationDomain::NativePublication, count);
+    }
     void deallocate(T* address, std::size_t count) noexcept
     {
         if (storage_) storage_->template deallocate<T>(address, count);
-        else std::allocator<T>().deallocate(address, count);
+        else domain_deallocate(AllocationDomain::NativePublication, address, count);
     }
     template<class U> bool operator==(const NativeStorageAllocator<U>& other) const noexcept
     { return storage_ == other.storage_; }

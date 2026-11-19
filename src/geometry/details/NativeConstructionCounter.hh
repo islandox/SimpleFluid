@@ -2,6 +2,7 @@
  * @brief Self-accounted detached scalar counter creation with no stack capture.
  */
 #pragma once
+#include "geometry/details/AllocationDomainScope.hh"
 #include "geometry/details/NativeAllocationExtent.hh"
 #include <limits>
 #include <memory>
@@ -83,7 +84,7 @@ template<class Counter> struct Delete
     void operator()(Counter* counter) noexcept
     {
         std::destroy_at(counter);
-        std::allocator<Counter>{}.deallocate(counter, 1);
+        domain_deallocate(AllocationDomain::NativePublication, counter, 1);
         mirror.retire(sizeof(Counter));
     }
 };
@@ -112,7 +113,7 @@ public:
         T* allocation = nullptr;
         try
         {
-            allocation = std::allocator<T>{}.allocate(count);
+            allocation = domain_allocate<T>(AllocationDomain::NativePublication, count);
         }
         catch (...)
         {
@@ -122,7 +123,7 @@ public:
         }
         if (counter_->native_allocation.control.address)
         {
-            std::allocator<T>{}.deallocate(allocation, count);
+            domain_deallocate(AllocationDomain::NativePublication, allocation, count);
             counter_->used -= bytes;
             mirror_.retire(bytes);
             throw std::invalid_argument("Detached counter requires a single qualified control allocation.");
@@ -132,7 +133,7 @@ public:
     }
     void deallocate(T* allocation, std::size_t count) noexcept
     {
-        std::allocator<T>{}.deallocate(allocation, count);
+        domain_deallocate(AllocationDomain::NativePublication, allocation, count);
         mirror_.retire(count * sizeof(T));
     }
     template<class U> bool operator==(const ControlAllocator<U, Counter>& other) const noexcept
@@ -165,7 +166,7 @@ public:
         if (!mirror.acquire(sizeof(Counter)))
             throw std::invalid_argument("Native counter object exceeds source arena headroom.");
         Counter* raw = nullptr;
-        try { raw = std::allocator<Counter>{}.allocate(1); }
+        try { raw = domain_allocate<Counter>(AllocationDomain::NativePublication, 1); }
         catch (...) { mirror.retire(sizeof(Counter)); throw; }
         std::construct_at(raw, initial);
         raw->native_allocation.object = {raw, sizeof(Counter)};

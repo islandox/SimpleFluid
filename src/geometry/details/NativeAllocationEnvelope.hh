@@ -88,28 +88,32 @@ private:
     NativeConstructionAllocator<T> allocator_;
     Record* record_;
 };
-template<class T> class SIMPLEFLUID_LOCAL BlockAllocator
+template<class T, AllocationDomain Domain = AllocationDomain::NativePublication> class SIMPLEFLUID_LOCAL BlockAllocator
 {
-    template<class> friend class BlockAllocator;
+    template<class, AllocationDomain> friend class BlockAllocator;
 
 public:
     using value_type = T;
+    template<class U> struct rebind
+    {
+        using other = BlockAllocator<U, Domain>;
+    };
     BlockAllocator(NativeConstructionAllocator<T> allocator, std::shared_ptr<Record> record, Block block) noexcept
         : allocator_(std::move(allocator)), record_(std::move(record)), block_(block)
     {
     }
     template<class U>
-    BlockAllocator(const BlockAllocator<U>& other) noexcept
+    BlockAllocator(const BlockAllocator<U, Domain>& other) noexcept
         : allocator_(other.allocator_), record_(other.record_), block_(other.block_)
     {
     }
     T* allocate(std::size_t count)
     {
-        auto* address = allocator_.allocate(count);
+        auto* address = allocator_.allocate_for(Domain, count);
         auto& extent = record_->blocks[static_cast<unsigned>(block_)];
         if (extent.address)
         {
-            allocator_.deallocate(address, count);
+            allocator_.deallocate_for(Domain, address, count);
             throw std::invalid_argument("Native envelope requires a single qualified combined allocation.");
         }
         extent = {address, count * sizeof(T)};
@@ -117,11 +121,11 @@ public:
     }
     void deallocate(T* address, std::size_t count) noexcept
     {
-        allocator_.deallocate(address, count);
+        allocator_.deallocate_for(Domain, address, count);
         if (block_ == Block::TargetControl)
             record_->release_target();
     }
-    template<class U> bool operator==(const BlockAllocator<U>& other) const noexcept
+    template<class U> bool operator==(const BlockAllocator<U, Domain>& other) const noexcept
     {
         return allocator_ == other.allocator_ && record_ == other.record_ && block_ == other.block_;
     }
@@ -295,6 +299,11 @@ public:
     template<class T, class... Args>
     [[nodiscard]] static NativeTrackedOwner<T> make(const NativeConstructionAdmission& admission, Args&&... args)
     {
+        return make_for<AllocationDomain::NativePublication, T>(admission, std::forward<Args>(args)...);
+    }
+    template<AllocationDomain Domain, class T, class... Args>
+    [[nodiscard]] static NativeTrackedOwner<T> make_for(const NativeConstructionAdmission& admission, Args&&... args)
+    {
         static_assert(!std::is_array_v<T>);
         namespace detail = native_envelope_detail;
         auto memory = admission.unique<detail::Record>();
@@ -304,9 +313,9 @@ public:
         auto deleter = std::move(memory.get_deleter());
         std::shared_ptr<detail::Record> record(raw, std::move(deleter),
             detail::RecordAllocator<detail::Record>(admission.allocator<detail::Record>(), raw));
-        auto owner =
-            std::allocate_shared<T>(detail::BlockAllocator<T>(admission.allocator<T>(), record, detail::Block::Target),
-                std::forward<Args>(args)...);
+        auto owner = std::allocate_shared<T>(
+            detail::BlockAllocator<T, Domain>(admission.allocator<T>(), record, detail::Block::Target),
+            std::forward<Args>(args)...);
         if (!detail::contains(record->blocks[static_cast<unsigned>(detail::Block::Target)], owner.get(), sizeof(T)))
             throw std::invalid_argument("Native target does not use its recorded qualified combined allocation.");
         auto envelope = std::allocate_shared<NativeAllocationEnvelope>(
