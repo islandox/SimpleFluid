@@ -6,6 +6,7 @@
 #include "solvers/MixtureFaceTransport.hh"
 #include <Tpetra_Import.hpp>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -55,7 +56,14 @@ struct FourierFaceLedger
     GO geometry_identity = 0;
     std::optional<std::size_t> owner, neighbor;
     double energy = 0; ///< Canonical integrated J owner -> neighbor; count global diagnostics only if owner is owned.
-    double decrease = 0, increase = 0; ///< Canonical signed packet's binary64 temperature operand bounds, J.
+    double decrease = 0, increase = 0;    ///< Canonical signed packet's binary64 temperature operand bounds, J.
+    double conductance = 0;               ///< W/K, as evaluated by the canonical face owner.
+    GO owner_cell = 0, neighbor_cell = 0; ///< Algebraic cell map IDs for the thermal block.
+};
+struct FourierCellLinearization
+{
+    double capacity = 0, temperature = 0; ///< Fixed-pressure enthalpy derivative (J/K) and actual face operand (K).
+    double minimum_temperature = 0, maximum_temperature = std::numeric_limits<double>::infinity();
 };
 class SIMPLEFLUID_SOLVERS_LOCAL LowMachFaceTransportAdapter;
 
@@ -66,6 +74,7 @@ struct Receipt
     SpeciesDiffusionPreview diffusion;
     std::vector<CanonicalDiffusionFace> raw_diffusion_faces;
     std::vector<FourierFaceLedger> fourier_faces;
+    std::optional<std::vector<FourierCellLinearization>> fourier_thermal; ///< Owned cells, including empty owners.
     std::vector<RawCellReceipt> cells;
     // Later interphase stages consume diffusion.state as actual donors, never the pre-face base.
     Flow::SourceStageResult rounded;
@@ -95,7 +104,7 @@ class SIMPLEFLUID_SOLVERS_LOCAL LowMachFaceTransportAdapter
 {
 public:
     LowMachFaceTransportAdapter(std::shared_ptr<const Mesh> mesh, std::shared_ptr<const SpeciesCatalog> catalog,
-        Options options, PhaseBindings compartments);
+        Options options, PhaseBindings compartments, std::optional<PhaseThermalMode> thermal_mode = std::nullopt);
     Receipt preview(const Flow::SourceStageContext& context, std::span<const CellSpeciesState> post_chemistry) const;
     /** Explicit prepared T/p/EOS guesses, e.g. arriving-phase T recovered from transported U by SourceEngine.
      * Donor composition STILL comes only from post_chemistry, never these cells' moles.
@@ -116,6 +125,7 @@ private:
     std::shared_ptr<const SpeciesCatalog> catalog_;
     Options options_;
     PhaseBindings compartments_;
+    std::optional<PhaseThermalMode> thermal_mode_;
     Teuchos::RCP<const Pack::map_type> owned_cells_, overlap_cells_, owned_faces_, overlap_faces_;
     std::unique_ptr<Pack::import_type> cell_import_, face_import_;
 };

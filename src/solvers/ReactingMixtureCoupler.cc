@@ -796,10 +796,14 @@ struct SourceEngine
             [&]
             {
                 result.result = std::move(composed.result);
+                result.result.gross_channel_metadata = gross_event_channels();
                 result.result.thermal_receipt = std::move(thermal_batch);
                 result.result.qbmm_cells = std::move(qbmm.cells);
                 result.ledgers = std::move(composed.chemistry_ledgers);
                 result.face_receipts = std::move(composed.faces);
+                for (const auto& face : result.face_receipts)
+                    if (face->fourier_thermal)
+                        result.result.fourier_thermal_stages.push_back(face);
                 result.post_faces = std::move(composed.post_faces);
                 result.population_events.reserve(result.post_faces.size());
                 const auto& roles = flow->options().phase_roles;
@@ -964,6 +968,47 @@ struct SourceEngine
             require(std::isfinite(result[i]) && result[i] >= 0, "Source event convergence packet overflow.");
         }
         return result;
+    }
+
+    std::vector<Solver::GrossChannelMetadata> gross_event_channels() const
+    {
+        using Stage = Solver::GrossResidualStage;
+        const auto np = options.phases.size(), ns = options.mechanism->catalog().species().size();
+        const auto nr = options.mechanism->reactions().size();
+        std::vector<Solver::GrossChannelMetadata> channels;
+        const auto add_pairs = [&](Stage stage, size_t index, size_t count)
+        {
+            for (size_t i = 0; i < count; ++i)
+            {
+                channels.push_back({stage, index, 1});
+                channels.push_back({stage, index, -1});
+            }
+        };
+        channels.insert(channels.end(), nr, {Stage::Chemistry, 0, 1}); // Forward extents.
+        channels.insert(channels.end(), nr, {Stage::Chemistry, 0, -1}); // Reverse extents.
+        add_pairs(Stage::Chemistry, 0, np * ns + 4 * np + 2);
+        for (size_t i = 0; i < face_stages.size(); ++i)
+            add_pairs(Stage::FaceTransport, i, ns + 3);
+        if (options.interphase)
+        {
+            const auto& stages = options.interphase->configuration->stages;
+            for (size_t i = 0; i < stages.size(); ++i)
+            {
+                const auto& stage = stages[i];
+                if (stage.kind == InterphaseStageKind::Material)
+                    channels.insert(channels.end(), stage.material.size(), {Stage::Interphase, i, 1});
+                else
+                    add_pairs(Stage::Interphase, i, stage.heat.size());
+            }
+        }
+        if (options.body_acceleration)
+            for (size_t axis = 0; axis < 3; ++axis)
+            {
+                const double value = options.body_acceleration->component(axis);
+                channels.push_back({Stage::BodyImpulse, 0, (value > 0) - (value < 0)});
+            }
+        add_pairs(Stage::PopulationNumbers, 0, np);
+        return channels;
     }
 };
 // Fence allocation before entering the communicating motion constructor.
@@ -1340,7 +1385,8 @@ struct ReactingMixtureCoupler::Implementation
                         prepared_bindings = bindings;
                     });
                 storage->value = ::new (static_cast<void*>(storage->memory)) Faces::LowMachFaceTransportAdapter(
-                    flow->mesh(), catalog_alias, std::move(prepared_options), std::move(prepared_bindings));
+                    flow->mesh(), catalog_alias, std::move(prepared_options), std::move(prepared_bindings),
+                    flow->options().thermal_mode);
                 // Aliasing does not allocate; the reserved vector preserves this exact immutable stage association.
                 engine->face_stages.emplace_back(storage, storage->value);
             }

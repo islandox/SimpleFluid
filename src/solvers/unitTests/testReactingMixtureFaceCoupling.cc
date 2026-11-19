@@ -1,11 +1,14 @@
 /** Public-controller conservation oracles for ordered mixture face sources. */
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/ReactingMixtureCoupler.hh"
+#include "solvers/details/LowMachFourierThermal.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
+#include <array>
 #include <cmath>
 #include <gtest/gtest.h>
 #include <memory>
+#include <optional>
 
 namespace
 {
@@ -24,12 +27,13 @@ struct Fixture
     std::shared_ptr<const R::MixtureThermodynamics> liquid;
     std::shared_ptr<const R::ReactionMechanism> mechanism;
     std::shared_ptr<Flow> flow;
-    explicit Fixture(bool thermal = false, bool reaction_everywhere = false, double heat = 0)
+    explicit Fixture(bool thermal = false, bool reaction_everywhere = false, double heat = 0,
+        double interface_height = .5, std::optional<std::array<double, 2>> initial_temperatures = std::nullopt)
     {
         Flow::Mesh::DistributionOptions distribution;
         distribution.allow_empty_partitions = true;
-        mesh = std::make_shared<Flow::Mesh>(std::make_shared<Meshes::OrthogonalCartesian3D>(
-                                                Vec3D<ArrReal>{ArrReal{0, 1}, ArrReal{0, 1}, ArrReal{0, .5, 1}}),
+        mesh = std::make_shared<Flow::Mesh>(std::make_shared<Meshes::OrthogonalCartesian3D>(Vec3D<ArrReal>{
+                                                ArrReal{0, 1}, ArrReal{0, 1}, ArrReal{0, interface_height, 1}}),
             distribution);
         catalog = std::make_shared<const R::SpeciesCatalog>(
             std::vector<R::SpeciesDefinition>{{first, "first solute", .1, {{"X", 1}}, {R::SpeciesPhase::Dissolved}},
@@ -54,10 +58,13 @@ struct Fixture
         state.cells.resize(mesh->num_owned_cells());
         for (size_t c = 0; c < state.cells.size(); ++c)
         {
-            const bool lower = mesh->cell_centroid(static_cast<LO>(c)).z < .5;
+            const auto cell = static_cast<LO>(c);
+            const bool lower = mesh->cell_centroid(cell).z < interface_height;
             const double n = lower || reaction_everywhere ? 2 : 0;
-            const double t = thermal && !lower ? 301 : 300;
-            state.cells[c].phases = {{liquid, {n, 0, 5 - n}, 100000, capacity * (t - 300), t}};
+            const double baseline_temperature = thermal && !lower ? 301 : 300;
+            const double t = initial_temperatures ? (*initial_temperatures)[lower ? 0 : 1] : baseline_temperature;
+            const double mass = mesh->cell_volume(cell); // rho = 1 kg/m3.
+            state.cells[c].phases = {{liquid, {n, 0, mass / .1 - n}, 100000, mass * 512 * (t - 300), t}};
         }
         flow->initialize(std::move(state));
     }
@@ -179,6 +186,99 @@ TEST(ReactingMixtureFaceCouplingTest, FourierClosesTheCoupledTwoCellEnergyBalanc
     const auto accepted = f.flow->state();
     controller.restore(checkpoint);
     expect_same(controller.preview(.125).state(), accepted);
+}
+TEST(ReactingMixtureFaceCouplingTest, StiffFourierContactMatchesUnequalCapacityClosedForm)
+{
+    constexpr double interface_height = .25, dt = .125, conductance = 3072;
+    constexpr std::array capacities{128., 384.};
+    // The liquid is incompressible with cv = 512 J/(kg K), and rho = 1 kg/m3.
+    // With no other source, C1*(T1-T1*)=-Q and C2*(T2-T2*)=Q. Substituting
+    // into Q=dt*G*(T1-T2) gives the backward-Euler packet below.
+    for (const auto& temperatures : {std::array{305., 300.}, std::array{300., 305.}, std::array{300., 300.}})
+    {
+        SCOPED_TRACE(temperatures[0] - temperatures[1]);
+        Fixture f(false, false, 0, interface_height, temperatures);
+        auto options = f.options();
+        options.face_transport = {f.contacts(0, conductance)};
+        Controller controller(f.flow, options);
+        const auto before = f.flow->state();
+        const auto trial = controller.preview(dt);
+        const double integrated_conductance = dt * conductance;
+        const double heat = integrated_conductance * (temperatures[0] - temperatures[1]) /
+                            (1 + integrated_conductance * (1 / capacities[0] + 1 / capacities[1]));
+        std::array<double, 2> energy_changes{};
+        for (size_t c = 0; c < trial.state().cells.size(); ++c)
+        {
+            const bool upper = f.mesh->cell_centroid(static_cast<LO>(c)).z > interface_height;
+            const double expected = upper ? heat : -heat;
+            const auto& phase = trial.state().cells[c].phases[0];
+            const auto& transported = trial.transport_snapshot().cells.at(c).phases.at(0);
+            EXPECT_EQ(transported.internal_energy, before.cells[c].phases[0].internal_energy);
+            EXPECT_EQ(transported.advected_material_volume, f.mesh->cell_volume(static_cast<LO>(c)));
+            const double energy_change = phase.internal_energy - transported.internal_energy;
+            energy_changes[upper] += energy_change;
+            if (heat == 0)
+            {
+                EXPECT_EQ(phase.temperature, temperatures[upper]);
+                EXPECT_EQ(energy_change, 0);
+            }
+            else
+            {
+                EXPECT_NEAR(phase.temperature, temperatures[upper] + expected / capacities[upper], 1e-8);
+                EXPECT_NEAR(energy_change, expected, 1e-6);
+            }
+        }
+        EXPECT_NEAR(f.sum(energy_changes[0]) + f.sum(energy_changes[1]), 0, 1e-7);
+        EXPECT_EQ(trial.diagnostics().net_thermal_energy, 0);
+        EXPECT_LE(trial.diagnostics().flow.source_evaluations, 80);
+        EXPECT_LE(trial.diagnostics().flow.maximum_event_residual, 1);
+        expect_same(f.flow->state(), before);
+        controller.commit(trial);
+        EXPECT_EQ(f.flow->state().time, dt);
+    }
+}
+TEST(ReactingMixtureFaceCouplingTest, UnrepresentableFourierScalingKeepsRecoveredGuess)
+{
+    namespace thermal = R::fourier_thermal_detail;
+    Fixture f(false, false, 0, .5, std::array{301., 300.});
+    const auto recovered = f.flow->state();
+    // The first block has a subnormal scaled diagonal. The second has normal diagonals
+    // and its sole nonzero defect underflows in the squared scaled RHS norm.
+    for (const auto& [small_capacity, large_capacity, conductance] :
+        {std::array{1e-8, 1e302, 1e-9}, std::array{1e-200, 1., 1e-201}})
+    {
+        SCOPED_TRACE(small_capacity);
+        auto stage = std::make_shared<R::low_mach_faces::Receipt>();
+        auto& rows = stage->fourier_thermal.emplace(recovered.cells.size());
+        for (std::size_t c = 0; c < rows.size(); ++c)
+            rows[c] = {f.lower(c) ? small_capacity : large_capacity, 300.};
+        const auto owned = [&](LO cell) -> std::optional<std::size_t>
+        {
+            if (cell != Flow::Mesh::invalid_local_id() && f.mesh->is_owned_cell(cell))
+                return static_cast<std::size_t>(cell);
+            return std::nullopt;
+        };
+        double owned_contacts = 0;
+        for (std::size_t fidx = 0; fidx < f.mesh->num_faces(); ++fidx)
+        {
+            const auto face = static_cast<LO>(fidx);
+            if (f.mesh->is_geometry_exterior_face(face))
+                continue;
+            const auto owner = f.mesh->owner_cell(face), neighbor = f.mesh->neighbor_cell(face);
+            const auto a = owned(owner), b = owned(neighbor);
+            if (a || b)
+            {
+                owned_contacts += a.has_value();
+                stage->fourier_faces.push_back({f.mesh->face_geometry_global_id(face), a, b, 0, 0, 0, conductance,
+                    f.mesh->cell_global_id(owner), f.mesh->cell_global_id(neighbor)});
+            }
+        }
+        EXPECT_EQ(f.sum(owned_contacts), 1);
+        const std::array<thermal::Stage, 1> stages{stage};
+        auto guess = recovered;
+        ASSERT_NO_THROW(thermal::correct(*f.mesh, 1., R::PhaseThermalMode::Equilibrium, stages, guess));
+        expect_same(guess, recovered);
+    }
 }
 TEST(ReactingMixtureFaceCouplingTest, LaterDonorFailurePreservesAcceptedStateAndEarlierValidTrial)
 {

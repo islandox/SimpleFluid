@@ -155,6 +155,7 @@ struct ComposedSourceStage
         for (auto interval : source)
         {
             interval.channel_ += offset;
+            interval.face_stage_ = faces.size();
             destination.push_back(interval);
         }
     }

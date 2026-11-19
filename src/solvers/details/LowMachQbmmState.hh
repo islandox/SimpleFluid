@@ -404,6 +404,14 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_source_receipts(
     require(transport.qbmm_families.size() == families.size(), "QBMM transport phase layout differs.");
     if (result.gross_events.empty())
         result.gross_events.resize(cells);
+    if (cells > 0 && result.gross_channel_metadata.empty())
+        result.gross_channel_metadata.resize(result.gross_events.front().size());
+    constexpr std::array directions{1, -1, -1, 1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1};
+    static_assert(directions.size() == Flow::QbmmSourceReceipt::gross_channels);
+    for (size_t a = 0; a < families.size(); ++a)
+        if (families[a])
+            for (const auto direction : directions)
+                result.gross_channel_metadata.push_back({Flow::GrossResidualStage::QbmmPopulation, a, direction});
     for (size_t c = 0; c < cells; ++c)
     {
         require(result.qbmm_cells[c].size() == families.size(), "QBMM source receipt phase layout differs.");

@@ -232,6 +232,7 @@ set(simplefluid_forbidden_api_patterns
     "^SimpleFluid::Reacting::(LowMachMixtureSolver|LowMachPressureEquation|ReactingMixtureCoupler)::Implementation::"
     "^SimpleFluid::Reacting::ReactingMixtureCoupler::Trial::Data::"
     "^SimpleFluid::Reacting::LowMachMixtureSolver::(require_controller|release_controller|preview_impl|preview_planar_impl|preview_ale_with_qbmm_sources|capture_accepted_geometry|restore_accepted_after_motion|rollback_failed_planar_restore|checkpoint_state|prepare_qbmm_publication|serialize_qbmm_restart_impl|restore_qbmm_restart_impl)[(]"
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::SourceCorrectorExhausted::SourceCorrectorExhausted[(]"
     "^SimpleFluid::Reacting::LowMachPressureEquation::project_impl[(]"
     "^SimpleFluid::Reacting::source_stage_detail::"
     "^SimpleFluid::Reacting::history_detail::"
@@ -716,6 +717,17 @@ foreach(simplefluid_stage4_mesh_kind IN ITEMS native)
     endforeach()
     simplefluid_require_exact_api(
         "^${simplefluid_stage4_model}::evaluate_liquid_volume[(]double[)] const$" 1)
+endforeach()
+
+# The source-corrector failure owns its destructor and cross-DSO catch RTTI.
+# The three Itanium destructor entries are deleting, complete and base.
+set(simplefluid_source_corrector_error "SimpleFluid::Reacting::LowMachMixtureSolver::SourceCorrectorExhausted")
+set(simplefluid_source_corrector_public_symbol_budget 6)
+simplefluid_require_reacting_api(
+    "^${simplefluid_source_corrector_error}::~SourceCorrectorExhausted[(][)]$" 3)
+foreach(simplefluid_source_corrector_rtti IN ITEMS "typeinfo for" "typeinfo name for" "vtable for")
+    simplefluid_require_exact_api(
+        "^${simplefluid_source_corrector_rtti} ${simplefluid_source_corrector_error}$" 1)
 endforeach()
 
 # Final schema-only field API: exactly one heat-independent advance and one
@@ -1367,7 +1379,8 @@ foreach(simplefluid_demangled_symbol IN LISTS simplefluid_demangled_symbols)
     endif()
 
     if(simplefluid_demangled_symbol MATCHES "^(typeinfo( name)? for|vtable for) SimpleFluid::Reacting::"
-       AND NOT simplefluid_demangled_symbol MATCHES "^(typeinfo( name)? for|vtable for) SimpleFluid::Reacting::(CaloricDomainUnresolved|ThermalCaloricRangeError)$")
+       AND NOT simplefluid_demangled_symbol MATCHES "^(typeinfo( name)? for|vtable for) SimpleFluid::Reacting::(CaloricDomainUnresolved|ThermalCaloricRangeError)$"
+       AND NOT simplefluid_demangled_symbol MATCHES "^(typeinfo( name)? for|vtable for) ${simplefluid_source_corrector_error}$")
         message(FATAL_ERROR
             "Unreviewed reacting RTTI definition: ${simplefluid_demangled_symbol}")
     endif()
@@ -1415,7 +1428,7 @@ math(EXPR simplefluid_retired_mesh_total_symbol_budget
 math(EXPR simplefluid_api_symbol_lower_bound
     "${simplefluid_pre_retirement_api_symbol_lower_bound} - ${simplefluid_retired_mesh_total_symbol_budget}")
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_qbmm_report_public_symbol_budget} + ${simplefluid_qbmm_transport_public_symbol_budget} + ${simplefluid_qbmm_source_public_symbol_budget} + ${simplefluid_qbmm_state_public_symbol_budget} + ${simplefluid_qbmm_public_symbol_budget} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_population_process_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget} - ${simplefluid_retired_mesh_exact_symbol_budget}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_qbmm_report_public_symbol_budget} + ${simplefluid_qbmm_transport_public_symbol_budget} + ${simplefluid_qbmm_source_public_symbol_budget} + ${simplefluid_qbmm_state_public_symbol_budget} + ${simplefluid_qbmm_public_symbol_budget} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_source_corrector_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_population_process_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget} - ${simplefluid_retired_mesh_exact_symbol_budget}")
 math(EXPR simplefluid_api_symbol_reviewed_maximum
     "${simplefluid_api_symbol_upper_bound} - 3")
 math(EXPR simplefluid_api_symbol_upper_bound

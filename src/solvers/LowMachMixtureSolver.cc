@@ -11,6 +11,7 @@
 #include "equations/VariableDensityMomentumEquation.hh"
 #include "equations/details/LowMachScaledFaceSum.hh"
 #include "solvers/details/LowMachConditionedThermal.hh"
+#include "solvers/details/LowMachFourierThermal.hh"
 #include "solvers/details/LowMachQbmmControllerRestart.hh"
 #include "solvers/details/LowMachQbmmKineticTransport.hh"
 #include "solvers/details/LowMachQbmmLawInputs.hh"
@@ -41,6 +42,7 @@ namespace
 {
 using Solver = LowMachMixtureSolver;
 using LO = Solver::Pack::local_ordinal_type;
+using GO = Solver::Pack::global_ordinal_type;
 using ScalarField = Solver::Traits::scalar_cell_type;
 using VectorField = Solver::Traits::vector_cell_type;
 using FaceField = Solver::Traits::scalar_face_type;
@@ -67,6 +69,61 @@ FVM::CarrierId resolved_carrier_identity(const Solver::PhaseRoleDescriptor& role
     }
     throw std::logic_error("Unknown Low-Mach phase role in carrier identity resolution.");
 }
+
+std::optional<Solver::GrossResidualWitness> select_gross_residual_winner(const Teuchos::Comm<int>& comm,
+    const std::optional<Solver::GrossResidualWitness>& local, double local_residual, double maximum_residual)
+{
+    if (comm.getSize() == 1)
+        return local;
+    // Select among exactly those operands which attain the reduced maximum.
+    // Geometry cell IDs are unique among owners, and each owner already
+    // resolved its ties by stage, channel and canonical face.
+    const bool eligible = local && local_residual == maximum_residual;
+    const GO local_cell = eligible ? local->geometry_cell : std::numeric_limits<GO>::max();
+    GO cell;
+    Teuchos::reduceAll(comm, Teuchos::REDUCE_MIN, 1, &local_cell, &cell);
+    const int absent = comm.getSize();
+    const int local_owner = eligible && local_cell == cell ? comm.getRank() : absent;
+    int owner;
+    Teuchos::reduceAll(comm, Teuchos::REDUCE_MIN, 1, &local_owner, &owner);
+    if (owner == absent)
+        return std::nullopt;
+
+    // Keep the full native ID and stage-index widths. Encoded directions
+    // 0, 1, 2 and 3 represent -1, 0, 1 and an absent direction, respectively.
+    using WireIndex = std::make_unsigned_t<GO>;
+    static_assert(std::numeric_limits<size_t>::digits <= std::numeric_limits<WireIndex>::digits);
+    const auto encode_direction = [](std::optional<int> direction)
+    { return static_cast<WireIndex>(direction.value_or(2) + 1); };
+    std::array<WireIndex, 8> ids{};
+    std::array<double, 8> operands{};
+    if (comm.getRank() == owner)
+    {
+        const auto& w = *local;
+        ids = {static_cast<WireIndex>(w.geometry_face.value_or(0)), w.channel,
+            static_cast<WireIndex>(w.channel_metadata.stage), w.channel_metadata.stage_index,
+            w.geometry_face.has_value(), encode_direction(w.channel_metadata.direction),
+            encode_direction(w.current_direction), encode_direction(w.previous_direction)};
+        operands = {w.current_packet, w.previous_packet, w.scale, w.relative_tolerance, w.current_decrease,
+            w.current_increase, w.previous_decrease, w.previous_increase};
+    }
+    Teuchos::broadcast(comm, owner, int(ids.size()), ids.data());
+    Teuchos::broadcast(comm, owner, int(operands.size()), operands.data());
+    const auto direction = [](WireIndex encoded) -> std::optional<int>
+    { return encoded == 3 ? std::nullopt : std::optional<int>(static_cast<int>(encoded) - 1); };
+    const auto [face, channel, stage, stage_index, face_present, slot_direction, now_direction, old_direction] = ids;
+    const auto [now, old, scale, tolerance, now_decrease, now_increase, old_decrease, old_increase] = operands;
+    return Solver::GrossResidualWitness{.geometry_cell = cell,
+        .geometry_face = face_present ? std::optional<GO>(static_cast<GO>(face)) : std::nullopt,
+        .fourier_stage = face_present ? std::optional<size_t>(static_cast<size_t>(stage_index)) : std::nullopt,
+        .channel_metadata = {static_cast<Solver::GrossResidualStage>(stage), static_cast<size_t>(stage_index),
+            direction(slot_direction)},
+        .channel = static_cast<size_t>(channel), .current_direction = direction(now_direction),
+        .previous_direction = direction(old_direction), .current_packet = now, .previous_packet = old, .scale = scale,
+        .relative_tolerance = tolerance, .current_decrease = now_decrease, .current_increase = now_increase,
+        .previous_decrease = old_decrease, .previous_increase = old_increase};
+}
+
 std::optional<std::array<double, 3>> acceleration_components(const std::optional<Solver::Vector>& acceleration)
 {
     if (!acceleration)
@@ -289,6 +346,14 @@ CaloricCell recover_enthalpy(const Solver::CellState& transported, std::span<con
     return result;
 }
 } // namespace
+
+LowMachMixtureSolver::SourceCorrectorExhausted::SourceCorrectorExhausted(
+    const std::string& message, SourceStageMetadata stage, std::vector<GrossResidualEvaluation> evaluations)
+    : std::runtime_error(message), stage_(std::move(stage)), evaluations_(std::move(evaluations))
+{
+}
+
+LowMachMixtureSolver::SourceCorrectorExhausted::~SourceCorrectorExhausted() noexcept = default;
 
 void LowMachMixtureSolver::require_uniform_advancement(const Mesh& mesh, AdvancementOperation operation)
 {
@@ -1738,6 +1803,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
     std::vector<CellSources> previous_sources;
     std::vector<std::vector<double>> gross_events, previous_events;
     FourierGrossResolutions previous_fourier_resolution;
+    std::vector<GrossChannelMetadata> previous_gross_metadata;
     QbmmSourceCells qbmm_cells;
     std::optional<bool> event_channel, conditioned_channel;
     std::shared_ptr<const PressureConditionedThermalBatch> thermal_batch, previous_thermal_batch;
@@ -1772,6 +1838,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             }
         });
     Diagnostics result;
+    std::vector<GrossResidualEvaluation> gross_residual_evaluations;
     State trial = accepted;
     State thermodynamic_guess = accepted;
     std::array<FaceSum, 3> pressure_impulse;
@@ -1782,6 +1849,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
         for (int iteration = 0; iteration < d->options.maximum_correctors; ++iteration)
         {
             trial = accepted;
+            std::vector<fourier_thermal_detail::Stage> fourier_thermal_stages;
             result = {};
             result.family_transport = d->options.qbmm_model.family_transport;
             result.correctors = iteration + 1;
@@ -2251,6 +2319,9 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             "Fourier gross resolution requires the private reacting-controller lease.");
                         source_stage_detail::validate_fourier_resolution(
                             evaluated.fourier_gross_resolution, evaluated.gross_events);
+                        check(evaluated.fourier_thermal_stages.empty() ||
+                                  (controller && controller->reacting_source_authority),
+                            "Fourier thermal stages require the private reacting-controller lease.");
                         source_stage_detail::validate_number_packets(evaluated.sources, nc, d->options.phase_roles);
                         qbmm_detail::validate_sources(d->options, evaluated.sources, coherent_qbmm);
                         if (coherent_qbmm)
@@ -2322,14 +2393,31 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         if (coherent_qbmm)
                             for (const auto& row : evaluated.gross_events)
                                 check(row.size() == qbmm_event_width, "QBMM gross-event schema differs across owners.");
+                        if (!evaluated.gross_channel_metadata.empty())
+                            for (const auto& row : evaluated.gross_events)
+                                check(row.size() == evaluated.gross_channel_metadata.size(),
+                                    "Gross-event diagnostic metadata does not match the channel layout.");
+                        for (const auto& channel : evaluated.gross_channel_metadata)
+                        {
+                            check(channel.stage >= GrossResidualStage::Provider &&
+                                      channel.stage <= GrossResidualStage::QbmmPopulation,
+                                "Gross-event diagnostic metadata has an invalid stage.");
+                            check(!channel.direction || (*channel.direction >= -1 && *channel.direction <= 1),
+                                "Gross-event diagnostic metadata has an invalid direction.");
+                        }
                         if (previous_transport)
+                        {
                             source_stage_detail::validate_event_shape(evaluated.gross_events, previous_events);
+                            check(evaluated.gross_channel_metadata == previous_gross_metadata,
+                                "Gross-event diagnostic metadata changed between correctors.");
+                        }
                     });
                 event_channel = bool(global_events);
                 sources = std::move(evaluated.sources);
                 gross_events = std::move(evaluated.gross_events);
-                double event_residual = global_events ? std::numeric_limits<double>::infinity() : 0;
-                double fourier_uncertainty = 0;
+                fourier_thermal_stages = std::move(evaluated.fourier_thermal_stages);
+                source_stage_detail::GrossComparison comparison;
+                comparison.residual = global_events ? std::numeric_limits<double>::infinity() : 0;
                 double source_residual = std::numeric_limits<double>::infinity();
                 double transport_residual = std::numeric_limits<double>::infinity();
                 double shape_residual = coherent_qbmm ? std::numeric_limits<double>::infinity() : 0;
@@ -2338,11 +2426,9 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     collective_detail::collective_local_validation(mesh, "Source/transport convergence",
                         [&]
                         {
-                            const auto comparison = source_stage_detail::event_error(gross_events, previous_events,
+                            comparison = source_stage_detail::event_error(gross_events, previous_events,
                                 source_options.source_relative_tolerance, evaluated.fourier_gross_resolution,
-                                previous_fourier_resolution);
-                            event_residual = comparison.residual;
-                            fourier_uncertainty = comparison.fourier_uncertainty;
+                                previous_fourier_resolution, mesh, evaluated.gross_channel_metadata);
                             source_residual = source_stage_detail::source_error(sources, previous_sources,
                                 last_transport, thermodynamic_guess, accepted, source_options);
                             transport_residual = source_stage_detail::transport_error(
@@ -2355,13 +2441,18 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 }
                 qbmm_cells = std::move(evaluated.qbmm_cells);
                 result.source_evaluations = iteration + 1;
-                const std::array local_event_comparison{event_residual, fourier_uncertainty};
+                const std::array local_event_comparison{comparison.residual, comparison.fourier_uncertainty};
                 std::array<double, 2> global_event_comparison;
-                Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+                const auto comm = mesh.owned_cell_map()->getComm();
+                Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX,
                     int(local_event_comparison.size()), local_event_comparison.data(), global_event_comparison.data());
                 result.maximum_event_residual = global_event_comparison[0];
                 if (previous_transport)
                     result.maximum_fourier_gross_comparison_uncertainty_j = global_event_comparison[1];
+                auto winner = global_events && previous_transport
+                                  ? select_gross_residual_winner(
+                                        *comm, comparison.winner, comparison.residual, result.maximum_event_residual)
+                                  : std::nullopt;
                 result.maximum_source_residual = d->maximum(source_residual);
                 result.maximum_transport_residual = d->maximum(transport_residual);
                 if (coherent_qbmm)
@@ -2373,6 +2464,9 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         previous_sources = sources;
                         previous_events = gross_events;
                         previous_fourier_resolution = std::move(evaluated.fourier_gross_resolution);
+                        previous_gross_metadata = std::move(evaluated.gross_channel_metadata);
+                        gross_residual_evaluations.push_back(
+                            {result.source_evaluations, result.maximum_event_residual, 0, std::move(winner)});
                     });
             }
             collective_detail::collective_local_validation(mesh, "Low-Mach integrated local sources",
@@ -3086,6 +3180,9 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             Teuchos::reduceAll(
                 *mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &smallest_volume, &global_smallest_volume);
             flux_change = d->maximum(flux_change) * dt / global_smallest_volume;
+            if (provider)
+                gross_residual_evaluations.back().normalized_flux_change =
+                    flux_change / d->options.volume_relative_tolerance;
             double thermal_residual = 0;
             collective_detail::collective_local_validation(mesh, "Pressure/thermal corrector convergence",
                 [&] { thermal_residual = source_stage_detail::thermal_error(trial, thermodynamic_guess, d->options); });
@@ -3145,7 +3242,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         << ", gross=" << result.maximum_event_residual
                         << ", shape=" << result.maximum_shape_source_residual << ", Fourier operand uncertainty [J]="
                         << result.maximum_fourier_gross_comparison_uncertainty_j.value_or(0.);
-                throw std::runtime_error(message.str());
+                throw SourceCorrectorExhausted(
+                    message.str(), std::move(stage), std::move(gross_residual_evaluations));
             }
             if (iteration + 1 >= d->options.maximum_correctors)
             {
@@ -3155,6 +3253,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         << result.maximum_occupancy_error << ", normalized flux change=" << flux_change;
                 throw std::runtime_error(message.str());
             }
+            fourier_thermal_detail::correct(mesh, dt, d->options.thermal_mode, fourier_thermal_stages,
+                thermodynamic_guess);
         }
         double old_mass = 0, new_mass = 0, external_mass = 0;
         detail::CompensatedSum<long double> old_energy, new_energy, external_energy;
@@ -3417,6 +3517,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             });
         staged.candidate = std::move(trial);
         staged.preview_id = preview_id;
+        result.gross_residual_evaluations = std::move(gross_residual_evaluations);
         staged.statistics = std::move(result);
         staged.transport = std::move(last_transport);
         staged.sources = std::move(sources);

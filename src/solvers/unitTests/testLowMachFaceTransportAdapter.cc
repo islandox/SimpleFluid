@@ -34,7 +34,8 @@ struct Fixture
     std::vector<std::vector<std::array<long double, 2>>> post_source_parts;
     std::vector<R::SpeciesSourceLedger> chemistry_ledgers;
     R::SpeciesId finite_counter;
-    explicit Fixture(std::size_t count = 2, R::SpeciesId counter_id = solvent) : finite_counter(counter_id)
+    explicit Fixture(std::size_t count = 2, R::SpeciesId counter_id = solvent, double composition_capacity_slope = 0)
+        : finite_counter(counter_id)
     {
         S::ArrReal z;
         for (std::size_t c = 0; c <= count; ++c)
@@ -45,14 +46,18 @@ struct Fixture
                                                 S::Vec3D<S::ArrReal>{S::ArrReal{0, 1}, S::ArrReal{0, 1}, z}),
             distribution);
         catalog = std::make_shared<const R::SpeciesCatalog>(
-            std::vector<R::SpeciesDefinition>{
-                {finite_counter, "explicit finite counter", .010, {{"X", 1}}, {R::SpeciesPhase::Liquid}},
+            std::vector<R::SpeciesDefinition>{{finite_counter, "explicit finite counter", .010, {{"X", 1}},
+                                                  {R::SpeciesPhase::Liquid, R::SpeciesPhase::Resolved}},
                 {one, "dissolved first molecule", .020, {{"X", 2}}, {R::SpeciesPhase::Dissolved}},
                 {two, "dissolved second molecule", .040, {{"X", 4}}, {R::SpeciesPhase::Dissolved}}},
             7);
         liquid = R::make_linear_compressible_mixture_liquid(
-            catalog, {250, 600, 10000, 2000000}, [](std::span<const double>)
-            { return R::LinearCompressibleMixtureLiquid{300, 100000, 1000, 4200, 0, 1e-9, 0, 0, 0}; },
+            catalog, {250, 600, 10000, 2000000},
+            [composition_capacity_slope](std::span<const double> x)
+            {
+                return R::LinearCompressibleMixtureLiquid{
+                    300, 100000, 1000, 4200 + composition_capacity_slope * x[1], 0, 1e-9, 0, 0, 0};
+            },
             R::EnergyConvention::SensibleEnergy);
         transport.accepted_revision = thermal.revision = 3;
         transport.accepted_generation = 7;
@@ -110,6 +115,24 @@ struct Fixture
     F::PhaseBindings bindings() const
     {
         return {{{R::SpeciesPhase::Liquid, {}}, {R::SpeciesPhase::Dissolved, {}}, {R::SpeciesPhase::Dissolved, {}}}};
+    }
+    void prepare_ordered_chemistry(F::LocalChemistryStage& prepared, std::size_t phase_count) const
+    {
+        prepared.post_chemistry = post_chemistry;
+        prepared.post_chemistry_parts = post_source_parts;
+        prepared.ledgers = chemistry_ledgers;
+        prepared.caloric_guesses = thermal.cells;
+        prepared.gross_events.resize(thermal.cells.size());
+        prepared.sums.reset(thermal.cells.size(), phase_count, catalog->species().size());
+        for (std::size_t c = 0; c < thermal.cells.size(); ++c)
+        {
+            for (std::size_t s = 0; s < catalog->species().size(); ++s)
+                prepared.sums.add_material(c, 0, s,
+                    chemistry_ledgers[c].chemicalChange.amount(*catalog, catalog->species()[s].id,
+                        s == 0 ? R::SpeciesPhase::Liquid : R::SpeciesPhase::Dissolved));
+            prepared.gross_events[c] = {
+                chemistry_ledgers[c].forwardReactionExtents[0], chemistry_ledgers[c].reverseReactionExtents[0]};
+        }
     }
     F::Options options(bool heat = true) const
     {
@@ -428,24 +451,8 @@ TEST(LowMachFaceTransportTest, OrderedStagesConsumeActualPriorStateInsteadOfRese
     F::LowMachFaceTransportAdapter second(f.mesh, f.catalog, controls, f.bindings());
     const std::array<const F::LowMachFaceTransportAdapter*, 2> stages{&first, &second};
     const auto result = F::compose_post_chemistry_faces(f.context(), *f.catalog, stages,
-        [&](const Flow::SourceStageContext& context, F::LocalChemistryStage& prepared)
-        {
-            prepared.post_chemistry = f.post_chemistry;
-            prepared.post_chemistry_parts = f.post_source_parts;
-            prepared.ledgers = f.chemistry_ledgers;
-            prepared.caloric_guesses = context.thermodynamic_trial.cells;
-            prepared.gross_events.resize(context.mesh.num_owned_cells(), std::vector<double>(2));
-            prepared.sums.reset(context.mesh.num_owned_cells(), 1, 3);
-            for (std::size_t c = 0; c < prepared.post_chemistry.size(); ++c)
-            {
-                for (std::size_t s = 0; s < 3; ++s)
-                    prepared.sums.add_material(c, 0, s,
-                        f.chemistry_ledgers[c].chemicalChange.amount(*f.catalog, f.catalog->species()[s].id,
-                            s == 0 ? R::SpeciesPhase::Liquid : R::SpeciesPhase::Dissolved));
-                prepared.gross_events[c] = {
-                    f.chemistry_ledgers[c].forwardReactionExtents[0], f.chemistry_ledgers[c].reverseReactionExtents[0]};
-            }
-        });
+        [&](const Flow::SourceStageContext&, F::LocalChemistryStage& prepared)
+        { f.prepare_ordered_chemistry(prepared, 1); });
     ASSERT_EQ(result.faces.size(), 2U);
     for (const auto& event : result.faces[0]->diffusion.faces)
         EXPECT_NEAR(event.moles[1], .02734375, 2e-15);
@@ -458,6 +465,105 @@ TEST(LowMachFaceTransportTest, OrderedStagesConsumeActualPriorStateInsteadOfRese
             lower ? .822021484375 : .052978515625, 2e-14);
         EXPECT_EQ(result.result.gross_events[c].size(), 26U); // 2 chemical + 2*(2*3+6) face events.
         EXPECT_EQ(result.post_faces[c].amounts, result.faces.back()->diffusion.state[c].amounts);
+    }
+}
+
+TEST(LowMachFaceTransportTest, FourierCapacityUsesOrderedDonorsAndFixedPressurePhaseGroup)
+{
+    constexpr double capacity_slope = 1e6, cv = 20, gas_constant = 8, gas_pressure = 140000;
+    Fixture f(2, solvent, capacity_slope);
+    const auto ns = f.catalog->species().size();
+    const auto gas = R::make_ideal_gas_mixture(f.catalog, std::vector<R::IdealGasCaloricSpecies>(ns, {cv, 300., 0.}),
+        {275, 450, 10000, 2000000}, R::EnergyConvention::SensibleEnergy, gas_constant);
+    auto bindings = f.bindings();
+    bindings.push_back(std::vector<R::DiffusionCompartment>(ns, {R::SpeciesPhase::Resolved, {}}));
+    for (std::size_t c = 0; c < f.thermal.cells.size(); ++c)
+    {
+        const bool lower = f.mesh->cell_global_id(static_cast<LO>(c)) == 0;
+        const double gas_amount = lower ? 2 : 3;
+        auto& liquid = f.thermal.cells[c].phases[0];
+        const double temperature = liquid.temperature;
+        // This is a lagged intensive guess. Its stored composition is not the current stage inventory.
+        liquid.moles[0] -= 6;
+        liquid.moles[1] += 3;
+        f.thermal.cells[c].phases.push_back(
+            {gas, {4 * gas_amount, 0, 0}, gas_pressure, 4 * gas_amount * cv * (temperature - 300), temperature});
+        f.transport.cells[c].phases.push_back(
+            {{gas_amount, 0, 0}, gas_amount * cv * (temperature - 300), .25, std::nullopt});
+        auto& donor = f.post_chemistry[c];
+        donor.set_amount(*f.catalog, solvent, R::SpeciesPhase::Resolved, gas_amount);
+        const auto raw_slot = F::raw_amount_slot(*f.catalog, donor, solvent, {R::SpeciesPhase::Resolved, {}});
+        f.post_source_parts[c].at(raw_slot) = {gas_amount, 0};
+    }
+    auto diffusion_options = f.options(false);
+    diffusion_options.diffusion->primary_species = {one};
+    diffusion_options.diffusion->molar_conductance = [](const auto&) { return std::vector{0., .125, 0.}; };
+    F::LowMachFaceTransportAdapter diffusion(f.mesh, f.catalog, diffusion_options, bindings);
+    // Chemistry leaves 0.875 mol of the first solute below and none above. A
+    // .125 s by .125 m3/s contact at .5 m3 per cell moves d upward, while
+    // the half-molar-mass counter moves 2d downward. Each liquid stays at 500 kg.
+    constexpr double d = .125 * .125 * (.875 / .5);
+    constexpr double expected_conductance = 2 + .875 - 2 * d;
+    constexpr double expected_heat = .125 * expected_conductance * 100;
+    const auto comm = f.mesh->owned_cell_map()->getComm();
+    EXPECT_EQ(f.sum(f.mesh->num_owned_cells() == 0 ? 1. : 0.), std::max(0, comm->getSize() - 2));
+    for (const auto mode : {R::PhaseThermalMode::Equilibrium, R::PhaseThermalMode::SeparatePhaseTemperatures})
+    {
+        SCOPED_TRACE(static_cast<int>(mode));
+        const bool equilibrium = mode == R::PhaseThermalMode::Equilibrium;
+        int conductance_calls = 0;
+        auto fourier_options = f.options();
+        fourier_options.identity = "Fourier contact after ordered liquid diffusion";
+        fourier_options.diffusion.reset();
+        fourier_options.fourier->conductance = [&conductance_calls](const auto& face)
+        {
+            ++conductance_calls; // Instrumentation only.
+            return 2 + std::abs(face.owner.physical_moles[1] - face.neighbor.physical_moles[1]);
+        };
+        F::LowMachFaceTransportAdapter fourier(f.mesh, f.catalog, fourier_options, bindings, mode);
+        const std::array<const F::LowMachFaceTransportAdapter*, 2> stages{&diffusion, &fourier};
+        const auto composed = F::compose_post_chemistry_faces(f.context(), *f.catalog, stages,
+            [&](const Flow::SourceStageContext&, F::LocalChemistryStage& prepared)
+            { f.prepare_ordered_chemistry(prepared, bindings.size()); });
+        EXPECT_EQ(f.sum(conductance_calls), 1);
+        ASSERT_EQ(composed.faces.size(), stages.size());
+        const auto& receipt = *composed.faces.back();
+        for (const auto& contact : receipt.fourier_faces)
+            EXPECT_DOUBLE_EQ(contact.conductance, expected_conductance);
+        EXPECT_TRUE(receipt.fourier_thermal.has_value());
+        const auto rows = receipt.fourier_thermal
+                              ? std::span<const F::FourierCellLinearization>(*receipt.fourier_thermal)
+                              : std::span<const F::FourierCellLinearization>{};
+        const auto nc = f.mesh->num_owned_cells();
+        EXPECT_EQ(rows.size(), nc);
+        double local_heat = 0;
+        for (std::size_t c = 0; c < std::min(rows.size(), nc); ++c)
+        {
+            const bool lower = f.mesh->cell_global_id(static_cast<LO>(c)) == 0;
+            const double one_moles = lower ? .875 - d : d;
+            const double two_moles = lower ? .0625 : .5;
+            const double counter_moles = lower ? 49998 + 2 * d : 49998 - 2 * d;
+            const double x_one = one_moles / (one_moles + two_moles + counter_moles);
+            const double liquid_capacity = 500 * (4200 + capacity_slope * x_one);
+            // At fixed p, d(U+pV)/dT for an ideal gas is n*cv + n*R.
+            const double gas_capacity = (lower ? 2 : 3) * (cv + gas_constant);
+            EXPECT_NEAR(rows[c].capacity, liquid_capacity + (equilibrium ? gas_capacity : 0), 1e-8);
+            EXPECT_DOUBLE_EQ(rows[c].temperature, lower ? 300 : 400);
+            EXPECT_DOUBLE_EQ(rows[c].minimum_temperature, equilibrium ? 275 : 250);
+            EXPECT_DOUBLE_EQ(rows[c].maximum_temperature, equilibrium ? 450 : 600);
+            const auto& packets = receipt.cells[c].fourier_energy;
+            EXPECT_EQ(packets.size(), 1U);
+            for (const double packet : packets)
+            {
+                EXPECT_DOUBLE_EQ(packet, lower ? expected_heat : -expected_heat);
+                local_heat += packet;
+            }
+            const auto& intervals = composed.result.fourier_gross_resolution.at(c);
+            EXPECT_EQ(intervals.size(), 1U);
+            if (!intervals.empty())
+                EXPECT_EQ(intervals.front().face_stage(), 1U);
+        }
+        EXPECT_EQ(f.sum(local_heat), 0);
     }
 }
 

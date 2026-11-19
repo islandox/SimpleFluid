@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <tuple>
 
 namespace SimpleFluid::Reacting::source_stage_detail
 {
@@ -159,9 +160,18 @@ struct GrossComparison
 {
     double residual = 0;
     double fourier_uncertainty = 0;
+    std::optional<Flow::GrossResidualWitness> winner;
 
-    void include(GrossComparison local)
+    void include(const GrossComparison& local)
     {
+        const auto key = [](const Flow::GrossResidualWitness& value)
+        {
+            return std::tie(value.geometry_cell, value.channel_metadata.stage, value.channel_metadata.stage_index,
+                value.channel, value.geometry_face);
+        };
+        if (local.winner && (!winner || local.residual > residual ||
+                                (local.residual == residual && key(*local.winner) < key(*winner))))
+            winner = local.winner;
         residual = std::max(residual, local.residual);
         fourier_uncertainty = std::max(fourier_uncertainty, local.fourier_uncertainty);
     }
@@ -169,7 +179,7 @@ struct GrossComparison
 
 SIMPLEFLUID_SOLVERS_LOCAL inline GrossComparison fourier_face_error(
     std::span<const Flow::FourierFaceResolution> current, std::span<const Flow::FourierFaceResolution> previous,
-    double tolerance)
+    double tolerance, Flow::Pack::global_ordinal_type cell = {}, size_t stage = 0, size_t channel = 0)
 {
     require(current.size() == previous.size(), "Fourier resolution face count changed between correctors.");
     GrossComparison maximum;
@@ -178,21 +188,32 @@ SIMPLEFLUID_SOLVERS_LOCAL inline GrossComparison fourier_face_error(
         const auto& now = current[i];
         const auto& old = previous[i];
         require(now.geometry_identity == old.geometry_identity, "Fourier resolution canonical face changed.");
+        const auto direction = [](double packet) { return (packet > 0) - (packet < 0); };
+        const double scale = std::max(std::abs(now.energy), std::abs(old.energy));
+        const Flow::GrossResidualWitness witness{.geometry_cell = cell, .geometry_face = now.geometry_identity,
+            .fourier_stage = stage, .channel_metadata = {Flow::GrossResidualStage::FaceTransport, stage, std::nullopt},
+            .channel = channel, .current_direction = direction(now.energy), .previous_direction = direction(old.energy),
+            .current_packet = now.energy, .previous_packet = old.energy, .scale = scale, .relative_tolerance = tolerance,
+            .current_decrease = now.decrease, .current_increase = now.increase,
+            .previous_decrease = old.decrease, .previous_increase = old.increase};
         if (now.energy == old.energy)
+        {
+            maximum.include({0, 0, witness});
             continue;
+        }
         const auto& greater = now.energy > old.energy ? now : old;
         const auto& lesser = now.energy > old.energy ? old : now;
         const long double high = greater.energy, low = lesser.energy;
         const long double decrease = greater.decrease, increase = lesser.increase;
-        const long double scale = std::max(std::abs(high), std::abs(low));
         // Half-scale only at extreme magnitudes so even binary64 long double
         // can subtract a reversal or sum its bounds without overflow.
         constexpr long double half_maximum = std::numeric_limits<long double>::max() / 2;
-        const long double factor = std::max({scale, decrease, increase}) > half_maximum ? .5L : 1.L;
+        const long double factor =
+            std::max({static_cast<long double>(scale), decrease, increase}) > half_maximum ? .5L : 1.L;
         const long double uncertainty = factor * decrease + factor * increase;
         const long double gap = std::max(0.L, (factor * high - factor * low) - uncertainty);
         maximum.include({normalized(gap, factor * scale, tolerance),
-            static_cast<double>(std::min(uncertainty, factor * std::numeric_limits<double>::max()) / factor)});
+            static_cast<double>(std::min(uncertainty, factor * std::numeric_limits<double>::max()) / factor), witness});
     }
     return maximum;
 }
@@ -212,21 +233,23 @@ SIMPLEFLUID_SOLVERS_LOCAL inline double event_error(
 }
 SIMPLEFLUID_SOLVERS_LOCAL inline GrossComparison event_error(const std::vector<std::vector<double>>& current,
     const std::vector<std::vector<double>>& previous, double tolerance,
-    const Flow::FourierGrossResolutions& current_fourier, const Flow::FourierGrossResolutions& previous_fourier)
+    const Flow::FourierGrossResolutions& current_fourier, const Flow::FourierGrossResolutions& previous_fourier,
+    const Flow::Mesh& mesh, std::span<const Flow::GrossChannelMetadata> metadata)
 {
     require(current_fourier.size() == previous_fourier.size(), "Fourier gross resolution rows changed.");
-    if (current_fourier.empty())
-        return {event_error(current, previous, tolerance)};
     validate_event_shape(current, previous);
     GrossComparison maximum;
     for (size_t c = 0; c < current.size(); ++c)
     {
-        const auto& now_stages = current_fourier[c];
-        const auto& old_stages = previous_fourier[c];
+        const auto cell = mesh.cell_geometry_global_id(static_cast<Flow::Pack::local_ordinal_type>(c));
+        using FourierStages = std::span<const Flow::FourierGrossResolution>;
+        const auto now_stages = current_fourier.empty() ? FourierStages{} : FourierStages(current_fourier[c]);
+        const auto old_stages = previous_fourier.empty() ? FourierStages{} : FourierStages(previous_fourier[c]);
         require(now_stages.size() == old_stages.size(), "Fourier gross resolution stage count changed.");
         for (size_t stage = 0; stage < now_stages.size(); ++stage)
-            require(now_stages[stage].positive_channel() == old_stages[stage].positive_channel(),
-                "Fourier gross resolution stage channel changed.");
+            require(now_stages[stage].positive_channel() == old_stages[stage].positive_channel() &&
+                        now_stages[stage].face_stage() == old_stages[stage].face_stage(),
+                "Fourier gross resolution stage or channel changed.");
         size_t stage = 0;
         for (size_t i = 0; i < current[c].size(); ++i)
         {
@@ -234,13 +257,20 @@ SIMPLEFLUID_SOLVERS_LOCAL inline GrossComparison event_error(const std::vector<s
             {
                 // The raw directional aggregates stay in the receipt. Compare
                 // their constituent signed contacts with each face's own scale.
-                maximum.include(fourier_face_error(now_stages[stage].faces(), old_stages[stage].faces(), tolerance));
+                const auto& now = now_stages[stage];
+                maximum.include(fourier_face_error(
+                    now.faces(), old_stages[stage].faces(), tolerance, cell, now.face_stage(), i));
                 ++stage;
                 ++i;
                 continue;
             }
-            const long double now = current[c][i], old = previous[c][i];
-            maximum.residual = std::max(maximum.residual, normalized(now - old, std::max(now, old), tolerance));
+            const double now = current[c][i], old = previous[c][i], scale = std::max(now, old);
+            const auto channel = metadata.empty() ? Flow::GrossChannelMetadata{} : metadata[i];
+            const Flow::GrossResidualWitness witness{.geometry_cell = cell, .geometry_face = std::nullopt,
+                .fourier_stage = std::nullopt, .channel_metadata = channel, .channel = i,
+                .current_direction = channel.direction, .previous_direction = channel.direction,
+                .current_packet = now, .previous_packet = old, .scale = scale, .relative_tolerance = tolerance};
+            maximum.include({normalized(static_cast<long double>(now) - old, scale, tolerance), 0, witness});
         }
     }
     return maximum;

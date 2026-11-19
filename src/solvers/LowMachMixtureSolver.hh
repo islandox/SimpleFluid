@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -31,6 +32,7 @@ namespace low_mach_faces
 {
 class SIMPLEFLUID_SOLVERS_LOCAL LowMachFaceTransportAdapter;
 struct ComposedSourceStage;
+struct Receipt;
 } // namespace low_mach_faces
 
 class SIMPLEFLUID_SOLVERS_EXPORT LowMachMixtureSolver
@@ -178,6 +180,23 @@ public:
         std::array<long double, 2> event_shape_change{}; ///< Q1 signed H2,H3 before canonical endpoint rounding.
     };
     using QbmmSourceCells = std::vector<std::vector<std::optional<QbmmSourceReceipt>>>;
+    enum class GrossResidualStage
+    {
+        Provider,
+        Chemistry,
+        FaceTransport,
+        Interphase,
+        BodyImpulse,
+        PopulationNumbers,
+        QbmmPopulation
+    };
+    struct GrossChannelMetadata
+    {
+        GrossResidualStage stage = GrossResidualStage::Provider;
+        size_t stage_index = 0; ///< Ordered index within the stage kind.
+        std::optional<int> direction; ///< Sign in the declared channel convention, when directional.
+        bool operator==(const GrossChannelMetadata&) const = default;
+    };
     struct FourierFaceResolution
     {
         Pack::global_ordinal_type geometry_identity;
@@ -189,6 +208,7 @@ public:
         friend class low_mach_faces::LowMachFaceTransportAdapter;
         friend struct low_mach_faces::ComposedSourceStage;
         size_t channel_;                           ///< Adjacent exact positive and negative Fourier heat totals.
+        size_t face_stage_ = 0;                    ///< Stage index in the complete ordered face sequence.
         std::vector<FourierFaceResolution> faces_; ///< Sorted by canonical geometry identity.
         FourierGrossResolution(size_t channel, std::vector<FourierFaceResolution> faces)
             : channel_(channel), faces_(std::move(faces))
@@ -197,6 +217,7 @@ public:
 
     public:
         [[nodiscard]] size_t positive_channel() const noexcept { return channel_; }
+        [[nodiscard]] size_t face_stage() const noexcept { return face_stage_; }
         [[nodiscard]] std::span<const FourierFaceResolution> faces() const noexcept { return faces_; }
     };
     using FourierGrossResolutions = std::vector<std::vector<FourierGrossResolution>>;
@@ -213,6 +234,8 @@ public:
             thermal_receipt;        ///< Frozen events, raw energy; no rates inside pressure roots.
         QbmmSourceCells qbmm_cells; ///< Owned-cell and physical-phase order; engaged for every bound family.
         FourierGrossResolutions fourier_gross_resolution; ///< Sparse owned rows from the canonical Fourier adapter.
+        std::vector<std::shared_ptr<const low_mach_faces::Receipt>> fourier_thermal_stages; ///< Private reacting lease.
+        std::vector<GrossChannelMetadata> gross_channel_metadata; ///< Optional descriptions in gross-event order.
     };
     using SourceStageCallback = std::function<SourceStageResult(const SourceStageContext&)>;
     /** Immutable metadata and shared callback lifetime, independent of any controller object.
@@ -295,6 +318,43 @@ public:
         double material_volume_flux = 0;   ///< All-phase direct volume rate at the stage carrier flux, m3/s.
         bool operator==(const PhaseFaceTransport&) const = default;
     };
+    struct GrossResidualWitness
+    {
+        Pack::global_ordinal_type geometry_cell{};
+        std::optional<Pack::global_ordinal_type> geometry_face;
+        std::optional<size_t> fourier_stage; ///< Index in the ordered face stages, when comparing signed contact heat.
+        GrossChannelMetadata channel_metadata;
+        size_t channel = 0; ///< Gross row slot. For signed contact heat, the base slot of the directional pair.
+        std::optional<int> current_direction, previous_direction; ///< For Fourier, +1 into this cell and -1 out.
+        double current_packet = 0, previous_packet = 0;
+        double scale = 0, relative_tolerance = 0;
+        double current_decrease = 0, current_increase = 0; ///< Fourier operand interval radii, J.
+        double previous_decrease = 0, previous_increase = 0;
+        bool operator==(const GrossResidualWitness&) const = default;
+    };
+    struct GrossResidualEvaluation
+    {
+        int evaluation = 0; ///< One-based source callback evaluation.
+        double normalized_residual = 0, normalized_flux_change = 0;
+        std::optional<GrossResidualWitness> winner; ///< Disengaged when no current/previous pair exists.
+        bool operator==(const GrossResidualEvaluation&) const = default;
+    };
+    class SIMPLEFLUID_SOLVERS_EXPORT SourceCorrectorExhausted final : public std::runtime_error
+    {
+        friend class LowMachMixtureSolver;
+        SourceStageMetadata stage_;
+        std::vector<GrossResidualEvaluation> evaluations_;
+        SIMPLEFLUID_SOLVERS_LOCAL SourceCorrectorExhausted(
+            const std::string& message, SourceStageMetadata stage, std::vector<GrossResidualEvaluation> evaluations);
+
+    public:
+        ~SourceCorrectorExhausted() noexcept override;
+        [[nodiscard]] const SourceStageMetadata& source_stage() const noexcept { return stage_; }
+        [[nodiscard]] std::span<const GrossResidualEvaluation> gross_residual_evaluations() const noexcept
+        {
+            return evaluations_;
+        }
+    };
     struct Diagnostics
     {
         int correctors = 0, source_evaluations = 0;
@@ -366,6 +426,7 @@ public:
         double maximum_linear_cfl = 0;
         double maximum_linear_stage_residual = 0, maximum_linear_step_residual = 0;
         ///< Local block residuals normalized by the physical conservation gate, reduced over owners.
+        std::vector<GrossResidualEvaluation> gross_residual_evaluations; ///< Live source trace; omitted by restart.
     };
     enum class QbmmStateKind
     {

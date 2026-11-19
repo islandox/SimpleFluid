@@ -17,7 +17,10 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <gtest/gtest.h>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -381,7 +384,12 @@ struct Endpoint
     }
 };
 
-double checked_step(Fixture& f, Controller& controller, double dt)
+struct FourierBalance
+{
+    double exchange = 0, maximum_pair_defect = 0;
+};
+
+FourierBalance checked_step(Fixture& f, Controller& controller, double dt)
 {
     const auto before = inventory(f, f.solver->state());
     const Endpoint accepted(f);
@@ -391,6 +399,11 @@ double checked_step(Fixture& f, Controller& controller, double dt)
     const auto report = controller.qbmm_report(trial);
     const auto& diag = trial.diagnostics().flow;
     EXPECT_GE(diag.source_evaluations, 2);
+    EXPECT_LE(diag.source_evaluations, f.solver->options().maximum_correctors);
+    EXPECT_LE(diag.maximum_source_residual, 1);
+    EXPECT_LE(diag.maximum_transport_residual, 1);
+    EXPECT_LE(diag.maximum_thermal_residual, 1);
+    EXPECT_LE(diag.maximum_conditioned_thermal_residual, 1);
     EXPECT_LE(diag.maximum_event_residual, 1);
     EXPECT_LE(diag.maximum_shape_source_residual, 1);
     EXPECT_LE(diag.maximum_shape_transport_residual, 1);
@@ -581,11 +594,13 @@ double checked_step(Fixture& f, Controller& controller, double dt)
             expect_relative(
                 f.sum(heat_from_walls[wall]), wall_heat[wall], std::max(std::abs(wall_heat[wall]), 1.), 1e-12);
     fourier_endpoints = f.sum(fourier_endpoints);
-    double fourier_activity = 0;
+    FourierBalance fourier;
     for (size_t face = 0; face < global_faces; ++face)
     {
         EXPECT_EQ(fourier_endpoints[2 * face], -fourier_endpoints[2 * face + 1]) << "geometry face " << face;
-        fourier_activity += std::abs(fourier_endpoints[2 * face]);
+        fourier.exchange += std::abs(fourier_endpoints[2 * face]);
+        fourier.maximum_pair_defect = std::max(
+            fourier.maximum_pair_defect, std::abs(fourier_endpoints[2 * face] + fourier_endpoints[2 * face + 1]));
     }
     expect_relative(diag.pressure_work, global_work, std::max(std::abs(global_work), 1.), 2e-8);
     // Sensible-energy tolerance is based on thermal storage, independent of heat
@@ -622,12 +637,13 @@ double checked_step(Fixture& f, Controller& controller, double dt)
     controller.commit(trial);
     EXPECT_EQ(f.population_calls, calls);
     EXPECT_EQ(f.solver->state().time, accepted.state.time + dt);
-    return fourier_activity;
+    return fourier;
 }
 
 struct Observables
 {
     double circulation = 0, thermal_dipole = 0, vertical_pressure_dipole = 0, speed_squared = 0, area = 0, d32 = 0;
+    double dispersed_volume_fraction = 0;
 };
 
 Observables observe(const Fixture& f, const Controller& controller)
@@ -646,6 +662,7 @@ Observables observe(const Fixture& f, const Controller& controller)
         result.vertical_pressure_dipole += volume * (center.z - .5) * cell.mechanical_pressure;
         for (size_t d = 0; d < 3; ++d)
             result.speed_squared += volume * std::pow(cell.velocity.component(d), 2);
+        result.dispersed_volume_fraction += phase_volume(cell.phases[1], 1);
         const auto& geometry = *report.cells[c].families[1]->geometry;
         result.area += volume * geometry.area_density;
         diameter3 += volume * geometry.diameter_moment_density[3];
@@ -655,6 +672,8 @@ Observables observe(const Fixture& f, const Controller& controller)
     result.thermal_dipole = f.sum(result.thermal_dipole);
     result.vertical_pressure_dipole = f.sum(result.vertical_pressure_dipole);
     result.speed_squared = f.sum(result.speed_squared);
+    // The closed fixture has unit total volume.
+    result.dispersed_volume_fraction = f.sum(result.dispersed_volume_fraction);
     result.area = f.sum(result.area);
     result.d32 = f.sum(diameter3) / f.sum(diameter2);
     return result;
@@ -667,6 +686,7 @@ void record_observables(const char* prefix, const Observables& values)
     testing::Test::RecordProperty(
         std::string(prefix) + "_vertical_pressure_dipole_Pa_m", values.vertical_pressure_dipole);
     testing::Test::RecordProperty(std::string(prefix) + "_rms_speed_m_per_s", std::sqrt(values.speed_squared));
+    testing::Test::RecordProperty(std::string(prefix) + "_dispersed_volume_fraction", values.dispersed_volume_fraction);
     testing::Test::RecordProperty(std::string(prefix) + "_area_m2", values.area);
     testing::Test::RecordProperty(std::string(prefix) + "_d32_m", values.d32);
 }
@@ -725,28 +745,66 @@ TEST(QbmmApplicationBenchmarks, HeatedClosedCirculationBudgetsCheckpointAndPorta
     }
 }
 
-Observables run_case(CaseOptions options, double dt, const char* label = nullptr)
+Observables run_case(CaseOptions options, double dt, const char* label = nullptr, bool record_cavity_metrics = false)
 {
     Fixture f(options);
     Controller controller(f.solver, f.options());
-    int maximum_evaluations = 0;
-    double maximum_fourier_uncertainty = 0;
-    for (int step = 0; step < std::lround(horizon / dt); ++step)
+    const auto comm = f.mesh->owned_cell_map()->getComm();
+    const int ranks = comm->getSize();
+    if (record_cavity_metrics)
     {
+        const auto& controls = f.solver->options();
+        EXPECT_EQ(controls.maximum_correctors, 80);
+        EXPECT_EQ(controls.source_relative_tolerance, 1e-8);
+        EXPECT_EQ(controls.thermal_relative_tolerance, 2e-9);
+        EXPECT_EQ(controls.volume_relative_tolerance, 2e-9);
+        EXPECT_EQ(controls.conservation_relative_tolerance, 2e-10);
+        EXPECT_EQ(controls.continuity_tolerance, 1e-10);
+        if (const char* expected = std::getenv("SIMPLEFLUID_CAVITY_EXPECTED_RANKS"))
+            EXPECT_EQ(std::to_string(ranks), expected);
+        testing::Test::RecordProperty("mpi_ranks", ranks);
+    }
+    int maximum_evaluations = 0;
+    double maximum_fourier_uncertainty = 0, maximum_event_residual = 0, maximum_flux_residual = 0;
+    double maximum_mass_defect = 0, maximum_energy_defect = 0, maximum_occupancy = 0, maximum_continuity = 0;
+    FourierBalance maximum_fourier;
+    const auto steps = std::lround(horizon / dt);
+    for (int step = 0; step < steps; ++step)
+    {
+        FourierBalance fourier;
         try
         {
-            checked_step(f, controller, dt);
+            fourier = checked_step(f, controller, dt);
         }
         catch (const std::exception& error)
         {
             std::ostringstream message;
-            message << "Q6 case " << (label ? label : "sensitivity") << ": N=" << options.cells_per_side
+            message << "Cavity case " << (label ? label : "sensitivity") << ": N=" << options.cells_per_side
                     << ", dt=" << dt << ", accepted time=" << f.solver->state().time << ", gravity=" << options.gravity
                     << ", wall differential=" << options.differential_heat << ": " << error.what();
             throw std::runtime_error(message.str());
         }
-        maximum_evaluations = std::max(maximum_evaluations, controller.diagnostics().flow.source_evaluations);
-        const auto uncertainty = controller.diagnostics().flow.maximum_fourier_gross_comparison_uncertainty_j;
+        const auto& flow = controller.diagnostics().flow;
+        maximum_evaluations = std::max(maximum_evaluations, flow.source_evaluations);
+        maximum_event_residual = std::max(maximum_event_residual, flow.maximum_event_residual);
+        maximum_fourier.exchange = std::max(maximum_fourier.exchange, fourier.exchange);
+        maximum_fourier.maximum_pair_defect =
+            std::max(maximum_fourier.maximum_pair_defect, fourier.maximum_pair_defect);
+        EXPECT_TRUE(std::isfinite(flow.mass_error));
+        EXPECT_TRUE(std::isfinite(flow.internal_energy_error));
+        maximum_mass_defect = std::max(maximum_mass_defect, std::abs(flow.mass_error));
+        maximum_energy_defect = std::max(maximum_energy_defect, std::abs(flow.internal_energy_error));
+        maximum_occupancy = std::max(maximum_occupancy, flow.maximum_occupancy_error);
+        maximum_continuity = std::max(maximum_continuity, flow.maximum_continuity_residual);
+        EXPECT_EQ(flow.gross_residual_evaluations.size(), static_cast<size_t>(flow.source_evaluations));
+        if (!flow.gross_residual_evaluations.empty())
+        {
+            const auto& accepted = flow.gross_residual_evaluations.back();
+            EXPECT_EQ(accepted.normalized_residual, flow.maximum_event_residual);
+            EXPECT_LE(accepted.normalized_flux_change, 1);
+            maximum_flux_residual = std::max(maximum_flux_residual, accepted.normalized_flux_change);
+        }
+        const auto uncertainty = flow.maximum_fourier_gross_comparison_uncertainty_j;
         EXPECT_TRUE(uncertainty.has_value());
         maximum_fourier_uncertainty = std::max(maximum_fourier_uncertainty, uncertainty.value_or(0.));
     }
@@ -757,7 +815,48 @@ Observables run_case(CaseOptions options, double dt, const char* label = nullptr
             std::string(label) + "_maximum_fourier_operand_uncertainty_J", maximum_fourier_uncertainty);
     }
     EXPECT_EQ(f.solver->state().time, horizon);
-    return observe(f, controller);
+    const auto endpoint = observe(f, controller);
+    if (record_cavity_metrics)
+    {
+        EXPECT_GT(maximum_fourier.exchange, 0);
+        EXPECT_EQ(maximum_fourier.maximum_pair_defect, 0);
+        const std::string prefix(label);
+        record_observables(label, endpoint);
+        testing::Test::RecordProperty(prefix + "_cells_per_side", options.cells_per_side);
+        testing::Test::RecordProperty(prefix + "_dt_s", dt);
+        testing::Test::RecordProperty(prefix + "_horizon_s", f.solver->state().time);
+        testing::Test::RecordProperty(prefix + "_maximum_event_residual", maximum_event_residual);
+        testing::Test::RecordProperty(prefix + "_maximum_flux_residual", maximum_flux_residual);
+        testing::Test::RecordProperty(prefix + "_maximum_fourier_exchange_J", maximum_fourier.exchange);
+        testing::Test::RecordProperty(prefix + "_maximum_fourier_pair_defect_J", maximum_fourier.maximum_pair_defect);
+        testing::Test::RecordProperty(prefix + "_maximum_mass_defect_kg", maximum_mass_defect);
+        testing::Test::RecordProperty(prefix + "_maximum_internal_energy_defect_J", maximum_energy_defect);
+        testing::Test::RecordProperty(prefix + "_maximum_occupancy_error", maximum_occupancy);
+        testing::Test::RecordProperty(prefix + "_maximum_continuity_residual", maximum_continuity);
+        if (comm->getRank() == 0)
+        {
+            std::ostringstream summary;
+            summary << std::setprecision(17) << "Cavity " << label << " ranks=" << ranks
+                    << " N=" << options.cells_per_side << " dt_s=" << dt << " accepted_steps=" << steps
+                    << " accepted_time_s=" << f.solver->state().time << " max_evaluations=" << maximum_evaluations
+                    << " max_event_residual=" << maximum_event_residual
+                    << " max_flux_residual=" << maximum_flux_residual
+                    << " max_fourier_exchange_J=" << maximum_fourier.exchange
+                    << " max_fourier_pair_defect_J=" << maximum_fourier.maximum_pair_defect
+                    << " max_fourier_operand_uncertainty_J=" << maximum_fourier_uncertainty
+                    << " max_mass_defect_kg=" << maximum_mass_defect
+                    << " max_internal_energy_defect_J=" << maximum_energy_defect
+                    << " max_occupancy_error=" << maximum_occupancy << " max_continuity_residual=" << maximum_continuity
+                    << " circulation_m2_per_s=" << endpoint.circulation
+                    << " thermal_dipole_K_m=" << endpoint.thermal_dipole
+                    << " vertical_pressure_dipole_Pa_m=" << endpoint.vertical_pressure_dipole
+                    << " rms_speed_m_per_s=" << std::sqrt(endpoint.speed_squared)
+                    << " dispersed_volume_fraction=" << endpoint.dispersed_volume_fraction
+                    << " area_m2=" << endpoint.area << " d32_m=" << endpoint.d32 << '\n';
+            std::cout << summary.str();
+        }
+    }
+    return endpoint;
 }
 
 TEST(QbmmApplicationBenchmarks, FourierOperandResolutionRetainsResolvedHeatAndGrossTurnover)
@@ -825,6 +924,47 @@ TEST(QbmmApplicationBenchmarks, FourierResolutionMatchesContactsAndUsesAsymmetri
     const auto boundary = Source::fourier_face_error(now, old, tolerance);
     EXPECT_DOUBLE_EQ(boundary.fourier_uncertainty, s);
     EXPECT_DOUBLE_EQ(boundary.residual, .5 / tolerance);
+    ASSERT_TRUE(boundary.winner);
+    EXPECT_EQ(boundary.winner->current_direction, 1);
+    EXPECT_EQ(boundary.winner->previous_direction, -1);
+    EXPECT_EQ(boundary.winner->current_packet, s);
+    EXPECT_EQ(boundary.winner->previous_packet, -s / 2);
+    EXPECT_EQ(boundary.winner->current_decrease, s / 2);
+    EXPECT_EQ(boundary.winner->current_increase, 3 * s / 4);
+    EXPECT_EQ(boundary.winner->previous_decrease, 3 * s / 4);
+    EXPECT_EQ(boundary.winner->previous_increase, s / 2);
+}
+
+TEST(QbmmApplicationBenchmarks, FourierWitnessKeepsWinningFaceOperandsIndependentOfMaximumUncertainty)
+{
+    namespace Source = R::source_stage_detail;
+    using Face = Solver::FourierFaceResolution;
+    // Face 17 has gap (8-0)-(1+1)=6 J and scale 8 J. Face 19 has
+    // a wider uncertainty (8+8)=16 J and zero gap.
+    constexpr std::array current{Face{17, 8, 1, 32}, Face{19, 8, 8, 8}};
+    constexpr std::array previous{Face{17, 0, 64, 1}, Face{19, 0, 8, 8}};
+    constexpr double tolerance = .125;
+    const auto comparison = Source::fourier_face_error(current, previous, tolerance, 23, 2, 7);
+    EXPECT_EQ(comparison.fourier_uncertainty, 16);
+    EXPECT_EQ(comparison.residual, 6);
+    ASSERT_TRUE(comparison.winner);
+    const auto& winner = *comparison.winner;
+    EXPECT_EQ(winner.geometry_cell, 23);
+    EXPECT_EQ(winner.geometry_face, 17);
+    EXPECT_EQ(winner.fourier_stage, 2);
+    EXPECT_EQ(winner.channel_metadata.stage, Solver::GrossResidualStage::FaceTransport);
+    EXPECT_EQ(winner.channel_metadata.stage_index, 2);
+    EXPECT_EQ(winner.channel, 7);
+    EXPECT_EQ(winner.current_direction, 1);
+    EXPECT_EQ(winner.previous_direction, 0);
+    EXPECT_EQ(winner.current_packet, 8);
+    EXPECT_EQ(winner.previous_packet, 0);
+    EXPECT_EQ(winner.scale, 8);
+    EXPECT_EQ(winner.relative_tolerance, tolerance);
+    EXPECT_EQ(winner.current_decrease, 1);
+    EXPECT_EQ(winner.current_increase, 32);
+    EXPECT_EQ(winner.previous_decrease, 64);
+    EXPECT_EQ(winner.previous_increase, 1);
 }
 
 TEST(QbmmApplicationBenchmarks, FourierSubnormalBoundsUseStrictComparison)
@@ -857,6 +997,12 @@ TEST(QbmmApplicationBenchmarks, FourierSubnormalBoundsUseStrictComparison)
     const auto change = Source::fourier_face_error(large, small, tolerance);
     EXPECT_DOUBLE_EQ(change.residual, .8 / tolerance);
     EXPECT_EQ(change.fourier_uncertainty, 0.);
+    ASSERT_TRUE(change.winner);
+    EXPECT_EQ(change.winner->previous_packet, quantum);
+    EXPECT_EQ(change.winner->current_packet, 5 * quantum);
+    EXPECT_EQ(change.winner->scale, 5 * quantum);
+    EXPECT_EQ(change.winner->previous_increase, 0.);
+    EXPECT_EQ(change.winner->current_decrease, 0.);
     EXPECT_DOUBLE_EQ(Source::fourier_face_error(small, negative, tolerance).residual, 2. / tolerance);
 
     // At the binade boundary the increase uses 3*u/4. This conductance
@@ -979,9 +1125,6 @@ void record_sensitivity(
     Refinement refinement, const Observables& coarse, const Observables& medium, const Observables& fine)
 {
     const std::string name = refinement == Refinement::Mesh ? "mesh" : "dt";
-    record_observables((name + "_coarse").c_str(), coarse);
-    record_observables((name + "_medium").c_str(), medium);
-    record_observables((name + "_fine").c_str(), fine);
     const std::array a{coarse.circulation, coarse.thermal_dipole, coarse.area, coarse.d32};
     const std::array b{medium.circulation, medium.thermal_dipole, medium.area, medium.d32};
     const std::array c{fine.circulation, fine.thermal_dipole, fine.area, fine.d32};
@@ -1020,15 +1163,12 @@ TEST(QbmmApplicationBenchmarks, MeasuredMeshSensitivityAtMatchedTimestepAndHoriz
     CaseOptions options;
     constexpr double dt = step_size / 2;
     options.cells_per_side = 2;
-    const auto coarse = run_case(options, dt, "mesh_coarse");
+    const auto coarse = run_case(options, dt, "mesh_coarse", true);
     options.cells_per_side = 4;
-    const auto medium = run_case(options, dt, "mesh_medium");
+    const auto medium = run_case(options, dt, "mesh_medium", true);
     options.cells_per_side = 8;
-    const auto fine = run_case(options, dt, "mesh_fine");
+    const auto fine = run_case(options, dt, "mesh_fine", true);
     record_sensitivity(Refinement::Mesh, coarse, medium, fine);
-    testing::Test::RecordProperty("mesh_coarse_cells_per_side", 2);
-    testing::Test::RecordProperty("mesh_medium_cells_per_side", 4);
-    testing::Test::RecordProperty("mesh_fine_cells_per_side", 8);
     testing::Test::RecordProperty("matched_dt_s", dt);
     testing::Test::RecordProperty("matched_horizon_s", horizon);
 }
@@ -1036,12 +1176,38 @@ TEST(QbmmApplicationBenchmarks, MeasuredMeshSensitivityAtMatchedTimestepAndHoriz
 TEST(QbmmApplicationBenchmarks, MeasuredTimestepSensitivityAtMatchedMeshAndHorizon)
 {
     CaseOptions options;
-    const auto coarse = run_case(options, step_size);
-    const auto medium = run_case(options, step_size / 2);
-    const auto fine = run_case(options, step_size / 4);
+    const auto coarse = run_case(options, step_size, "dt_coarse", true);
+    const auto medium = run_case(options, step_size / 2, "dt_medium", true);
+    const auto fine = run_case(options, step_size / 4, "dt_fine", true);
     record_sensitivity(Refinement::TimeStep, coarse, medium, fine);
     testing::Test::RecordProperty("matched_cells_per_side", options.cells_per_side);
     testing::Test::RecordProperty("matched_horizon_s", horizon);
+}
+
+void check_matched_fourier_cavity(int cells_per_side)
+{
+    CaseOptions options;
+    options.cells_per_side = cells_per_side;
+    constexpr double dt = 1. / 128;
+    const auto endpoint = run_case(options, dt, "matched", true);
+    EXPECT_GT(endpoint.circulation, 0);
+    EXPECT_GT(endpoint.thermal_dipole, 0);
+    EXPECT_TRUE(std::isfinite(endpoint.vertical_pressure_dipole));
+    EXPECT_GT(endpoint.speed_squared, 0);
+    EXPECT_GT(endpoint.dispersed_volume_fraction, 0);
+    EXPECT_LT(endpoint.dispersed_volume_fraction, 1);
+    EXPECT_GT(endpoint.area, 0);
+    EXPECT_GT(endpoint.d32, 0);
+}
+
+TEST(QbmmFourierCavity, Matched16)
+{
+    check_matched_fourier_cavity(16);
+}
+
+TEST(QbmmFourierCavity, Matched32)
+{
+    check_matched_fourier_cavity(32);
 }
 
 TEST(QbmmApplicationBenchmarks, SingleCellEmptyOwnersRetainImpulseHeatInventoriesAndRestart)
@@ -1085,7 +1251,7 @@ TEST(QbmmApplicationBenchmarks, SingleCellRetainsEachSignedWallHeatPacket)
         options.differential_heat = wall == 0 ? options.mean_heat : -options.mean_heat;
         Fixture f(options);
         Controller controller(f.solver, f.options());
-        EXPECT_EQ(checked_step(f, controller, step_size), 0);
+        EXPECT_EQ(checked_step(f, controller, step_size).exchange, 0);
         EXPECT_NEAR(controller.diagnostics().external_heat, signed_heat[wall], 1e-10);
         EXPECT_NEAR(controller.diagnostics().net_thermal_energy, signed_heat[wall], 1e-8);
     }
@@ -1121,7 +1287,7 @@ TEST(QbmmApplicationBenchmarks, ResolvedCavityRetainsSharedFacesWithEmptyOwners)
     testing::Test::RecordProperty("shared_faces", global_shared);
     Controller controller(f.solver, f.options());
     checked_step(f, controller, step_size);
-    EXPECT_GT(checked_step(f, controller, step_size), 0);
+    EXPECT_GT(checked_step(f, controller, step_size).exchange, 0);
 }
 
 /** Independent mass-conserving fixed-pivot population reference.

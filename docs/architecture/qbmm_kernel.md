@@ -413,6 +413,81 @@ the same H0–H3. A separate constant-kernel test checks the bin reference again
 analytic solution. These tests quantify closure error, not empirical validity of a
 particular growth, collision, breakup, slip or high-void correlation.
 
+### Q8a heated-cavity corrector
+
+Each live source evaluation records the normalized gross residual and flux change.
+The first evaluation has no predecessor. Subsequent entries identify the winning
+stage, gross slot, canonical geometry cell and, for Fourier contact, the ordered
+face stage and canonical geometry face. The witness retains both packets, their
+directions, the comparison scale, relative tolerance and each packet's lower and
+upper interval radii. Heat entering the named cell is positive. Equal residuals
+use the smallest geometry cell ID, then stage kind, stage index, gross slot and face
+ID. All ranks receive the same winning operands. A capped solve exposes the trace
+through `SourceCorrectorExhausted`. Accepted trials expose it through flow diagnostics.
+The live trace is omitted from portable restart v5–v8.
+
+The original lagged 16×16 corrector rejected its first 1/128 s step at evaluation
+80. Ordered face stage 0, gross slot 48, cell 149, face 159 carried heat out of the
+cell. The packet changed from −4.3210916714997438e−5 to −4.3210922569869581e−5 J.
+The larger magnitude set the scale. Each packet had 2.8421709430404007e−14 J
+of uncertainty in each direction. At relative tolerance 1e−8 the uncovered gap
+gave 13.41797022 times the allowed change. The signed packet increments alternated
+over the final evaluations. At evaluation 80 the cell had 4.2362546163 J/K of
+fixed-pressure caloric response and `dt * sum(G) / C = 0.47211515`.
+
+| Single change to the lagged 16×16 case | Outcome | Winning gross residual on first step |
+| --- | --- | ---: |
+| Zero Fourier conductance | All 16 steps accepted in five evaluations each | 0.0186524 (QBMM slot 68) |
+| Gravity off | First step exhausted | 31493.6171 (Fourier face 875) |
+| Zero prescribed slip | First step exhausted | 3.94964718 (Fourier face 74) |
+| Population events off | First step exhausted | 13.42438990 (Fourier face 108) |
+
+After an unsuccessful outer evaluation the host solves
+\((C+\Delta t L_G)\delta T=C(T_{\rm recovered}-T_{\rm guess})\) for the next
+temperature guess. Each ordered Fourier stage evaluates its conductance once per
+canonical face using the actual predecessor composition and the stage temperature.
+The graph sums these conductances. The last active incident stage on each row supplies
+its temperature operand and occupied fixed-pressure capacity
+\(C=\sum_a m_a[(\partial u_a/\partial T)_p-p_a(\partial\rho_a/\partial T)_p/\rho_a^2]\).
+Equilibrium recovery sums all occupied phases. Separate-temperature recovery uses
+the selected phase and its own contact graph. The correction respects the temperature
+bounds of the incident stages and recovered phases.
+The first physical recovery must succeed within the supplied EOS domains before
+the block can supply a correction. If the block or its bounded update is
+unavailable, the next evaluation uses the recovered temperature.
+
+The next outer evaluation restarts from accepted inventories and recomputes transport,
+conductances, signed face packets, EOS states, pressure work and every physical
+acceptance gate. The linear solve contributes only a temperature guess. The final
+receipt books one signed pair \((-Q_f,+Q_f)\) per canonical contact, with the same
+asymmetric operand intervals and strict subnormal comparison as the original corrector.
+
+The two-cell oracle uses 128 and 384 J/K, \(\Delta t G=384\) J/K and a 5 K
+initial difference. Its implicit contact transfers 384 J, reverses to −384 J
+when the initial temperatures are swapped, and gives exactly zero for equal
+temperatures. A separate ordered-stage oracle checks a contact after diffusion
+using composition-dependent liquid capacity and an ideal-gas contribution of
+\(n(C_v+R)\) to the equilibrium response.
+
+The manufactured cavities below each completed 16 steps of 1/128 s through
+1/8 s with the 80-evaluation cap. Each evaluation count is the maximum for an
+accepted step. Residual and conservation columns give the largest value across
+accepted steps and all three rank counts. The gross residual limit is 1.
+
+| Grid | Evaluations, serial / MPI-2 / MPI-4 | Gross residual | Absolute mass defect (kg) | Absolute internal-energy defect (J) |
+| --- | --- | ---: | ---: | ---: |
+| 2×2 | 6 / 6 / 6 | 0.0976422 | 4.44e−16 | 7.06e−11 |
+| 4×4 | 7 / 7 / 7 | 0.882228 | 6.66e−16 | 6.89e−11 |
+| 8×8 | 8 / 8 / 8 | 0.803010 | 1.55e−15 | 6.52e−11 |
+| 16×16 | 11 / 11 / 12 | 0.983561 | 2.44e−15 | 6.16e−11 |
+| 32×32 | 14 / 14 / 13 | 0.722382 | 1.42e−14 | 6.66e−11 |
+
+The maximum absolute sum of opposite face packets was zero at every resolution.
+At fixed 4×4 mesh the separate timestep study reached the same horizon with steps
+of 1/64, 1/128 and 1/256 s. The serial thermal dipole was 0.6779813, 0.6794844
+and 0.6802403 K·m, respectively. The circulation and thermal-dipole refinement
+checks passed on one, two and four ranks.
+
 ## Q7a prescribed planar ALE
 
 For each bound phase the unknowns are extensive species moles, H0, H2, H3 and signed internal

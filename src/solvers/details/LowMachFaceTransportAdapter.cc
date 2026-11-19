@@ -132,9 +132,10 @@ CellSpeciesState zero_like(const CellSpeciesState& state)
 } // namespace
 
 LowMachFaceTransportAdapter::LowMachFaceTransportAdapter(std::shared_ptr<const Mesh> mesh,
-    std::shared_ptr<const SpeciesCatalog> catalog, Options options, PhaseBindings compartments)
+    std::shared_ptr<const SpeciesCatalog> catalog, Options options, PhaseBindings compartments,
+    std::optional<PhaseThermalMode> thermal_mode)
     : mesh_(std::move(mesh)), catalog_(std::move(catalog)), options_(std::move(options)),
-      compartments_(std::move(compartments))
+      compartments_(std::move(compartments)), thermal_mode_(thermal_mode)
 {
     if (!mesh_)
         throw std::invalid_argument("Face adapter requires a communicator-bearing mesh.");
@@ -249,12 +250,12 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
 {
     collective_detail::require_uniform_value(*mesh_, int(raw_authority), "Face raw predecessor authority");
     const auto ns = catalog_->species().size(), np = compartments_.size(), physical = options_.physical_phase;
-    const std::size_t sample_columns = 2 * ns + 6, packet_columns = 3 * ns + 4 + (options_.fourier ? 2 : 0);
+    const std::size_t sample_columns = 2 * ns + 6, packet_columns = 3 * ns + 4 + (options_.fourier ? 3 : 0);
     const std::size_t t = 2 * ns, p = t + 1, volume = t + 2, density = t + 3;
     const std::size_t counter_amount = t + 4, bulk_volume = t + 5;
     const std::size_t h_owner = 1 + ns, h_neighbor = 1 + 2 * ns;
     const std::size_t hc_owner = 1 + 3 * ns, hc_neighbor = hc_owner + 1, heat_column = hc_owner + 2,
-                      heat_decrease = heat_column + 1, heat_increase = heat_column + 2;
+                      heat_decrease = heat_column + 1, heat_increase = heat_column + 2, conductance = heat_column + 3;
     std::unique_ptr<MV> owned_samples, local_samples, owned_packets, local_packets;
     Receipt result;
     collective_detail::collective_local_validation(*mesh_, "Face stage state and halo packing",
@@ -499,6 +500,7 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
                     const double g = options_.fourier->conductance(law);
                     require(std::isfinite(g) && g >= 0 && (g == 0 || (a.phase_volume > 0 && b.phase_volume > 0)),
                         "Fourier contact requires finite nonnegative conductance and two occupied selected phases.");
+                    owned_packets->replaceLocalValue(row, conductance, g);
                     const long double integrated_conductance = static_cast<long double>(law.time_step) * g;
                     const double q =
                         narrow(integrated_conductance * (static_cast<long double>(a.temperature) - b.temperature));
@@ -555,9 +557,76 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
                     result.raw_diffusion_faces.push_back(std::move(packet));
                 }
                 if (options_.fourier)
-                    result.fourier_faces.push_back(
-                        {mesh_->face_geometry_global_id(face), a, b, local_packets->getData(heat_column)[row],
-                            local_packets->getData(heat_decrease)[row], local_packets->getData(heat_increase)[row]});
+                    result.fourier_faces.push_back({mesh_->face_geometry_global_id(face), a, b,
+                        local_packets->getData(heat_column)[row], local_packets->getData(heat_decrease)[row],
+                        local_packets->getData(heat_increase)[row], local_packets->getData(conductance)[row],
+                        mesh_->cell_global_id(owner), mesh_->cell_global_id(neighbor)});
+            }
+            if (options_.fourier && thermal_mode_)
+            {
+                auto& rows = result.fourier_thermal.emplace(post_chemistry.size());
+                for (const auto& face : result.fourier_faces)
+                    if (face.conductance > 0)
+                        for (const auto& cell : {face.owner, face.neighbor})
+                            if (cell)
+                                rows[*cell].temperature = prepared_caloric_guesses[*cell].phases[physical].temperature;
+                for (std::size_t c = 0; c < rows.size(); ++c)
+                {
+                    auto& row = rows[c];
+                    if (row.temperature == 0)
+                        continue;
+                    SimpleFluid::detail::CompensatedSum<double> capacity;
+                    std::vector<double> x(ns);
+                    for (std::size_t a = 0; a < np; ++a)
+                    {
+                        if (*thermal_mode_ == PhaseThermalMode::SeparatePhaseTemperatures && a != physical)
+                            continue;
+                        const auto& phase = prepared_caloric_guesses[c].phases[a];
+                        SimpleFluid::detail::CompensatedSum<double> total, mass;
+                        for (std::size_t s = 0; s < ns; ++s)
+                        {
+                            const auto& role = compartments_[a][s];
+                            x[s] = post_chemistry[c].amount(
+                                *catalog_, catalog_->species()[s].id, role.phase, role.population);
+                            total += x[s];
+                            mass += x[s] * catalog_->species()[s].molarMass;
+                        }
+                        const auto& bounds = phase.thermodynamics->bounds();
+                        const double moles = total.value();
+                        if (moles > 0 || std::ranges::any_of(phase.moles, [](double n) { return n > 0; }))
+                        {
+                            row.minimum_temperature = std::max(row.minimum_temperature, bounds.minimum_temperature);
+                            row.maximum_temperature = std::min(row.maximum_temperature, bounds.maximum_temperature);
+                        }
+                        if (moles == 0)
+                            continue;
+                        // The block can encounter a phase that the Fourier law itself did not sample.
+                        // An unavailable predictor tangent leaves the normal caloric recovery in charge.
+                        if (!(std::isfinite(moles) && std::isfinite(mass.value()) && mass.value() > 0 &&
+                                phase.temperature >= bounds.minimum_temperature &&
+                                phase.temperature <= bounds.maximum_temperature &&
+                                phase.absolute_pressure >= bounds.minimum_pressure &&
+                                phase.absolute_pressure <= bounds.maximum_pressure))
+                        {
+                            capacity = {};
+                            break;
+                        }
+                        for (auto& value : x)
+                            value /= moles;
+                        const auto point =
+                            phase.thermodynamics->evaluate(phase.temperature, phase.absolute_pressure, x);
+                        const double enthalpy_temperature = std::fma(-phase.absolute_pressure / point.density,
+                            point.density_temperature / point.density, point.internal_energy_temperature);
+                        const double derivative = mass.value() * enthalpy_temperature;
+                        if (!(derivative > 0 && std::isfinite(derivative)))
+                        {
+                            capacity = {};
+                            break;
+                        }
+                        capacity += derivative;
+                    }
+                    row.capacity = capacity.value();
+                }
             }
             std::ranges::sort(result.raw_diffusion_faces, {}, &CanonicalDiffusionFace::identity);
             if (options_.diffusion)

@@ -64,7 +64,17 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     simplefluid_discover_tests(${TEST_NAME}
       XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q7b/$<CONFIG>"
       PROPERTIES LABELS "qbmm\\;kinetic\\;low_mach\\;conservation")
-  elseif(TEST_NAME MATCHES "^testQbmm(ApplicationBenchmarks|SlipAndGravity)$")
+  elseif(TEST_NAME STREQUAL "testQbmmApplicationBenchmarks")
+    simplefluid_discover_tests(${TEST_NAME}
+      TEST_FILTER "QbmmApplicationBenchmarks.*"
+      XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q6/$<CONFIG>"
+      PROPERTIES LABELS "qbmm\\;low_mach\\;application")
+    simplefluid_discover_tests(${TEST_NAME}
+      TEST_FILTER "QbmmFourierCavity.*"
+      XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q8a/$<CONFIG>"
+      PROPERTIES LABELS "qbmm\\;low_mach\\;application\\;fourier"
+        TIMEOUT 1800 ENVIRONMENT "SIMPLEFLUID_CAVITY_EXPECTED_RANKS=1")
+  elseif(TEST_NAME STREQUAL "testQbmmSlipAndGravity")
     simplefluid_discover_tests(${TEST_NAME}
       XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q6/$<CONFIG>"
       PROPERTIES LABELS "qbmm\\;low_mach\\;application")
@@ -195,7 +205,18 @@ foreach(_mixture_ranks IN ITEMS 2 4)
         LABELS "mpi;low_mach;reacting;qbmm;conservation;transaction;application;empty_rank" TIMEOUT 180)
     simplefluid_add_mpi_test(NAME QbmmApplicationBenchmarks_${_mixture_ranks}procs
         TARGET testQbmmApplicationBenchmarks PROCS ${_mixture_ranks}
+        ARGS "--gtest_filter=QbmmApplicationBenchmarks.*"
         LABELS "mpi;low_mach;reacting;qbmm;conservation;transaction;application;empty_rank" TIMEOUT 600)
+    foreach(_cavity_cells IN ITEMS 16 32)
+        set(_cavity_test QbmmFourierCavity${_cavity_cells}_${_mixture_ranks}procs)
+        simplefluid_add_mpi_test(NAME ${_cavity_test}
+            TARGET testQbmmApplicationBenchmarks PROCS ${_mixture_ranks}
+            ARGS "--gtest_filter=QbmmFourierCavity.Matched${_cavity_cells}"
+            LABELS "mpi;low_mach;reacting;qbmm;conservation;transaction;application;fourier" TIMEOUT 1800)
+        if(TEST ${_cavity_test})
+            set_tests_properties(${_cavity_test} PROPERTIES ENVIRONMENT "SIMPLEFLUID_CAVITY_EXPECTED_RANKS=${_mixture_ranks}")
+        endif()
+    endforeach()
     simplefluid_add_mpi_test(NAME LowMachQbmmState_${_mixture_ranks}procs
         TARGET testLowMachQbmmState PROCS ${_mixture_ranks}
         LABELS "mpi;low_mach;qbmm;population;transaction;empty_rank" TIMEOUT 180)

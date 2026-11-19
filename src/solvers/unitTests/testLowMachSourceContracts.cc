@@ -278,13 +278,100 @@ TEST(LowMachSourceContractsTest, GrossTurnoverAndTinyEventsConvergeIndependently
     EXPECT_EQ(fixture.flow->state().revision, accepted.revision);
 }
 
+TEST(LowMachSourceContractsTest, GrossResidualWitnessBreaksCrossRankTiesAndSurvivesExhaustion)
+{
+    Fixture fixture(2);
+    const auto comm = fixture.mesh->owned_cell_map()->getComm();
+    using GO = Flow::Pack::global_ordinal_type;
+    GO local_minimum = std::numeric_limits<GO>::max(), minimum_cell = 0;
+    for (size_t c = 0; c < fixture.mesh->num_owned_cells(); ++c)
+        local_minimum = std::min(local_minimum, fixture.mesh->cell_geometry_global_id(static_cast<LO>(c)));
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_minimum, &minimum_cell);
+    const auto accepted = fixture.flow->state();
+    constexpr double tolerance = .125;
+    const auto provider = [&](int cap)
+    {
+        return std::make_shared<const Flow::SourceStageProvider>(
+            Flow::SourceStageProvider{"controlled gross residual witness", 1, fixture.schema->fingerprint(),
+                [minimum_cell](const Flow::SourceStageContext& context)
+                {
+                    Flow::SourceStageResult result;
+                    result.gross_events.resize(context.transport.cells.size());
+                    constexpr size_t stage_index = std::numeric_limits<size_t>::max();
+                    result.gross_channel_metadata = {{Flow::GrossResidualStage::Provider, stage_index, -1},
+                        {Flow::GrossResidualStage::Provider, stage_index, 1}};
+                    for (size_t c = 0; c < result.gross_events.size(); ++c)
+                    {
+                        const auto cell = context.mesh.cell_geometry_global_id(static_cast<LO>(c));
+                        const double previous = cell == minimum_cell ? 8 : 4;
+                        const double packet = context.transport.stage.corrector == 0 ? previous : previous / 2;
+                        result.gross_events[c] = {packet, packet / 2};
+                    }
+                    return result;
+                },
+                tolerance, cap});
+    };
+    const auto check_trace = [&](std::span<const Flow::GrossResidualEvaluation> trace, size_t count)
+    {
+        ASSERT_EQ(trace.size(), count);
+        EXPECT_EQ(trace[0].evaluation, 1);
+        EXPECT_FALSE(trace[0].winner);
+        EXPECT_EQ(trace[1].evaluation, 2);
+        EXPECT_EQ(trace[1].normalized_residual, 4);
+        ASSERT_TRUE(trace[1].winner);
+        const auto& winner = *trace[1].winner;
+        EXPECT_EQ(winner.geometry_cell, minimum_cell);
+        EXPECT_FALSE(winner.geometry_face);
+        EXPECT_EQ(winner.channel_metadata.stage, Flow::GrossResidualStage::Provider);
+        EXPECT_EQ(winner.channel_metadata.stage_index, std::numeric_limits<size_t>::max());
+        EXPECT_EQ(winner.current_direction, -1);
+        EXPECT_EQ(winner.previous_direction, -1);
+        EXPECT_EQ(winner.channel, 0);
+        EXPECT_EQ(winner.previous_packet, 8);
+        EXPECT_EQ(winner.current_packet, 4);
+        EXPECT_EQ(winner.scale, 8);
+        EXPECT_EQ(winner.relative_tolerance, tolerance);
+    };
+    const auto retained = fixture.flow->preview_with_sources(.01, provider(3));
+    const auto& trace = retained.diagnostics().gross_residual_evaluations;
+    check_trace(trace, 3);
+    EXPECT_EQ(retained.diagnostics().maximum_event_residual, 0);
+    try
+    {
+        (void) fixture.flow->preview_with_sources(.01, provider(2));
+        ADD_FAILURE() << "The second evaluation still has a resolved gross residual.";
+    }
+    catch (const Flow::SourceCorrectorExhausted& error)
+    {
+        EXPECT_EQ(error.source_stage().corrector, 1);
+        check_trace(error.gross_residual_evaluations(), 2);
+    }
+    EXPECT_EQ(fixture.flow->state().revision, accepted.revision);
+    EXPECT_EQ(fixture.flow->state().time, accepted.time);
+    EXPECT_NO_THROW(fixture.flow->commit(retained));
+}
+
 TEST(LowMachSourceContractsTest, InvalidOrChangingGrossEventSchemasRejectAndKeepRetainedTrial)
 {
-    for (int scenario = 0; scenario < 5; ++scenario)
+    constexpr int invalid_direction = 5, invalid_stage = 6;
+    for (int scenario = 0; scenario <= invalid_stage; ++scenario)
     {
+        SCOPED_TRACE(scenario);
         Fixture fixture(2);
         const auto retained = fixture.flow->preview(.01);
         const auto accepted = fixture.flow->state();
+        const auto comm = fixture.mesh->owned_cell_map()->getComm();
+        int corrupt_rank = -1;
+        if (scenario >= invalid_direction)
+        {
+            const bool empty = fixture.mesh->num_owned_cells() == 0;
+            // Prefer an empty rank for the bad direction so validation cannot
+            // accidentally skip the metadata just because there are no rows.
+            const int candidate = empty == (scenario == invalid_direction) ? comm->getRank() : -1;
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &candidate, &corrupt_rank);
+            if (corrupt_rank == -1)
+                corrupt_rank = 0;
+        }
         const auto provider = std::make_shared<const Flow::SourceStageProvider>(Flow::SourceStageProvider{
             "invalid-event-schema", 1, fixture.schema->fingerprint(), [&](const Flow::SourceStageContext& context)
             {
@@ -303,6 +390,18 @@ TEST(LowMachSourceContractsTest, InvalidOrChangingGrossEventSchemasRejectAndKeep
                 }
                 if (scenario == 4 && context.transport.stage.corrector > 0)
                     result.gross_events.clear();
+                if (scenario >= invalid_direction)
+                {
+                    Flow::GrossChannelMetadata channel{Flow::GrossResidualStage::Provider, 0, 1};
+                    if (comm->getRank() == corrupt_rank)
+                    {
+                        if (scenario == invalid_direction)
+                            channel.direction = 2;
+                        else
+                            channel.stage = static_cast<Flow::GrossResidualStage>(99);
+                    }
+                    result.gross_channel_metadata.push_back(channel);
+                }
                 return result;
             }});
         EXPECT_THROW((void) fixture.flow->preview_with_sources(.01, provider), std::exception);
