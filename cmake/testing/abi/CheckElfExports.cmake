@@ -918,10 +918,33 @@ simplefluid_require_reacting_api(
 simplefluid_require_reacting_api(
     "^${qbmm_ns}advance_qbmm_population[(]${qbmm_schema} const&, ${qbmm_ns}CellSpeciesState const&, ${qbmm_ns}QbmmCellView, ${qbmm_ns}QbmmEventBatch const&[)]$" 1)
 
-# Raw final material allocations for pressure-conditioned replay.
-set(simplefluid_qbmm_source_public_symbol_budget 1)
+# Four Q2 solver entry points for explicit migration and fixed-partition restart.
+set(simplefluid_qbmm_state_public_symbol_budget 4)
+set(qbmm_flow "${qbmm_ns}LowMachMixtureSolver")
+simplefluid_require_reacting_api(
+    "^${qbmm_flow}::initialize_qbmm[(]${qbmm_flow}::State, ${qbmm_flow}::QbmmInitialization const&, ${simplefluid_stage3_controller_pointer}[)]$" 1)
+simplefluid_require_reacting_api(
+    "^${qbmm_flow}::restore_qbmm_checkpoint[(]${qbmm_flow} const&, ${qbmm_flow}::Checkpoint const&, ${qbmm_flow}::QbmmInitialization const&, ${simplefluid_stage3_controller_pointer}[)]$" 1)
+simplefluid_require_reacting_api("^${qbmm_flow}::serialize_qbmm_restart[(][)] const$" 1)
+simplefluid_require_reacting_api(
+    "^${qbmm_flow}::restore_qbmm_restart[(]${simplefluid_stage3_std}span<${simplefluid_stage3_std}byte const, [0-9]+u?l*>, ${simplefluid_stage3_controller_pointer}[)]$" 1)
+
+# Q3 retains the raw accepted atom receipts and compiles their final thermal allocations.
+set(simplefluid_qbmm_source_public_symbol_budget 2)
+simplefluid_require_reacting_api("^${qbmm_ns}ReactingMixtureCoupler::Trial::local_qbmm_sources[(][)] const$" 1)
 simplefluid_require_reacting_api(
     "^${qbmm_ns}compile_interphase_plan[(]${simplefluid_stage3_std}shared_ptr<${qbmm_ns}InterphaseConfiguration const>, ${simplefluid_reacting_phase_span}, ${simplefluid_thermal_double_vectors}, ${simplefluid_thermal_long_vectors}, ${simplefluid_thermal_long_vector}, ${simplefluid_raw_amount_span}, ${qbmm_ns}FrozenMaterialSourceTail[)]$" 1)
+
+# Q4 exposes the native phase-face rates retained by a coupled trial.
+set(simplefluid_qbmm_transport_public_symbol_budget 1)
+simplefluid_require_reacting_api("^${qbmm_ns}ReactingMixtureCoupler::Trial::owned_phase_transport[(][)] const$" 1)
+
+# Q5 accepted and trial reporting entry points on the native flow and its controller.
+set(simplefluid_qbmm_report_public_symbol_budget 4)
+foreach(owner IN ITEMS LowMachMixtureSolver ReactingMixtureCoupler)
+    simplefluid_require_reacting_api("^${qbmm_ns}${owner}::qbmm_report[(][)] const$" 1)
+    simplefluid_require_reacting_api("^${qbmm_ns}${owner}::qbmm_report[(]${qbmm_ns}${owner}::Trial const&[)] const$" 1)
+endforeach()
 
 # Isothermal NOX adds one public context constructor (two Itanium entries) and
 # two virtual hooks. Even private overrides must remain exported: downstream
@@ -1369,7 +1392,7 @@ math(EXPR simplefluid_retired_mesh_total_symbol_budget
 math(EXPR simplefluid_api_symbol_lower_bound
     "${simplefluid_pre_retirement_api_symbol_lower_bound} - ${simplefluid_retired_mesh_total_symbol_budget}")
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_qbmm_source_public_symbol_budget} + ${simplefluid_qbmm_public_symbol_budget} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_population_process_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget} - ${simplefluid_retired_mesh_exact_symbol_budget}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_qbmm_report_public_symbol_budget} + ${simplefluid_qbmm_transport_public_symbol_budget} + ${simplefluid_qbmm_source_public_symbol_budget} + ${simplefluid_qbmm_state_public_symbol_budget} + ${simplefluid_qbmm_public_symbol_budget} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_population_process_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget} - ${simplefluid_retired_mesh_exact_symbol_budget}")
 math(EXPR simplefluid_api_symbol_reviewed_maximum
     "${simplefluid_api_symbol_upper_bound} - 3")
 math(EXPR simplefluid_api_symbol_upper_bound

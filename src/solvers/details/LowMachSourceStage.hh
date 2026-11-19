@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "solvers/LowMachMixtureSolver.hh"
+#include "utils/CompensatedSum.hh"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -15,6 +16,25 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void require(bool valid, const char* message)
 {
     if (!valid)
         throw std::invalid_argument(message);
+}
+/** Use the endpoint operands only so large turnover cannot hide a lost small stock. */
+SIMPLEFLUID_SOLVERS_LOCAL inline void validate_source_endpoint(double transported, double packet, double actual)
+{
+    require(
+        std::isfinite(transported) && transported >= 0 && std::isfinite(packet) && std::isfinite(actual) && actual >= 0,
+        "Nonfinite or negative source endpoint input.");
+    SimpleFluid::detail::CompensatedSum<long double> replay;
+    replay += transported;
+    replay += packet;
+    const auto recovered = replay.value();
+    const auto endpoint = static_cast<long double>(actual);
+    SimpleFluid::detail::CompensatedSum<long double> error;
+    error += recovered;
+    error += -endpoint;
+    const auto bound = 64 * std::numeric_limits<double>::epsilon() * (std::abs(recovered) + std::abs(endpoint));
+    require(std::isfinite(recovered) && recovered >= 0 && (recovered == 0) == (actual == 0) &&
+                std::isfinite(error.value()) && std::isfinite(bound) && std::abs(error.value()) <= bound,
+        "Rounded source packet cannot replay its actual sequential endpoint.");
 }
 SIMPLEFLUID_SOLVERS_LOCAL inline long double mass(std::span<const double> moles, const SpeciesCatalog& catalog)
 {
@@ -92,6 +112,40 @@ SIMPLEFLUID_SOLVERS_LOCAL inline double event_error(
 SIMPLEFLUID_SOLVERS_LOCAL inline double number_packet(std::span<const Flow::CellSources> cells, size_t c, size_t a)
 {
     return cells.empty() || cells[c].population_number_changes.empty() ? 0 : cells[c].population_number_changes[a];
+}
+SIMPLEFLUID_SOLVERS_LOCAL inline QbmmShapeState shape_packet(
+    std::span<const Flow::CellSources> cells, size_t c, size_t a)
+{
+    return cells.empty() || cells[c].qbmm_shape_changes.empty()
+               ? QbmmShapeState{}
+               : cells[c].qbmm_shape_changes[a].value_or(QbmmShapeState{});
+}
+SIMPLEFLUID_SOLVERS_LOCAL inline double shape_source_error(std::span<const Flow::CellSources> current,
+    std::span<const Flow::CellSources> previous, const Flow::QbmmSourceCells& receipts,
+    const Flow::QbmmSourceCells& previous_receipts, const Flow::TransportSnapshot& transported, double tolerance)
+{
+    double maximum = 0;
+    for (size_t c = 0; c < transported.cells.size(); ++c)
+        for (size_t a = 0; a < transported.qbmm_families.size(); ++a)
+        {
+            if (!transported.qbmm_families[a])
+                continue;
+            const auto now = shape_packet(current, c, a), old = shape_packet(previous, c, a);
+            maximum = std::max({maximum,
+                normalized(
+                    static_cast<long double>(now.H2) - old.H2, std::max(std::abs(now.H2), std::abs(old.H2)), tolerance),
+                normalized(static_cast<long double>(now.H3) - old.H3, std::max(std::abs(now.H3), std::abs(old.H3)),
+                    tolerance)});
+            // Compare the raw integrated event algebra too. A small event can be below
+            // the ULP of a large stored shape moment in both consecutive candidates.
+            for (size_t k = 0; k < 2; ++k)
+            {
+                const auto x = receipts.at(c).at(a).value().event_shape_change[k];
+                const auto y = previous_receipts.at(c).at(a).value().event_shape_change[k];
+                maximum = std::max(maximum, normalized(x - y, std::max(std::abs(x), std::abs(y)), tolerance));
+            }
+        }
+    return maximum;
 }
 SIMPLEFLUID_SOLVERS_LOCAL inline void validate_number_packets(
     std::span<const Flow::CellSources> sources, size_t cells, std::span<const Flow::PhaseRoleDescriptor> roles)
@@ -238,7 +292,9 @@ SIMPLEFLUID_SOLVERS_LOCAL inline double transport_error(const Flow::TransportSna
                 current.accepted_generation == previous.accepted_generation &&
                 current.old_geometry_epoch == previous.old_geometry_epoch &&
                 current.new_geometry_epoch == previous.new_geometry_epoch && current.time_step == previous.time_step &&
-                current.accepted_time == previous.accepted_time,
+                current.accepted_time == previous.accepted_time &&
+                current.schema_fingerprint == previous.schema_fingerprint &&
+                current.qbmm_families == previous.qbmm_families,
         "Transport snapshots do not belong to one immutable preview frame.");
     double maximum = 0;
     for (size_t c = 0; c < current.cells.size(); ++c)
@@ -275,6 +331,16 @@ SIMPLEFLUID_SOLVERS_LOCAL inline double transport_error(const Flow::TransportSna
                     maximum, normalized(static_cast<long double>(*now.population_number) - *old.population_number,
                                  std::max(std::abs(*now.population_number), std::abs(*old.population_number)),
                                  options.source_relative_tolerance));
+            require(now.qbmm_shape.has_value() == old.qbmm_shape.has_value(),
+                "QBMM shape ownership changed within an immutable transport preview.");
+            if (now.qbmm_shape)
+                for (auto moment : {&QbmmShapeState::H2, &QbmmShapeState::H3})
+                {
+                    const long double latest = (*now.qbmm_shape).*moment;
+                    const long double prior = (*old.qbmm_shape).*moment;
+                    maximum = std::max(maximum,
+                        normalized(latest - prior, std::max(latest, prior), options.source_relative_tolerance));
+                }
         }
     }
     return maximum;

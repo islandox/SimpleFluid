@@ -6,6 +6,7 @@ std::shared_ptr<LowMachMixtureSolver::ALEGeometryCertificate> LowMachMixtureSolv
     collective_detail::collective_local_validation(mesh, "Accepted planar geometry authority",
         [&]
         {
+            check(d->options.qbmm_families.empty(), "Native QBMM currently rejects planar ALE checkpoints.");
             check(d->initialized && d->epoch == mesh_geometry_epoch(mesh) && !motion.has_active_trial() &&
                       motion.mesh_ptr().get() == d->mesh.get(),
                 "Planar authority must be live, idle and bound to this exact current accepted mesh.");
@@ -77,6 +78,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_planar_impl(double dt,
     collective_detail::collective_local_validation(mesh, "Prescribed planar preview input",
         [&]
         {
+            check(d->options.qbmm_families.empty(), "Native QBMM currently rejects planar ALE preview.");
             check(d->initialized && d->epoch == mesh_geometry_epoch(mesh) && motion.mesh_ptr().get() == d->mesh.get() &&
                       !motion.has_active_trial(),
                 "Planar preview requires initialized accepted geometry and its explicit idle motion authority.");
@@ -158,6 +160,7 @@ void LowMachMixtureSolver::commit_ale(const Trial& trial, PlanarMotion& motion, 
     collective_detail::collective_local_validation(mesh, "Explicit planar trial commit preflight",
         [&]
         {
+            check(d->options.qbmm_families.empty(), "Native QBMM currently rejects planar ALE commit.");
             certificate = trial.ale_geometry;
             check(certificate && certificate->owner == this && certificate->motion_identity == std::addressof(motion) &&
                       certificate->geometry_identity == mesh.geometry_identity() && trial.owner == this &&
@@ -242,6 +245,7 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, PlanarMotion& motion
     collective_detail::collective_local_validation(mesh, "Planar checkpoint authority",
         [&]
         {
+            check(d->options.qbmm_families.empty(), "Native QBMM currently rejects planar ALE restore.");
             check(saved.owner == this && saved.ale_geometry && saved.ale_geometry->owner == this &&
                       saved.ale_geometry->motion_identity == std::addressof(motion) &&
                       saved.ale_geometry->geometry_identity == mesh.geometry_identity() &&

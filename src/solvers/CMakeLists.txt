@@ -1,5 +1,6 @@
 set(SIMPLEFLUID_SOLVER_SOURCES
     LowMachMixtureSolver.cc
+    LowMachQbmmInitialization.cc
     ReactingMixtureCoupler.cc
     details/LowMachFaceTransportAdapter.cc
     explicit_instantiation/LiquidMassInventory.cc

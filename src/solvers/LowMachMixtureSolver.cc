@@ -10,12 +10,15 @@
 #include "equations/EquationValidation.hh"
 #include "equations/VariableDensityMomentumEquation.hh"
 #include "solvers/details/LowMachConditionedThermal.hh"
+#include "solvers/details/LowMachQbmmState.hh"
+#include "solvers/details/LowMachQbmmTransport.hh"
 #include "solvers/details/LowMachSourceStage.hh"
 #include "solvers/details/LowMachTransportConsistency.hh"
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <exception>
@@ -249,6 +252,16 @@ struct LowMachMixtureSolver::ALEGeometryCertificate
     std::vector<Pack::global_ordinal_type> cell_ids, face_ids, cell_geometry_ids, face_geometry_ids;
 };
 
+struct LowMachMixtureSolver::QbmmPublication
+{
+    QbmmStateOrigin origin = QbmmStateOrigin::Corrector;
+    QbmmReceiptHistory history = QbmmReceiptHistory::NoInterval;
+    std::optional<std::uint64_t> archived_generation;
+    std::uint64_t shape_diagnostics_version = 3; ///< v2 records shape sources, v3 adds shape transport.
+    std::shared_ptr<const QbmmIntervalReport> interval;
+    std::optional<QbmmBalances> balances;
+};
+
 struct LowMachMixtureSolver::Implementation
 {
     SP<const Mesh> mesh;
@@ -256,8 +269,16 @@ struct LowMachMixtureSolver::Implementation
     Options options;
     State accepted;
     Diagnostics diagnostics;
+    std::shared_ptr<const QbmmPublication> qbmm_publication;
+    std::optional<std::uint64_t> active_qbmm_controller, accepted_qbmm_controller;
+    bool needs_restart_controller = false;
     bool initialized = false, controller_active = false;
+    std::optional<std::uint64_t> checkpoint_controller() const noexcept
+    {
+        return active_qbmm_controller ? active_qbmm_controller : accepted_qbmm_controller;
+    }
     std::uint64_t trial_nonce = 0, controller_id = 0, source_invocation = 0;
+    std::uint64_t qbmm_preview_id = 0;
     std::uint64_t epoch = 0, logical_geometry = 0;
     ScalarField rho, old_rho, mu, mechanical_pressure, old_scalar, scalar, unit, zero, published_rho;
     VectorField u, old_u, pressure_gradient, published_u;
@@ -339,6 +360,9 @@ struct LowMachMixtureSolver::Implementation
                         "Physical phase identities must resolve to unique carrier identities; "
                         "dispersed identities must be explicit.");
                 }
+                qbmm_detail::validate_configuration(options, eos);
+                if (!options.qbmm_families.empty())
+                    BelosLinearSolver<Pack>::validate_options(options.linear);
                 for (size_t f = 0; f < mesh->num_faces(); ++f)
                 {
                     const auto face = static_cast<LO>(f);
@@ -411,6 +435,32 @@ struct LowMachMixtureSolver::Implementation
             *mesh, static_cast<int>(options.thermal_mode), "Low-Mach thermal mode");
         collective_detail::require_uniform_value(
             *mesh, eos.front()->catalog().fingerprint(), "Low-Mach species schema fingerprint");
+        collective_detail::require_uniform_value(*mesh, options.qbmm_families.size(), "Native QBMM phase layout");
+        if (!options.qbmm_families.empty())
+        {
+            const auto& linear = options.linear;
+            collective_detail::require_uniform_value(
+                *mesh, linear.max_iterations, "Native QBMM transport iteration budget");
+            collective_detail::require_uniform_value(*mesh, linear.tolerance, "Native QBMM transport linear tolerance");
+            collective_detail::require_uniform_value(*mesh, linear.verbosity, "Native QBMM transport linear verbosity");
+            collective_detail::require_uniform_value(
+                *mesh, int(linear.backend), "Native QBMM transport linear backend");
+            collective_detail::require_uniform_value(
+                *mesh, int(linear.preconditioner), "Native QBMM transport preconditioner");
+            collective_detail::require_uniform_value(
+                *mesh, int(linear.reuse_preconditioner), "Native QBMM transport preconditioner reuse");
+        }
+        for (const auto& family : options.qbmm_families)
+        {
+            collective_detail::require_uniform_value(*mesh, int(bool(family)), "Native QBMM phase binding");
+            if (family)
+            {
+                const auto stamp = qbmm_family_stamp(*family);
+                collective_detail::require_uniform_value(*mesh, stamp.catalog_fingerprint, "Native QBMM catalog");
+                collective_detail::require_uniform_value(*mesh, stamp.family_fingerprint, "Native QBMM family");
+                collective_detail::require_uniform_value(*mesh, stamp.mass_scale_kg, "Native QBMM mass scale");
+            }
+        }
         collective_detail::require_uniform_value(
             *mesh, int(bool(options.mixture_dynamic_viscosity)), "Low-Mach viscosity closure presence");
         for (const auto& provider : eos)
@@ -476,6 +526,170 @@ struct LowMachMixtureSolver::Implementation
             published_u.sync_ghosts();
         }
     }
+    void publish_fixed(State&& state, Diagnostics&& statistics, std::span<const double> face_flux,
+        std::uint64_t generation, std::shared_ptr<const QbmmPublication> publication = {})
+    {
+        if (options.qbmm_families.empty())
+        {
+            publish_fields(state, true);
+            for (size_t f = 0; f < face_flux.size(); ++f)
+                flux.set_owned_value(static_cast<LO>(f), face_flux[f]);
+            flux.sync_ghosts();
+        }
+        else
+            publish_qbmm_fields(state, face_flux);
+        accepted = std::move(state);
+        diagnostics = std::move(statistics);
+        qbmm_publication = std::move(publication);
+        accepted_qbmm_controller = active_qbmm_controller;
+        needs_restart_controller = false;
+        initialized = true;
+        trial_nonce = generation;
+    }
+    void publish_qbmm_fields(const State& state, std::span<const double> face_flux)
+    {
+        // These corrector workspaces are overwritten before the next preview reads them.
+        // Keep accepted fields and their public objects intact until all imports succeed.
+        collective_detail::collective_local_validation(*mesh, "Low-Mach fixed field staging",
+            [&]
+            {
+                check(state.cells.size() == mesh->num_owned_cells() && face_flux.size() == mesh->num_owned_faces(),
+                    "Low-Mach publication does not match the owned cell and face maps.");
+                for (size_t c = 0; c < state.cells.size(); ++c)
+                {
+                    const auto cell = static_cast<LO>(c);
+                    const auto& candidate = state.cells[c];
+                    double mass = 0;
+                    for (const auto& phase : candidate.phases)
+                        mass += phase_mass(phase);
+                    const double density = mass / mesh->cell_volume(cell);
+                    check(std::isfinite(density) && density > 0, "Low-Mach publication density is invalid.");
+                    old_rho.set_owned_value(cell, density);
+                    mu.set_owned_value(cell, density);
+                    old_u.set_owned_value(cell, candidate.velocity);
+                    pressure_gradient.set_owned_value(cell, candidate.velocity);
+                    old_scalar.set_owned_value(cell, candidate.mechanical_pressure);
+                }
+                for (size_t f = 0; f < face_flux.size(); ++f)
+                {
+                    check(std::isfinite(face_flux[f]), "Low-Mach publication face flux is invalid.");
+                    trial_flux.set_owned_value(static_cast<LO>(f), face_flux[f]);
+                }
+            });
+        old_rho.sync_ghosts();
+        mu.sync_ghosts();
+        old_u.sync_ghosts();
+        pressure_gradient.sync_ghosts();
+        old_scalar.sync_ghosts();
+        trial_flux.sync_ghosts();
+
+        const auto swap_storage = [](auto& accepted_field, auto& staged_field)
+        {
+            accepted_field.owned_data().swap(staged_field.owned_data());
+            accepted_field.overlap_data().swap(staged_field.overlap_data());
+        };
+        swap_storage(rho, old_rho);
+        swap_storage(published_rho, mu);
+        swap_storage(u, old_u);
+        swap_storage(published_u, pressure_gradient);
+        swap_storage(mechanical_pressure, old_scalar);
+        swap_storage(flux, trial_flux);
+    }
+    FVM::TransportSystem<Pack> assemble_phase_transport(
+        const FaceField& phase_flux, double dt, const FVM::ALEControlVolumeState* ale = nullptr)
+    {
+        using Factory = FVM::TransportSystemFactory<Pack, Mesh>;
+        return Factory::assemble(typename Factory::WeightedScalarTerms{.history = {old_scalar, dt},
+                                     .face_fluxes = phase_flux,
+                                     .coefficients = {unit, unit, zero},
+                                     .sources = {.source = [](LO) { return 0.0; }}},
+            typename Factory::WeightedScalarBoundary{
+                .condition = [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0}; },
+                .value = [](int, size_t) { return 0.0; }},
+            typename Factory::WeightedScalarOptions{.discretization = {.time = FVM::ScalarTimeScheme::BackwardEuler,
+                                                        .convection = FVM::ScalarConvectionScheme::Upwind},
+                .correction = {FVM::NonOrthogonalTreatment::Implicit, nullptr}},
+            typename Factory::WeightedScalarContext{.geometry_cache = &geometry, .ale = ale});
+    }
+    std::vector<QbmmFaceFlux> transport_qbmm(const State& previous, State& candidate, size_t phase,
+        const FaceField& phase_flux, double dt, Diagnostics& statistics)
+    {
+        const size_t species = eos[phase]->catalog().species().size(), cells = previous.cells.size();
+        std::vector<std::vector<double>> old_amount, amount;
+        collective_detail::collective_local_validation(*mesh, "Native QBMM block assembly input",
+            [&]
+            {
+                old_amount.assign(species + 4, std::vector<double>(cells));
+                for (size_t c = 0; c < cells; ++c)
+                {
+                    const auto& cell = previous.cells[c];
+                    for (size_t s = 0; s < species; ++s)
+                        old_amount[s][c] = cell.phases[phase].moles[s];
+                    old_amount[species][c] = *cell.phase_numbers[phase];
+                    old_amount[species + 1][c] = cell.qbmm_shape[phase]->H2;
+                    old_amount[species + 2][c] = cell.qbmm_shape[phase]->H3;
+                    old_amount[species + 3][c] = cell.phases[phase].internal_energy;
+                    const double trace = transport_consistency_detail::transport_concentration(
+                        old_amount[species][c], mesh->cell_volume(static_cast<LO>(c)));
+                    old_scalar.set_owned_value(static_cast<LO>(c), trace);
+                }
+            });
+        old_scalar.sync_ghosts();
+        // One native concrete operator owns the complete family, including signed phase energy.
+        const auto system = assemble_phase_transport(phase_flux, dt);
+        auto block = transport_consistency_detail::enforce_block(mesh, old_amount, phase_flux, dt, amount,
+            *system.matrix, *system.rhs, options.linear, options.conservation_relative_tolerance, species);
+        std::array<long double, 2> local_h1{}, global_h1{};
+        collective_detail::collective_local_validation(*mesh, "Native represented QBMM transport block",
+            [&]
+            {
+                const auto& family = *options.qbmm_families[phase];
+                detail::CompensatedSum<long double> defect, magnitude;
+                for (size_t c = 0; c < cells; ++c)
+                {
+                    auto& cell = candidate.cells[c];
+                    for (size_t s = 0; s < species; ++s)
+                        cell.phases[phase].moles[s] = amount[s][c];
+                    cell.phase_numbers[phase] = amount[species][c];
+                    cell.qbmm_shape[phase] = QbmmShapeState{amount[species + 1][c], amount[species + 2][c]};
+                    cell.phases[phase].internal_energy = amount[species + 3][c];
+                    const long double old_h1 = family.scaled_mass(previous.cells[c].phases[phase].moles);
+                    const long double new_h1 = family.scaled_mass(cell.phases[phase].moles);
+                    defect += new_h1 - old_h1;
+                    magnitude += old_h1;
+                    magnitude += new_h1;
+                }
+                // No source/thermodynamic callback may see a split or unrealizable block.
+                qbmm_detail::validate_transport(options, candidate);
+                for (const auto& packet : block.owned_flux)
+                {
+                    const bool absent = family.scaled_mass_change(packet.species_molar_flux) == 0;
+                    check(absent == (packet.population_number_flux == 0) && absent == (packet.shape_flux.H2 == 0) &&
+                              absent == (packet.shape_flux.H3 == 0),
+                        "QBMM canonical material and moment face packet presence differs.");
+                }
+                local_h1 = {defect.value(), magnitude.value()};
+            });
+        const auto comm = mesh->owned_cell_map()->getComm();
+        transport_consistency_detail::sum_qbmm_budget(*comm, local_h1, global_h1);
+        check(source_stage_detail::normalized(global_h1[0], global_h1[1],
+                  transport_consistency_detail::qbmm_closed_budget_tolerance(comm->getSize())) <= 1,
+            "QBMM transport fails its closed derived H1 budget.");
+        statistics.transport_consistency_refinements += block.sweeps;
+        for (size_t q = 0; q < block.components.size(); ++q)
+        {
+            const auto& component = block.components[q];
+            statistics.transport_linear.add(component.linear);
+            statistics.maximum_initial_transport_residual =
+                std::max(statistics.maximum_initial_transport_residual, component.initial_residual);
+            double* residual = q < species        ? &statistics.maximum_species_transport_residual
+                               : q == species     ? &statistics.maximum_population_transport_residual
+                               : q == species + 3 ? &statistics.maximum_energy_transport_residual
+                                                  : &statistics.maximum_shape_transport_residual;
+            *residual = std::max(*residual, component.final_residual);
+        }
+        return std::move(block.owned_flux);
+    }
     void transport(std::span<const double> old_amount, const FaceField& phase_flux, double dt,
         std::vector<double>& new_amount, Diagnostics& statistics, transport_consistency_detail::Quantity quantity,
         const FVM::ALEControlVolumeState* ale = nullptr)
@@ -485,10 +699,9 @@ struct LowMachMixtureSolver::Implementation
             {
                 for (size_t c = 0; c < old_amount.size(); ++c)
                 {
-                    const double value = old_amount[c] /
-                                         (ale ? ale->old_cell_volumes()[c] : mesh->cell_volume(static_cast<LO>(c)));
-                    check(std::isfinite(old_amount[c]) && std::isfinite(value) &&
-                              (old_amount[c] == 0 || value != 0) &&
+                    const double value =
+                        old_amount[c] / (ale ? ale->old_cell_volumes()[c] : mesh->cell_volume(static_cast<LO>(c)));
+                    check(std::isfinite(old_amount[c]) && std::isfinite(value) && (old_amount[c] == 0 || value != 0) &&
                               (quantity == transport_consistency_detail::Quantity::Energy || old_amount[c] >= 0),
                         "Accepted phase transport inventory/concentration is invalid or unrepresentable.");
                     old_scalar.set_owned_value(static_cast<LO>(c), value);
@@ -496,28 +709,15 @@ struct LowMachMixtureSolver::Implementation
             });
         old_scalar.sync_ghosts();
         scalar.owned_data().update(1.0, old_scalar.owned_data(), 0.0);
-        auto system = FVM::TransportSystemFactory<Pack, Mesh>::assemble(
-            typename FVM::TransportSystemFactory<Pack, Mesh>::WeightedScalarTerms{.history = {old_scalar, dt},
-                .face_fluxes = phase_flux,
-                .coefficients = {unit, unit, zero},
-                .sources = {.source = [](LO) { return 0.0; }}},
-            typename FVM::TransportSystemFactory<Pack, Mesh>::WeightedScalarBoundary{
-                .condition = [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0}; },
-                .value = [](int, size_t) { return 0.0; }},
-            typename FVM::TransportSystemFactory<Pack, Mesh>::WeightedScalarOptions{
-                .discretization = {.time = FVM::ScalarTimeScheme::BackwardEuler,
-                    .convection = FVM::ScalarConvectionScheme::Upwind},
-                .correction = {FVM::NonOrthogonalTreatment::Implicit, nullptr}},
-            typename FVM::TransportSystemFactory<Pack, Mesh>::WeightedScalarContext{
-                .geometry_cache = &geometry, .ale = ale});
+        auto system = assemble_phase_transport(phase_flux, dt, ale);
         transport_solver.notify_operator_values_changed();
         const auto result =
             transport_solver.solve_with_statistics(system.matrix, *system.rhs, scalar.owned_data(), options.linear);
         if (!result.converged)
             throw std::runtime_error("Low-Mach phase transport failed true linear residual gate.");
-        const auto consistent = transport_consistency_detail::enforce(mesh, old_amount, phase_flux, dt,
-            scalar, new_amount, *system.matrix, *system.rhs, result, options.linear,
-            options.conservation_relative_tolerance, quantity, ale);
+        const auto consistent =
+            transport_consistency_detail::enforce(mesh, old_amount, phase_flux, dt, scalar, new_amount, *system.matrix,
+                *system.rhs, result, options.linear, options.conservation_relative_tolerance, quantity, ale);
         statistics.transport_linear.add(consistent.linear);
         statistics.transport_consistency_refinements += consistent.refinements;
         statistics.maximum_initial_transport_residual =
@@ -557,6 +757,9 @@ struct LowMachMixtureSolver::Implementation
         entries.reserve(np * (ns + 2));
         for (std::size_t a = 0; a < np; ++a)
         {
+            // Bound families own their moments, species, energy and canonical face flux together.
+            if (!options.qbmm_families.empty() && options.qbmm_families[a])
+                continue;
             const auto carrier = carrier_for_phase(a);
             FVM::TransportOperatorKey key;
             key.mesh_identity = mesh.get();
@@ -919,6 +1122,7 @@ void LowMachMixtureSolver::initialize(State candidate, const ControllerLease* co
                       candidate.thermodynamic_pressure >= d->options.minimum_pressure &&
                       candidate.thermodynamic_pressure <= d->options.maximum_pressure,
                 "Low-Mach initial state/map/pressure is invalid.");
+            qbmm_detail::validate_stamps(d->options, candidate);
             for (size_t c = 0; c < candidate.cells.size(); ++c)
             {
                 auto& cell = candidate.cells[c];
@@ -929,6 +1133,10 @@ void LowMachMixtureSolver::initialize(State candidate, const ControllerLease* co
                 check(cell.drift_velocity.size() == d->eos.size(), "Phase drift topology is invalid.");
                 for (size_t a = 0; a < cell.phases.size(); ++a)
                 {
+                    const auto& supplied_eos = cell.phases[a].thermodynamics;
+                    if (!d->options.qbmm_families.empty() && d->options.qbmm_families[a] && supplied_eos)
+                        check(supplied_eos->catalog().fingerprint() == d->eos[a]->catalog().fingerprint(),
+                            "Initial native QBMM material refers to a foreign EOS catalog.");
                     cell.phases[a].thermodynamics = d->eos[a];
                     cell.phases[a].absolute_pressure = candidate.thermodynamic_pressure + cell.mechanical_pressure;
                     for (size_t component = 0; component < 3; ++component)
@@ -944,6 +1152,7 @@ void LowMachMixtureSolver::initialize(State candidate, const ControllerLease* co
                     cell.phase_numbers.resize(d->eos.size());
                 }
                 source_stage_detail::validate_phase_numbers(cell, d->options.phase_roles);
+                (void) qbmm_detail::validate_cell(d->options, cell);
                 PhaseThermalRecovery recovered;
                 recovered.phases = cell.phases;
                 recovered.volumes.resize(cell.phases.size());
@@ -1000,6 +1209,36 @@ void LowMachMixtureSolver::initialize(State candidate, const ControllerLease* co
                 cell.phases = recovered.phases;
             }
         });
+    const auto face_rate = [&](LO face, const VectorField& velocity)
+    {
+        if (mesh.is_geometry_exterior_face(face))
+            return 0.0;
+        const LO owner = mesh.owner_cell(face), neighbor = mesh.opposite_or_periodic_neighbor_cell(face, owner);
+        const double value =
+            (velocity.local_value(owner) * 0.5 + velocity.local_value(neighbor) * 0.5).dot(mesh.face_area_vector(face));
+        check(std::isfinite(value), "Initial low-Mach volume flux is nonfinite.");
+        return value;
+    };
+    if (!d->options.qbmm_families.empty())
+    {
+        std::vector<double> face_flux;
+        collective_detail::collective_local_validation(mesh, "Initial QBMM velocity and face storage",
+            [&]
+            {
+                face_flux.resize(mesh.num_owned_faces());
+                for (size_t c = 0; c < candidate.cells.size(); ++c)
+                    d->old_u.set_owned_value(static_cast<LO>(c), candidate.cells[c].velocity);
+            });
+        d->old_u.sync_ghosts();
+        collective_detail::collective_local_validation(mesh, "Initial QBMM face flux",
+            [&]
+            {
+                for (size_t f = 0; f < face_flux.size(); ++f)
+                    face_flux[f] = face_rate(static_cast<LO>(f), d->old_u);
+            });
+        d->publish_fixed(std::move(candidate), {}, face_flux, d->trial_nonce + 1);
+        return;
+    }
     d->publish_fields(candidate);
     FaceField initial_flux(d->mesh, 0.0, "validated_initial_low_mach_flux");
     collective_detail::collective_local_validation(mesh, "Low-Mach initial face flux",
@@ -1007,17 +1246,8 @@ void LowMachMixtureSolver::initialize(State candidate, const ControllerLease* co
         {
             for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
             {
-                const LO face = static_cast<LO>(f);
-                double value = 0;
-                if (!mesh.is_geometry_exterior_face(face))
-                {
-                    const LO owner = mesh.owner_cell(face),
-                             neighbor = mesh.opposite_or_periodic_neighbor_cell(face, owner);
-                    value = (d->u.local_value(owner) * 0.5 + d->u.local_value(neighbor) * 0.5)
-                                .dot(mesh.face_area_vector(face));
-                }
-                check(std::isfinite(value), "Initial low-Mach volume flux is nonfinite.");
-                initial_flux.set_owned_value(face, value);
+                const auto face = static_cast<LO>(f);
+                initial_flux.set_owned_value(face, face_rate(face, d->u));
             }
         });
     initial_flux.sync_ghosts();
@@ -1038,7 +1268,10 @@ LowMachMixtureSolver::Checkpoint LowMachMixtureSolver::checkpoint() const
     saved.owner = this;
     saved.geometry_epoch = d->epoch;
     saved.logical_geometry = d->logical_geometry;
+    saved.generation = d->trial_nonce;
     saved.diagnostics = d->diagnostics;
+    saved.qbmm_publication = d->qbmm_publication;
+    saved.qbmm_controller_signature = d->checkpoint_controller();
     saved.face_flux.resize(d->mesh->num_owned_faces());
     for (size_t f = 0; f < saved.face_flux.size(); ++f)
         saved.face_flux[f] = d->flux.local_value(static_cast<LO>(f));
@@ -1049,33 +1282,42 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, const ControllerLeas
     require_controller(controller);
     State candidate;
     Diagnostics statistics;
-    std::vector<double> face_flux;
+    std::shared_ptr<const QbmmPublication> publication;
     collective_detail::collective_local_validation(*d->mesh, "Low-Mach checkpoint",
         [&]
         {
             check(saved.owner == this && !saved.ale_geometry && saved.logical_geometry == d->logical_geometry &&
                       d->epoch == mesh_geometry_epoch(*d->mesh) &&
+                      (d->options.qbmm_families.empty() || saved.geometry_epoch == d->epoch) &&
                       saved.state.cells.size() == d->mesh->num_owned_cells() &&
                       saved.face_flux.size() == d->mesh->num_owned_faces(),
                 "Low-Mach checkpoint belongs to a foreign solver, stale geometry or different maps.");
+            check(!d->controller_active || !saved.qbmm_controller_signature ||
+                      d->active_qbmm_controller == saved.qbmm_controller_signature,
+                "QBMM checkpoint belongs to a different coupled source configuration.");
+            qbmm_detail::validate_state(d->options, saved.state);
             candidate = saved.state;
             statistics = saved.diagnostics;
-            face_flux = saved.face_flux;
+            if (!d->options.qbmm_families.empty())
+            {
+                auto copy = saved.qbmm_publication ? std::make_shared<QbmmPublication>(*saved.qbmm_publication)
+                                                   : std::make_shared<QbmmPublication>();
+                copy->origin = QbmmStateOrigin::Checkpoint;
+                publication = std::move(copy);
+            }
         });
-    // A private checkpoint already passed physical acceptance. Restoring must
-    // neither call constitutive providers nor perturb its caloric state.
-    d->publish_fields(candidate, true);
-    for (size_t f = 0; f < face_flux.size(); ++f)
-        d->flux.set_owned_value(static_cast<LO>(f), face_flux[f]);
-    d->flux.sync_ghosts();
-    d->accepted = std::move(candidate);
-    d->diagnostics = std::move(statistics);
-    d->epoch = mesh_geometry_epoch(*d->mesh);
-    d->initialized = true;
-    ++d->trial_nonce;
+    if (!d->options.qbmm_families.empty())
+        collective_detail::require_uniform_value(*d->mesh, saved.generation, "QBMM checkpoint generation");
+    // The physical checkpoint was accepted by this owner. Preserve its caloric state exactly.
+    d->publish_fixed(
+        std::move(candidate), std::move(statistics), saved.face_flux, d->trial_nonce + 1, std::move(publication));
+    d->accepted_qbmm_controller = saved.qbmm_controller_signature;
+    d->needs_restart_controller = saved.qbmm_controller_signature.has_value();
 }
 
 #include "solvers/details/LowMachPlanarALE.inc"
+#include "solvers/details/LowMachQbmmReport.inc"
+#include "solvers/details/LowMachQbmmRestart.inc"
 
 LowMachMixtureSolver::Trial LowMachMixtureSolver::preview(
     double dt, const std::vector<CellSources>& sources, const ControllerLease* controller)
@@ -1091,20 +1333,37 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_with_sources(
     return preview_impl(dt, {}, std::move(provider), controller);
 }
 
+LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_with_qbmm_sources(
+    double dt, std::shared_ptr<const SourceStageProvider> provider, const ControllerLease* controller)
+{
+    return preview_impl(dt, {}, std::move(provider), controller, nullptr, true);
+}
+
 LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const std::vector<CellSources>& fixed_sources,
     std::shared_ptr<const SourceStageProvider> provider, const ControllerLease* controller,
-    const FVM::ALEControlVolumeState* ale)
+    const FVM::ALEControlVolumeState* ale, bool coherent_qbmm)
 {
     std::vector<CellSources> sources;
     const auto& mesh = *d->mesh;
     require_controller(controller);
     collective_detail::require_uniform_value(mesh, dt, "Low-Mach mixture timestep");
     collective_detail::require_uniform_value(mesh, int(ale != nullptr), "Low-Mach ALE transport selection");
+    if (!d->options.qbmm_families.empty())
+        collective_detail::require_uniform_value(mesh, int(coherent_qbmm), "Native QBMM source authority");
     if (ale)
         ale->validate(mesh, dt);
     collective_detail::collective_local_validation(mesh, "Low-Mach mixture step inputs",
         [&]
         {
+            check(!coherent_qbmm || (!d->options.qbmm_families.empty() && controller && provider && !ale),
+                "Coherent QBMM sources require a fixed-mesh QBMM controller and an immutable source provider.");
+            check(d->options.qbmm_families.empty() || (!ale && (!provider || coherent_qbmm)),
+                "Native QBMM requires fixed geometry and the coherent controller for source providers.");
+            check(d->options.qbmm_families.empty() || d->qbmm_preview_id != std::numeric_limits<std::uint64_t>::max(),
+                "QBMM preview identity exhausted.");
+            check(!d->needs_restart_controller || (coherent_qbmm && d->active_qbmm_controller &&
+                                                      d->active_qbmm_controller == d->accepted_qbmm_controller),
+                "QBMM restart requires the archived reacting controller before advancement.");
             sources = fixed_sources;
             check(d->initialized && d->epoch == mesh_geometry_epoch(mesh) && std::isfinite(dt) && dt > 0,
                 "Low-Mach step requires initialized current fixed geometry and a positive timestep.");
@@ -1131,8 +1390,11 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     check(
                         std::isfinite(source.momentum.component(component)), "Nonfinite integrated physical momentum.");
             }
+            qbmm_detail::validate_sources(d->options, sources);
         });
     collective_detail::require_uniform_value(mesh, int(bool(provider)), "Collective source-stage selection");
+    // Distinguish coexisting previews even if their clocks and revisions coincide.
+    const auto qbmm_preview_id = d->options.qbmm_families.empty() ? 0 : ++d->qbmm_preview_id;
     SourceStageMetadata stage;
     auto source_options = d->options;
     int maximum_source_evaluations = d->options.maximum_correctors;
@@ -1181,11 +1443,13 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
     }
     const auto accepted = d->accepted;
     const size_t nc = accepted.cells.size(), np = d->eos.size(), ns = d->eos.front()->catalog().species().size();
+    const auto& qbmm_families = d->options.qbmm_families;
     TransportSnapshot last_transport;
     std::vector<PhaseFaceTransport> last_phase_transport;
     std::optional<TransportSnapshot> previous_transport;
     std::vector<CellSources> previous_sources;
     std::vector<std::vector<double>> gross_events, previous_events;
+    QbmmSourceCells qbmm_cells;
     std::optional<bool> event_channel, conditioned_channel;
     std::shared_ptr<const PressureConditionedThermalBatch> thermal_batch, previous_thermal_batch;
     std::vector<PressureConditionedThermalEvaluation> last_thermal_evaluations, previous_thermal_evaluations;
@@ -1234,12 +1498,13 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             pressure_impulse = {};
             double local_caloric_transport = 0, local_energy_transport = 0;
             std::vector<std::vector<double>> adv_volumes(nc, std::vector<double>(np));
+            const auto is_qbmm_bound = [&](size_t a) { return !qbmm_families.empty() && qbmm_families[a]; };
             std::vector<std::unique_ptr<ScalarField>> transported_species(
-                d->options.use_multi_rhs_transport ? 0 : np * ns);
+                d->options.use_multi_rhs_transport && qbmm_families.empty() ? 0 : np * ns);
             std::vector<Implementation::CarrierSpeciesSlot> species_slots;
             const auto species_donor_concentration = [&](size_t a, size_t s, LO donor) -> double
             {
-                if (d->options.use_multi_rhs_transport)
+                if (d->options.use_multi_rhs_transport && !is_qbmm_bound(a))
                 {
                     const auto& slot = species_slots[a * ns + s];
                     return d->transport_workspaces[slot.group_index].conc_overlap->getData(slot.column_index)[donor];
@@ -1249,6 +1514,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             std::vector<std::unique_ptr<FaceField>> material_face_fraction(np);
             std::vector<std::unique_ptr<VectorField>> drift(np);
             std::vector<std::unique_ptr<FaceField>> phase_flux(np);
+            std::vector<std::vector<QbmmFaceFlux>> qbmm_face_flux(np);
             std::vector<double> before(nc), after;
             if (ale)
             {
@@ -1289,9 +1555,12 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             }
             for (size_t a = 0; a < np; ++a)
             {
-                if (!d->options.use_multi_rhs_transport)
+                const bool qbmm_bound = is_qbmm_bound(a);
+                if (qbmm_bound || !d->options.use_multi_rhs_transport)
                 {
-                    if (d->options.phase_roles[a].role == PhaseRole::DispersedGas)
+                    if (qbmm_bound)
+                        qbmm_face_flux[a] = d->transport_qbmm(accepted, trial, a, *phase_flux[a], dt, result);
+                    else if (d->options.phase_roles[a].role == PhaseRole::DispersedGas)
                     {
                         collective_detail::collective_local_validation(mesh, "Population transport input",
                             [&]
@@ -1384,26 +1653,33 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     }
                     for (size_t s = 0; s < ns; ++s)
                     {
-                        for (size_t c = 0; c < nc; ++c)
-                            before[c] = accepted.cells[c].phases[a].moles[s];
-                        d->transport(before, *phase_flux[a], dt, after, result,
-                            transport_consistency_detail::Quantity::Species, ale);
+                        if (!qbmm_bound)
+                        {
+                            for (size_t c = 0; c < nc; ++c)
+                                before[c] = accepted.cells[c].phases[a].moles[s];
+                            d->transport(before, *phase_flux[a], dt, after, result,
+                                transport_consistency_detail::Quantity::Species, ale);
+                            for (size_t c = 0; c < nc; ++c)
+                                trial.cells[c].phases[a].moles[s] = after[c];
+                        }
                         auto field = std::make_unique<ScalarField>(d->mesh, "transported_species_concentration");
                         for (size_t c = 0; c < nc; ++c)
-                        {
-                            trial.cells[c].phases[a].moles[s] = after[c];
-                            field->set_owned_value(static_cast<LO>(c), after[c] / mesh.cell_volume(static_cast<LO>(c)));
-                        }
+                            field->set_owned_value(static_cast<LO>(c),
+                                trial.cells[c].phases[a].moles[s] / mesh.cell_volume(static_cast<LO>(c)));
                         field->sync_ghosts();
                         transported_species[a * ns + s] = std::move(field);
                     }
-                    for (size_t c = 0; c < nc; ++c)
-                        before[c] = accepted.cells[c].phases[a].internal_energy;
-                    d->transport(before, *phase_flux[a], dt, after, result,
-                        transport_consistency_detail::Quantity::Energy, ale);
-                    for (size_t c = 0; c < nc; ++c)
-                        trial.cells[c].phases[a].internal_energy = after[c];
-                    ScalarField transported_energy_density(d->mesh, "transported_energy_operand");
+                    std::optional<ScalarField> transported_energy_density;
+                    if (!qbmm_bound)
+                    {
+                        for (size_t c = 0; c < nc; ++c)
+                            before[c] = accepted.cells[c].phases[a].internal_energy;
+                        d->transport(before, *phase_flux[a], dt, after, result,
+                            transport_consistency_detail::Quantity::Energy, ale);
+                        for (size_t c = 0; c < nc; ++c)
+                            trial.cells[c].phases[a].internal_energy = after[c];
+                        transported_energy_density.emplace(d->mesh, "transported_energy_operand");
+                    }
                     ScalarField caloric_carrier_density(d->mesh, "caloric_transport_characteristic");
                     collective_detail::collective_local_validation(mesh, "Low-Mach caloric transport scales",
                         [&]
@@ -1411,7 +1687,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             for (size_t c = 0; c < nc; ++c)
                             {
                                 const LO cell = static_cast<LO>(c);
-                                transported_energy_density.set_owned_value(cell, after[c] / mesh.cell_volume(cell));
+                                if (transported_energy_density)
+                                    transported_energy_density->set_owned_value(cell, after[c] / mesh.cell_volume(cell));
                                 const auto& old_phase = accepted.cells[c].phases[a];
                                 const double mass = phase_mass(old_phase);
                                 double caloric = 0;
@@ -1425,7 +1702,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                     cell, caloric / (ale ? ale->old_cell_volumes()[c] : mesh.cell_volume(cell)));
                             }
                         });
-                    transported_energy_density.sync_ghosts();
+                    if (transported_energy_density)
+                        transported_energy_density->sync_ghosts();
                     caloric_carrier_density.sync_ghosts();
                     for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
                     {
@@ -1435,7 +1713,9 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         const double phi = phase_flux[a]->local_value(face);
                         const LO owner = mesh.owner_cell(face);
                         const LO donor = phi >= 0 ? owner : mesh.opposite_or_periodic_neighbor_cell(face, owner);
-                        local_energy_transport += dt * std::abs(phi * transported_energy_density.local_value(donor));
+                        const double energy_flux = qbmm_bound ? qbmm_face_flux[a][f].internal_energy_flux
+                                                              : phi * transported_energy_density->local_value(donor);
+                        local_energy_transport += dt * std::abs(energy_flux);
                         local_caloric_transport += dt * std::abs(phi * caloric_carrier_density.local_value(donor));
                     }
                 }
@@ -1507,9 +1787,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     {
                         for (size_t c = 0; c < nc; ++c)
                         {
-                            adv_volumes[c][a] = old_volumes[c][a] -
-                                               dt * FVM::cell_flux_balance(
-                                                        mesh, material_volume_flux, static_cast<LO>(c));
+                            adv_volumes[c][a] = old_volumes[c][a] - dt * FVM::cell_flux_balance(mesh,
+                                                                             material_volume_flux, static_cast<LO>(c));
                             const auto& transported = trial.cells[c].phases[a];
                             check(phase_mass(transported) > 0 ||
                                       (transported.internal_energy == 0 && adv_volumes[c][a] == 0),
@@ -1535,6 +1814,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     last_transport.old_geometry_epoch = ale ? ale->old_geometry_epoch() : d->epoch;
                     last_transport.new_geometry_epoch = ale ? ale->new_geometry_epoch() : d->epoch;
                     last_transport.schema_fingerprint = d->eos.front()->catalog().fingerprint();
+                    last_transport.qbmm_families = accepted.qbmm_families;
                     last_transport.accepted_time = accepted.time;
                     last_transport.time_step = dt;
                     last_transport.stage = stage;
@@ -1548,9 +1828,13 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         packet.material_fraction.resize(np);
                         packet.mesh_volume_flux = ale ? ale->face_mesh_fluxes()[f] : 0.;
                         packet.relative_phase_volume_flux.resize(np);
+                        if (!qbmm_families.empty())
+                            packet.qbmm_flux.resize(np);
                         check(std::isfinite(packet.carrier_volume_flux), "Nonfinite stage carrier flux receipt.");
                         for (size_t a = 0; a < np; ++a)
                         {
+                            if (!qbmm_families.empty() && qbmm_families[a])
+                                packet.qbmm_flux[a] = qbmm_face_flux[a][f];
                             packet.relative_phase_volume_flux[a] = phase_flux[a]->local_value(face);
                             packet.phase_volume_flux[a] =
                                 packet.relative_phase_volume_flux[a] + packet.mesh_volume_flux;
@@ -1576,6 +1860,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             advected_energy[c][a] = inventory.internal_energy;
                             inventory.advected_material_volume = adv_volumes[c][a];
                             inventory.population_number = trial.cells[c].phase_numbers[a];
+                            if (!qbmm_families.empty())
+                                inventory.qbmm_shape = trial.cells[c].qbmm_shape[a];
                         }
                     }
                 });
@@ -1599,6 +1885,12 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         source_stage_detail::validate_packets(evaluated.sources, nc, np, ns);
                         source_stage_detail::validate_events(evaluated.gross_events, nc);
                         source_stage_detail::validate_number_packets(evaluated.sources, nc, d->options.phase_roles);
+                        qbmm_detail::validate_sources(d->options, evaluated.sources, coherent_qbmm);
+                        if (coherent_qbmm)
+                            qbmm_detail::validate_source_receipts(d->options, last_transport, evaluated);
+                        else
+                            check(
+                                evaluated.qbmm_cells.empty(), "QBMM source receipts require the coherent controller.");
                     });
                 collective_detail::require_uniform_value(
                     mesh, int(bool(evaluated.thermal_receipt)), "Conditioned thermal batch presence");
@@ -1646,6 +1938,13 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 int local_events = !evaluated.gross_events.empty(), global_events = 0;
                 Teuchos::reduceAll(
                     *mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_events, &global_events);
+                size_t qbmm_event_width = 0;
+                if (coherent_qbmm)
+                {
+                    const size_t local_width = local_events ? evaluated.gross_events.front().size() : 0;
+                    Teuchos::reduceAll(
+                        *mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_width, &qbmm_event_width);
+                }
                 collective_detail::collective_local_validation(mesh, "Source-stage event schema",
                     [&]
                     {
@@ -1653,6 +1952,9 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             "Enabled gross-event channel requires one event vector per owned cell.");
                         check(!event_channel || *event_channel == bool(global_events),
                             "Source stage changed its gross-event channel between correctors.");
+                        if (coherent_qbmm)
+                            for (const auto& row : evaluated.gross_events)
+                                check(row.size() == qbmm_event_width, "QBMM gross-event schema differs across owners.");
                         if (previous_transport)
                             source_stage_detail::validate_event_shape(evaluated.gross_events, previous_events);
                     });
@@ -1662,6 +1964,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 double event_residual = global_events ? std::numeric_limits<double>::infinity() : 0;
                 double source_residual = std::numeric_limits<double>::infinity();
                 double transport_residual = std::numeric_limits<double>::infinity();
+                double shape_residual = coherent_qbmm ? std::numeric_limits<double>::infinity() : 0;
                 if (previous_transport)
                 {
                     collective_detail::collective_local_validation(mesh, "Source/transport convergence",
@@ -1673,12 +1976,19 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                 last_transport, thermodynamic_guess, accepted, source_options);
                             transport_residual = source_stage_detail::transport_error(
                                 last_transport, *previous_transport, thermodynamic_guess, accepted, d->options);
+                            if (coherent_qbmm)
+                                shape_residual = source_stage_detail::shape_source_error(sources, previous_sources,
+                                    evaluated.qbmm_cells, qbmm_cells, last_transport,
+                                    source_options.source_relative_tolerance);
                         });
                 }
+                qbmm_cells = std::move(evaluated.qbmm_cells);
                 result.source_evaluations = iteration + 1;
                 result.maximum_event_residual = d->maximum(event_residual);
                 result.maximum_source_residual = d->maximum(source_residual);
                 result.maximum_transport_residual = d->maximum(transport_residual);
+                if (coherent_qbmm)
+                    result.maximum_shape_source_residual = d->maximum(shape_residual);
                 collective_detail::collective_local_validation(mesh, "Retained source corrector receipt",
                     [&]
                     {
@@ -1693,17 +2003,26 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     for (size_t c = 0; c < nc; ++c)
                         for (size_t a = 0; a < np; ++a)
                         {
-                            auto& phase = trial.cells[c].phases[a];
+                            const bool qbmm_bound = !qbmm_families.empty() && qbmm_families[a];
+                            auto& cell = trial.cells[c];
+                            auto& phase = cell.phases[a];
+                            if (coherent_qbmm && qbmm_bound)
+                            {
+                                const auto& endpoint = *qbmm_cells[c][a];
+                                phase.moles = endpoint.final_moles;
+                                cell.phase_numbers[a] = endpoint.final_count;
+                                cell.qbmm_shape[a] = endpoint.final_shape;
+                            }
                             for (size_t s = 0; s < ns; ++s)
                             {
-                                if (!sources.empty() && !sources[c].species_moles.empty())
+                                if (!qbmm_bound && !sources.empty() && !sources[c].species_moles.empty())
                                     phase.moles[s] += sources[c].species_moles[a][s];
                                 check(std::isfinite(phase.moles[s]) && phase.moles[s] >= 0,
                                     "Low-Mach source/transport overdraws phase species.");
                             }
-                            if (!sources.empty() && !sources[c].population_number_changes.empty() &&
-                                trial.cells[c].phase_numbers[a])
-                                *trial.cells[c].phase_numbers[a] += sources[c].population_number_changes[a];
+                            if (!qbmm_bound && !sources.empty() && !sources[c].population_number_changes.empty() &&
+                                cell.phase_numbers[a])
+                                *cell.phase_numbers[a] += sources[c].population_number_changes[a];
                             if (!sources.empty() && !sources[c].internal_energy.empty())
                                 phase.internal_energy += sources[c].internal_energy[a];
                         }
@@ -1713,6 +2032,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 {
                     for (const auto& cell : trial.cells)
                         source_stage_detail::validate_phase_numbers(cell, d->options.phase_roles);
+                    if (coherent_qbmm)
+                        qbmm_detail::validate_state(d->options, trial);
                 });
             std::vector<CaloricCell> thermal(nc);
             double local_domain_volume = 0;
@@ -2010,11 +2331,21 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         {
                             const double phi = phase_flux[a]->local_value(face);
                             const LO donor = phi >= 0 ? owner : neighbor;
-                            double density = 0;
-                            for (size_t s = 0; s < ns; ++s)
-                                density += species_donor_concentration(a, s, donor) *
-                                           d->eos[a]->catalog().species()[s].molarMass;
-                            const double mf = phi * density;
+                            double mf = 0;
+                            if (!qbmm_families.empty() && qbmm_families[a])
+                            {
+                                for (size_t s = 0; s < ns; ++s)
+                                    mf += qbmm_face_flux[a][f].species_molar_flux[s] *
+                                          d->eos[a]->catalog().species()[s].molarMass;
+                            }
+                            else
+                            {
+                                double density = 0;
+                                for (size_t s = 0; s < ns; ++s)
+                                    density += species_donor_concentration(a, s, donor) *
+                                               d->eos[a]->catalog().species()[s].molarMass;
+                                mf = phi * density;
+                            }
                             mass_flux += mf;
                             drift_flux = drift_flux + drift[a]->local_value(donor) * mf;
                             const double slip =
@@ -2236,9 +2567,9 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 result.maximum_continuity_residual <=
                     d->options.continuity_tolerance * std::max(1.0, projected.continuity_scale) &&
                 result.maximum_thermal_residual <= 1 && result.maximum_conditioned_thermal_residual <= 1 &&
-                (!provider ||
-                    (iteration >= 1 && result.maximum_source_residual <= 1 && result.maximum_transport_residual <= 1 &&
-                        result.maximum_thermal_residual <= 1 && result.maximum_event_residual <= 1)))
+                (!provider || (iteration >= 1 && result.maximum_source_residual <= 1 &&
+                                  result.maximum_transport_residual <= 1 && result.maximum_thermal_residual <= 1 &&
+                                  result.maximum_event_residual <= 1 && result.maximum_shape_source_residual <= 1)))
             {
                 collective_detail::collective_local_validation(mesh, "Accepted low-Mach uniform pressure",
                     [&]
@@ -2265,11 +2596,16 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
         double old_mass = 0, new_mass = 0, external_mass = 0;
         detail::CompensatedSum<long double> old_energy, new_energy, external_energy;
         detail::CompensatedSum<long double> caloric_storage_scale, caloric_source_scale, energy_operand_scale;
-        std::vector<double> old_species(ns), new_species(ns), source_species(ns);
+        std::vector<double> old_species, new_species, source_species;
         Vector old_momentum{}, new_momentum{}, external_momentum{}, momentum_operand_scale{};
         collective_detail::collective_local_validation(mesh, "Low-Mach physical caloric ledger",
             [&]
             {
+                old_species.resize(ns);
+                new_species.resize(ns);
+                source_species.resize(ns);
+                result.population_number_errors.assign(np, 0);
+                result.species_errors.resize(ns);
                 for (size_t c = 0; c < nc; ++c)
                 {
                     double accepted_mass = 0, candidate_mass = 0;
@@ -2371,7 +2707,47 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
         check(std::abs(result.internal_energy_error) <= physical_budget + result.internal_energy_roundoff_bound,
             "Low-Mach physical internal-energy/work budget failed.");
 
-        result.population_number_errors.assign(np, 0);
+        for (size_t a = 0; a < qbmm_families.size(); ++a)
+            if (qbmm_families[a])
+            {
+                std::array<long double, 4> local{}, global{};
+                collective_detail::collective_local_validation(mesh, "QBMM final physical shape-budget operands",
+                    [&]
+                    {
+                        std::array<detail::CompensatedSum<long double>, 2> defect, magnitude;
+                        for (size_t c = 0; c < nc; ++c)
+                        {
+                            const auto old_shape = *accepted.cells[c].qbmm_shape[a];
+                            const auto new_shape = *trial.cells[c].qbmm_shape[a];
+                            const auto source_shape = source_stage_detail::shape_packet(sources, c, a);
+                            const std::array<double, 2> old{old_shape.H2, old_shape.H3},
+                                now{new_shape.H2, new_shape.H3}, delta{source_shape.H2, source_shape.H3};
+                            for (size_t k = 0; k < 2; ++k)
+                            {
+                                detail::CompensatedSum<long double> cell_defect;
+                                cell_defect += now[k];
+                                cell_defect += -static_cast<long double>(old[k]);
+                                cell_defect += -static_cast<long double>(delta[k]);
+                                defect[k] += cell_defect.value();
+                                magnitude[k] += std::abs(static_cast<long double>(now[k]));
+                                magnitude[k] += std::abs(static_cast<long double>(old[k]));
+                                magnitude[k] += std::abs(static_cast<long double>(delta[k]));
+                            }
+                        }
+                        for (size_t k = 0; k < 2; ++k)
+                        {
+                            local[k] = defect[k].value();
+                            local[2 + k] = magnitude[k].value();
+                            check(std::isfinite(local[k]) && std::isfinite(local[2 + k]),
+                                "QBMM final physical shape-budget overflow.");
+                        }
+                    });
+                transport_consistency_detail::sum_qbmm_budget(*mesh.owned_cell_map()->getComm(), local, global);
+                for (size_t k = 0; k < 2; ++k)
+                    check(source_stage_detail::normalized(
+                              global[k], global[2 + k], d->options.conservation_relative_tolerance) <= 1,
+                        "Low-Mach physical QBMM shape/source budget failed.");
+            }
         for (size_t a = 0; a < np; ++a)
             if (d->options.phase_roles[a].role == PhaseRole::DispersedGas)
             {
@@ -2409,7 +2785,6 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                           d->options.conservation_relative_tolerance * std::max({before, after, std::abs(change)}),
                     "Low-Mach physical population number budget failed.");
             }
-        result.species_errors.resize(ns);
         for (size_t s = 0; s < ns; ++s)
         {
             const double old_n = d->sum(old_species[s]), new_n = d->sum(new_species[s]),
@@ -2438,11 +2813,27 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
         trial.time += dt;
         ++trial.revision;
         Trial staged;
+        collective_detail::collective_local_validation(mesh, "Low-Mach final trial snapshot",
+            [&]
+            {
+                staged.face_flux.resize(mesh.num_owned_faces());
+                for (size_t f = 0; f < staged.face_flux.size(); ++f)
+                    staged.face_flux[f] = d->trial_flux.local_value(static_cast<LO>(f));
+                if (!qbmm_families.empty())
+                {
+                    qbmm_detail::validate_stamps(d->options, trial);
+                    staged.qbmm_validation.reserve(nc);
+                    for (const auto& cell : trial.cells)
+                        staged.qbmm_validation.push_back(qbmm_detail::validate_cell(d->options, cell));
+                }
+            });
         staged.candidate = std::move(trial);
-        staged.statistics = result;
+        staged.qbmm_preview_id = qbmm_preview_id;
+        staged.statistics = std::move(result);
         staged.transport = std::move(last_transport);
         staged.sources = std::move(sources);
         staged.gross_events = std::move(gross_events);
+        staged.qbmm_cells = std::move(qbmm_cells);
         staged.provider = std::move(provider);
         staged.thermal_receipt = std::move(thermal_batch);
         staged.thermal_evaluations = std::move(last_thermal_evaluations);
@@ -2452,9 +2843,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
         staged.geometry_epoch = d->epoch;
         staged.logical_geometry = d->logical_geometry;
         staged.phase_transport = std::move(last_phase_transport);
-        staged.face_flux.resize(mesh.num_owned_faces());
-        for (size_t f = 0; f < staged.face_flux.size(); ++f)
-            staged.face_flux[f] = d->trial_flux.local_value(static_cast<LO>(f));
+        if (!qbmm_families.empty() && !coherent_qbmm)
+            finalize_qbmm_balances(staged);
         return staged;
     }
     catch (...)
@@ -2479,13 +2869,27 @@ void LowMachMixtureSolver::require_controller(const ControllerLease* controller)
 }
 LowMachMixtureSolver::ControllerLease LowMachMixtureSolver::acquire_controller()
 {
+    return acquire_controller_for({});
+}
+LowMachMixtureSolver::ControllerLease LowMachMixtureSolver::acquire_controller_for(std::string_view signature)
+{
+    std::optional<std::uint64_t> binding;
+    if (!d->options.qbmm_families.empty() && !signature.empty())
+    {
+        RestartHash hash;
+        hash.string(signature);
+        binding = hash.value;
+    }
     collective_detail::collective_local_validation(*d->mesh, "Low-Mach acquire controller",
         [&]
         {
+            check(!d->needs_restart_controller || binding == d->accepted_qbmm_controller,
+                "QBMM restart requires matching reaction, population and transfer provider metadata.");
             check(!d->controller_active && d->controller_id != std::numeric_limits<std::uint64_t>::max() &&
                       d->trial_nonce != std::numeric_limits<std::uint64_t>::max(),
                 "Low-Mach solver already has an external controller or exhausted its lease counter.");
         });
+    d->active_qbmm_controller = binding;
     d->controller_active = true;
     ++d->controller_id;
     ++d->trial_nonce;
@@ -2496,6 +2900,7 @@ void LowMachMixtureSolver::release_controller(std::uint64_t id) noexcept
     if (d->controller_active && id == d->controller_id)
     {
         d->controller_active = false;
+        d->active_qbmm_controller.reset();
         if (d->trial_nonce != std::numeric_limits<std::uint64_t>::max())
             ++d->trial_nonce;
     }
@@ -2526,6 +2931,7 @@ void LowMachMixtureSolver::commit(const Trial& trial, const ControllerLease* con
     require_controller(controller);
     State candidate;
     Diagnostics statistics;
+    std::shared_ptr<const QbmmPublication> publication;
     collective_detail::collective_local_validation(*d->mesh, "Low-Mach immutable trial commit",
         [&]
         {
@@ -2533,16 +2939,25 @@ void LowMachMixtureSolver::commit(const Trial& trial, const ControllerLease* con
                       trial.base_revision == d->accepted.revision && trial.logical_geometry == d->logical_geometry &&
                       d->epoch == mesh_geometry_epoch(*d->mesh),
                 "Low-Mach trial is foreign, already committed, superseded or belongs to stale geometry.");
+            qbmm_detail::validate_state(d->options, trial.candidate);
             candidate = trial.candidate;
             statistics = trial.statistics;
+            if (!d->options.qbmm_families.empty())
+            {
+                auto metadata = std::make_shared<QbmmPublication>();
+                check(trial.qbmm_balances.has_value(), "Native QBMM trial lacks physical report balances.");
+                metadata->balances = trial.qbmm_balances;
+                metadata->history = QbmmReceiptHistory::Available;
+                metadata->interval = qbmm_interval(trial);
+                publication = std::move(metadata);
+            }
         });
-    d->publish_fields(candidate, true);
-    for (size_t f = 0; f < trial.face_flux.size(); ++f)
-        d->flux.set_owned_value(static_cast<LO>(f), trial.face_flux[f]);
-    d->flux.sync_ghosts();
-    d->accepted = std::move(candidate);
-    d->diagnostics = std::move(statistics);
-    ++d->trial_nonce;
+    if (!d->options.qbmm_families.empty())
+    {
+        collective_detail::require_uniform_value(*d->mesh, trial.qbmm_preview_id, "QBMM collective trial selection");
+    }
+    d->publish_fixed(
+        std::move(candidate), std::move(statistics), trial.face_flux, d->trial_nonce + 1, std::move(publication));
 }
 LowMachMixtureSolver::Diagnostics LowMachMixtureSolver::advance(double dt, const std::vector<CellSources>& sources)
 {

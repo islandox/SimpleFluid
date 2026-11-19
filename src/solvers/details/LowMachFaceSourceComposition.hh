@@ -5,6 +5,7 @@
 #include "equations/CollectiveValidation.hh"
 #include "solvers/details/LowMachFaceTransportAdapter.hh"
 #include "solvers/details/LowMachRawSpeciesInventory.hh"
+#include "solvers/details/LowMachSourceStage.hh"
 #include "utils/CompensatedSum.hh"
 #include <array>
 #include <cmath>
@@ -130,29 +131,7 @@ public:
     }
 };
 
-/** Can one rounded signed packet represent the actual sequential endpoint?
- * The bound uses endpoint operands only: a large accepted inventory/gross turnover may not hide a lost small stock.
- * MPI-free; the controller invokes this inside its local failure fence before any later communication.
- */
-inline void validate_source_endpoint(double transported, double packet, double actual)
-{
-    using Sum = SimpleFluid::detail::CompensatedSum<long double>;
-    if (!std::isfinite(transported) || transported < 0 || !std::isfinite(packet) || !std::isfinite(actual) ||
-        actual < 0)
-        throw std::invalid_argument("Nonfinite or negative source endpoint input.");
-    Sum replay;
-    replay += transported;
-    replay += packet;
-    const auto recovered = replay.value();
-    Sum error;
-    error += recovered;
-    error += -static_cast<long double>(actual);
-    const auto bound = 64 * std::numeric_limits<double>::epsilon() *
-                       (std::abs(recovered) + std::abs(static_cast<long double>(actual)));
-    if (!std::isfinite(recovered) || recovered < 0 || (recovered == 0) != (actual == 0) ||
-        !std::isfinite(error.value()) || !std::isfinite(bound) || std::abs(error.value()) > bound)
-        throw std::invalid_argument("Rounded source packet cannot replay its actual sequential endpoint.");
-}
+using source_stage_detail::validate_source_endpoint;
 
 struct LocalChemistryStage
 {
@@ -181,9 +160,9 @@ struct ComposedSourceStage
  * and provide prepared caloric T/p/EOS guesses.
  * No outer collective_local_validation may wrap this function: face adapters communicate.
  */
-using PostFaceLocalStage = std::function<void(const Flow::SourceStageContext&, std::vector<CellSpeciesState>&,
-    std::vector<RawAmounts>&, LocalSourceAccumulator&, std::vector<std::vector<double>>&,
-    std::span<const Flow::CellState>)>;
+using PostFaceLocalStage =
+    std::function<void(const Flow::SourceStageContext&, std::vector<CellSpeciesState>&, std::vector<RawAmounts>&,
+        LocalSourceAccumulator&, std::vector<std::vector<double>>&, std::span<const Flow::CellState>)>;
 inline ComposedSourceStage compose_post_chemistry_faces(const Flow::SourceStageContext& context,
     const SpeciesCatalog& catalog, std::span<const LowMachFaceTransportAdapter* const> adapters,
     const std::function<void(const Flow::SourceStageContext&, LocalChemistryStage&)>& prepare_chemistry,
@@ -239,8 +218,8 @@ inline ComposedSourceStage compose_post_chemistry_faces(const Flow::SourceStageC
         [&]
         {
             if (post_faces)
-                post_faces(context, donors, donor_parts, chemistry.sums, chemistry.gross_events,
-                    chemistry.caloric_guesses);
+                post_faces(
+                    context, donors, donor_parts, chemistry.sums, chemistry.gross_events, chemistry.caloric_guesses);
         });
     collective_detail::collective_local_validation(context.mesh, "Finalize composed raw source channels",
         [&]

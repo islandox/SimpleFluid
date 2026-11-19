@@ -3,6 +3,7 @@
  */
 #include "solvers/ReactingMixtureCoupler.hh"
 #include "equations/CollectiveValidation.hh"
+#include "equations/details/QbmmPopulationEvents.hh"
 #include "solvers/details/LowMachConditionedThermal.hh"
 #include "solvers/details/LowMachFaceSourceComposition.hh"
 #include "solvers/details/LowMachPopulationSource.hh"
@@ -13,6 +14,7 @@
 #include <cstddef>
 #include <iomanip>
 #include <limits>
+#include <locale>
 #include <new>
 #include <set>
 #include <sstream>
@@ -64,7 +66,8 @@ bool identical_sources(std::span<const Solver::CellSources> a, std::span<const S
     for (size_t c = 0; c < a.size(); ++c)
     {
         if (a[c].species_moles != b[c].species_moles || a[c].internal_energy != b[c].internal_energy ||
-            a[c].population_number_changes != b[c].population_number_changes)
+            a[c].population_number_changes != b[c].population_number_changes ||
+            a[c].qbmm_shape_changes != b[c].qbmm_shape_changes)
             return false;
         for (size_t axis = 0; axis < 3; ++axis)
             if (a[c].momentum.component(axis) != b[c].momentum.component(axis))
@@ -86,11 +89,20 @@ struct FaceStageStorage
     }
 };
 
+#include "solvers/details/LowMachQbmmConfiguration.inc"
+
 struct SourceEngine
 {
     std::shared_ptr<Solver> flow;
     ReactingMixtureOptions options;
     std::vector<std::shared_ptr<const Faces::LowMachFaceTransportAdapter>> face_stages;
+    std::shared_ptr<const InterphaseConfiguration> thermal_configuration;
+    struct QbmmStage
+    {
+        std::vector<std::vector<std::optional<QbmmQuadrature>>> pre_material;
+        Solver::QbmmSourceCells cells;
+        std::vector<std::vector<double>> number_changes;
+    };
     struct Prepared
     {
         Solver::SourceStageResult result;
@@ -127,7 +139,26 @@ struct SourceEngine
                 return p;
         throw std::invalid_argument("External transfer references an unbound physical compartment.");
     }
-    void prepare_chemistry(const Solver::SourceStageContext& context, Faces::LocalChemistryStage& stage) const
+
+    bool qbmm_bound(size_t phase) const
+    {
+        const auto& families = flow->options().qbmm_families;
+        return !families.empty() && bool(families.at(phase));
+    }
+
+    static QbmmCellView qbmm_view(const QbmmPopulationSchema& family, const CellSpeciesState& state,
+        const Solver::TransportPhaseInventory& before)
+    {
+        const auto row =
+            std::ranges::find(state.dispersedPopulations, family.population(), &SpeciesPopulationState::id);
+        require(row != state.dispersedPopulations.end() && before.population_number && before.qbmm_shape,
+            "Transported QBMM family is missing material, count or shape.");
+        return {family.population(), state.schemaFingerprint, row->amounts, *before.population_number,
+            *before.qbmm_shape, family.fingerprint()};
+    }
+
+    void prepare_chemistry(
+        const Solver::SourceStageContext& context, Faces::LocalChemistryStage& stage, QbmmStage& qbmm) const
     {
         const auto& catalog = options.mechanism->catalog();
         const auto& transport = context.transport;
@@ -152,6 +183,8 @@ struct SourceEngine
             for (size_t p = 0; p < np; ++p)
             {
                 cell.phase_numbers[p] = transport.cells[c].phases[p].population_number;
+                if (qbmm_bound(p))
+                    cell.qbmm_shape.at(p) = transport.cells[c].phases[p].qbmm_shape;
                 auto& phase = cell.phases[p];
                 phase.moles = transport.cells[c].phases[p].moles;
                 Sum moles, phase_mass;
@@ -179,7 +212,7 @@ struct SourceEngine
                                                     .temperature;
                         }
                         else
-                            for (const auto& other : cell.phases)
+                            for (const auto& other : trial.cells[c].phases)
                                 if (other.temperature > 0)
                                 {
                                     phase.temperature = other.temperature;
@@ -197,6 +230,15 @@ struct SourceEngine
                 }
             }
             const auto initial = species(cell);
+            for (size_t p = 0; p < np; ++p)
+                if (qbmm_bound(p))
+                {
+                    const auto& family = *flow->options().qbmm_families[p];
+                    auto quadrature = invert_qbmm_moments(
+                        qbmm_cell_moments(family, qbmm_view(family, initial, transport.cells[c].phases[p])));
+                    require(quadrature.valid(), "Transported QBMM family has no admissible pre-material quadrature.");
+                    qbmm.pre_material[c][p] = std::move(quadrature);
+                }
             const auto& liquid = cell.phases.at(options.liquid_phase);
             Sum amount, mass;
             for (size_t i = 0; i < ns; ++i)
@@ -236,6 +278,10 @@ struct SourceEngine
             ReactionContext reaction{catalog, initial, environment};
             const auto input =
                 options.source ? options.source({reaction, cell, c, transport.cells[c]}, dt) : ReactionSourceInput{};
+            if (!flow->options().qbmm_families.empty())
+                for (const auto& transfer : input.externalTransfers)
+                    require(!qbmm_bound(phase_for(transfer.species, transfer.phase, transfer.population)),
+                        "Chemistry reservoir transfers cannot touch a QBMM family.");
             auto chemistry =
                 advance_reactions(*options.mechanism, initial, environment, dt, input, options.integration);
             // Retain actual pure-kernel state for the first face stage, not an endpoint reconstruction.
@@ -321,119 +367,339 @@ struct SourceEngine
         }
     }
 
+    Solver::CellState material_guess(const Solver::CellState& guess, const Solver::TransportCellInventory& transported,
+        const CellSpeciesState& material) const
+    {
+        auto result = guess;
+        const auto& catalog = options.mechanism->catalog();
+        result.phase_numbers.resize(options.phases.size());
+        for (size_t p = 0; p < options.phases.size(); ++p)
+        {
+            result.phase_numbers[p] = transported.phases[p].population_number;
+            if (qbmm_bound(p))
+                result.qbmm_shape.at(p) = transported.phases[p].qbmm_shape;
+            auto& phase = result.phases.at(p);
+            for (size_t i = 0; i < catalog.species().size(); ++i)
+                phase.moles.at(i) = material.amount(
+                    catalog, catalog.species()[i].id, compartment(options.phases[p], i), options.phases[p].population);
+            if (std::ranges::none_of(phase.moles, [](double n) { return n > 0; }))
+            {
+                phase.temperature = 0;
+                phase.internal_energy = 0;
+            }
+        }
+        return result;
+    }
+
+    std::vector<double> qbmm_phase_volumes(Solver::CellState& guess) const
+    {
+        const auto& catalog = options.mechanism->catalog();
+        const auto available =
+            std::ranges::find_if(guess.phases, [](const auto& phase) { return phase.temperature > 0; });
+        std::vector<double> volumes(guess.phases.size());
+        for (size_t p = 0; p < guess.phases.size(); ++p)
+        {
+            auto& phase = guess.phases[p];
+            Sum moles, mass;
+            for (size_t i = 0; i < phase.moles.size(); ++i)
+            {
+                moles += phase.moles[i];
+                mass += static_cast<long double>(phase.moles[i]) * catalog.species()[i].molarMass;
+            }
+            if (moles.value() == 0)
+                continue;
+            if (!(phase.temperature > 0))
+            {
+                require(available != guess.phases.end(), "Occupied QBMM rate-state phase needs a temperature guess.");
+                phase.temperature = available->temperature;
+            }
+            auto fractions = phase.moles;
+            for (auto& amount : fractions)
+                amount = static_cast<double>(amount / moles.value());
+            const auto point = phase.thermodynamics->evaluate(phase.temperature, phase.absolute_pressure, fractions);
+            volumes[p] = static_cast<double>(mass.value() / point.density);
+            phase.internal_energy = static_cast<double>(mass.value() * point.internal_energy);
+            require(std::isfinite(volumes[p]) && volumes[p] > 0 && std::isfinite(phase.internal_energy),
+                "QBMM rate-state phase volume or energy is not representable.");
+        }
+        return volumes;
+    }
+
+    void add_material(size_t c, size_t p, size_t s, double amount, std::vector<Faces::MolarTerm>& terms,
+        Faces::LocalSourceAccumulator& sums) const
+    {
+        const auto& binding = options.phases[p];
+        terms.push_back(
+            {options.mechanism->catalog().species()[s].id, {compartment(binding, s), binding.population}, amount});
+        sums.add_material(c, p, s, amount);
+    }
+
+    FrozenMaterialSourceTail apply_qbmm(const Solver::SourceStageContext& context, size_t c,
+        const Solver::CellState& caloric_guess, CellSpeciesState& material, Faces::RawAmounts& raw_material,
+        Faces::LocalSourceAccumulator& sums, QbmmStage& qbmm) const
+    {
+        const auto& transport = context.transport;
+        const auto& catalog = options.mechanism->catalog();
+        const auto& families = flow->options().qbmm_families;
+        const auto& transported = transport.cells[c];
+        Faces::validate_raw_inventory(catalog, material, raw_material);
+        FrozenMaterialSourceTail tail;
+        const std::vector<MaterialTransferSlot>* slots = nullptr;
+        if (options.qbmm_population && options.qbmm_population->transfers)
+        {
+            require(thermal_configuration && !thermal_configuration->stages.empty(),
+                "QBMM paired material is missing its frozen thermal configuration.");
+            tail.paired_stage = thermal_configuration->stages.size() - 1;
+            slots = &thermal_configuration->stages.back().material;
+            tail.paired_amounts.resize(slots->size());
+        }
+        Solver::CellState guess;
+        std::vector<double> phase_volumes;
+        if (options.qbmm_population)
+        {
+            guess = material_guess(caloric_guess, transported, material);
+            phase_volumes = qbmm_phase_volumes(guess);
+        }
+        std::vector<Faces::MolarTerm> terms;
+        for (size_t p = 0; p < families.size(); ++p)
+        {
+            if (!families[p])
+                continue;
+            const auto& family = *families[p];
+            const auto& before = transported.phases[p];
+            const auto pre = qbmm_view(family, material, before);
+            require(std::ranges::equal(pre.species_moles, before.moles),
+                "An upstream material stage changed a QBMM family without a paired allocation.");
+            for (size_t s = 0; s < before.moles.size(); ++s)
+            {
+                const auto slot = Faces::raw_amount_slot(
+                    catalog, material, catalog.species()[s].id, {SpeciesPhase::Dispersed, family.population()});
+                const auto& parts = raw_material.at(slot);
+                Sum change;
+                change += parts[0];
+                change += parts[1];
+                change += -static_cast<long double>(before.moles[s]);
+                require(change.value() == 0, "An upstream raw material stage changed a QBMM family.");
+            }
+
+            QbmmEventBatch batch{family.fingerprint(), 0, transport.time_step, {}};
+            if (options.qbmm_population)
+            {
+                const auto& provider = *options.qbmm_population;
+                auto operations = provider.evaluate({family, p, c, *qbmm.pre_material[c][p], material, phase_volumes,
+                    guess.phases, transport.stage, transport.time_step, transport.accepted_time});
+                batch.events.reserve(operations.size());
+                for (auto& operation : operations)
+                    batch.events.push_back(
+                        {provider.metadata.identity, provider.metadata.revision, std::move(operation)});
+            }
+            auto advance = qbmm_event_detail::advance_with_raw_species(family, material, pre, batch, raw_material);
+            if (!advance.endpoint)
+                throw std::invalid_argument(
+                    "QBMM population event rejected for " + family.population() + ". " + advance.diagnostic);
+            auto& endpoint = *advance.endpoint;
+            for (const auto& event : endpoint.receipts)
+                for (const auto& receipt : event.transfers)
+                {
+                    const auto& transfer = receipt.transfer;
+                    const auto* counterpart = std::get_if<QbmmPhaseExchange>(&transfer.counterpart);
+                    std::vector<double> external;
+                    if (!counterpart)
+                        external.resize(transfer.moles.size());
+                    for (size_t s = 0; s < transfer.moles.size(); ++s)
+                    {
+                        const auto amount = transfer.moles[s];
+                        if (amount == 0)
+                            continue;
+                        const double family_amount = receipt.into_family ? amount : -amount;
+                        add_material(c, p, s, family_amount, terms, sums);
+                        if (!counterpart)
+                        {
+                            external[s] = family_amount;
+                            continue;
+                        }
+                        require(slots, "QBMM paired material requires configured partial enthalpy transfer slots.");
+                        const auto id = catalog.species()[s].id;
+                        const auto other = phase_for(id, counterpart->phase, {});
+                        require(
+                            !qbmm_bound(other), "QBMM material counterparts must be unnamed physical compartments.");
+                        const MaterialTransferSlot key{
+                            id, receipt.into_family ? other : p, receipt.into_family ? p : other};
+                        const auto i = std::ranges::find(*slots, key);
+                        require(i != slots->end(), "QBMM paired material does not match a configured transfer slot.");
+                        tail.paired_amounts[i - slots->begin()].push_back(amount);
+                        add_material(c, other, s, -family_amount, terms, sums);
+                    }
+                    if (!counterpart)
+                    {
+                        const auto& reservoir = std::get<QbmmReservoirExchange>(transfer.counterpart);
+                        tail.reservoirs.push_back({p, std::move(external), reservoir.energy_j});
+                        sums.add_energy(c, p, reservoir.energy_j);
+                        for (size_t axis = 0; axis < 3; ++axis)
+                            sums.add_momentum(c, axis, reservoir.momentum[axis]);
+                    }
+                }
+            qbmm.number_changes[c][p] = population_source_detail::narrow(endpoint.moment_change[0]);
+            const auto final = std::ranges::find(
+                endpoint.species.dispersedPopulations, family.population(), &SpeciesPopulationState::id);
+            require(final != endpoint.species.dispersedPopulations.end(), "Missing constructive QBMM family endpoint.");
+            qbmm.cells[c][p] =
+                Solver::QbmmSourceReceipt{std::move(endpoint.receipts), endpoint.count, std::move(final->amounts),
+                    endpoint.shape, family.fingerprint(), {endpoint.moment_change[2], endpoint.moment_change[3]}};
+        }
+        // Replay all families together against one uncollapsed predecessor. No family can borrow another's credits.
+        material = Faces::apply_raw_material(catalog, material, raw_material, terms);
+        for (size_t p = 0; p < families.size(); ++p)
+            if (qbmm.cells[c][p])
+            {
+                const auto pre = qbmm_view(*families[p], material, transported.phases[p]);
+                const auto& expected = qbmm.cells[c][p]->final_moles;
+                for (size_t s = 0; s < expected.size(); ++s)
+                    Faces::validate_source_endpoint(0, pre.species_moles[s], expected[s]);
+            }
+        return tail;
+    }
+
+    void prepare_material_stages(const Solver::SourceStageContext& context, std::vector<CellSpeciesState>& donors,
+        std::vector<Faces::RawAmounts>& raw_donors, Faces::LocalSourceAccumulator& sums,
+        std::vector<std::vector<double>>& gross, std::span<const Solver::CellState> guesses,
+        PressureConditionedThermalBatch* thermal, QbmmStage& qbmm) const
+    {
+        const auto& catalog = options.mechanism->catalog();
+        const auto np = options.phases.size(), ns = catalog.species().size();
+        require(donors.size() == context.transport.cells.size() && guesses.size() == donors.size() &&
+                    raw_donors.size() == donors.size(),
+            "Interphase actual predecessor rows differ.");
+        const bool has_qbmm = !flow->options().qbmm_families.empty();
+        for (size_t c = 0; c < donors.size(); ++c)
+        {
+            Solver::CellState guess;
+            std::vector<std::vector<std::array<long double, 2>>> phase_parts;
+            std::vector<std::vector<long double>> raw_energy;
+            std::vector<long double> raw_declared;
+            if (thermal)
+            {
+                guess = material_guess(guesses[c], context.transport.cells[c], donors[c]);
+                phase_parts.assign(np, std::vector<std::array<long double, 2>>(ns));
+                for (size_t p = 0; p < np; ++p)
+                    for (size_t s = 0; s < ns; ++s)
+                        phase_parts[p][s] =
+                            raw_donors[c].at(Faces::raw_amount_slot(catalog, donors[c], catalog.species()[s].id,
+                                {compartment(options.phases[p], s), options.phases[p].population}));
+                raw_energy = sums.raw_energy(c);
+                raw_declared = sums.raw_declared(c);
+            }
+            FrozenInterphasePlan generic;
+            if (options.interphase)
+            {
+                require(context.transport.new_geometry_epoch == context.mesh.geometry_epoch(),
+                    "Interphase rate location belongs to stale trial geometry.");
+                const auto local = static_cast<Solver::Pack::local_ordinal_type>(c);
+                const auto geometry_cell = context.mesh.cell_geometry_global_id(local);
+                require(std::in_range<std::uint64_t>(geometry_cell),
+                    "Canonical interphase cell identity is not representable.");
+                const auto center = context.mesh.cell_centroid(local);
+                const ReactionLocation location{static_cast<std::uint64_t>(geometry_cell),
+                    context.transport.new_geometry_epoch, {center.x, center.y, center.z}, c};
+                auto amounts = options.interphase->integrate(
+                    {catalog, donors[c], context.transport.cells[c], guess, context.transport.stage, c,
+                        context.transport.time_step, context.transport.accepted_time, location});
+                generic = compile_interphase_plan(options.interphase->configuration, guess.phases, std::move(amounts),
+                    raw_energy, raw_declared, phase_parts);
+                for (size_t j = 0; j < generic.amounts.size(); ++j)
+                {
+                    const auto& stage = generic.configuration->stages[j];
+                    if (stage.kind == InterphaseStageKind::Material)
+                    {
+                        std::vector<Faces::MolarTerm> terms;
+                        for (size_t i = 0; i < generic.amounts[j].size(); ++i)
+                        {
+                            const double amount = generic.amounts[j][i];
+                            const auto& slot = stage.material[i];
+                            const auto species = catalog.index(slot.species);
+                            add_material(c, slot.donor, species, -amount, terms, sums);
+                            add_material(c, slot.recipient, species, amount, terms, sums);
+                            gross[c].push_back(amount);
+                        }
+                        donors[c] = Faces::apply_raw_material(catalog, donors[c], raw_donors[c], terms);
+                    }
+                    else
+                        for (double amount : generic.amounts[j])
+                        {
+                            gross[c].push_back(std::max(amount, 0.));
+                            gross[c].push_back(std::max(-amount, 0.));
+                        }
+                }
+                for (size_t p = 0; p < np; ++p)
+                    for (size_t s = 0; s < ns; ++s)
+                        require(donors[c].amount(catalog, catalog.species()[s].id, compartment(options.phases[p], s),
+                                    options.phases[p].population) == generic.final_moles[p][s],
+                            "Raw interphase replay differs from its frozen material plan.");
+            }
+            if (!has_qbmm)
+            {
+                thermal->cells.push_back(std::move(generic));
+                continue;
+            }
+            auto tail = apply_qbmm(context, c, guesses[c], donors[c], raw_donors[c], sums, qbmm);
+            if (!thermal)
+                continue;
+            if (tail.paired_stage)
+            {
+                auto& paired = generic.amounts.emplace_back();
+                for (const auto& terms : tail.paired_amounts)
+                {
+                    Sum amount;
+                    for (double term : terms)
+                        amount += term;
+                    paired.push_back(population_source_detail::narrow(amount.value()));
+                }
+            }
+            auto plan = compile_interphase_plan(thermal->configuration, guess.phases, std::move(generic.amounts),
+                std::move(raw_energy), std::move(raw_declared), phase_parts, std::move(tail));
+            for (size_t p = 0; p < np; ++p)
+                for (size_t s = 0; s < ns; ++s)
+                    Faces::validate_source_endpoint(0,
+                        donors[c].amount(catalog, catalog.species()[s].id, compartment(options.phases[p], s),
+                            options.phases[p].population),
+                        plan.final_moles[p][s]);
+            thermal->cells.push_back(std::move(plan));
+        }
+    }
+
     Prepared prepare(const Solver::SourceStageContext& context) const
     {
         std::vector<const Faces::LowMachFaceTransportAdapter*> ordered;
         std::function<void(const Solver::SourceStageContext&, Faces::LocalChemistryStage&)> local_prepare;
         Faces::PostFaceLocalStage interphase_stage;
         std::shared_ptr<PressureConditionedThermalBatch> thermal_batch;
+        QbmmStage qbmm;
         collective_detail::collective_local_validation(context.mesh, "Ordered face-stage views",
             [&]
             {
-                local_prepare = [this](const Solver::SourceStageContext& current, Faces::LocalChemistryStage& local)
-                { prepare_chemistry(current, local); };
-                if (options.interphase)
+                const auto np = flow->options().qbmm_families.size(), nc = context.transport.cells.size();
+                if (np)
+                {
+                    qbmm.pre_material.resize(nc, std::vector<std::optional<QbmmQuadrature>>(np));
+                    qbmm.cells.resize(nc, std::vector<std::optional<Solver::QbmmSourceReceipt>>(np));
+                    qbmm.number_changes.resize(nc, std::vector<double>(np));
+                }
+                local_prepare = [this, &qbmm](const Solver::SourceStageContext& current,
+                                    Faces::LocalChemistryStage& local) { prepare_chemistry(current, local, qbmm); };
+                if (thermal_configuration)
                 {
                     thermal_batch = std::make_shared<PressureConditionedThermalBatch>();
-                    thermal_batch->configuration = options.interphase->configuration;
+                    thermal_batch->configuration = thermal_configuration;
                     thermal_batch->source = conditioned_thermal_detail::identity(context.transport);
-                    thermal_batch->cells.reserve(context.transport.cells.size());
-                    interphase_stage = [this, thermal_batch](const Solver::SourceStageContext& current,
-                                           std::vector<CellSpeciesState>& donors,
-                                           std::vector<Faces::RawAmounts>& raw_donors,
-                                           Faces::LocalSourceAccumulator& sums,
-                                           std::vector<std::vector<double>>& gross,
-                                           std::span<const Solver::CellState> guesses)
-                    {
-                        const auto& catalog = options.mechanism->catalog();
-                        const auto np = options.phases.size();
-                        require(donors.size() == current.transport.cells.size() && guesses.size() == donors.size(),
-                            "Interphase actual predecessor rows differ.");
-                        for (size_t c = 0; c < donors.size(); ++c)
-                        {
-                            auto guess = guesses[c];
-                            guess.phase_numbers.resize(np);
-                            for (size_t a = 0; a < np; ++a)
-                            {
-                                guess.phase_numbers[a] = current.transport.cells[c].phases[a].population_number;
-                                bool occupied = false;
-                                for (size_t i = 0; i < catalog.species().size(); ++i)
-                                {
-                                    auto& n = guess.phases.at(a).moles.at(i);
-                                    n = donors[c].amount(catalog, catalog.species()[i].id,
-                                        compartment(options.phases[a], i), options.phases[a].population);
-                                    occupied = occupied || n > 0;
-                                }
-                                if (!occupied)
-                                {
-                                    guess.phases[a].temperature = 0;
-                                    guess.phases[a].internal_energy = 0;
-                                }
-                            }
-                            require(current.transport.new_geometry_epoch == current.mesh.geometry_epoch(),
-                                "Interphase rate location belongs to stale trial geometry.");
-                            const auto local = static_cast<Solver::Pack::local_ordinal_type>(c);
-                            const auto geometry_cell = current.mesh.cell_geometry_global_id(local);
-                            require(std::in_range<std::uint64_t>(geometry_cell),
-                                "Canonical interphase cell identity is not representable.");
-                            const auto center = current.mesh.cell_centroid(local);
-                            const ReactionLocation location{static_cast<std::uint64_t>(geometry_cell),
-                                current.transport.new_geometry_epoch, {center.x, center.y, center.z}, c};
-                            const auto amounts = options.interphase->integrate(
-                                {catalog, donors[c], current.transport.cells[c], guess, current.transport.stage, c,
-                                    current.transport.time_step, current.transport.accepted_time, location});
-                            require(raw_donors.size() == donors.size(), "Raw interphase predecessor rows differ.");
-                            std::vector<std::vector<std::array<long double, 2>>> phase_parts(
-                                np, std::vector<std::array<long double, 2>>(catalog.species().size()));
-                            for (size_t a = 0; a < np; ++a)
-                                for (size_t i = 0; i < catalog.species().size(); ++i)
-                                    phase_parts[a][i] = raw_donors[c].at(Faces::raw_amount_slot(catalog, donors[c],
-                                        catalog.species()[i].id,
-                                        {compartment(options.phases[a], i), options.phases[a].population}));
-                            auto plan = compile_interphase_plan(options.interphase->configuration, guess.phases,
-                                amounts, sums.raw_energy(c), sums.raw_declared(c), phase_parts);
-                            for (size_t j = 0; j < plan.amounts.size(); ++j)
-                            {
-                                const auto& stage = plan.configuration->stages[j];
-                                std::vector<Faces::MolarTerm> material_terms;
-                                for (size_t i = 0; i < plan.amounts[j].size(); ++i)
-                                {
-                                    const double amount = plan.amounts[j][i];
-                                    if (stage.kind == InterphaseStageKind::Material)
-                                    {
-                                        const auto& slot = stage.material[i];
-                                        const auto species = catalog.index(slot.species);
-                                        sums.add_material(c, slot.donor, species, -static_cast<long double>(amount));
-                                        sums.add_material(c, slot.recipient, species, amount);
-                                        material_terms.push_back({slot.species,
-                                            {compartment(options.phases[slot.donor], species),
-                                                options.phases[slot.donor].population}, -amount});
-                                        material_terms.push_back({slot.species,
-                                            {compartment(options.phases[slot.recipient], species),
-                                                options.phases[slot.recipient].population}, amount});
-                                        gross[c].push_back(amount);
-                                    }
-                                    else
-                                    {
-                                        gross[c].push_back(std::max(amount, 0.));
-                                        gross[c].push_back(std::max(-amount, 0.));
-                                    }
-                                }
-                                if (stage.kind == InterphaseStageKind::Material)
-                                    donors[c] = Faces::apply_raw_material(
-                                        catalog, donors[c], raw_donors[c], material_terms);
-                            }
-                            for (size_t a = 0; a < np; ++a)
-                                for (size_t i = 0; i < catalog.species().size(); ++i)
-                                    require(donors[c].amount(catalog, catalog.species()[i].id,
-                                                compartment(options.phases[a], i), options.phases[a].population) ==
-                                                plan.final_moles[a][i],
-                                        "Raw interphase replay differs from its frozen material plan.");
-                            donors[c].validate(catalog);
-                            thermal_batch->cells.push_back(std::move(plan));
-                        }
-                    };
+                    thermal_batch->cells.reserve(nc);
                 }
+                if (thermal_batch || np)
+                    interphase_stage =
+                        [this, thermal = thermal_batch.get(), &qbmm](const Solver::SourceStageContext& current,
+                            std::vector<CellSpeciesState>& donors, std::vector<Faces::RawAmounts>& raw_donors,
+                            Faces::LocalSourceAccumulator& sums, std::vector<std::vector<double>>& gross,
+                            std::span<const Solver::CellState> guesses)
+                    { prepare_material_stages(current, donors, raw_donors, sums, gross, guesses, thermal, qbmm); };
                 ordered.reserve(face_stages.size());
                 for (const auto& stage : face_stages)
                 {
@@ -449,41 +715,61 @@ struct SourceEngine
             {
                 result.result = std::move(composed.result);
                 result.result.thermal_receipt = std::move(thermal_batch);
+                result.result.qbmm_cells = std::move(qbmm.cells);
                 result.ledgers = std::move(composed.chemistry_ledgers);
                 result.face_receipts = std::move(composed.faces);
                 result.post_faces = std::move(composed.post_faces);
                 result.population_events.reserve(result.post_faces.size());
                 const auto& roles = flow->options().phase_roles;
                 const auto& population_catalog = options.mechanism->catalog();
+                const bool has_qbmm = !flow->options().qbmm_families.empty();
                 for (size_t c = 0; c < result.post_faces.size(); ++c)
                 {
-                    auto guess = context.thermodynamic_trial.cells.at(c);
-                    guess.phase_numbers.resize(roles.size());
+                    const auto& transported = context.transport.cells[c];
+                    auto guess =
+                        material_guess(context.thermodynamic_trial.cells.at(c), transported, result.post_faces[c]);
                     std::vector<int> occupied(roles.size(), 0);
+                    auto& source = result.result.sources.at(c);
+                    if (has_qbmm)
+                        source.qbmm_shape_changes.resize(roles.size());
                     for (size_t p = 0; p < roles.size(); ++p)
                     {
-                        guess.phase_numbers[p] = context.transport.cells[c].phases[p].population_number;
-                        auto& moles = guess.phases.at(p).moles;
-                        for (size_t i = 0; i < population_catalog.species().size(); ++i)
+                        occupied[p] = std::ranges::any_of(guess.phases[p].moles, [](double n) { return n > 0; });
+                        if (qbmm_bound(p))
                         {
-                            moles.at(i) =
-                                result.post_faces[c].amount(population_catalog, population_catalog.species()[i].id,
-                                    compartment(options.phases[p], i), options.phases[p].population);
-                            occupied[p] |= moles[i] > 0;
-                        }
-                        if (!occupied[p])
-                        {
-                            guess.phases[p].temperature = 0;
-                            guess.phases[p].internal_energy = 0;
+                            const auto& receipt = *result.result.qbmm_cells[c][p];
+                            const auto& before = *transported.phases[p].qbmm_shape;
+                            // Canonical endpoint differences include the Q1 reconstruction residual. Raw event
+                            // deltas stay with the original receipts for the native replay and convergence checks.
+                            const QbmmShapeState delta{
+                                population_source_detail::narrow(
+                                    static_cast<long double>(receipt.final_shape.H2) - before.H2),
+                                population_source_detail::narrow(
+                                    static_cast<long double>(receipt.final_shape.H3) - before.H3)};
+                            Faces::validate_source_endpoint(before.H2, delta.H2, receipt.final_shape.H2);
+                            Faces::validate_source_endpoint(before.H3, delta.H3, receipt.final_shape.H3);
+                            source.qbmm_shape_changes[p] = delta;
+                            guess.phase_numbers[p] = receipt.final_count;
+                            guess.qbmm_shape[p] = receipt.final_shape;
                         }
                     }
-                    // Final post-material moles and Nadv are actual inventories. T/p remains the existing candidate
-                    // guess; never manufacture a separate-phase temperature just to call an optional number law.
+                    // The legacy count law sees final material and the actual count inventory at this stage.
                     std::vector<BubbleGasPhysics::PopulationNumberEvent> events;
                     if (options.population_events)
-                        events = options.population_events->evaluate(
-                            {population_catalog, result.post_faces[c], context.transport.cells[c], guess,
-                                context.transport.stage, c, context.transport.time_step});
+                    {
+                        events = options.population_events->evaluate({population_catalog, result.post_faces[c],
+                            transported, guess, context.transport.stage, c, context.transport.time_step});
+                        const auto& declared = options.population_events->populations;
+                        for (const auto& event : events)
+                        {
+                            require(declared.empty() || std::ranges::find(declared, event.population) != declared.end(),
+                                "Count-only population event is outside its immutable declared scope.");
+                            const auto phase =
+                                std::ranges::find(roles, event.population, &Solver::PhaseRoleDescriptor::identity);
+                            require(phase == roles.end() || !qbmm_bound(phase - roles.begin()),
+                                "Count-only population event cannot change a QBMM family.");
+                        }
+                    }
                     auto number =
                         population_source_detail::apply(roles, guess.phase_numbers, occupied, std::move(events));
                     number.source_stage = context.transport.stage;
@@ -493,13 +779,17 @@ struct SourceEngine
                         number.provider_identity = options.population_events->identity;
                         number.provider_revision = options.population_events->revision;
                     }
-                    // Number events change no material, thermal packet or momentum. This is the sole narrowing
-                    // of their independent raw dimension; material/energy were narrowed once by the face composer.
-                    result.result.sources.at(c).population_number_changes = number.changes;
+                    source.population_number_changes = number.changes;
                     for (size_t p = 0; p < roles.size(); ++p)
                     {
                         result.result.gross_events.at(c).push_back(number.births[p]);
                         result.result.gross_events.at(c).push_back(number.deaths[p]);
+                        if (!qbmm_bound(p))
+                            continue;
+                        const auto& receipt = *result.result.qbmm_cells[c][p];
+                        source.population_number_changes[p] = qbmm.number_changes[c][p];
+                        Faces::validate_source_endpoint(*transported.phases[p].population_number,
+                            source.population_number_changes[p], receipt.final_count);
                     }
                     result.population_events.push_back(std::move(number));
                 }
@@ -602,14 +892,14 @@ struct ReactingMixtureCoupler::Implementation
 {
     std::shared_ptr<Solver> flow;
     ReactingMixtureOptions options;
-    Solver::ControllerLease lease;
+    std::optional<Solver::ControllerLease> lease;
     std::shared_ptr<const SourceEngine> source_engine;
     std::shared_ptr<Solver::PlanarMotion> motion;
     Diagnostics diagnostics;
     std::uint64_t generation = 0;
 
     Implementation(std::shared_ptr<Solver> solver, ReactingMixtureOptions controls)
-        : flow(std::move(solver)), options(std::move(controls)), lease(flow->acquire_controller())
+        : flow(std::move(solver)), options(std::move(controls))
     {
         const auto& mesh = *flow->mesh();
         collective_detail::require_uniform_value(mesh, static_cast<unsigned long long>(options.face_transport.size()),
@@ -647,7 +937,9 @@ struct ReactingMixtureCoupler::Implementation
                             *options.interphase->configuration, flow->state().cells.front().phases);
                 }
                 // Callback copies/immutable engine allocation are local and may fail even on an empty owner.
-                source_engine = std::make_shared<const SourceEngine>(SourceEngine{flow, options, {}});
+                const auto thermal_configuration = configure_qbmm_sources(*flow, options);
+                source_engine =
+                    std::make_shared<const SourceEngine>(SourceEngine{flow, options, {}, thermal_configuration});
                 const auto& catalog = options.mechanism->catalog();
                 const auto ns = catalog.species().size();
                 require(options.phases.size() == flow->options().phase_roles.size(),
@@ -777,6 +1069,7 @@ struct ReactingMixtureCoupler::Implementation
             [&]
             {
                 std::ostringstream signature;
+                signature.imbue(std::locale::classic());
                 signature << std::hexfloat << options.mechanism->catalog().fingerprint() << ':' << bool(options.source)
                           << ':' << options.source_identity.size() << ':' << options.source_identity << ':'
                           << options.source_revision << ':' << options.maximum_correctors << ':'
@@ -829,6 +1122,22 @@ struct ReactingMixtureCoupler::Implementation
                     signature << ':' << law.identity.size() << ':' << law.identity << ':' << law.revision << ':'
                               << law.schema_fingerprint;
                 }
+                if (options.population_events)
+                {
+                    signature << ":scope:" << options.population_events->populations.size();
+                    for (const auto& name : options.population_events->populations)
+                        signature << ':' << name.size() << ':' << name;
+                }
+                signature << ":qbmm:" << bool(options.qbmm_population);
+                if (options.qbmm_population)
+                {
+                    const auto& law = *options.qbmm_population;
+                    signature << ':' << law.metadata.identity.size() << ':' << law.metadata.identity << ':'
+                              << law.metadata.revision << ':' << law.metadata.schema_fingerprint << ':'
+                              << bool(law.transfers);
+                    if (law.transfers)
+                        signature << conditioned_thermal_detail::signature(*law.transfers);
+                }
                 signature << ":planar:" << bool(options.planar_motion);
                 if (options.planar_motion)
                 {
@@ -856,7 +1165,7 @@ struct ReactingMixtureCoupler::Implementation
             collective_detail::collective_local_validation(mesh, "Immutable face-stage construction inputs",
                 [&]
                 {
-                    engine = std::make_shared<SourceEngine>(SourceEngine{flow, options, {}});
+                    engine = std::make_shared<SourceEngine>(*source_engine);
                     engine->face_stages.reserve(options.face_transport.size());
                     // Aliasing ownership retains the mechanism/catalog lifetime without copying its immutable schema.
                     catalog_alias =
@@ -895,10 +1204,11 @@ struct ReactingMixtureCoupler::Implementation
                 Solver::PlanarMotion(options.planar_motion->mesh, options.planar_motion->options);
             motion = std::shared_ptr<Solver::PlanarMotion>(storage, storage->value);
         }
+        lease.emplace(flow->acquire_controller_for(schema_signature));
     }
 
     Diagnostics totals(const std::vector<SpeciesSourceLedger>& ledgers, std::span<const Solver::CellSources> applied,
-        std::span<const MixturePopulationEventReceipt> populations,
+        std::span<const MixturePopulationEventReceipt> populations, const Solver::QbmmSourceCells& qbmm,
         std::span<const PressureConditionedThermalEvaluation> thermal, int correctors,
         const Solver::Diagnostics& flow_statistics) const
     {
@@ -924,14 +1234,31 @@ struct ReactingMixtureCoupler::Implementation
                     sums[3 * nr + 2] += ledger.transferEnergy;
                     sums[3 * nr + 3] += ledger.externalMass;
                 }
+                for (const auto& cell : qbmm)
+                    for (const auto& family : cell)
+                        if (family)
+                            for (const auto& event : family->events)
+                                for (const auto& raw : event.transfers)
+                                    if (const auto* reservoir =
+                                            std::get_if<QbmmReservoirExchange>(&raw.transfer.counterpart))
+                                    {
+                                        sums[3 * nr + 2] += reservoir->energy_j;
+                                        const auto& species = options.mechanism->catalog().species();
+                                        for (size_t i = 0; i < species.size(); ++i)
+                                        {
+                                            const long double moles = raw.transfer.moles.at(i);
+                                            sums[3 * nr + 3] +=
+                                                (raw.into_family ? moles : -moles) * species[i].molarMass;
+                                        }
+                                    }
                 // These are the final applied physical packets, after every raw face/source cancellation.
                 // Keep one rank-local sum across all cells and phases rather than first rounding cell totals.
-                require(!options.interphase || thermal.size() == applied.size(),
+                require(!source_engine->thermal_configuration || thermal.size() == applied.size(),
                     "Final thermal diagnostic receipt row mismatch.");
                 for (size_t c = 0; c < applied.size(); ++c)
                 {
-                    const auto& energies =
-                        options.interphase ? thermal[c].applied_phase_energy : applied[c].internal_energy;
+                    const auto& energies = source_engine->thermal_configuration ? thermal[c].applied_phase_energy
+                                                                                : applied[c].internal_energy;
                     for (const auto value : energies)
                         sums[3 * nr + 4] += value;
                 }
@@ -973,15 +1300,24 @@ struct ReactingMixtureCoupler::Implementation
                 require(populations.size() == applied.size() && np <= size_t(std::numeric_limits<int>::max()) / 3,
                     "Population diagnostics row/phase layout differs.");
                 std::vector<Sum> totals(3 * np);
-                for (const auto& receipt : populations)
+                for (size_t c = 0; c < populations.size(); ++c)
                 {
+                    const auto& receipt = populations[c];
                     require(receipt.births.size() == np && receipt.deaths.size() == np && receipt.changes.size() == np,
                         "Population receipt diagnostic shape differs.");
                     for (size_t p = 0; p < np; ++p)
                     {
                         totals[p] += receipt.births[p];
                         totals[np + p] += receipt.deaths[p];
-                        totals[2 * np + p] += receipt.changes[p];
+                        totals[2 * np + p] += applied[c].population_number_changes.at(p);
+                        if (!qbmm.empty() && qbmm[c][p])
+                            for (const auto& event : qbmm[c][p]->events)
+                            {
+                                if (event.kind == QbmmEventKind::Birth)
+                                    totals[p] += event.gross_created[0];
+                                if (event.kind == QbmmEventKind::Disappearance)
+                                    totals[np + p] += event.gross_consumed[0];
+                            }
                     }
                 }
                 local_numbers.resize(totals.size());
@@ -1019,6 +1355,27 @@ const ReactingMixtureCoupler::Diagnostics& ReactingMixtureCoupler::diagnostics()
     return d->diagnostics;
 }
 
+Solver::QbmmReport ReactingMixtureCoupler::qbmm_report() const
+{
+    return qbmm_report_impl(nullptr);
+}
+
+Solver::QbmmReport ReactingMixtureCoupler::qbmm_report(const Trial& trial) const
+{
+    return qbmm_report_impl(&trial);
+}
+
+Solver::QbmmReport ReactingMixtureCoupler::qbmm_report_impl(const Trial* trial) const
+{
+    collective_detail::collective_local_validation(*d->flow->mesh(), "Reacting QBMM report selection",
+        [&]
+        {
+            require(!trial || (trial->d && trial->d->owner == this && trial->d->revision == d->generation),
+                "Reacting QBMM report trial is empty, foreign or stale.");
+        });
+    return trial ? d->flow->qbmm_report(trial->d->flow) : d->flow->qbmm_report();
+}
+
 const Solver::State& ReactingMixtureCoupler::Trial::state() const
 {
     require(bool(d), "Empty reacting mixture trial.");
@@ -1035,6 +1392,11 @@ const std::vector<SpeciesSourceLedger>& ReactingMixtureCoupler::Trial::local_sou
     return d->ledgers;
 }
 
+const Solver::QbmmSourceCells& ReactingMixtureCoupler::Trial::local_qbmm_sources() const
+{
+    require(bool(d), "Empty reacting mixture trial.");
+    return d->flow.qbmm_source_cells();
+}
 const std::vector<MixturePopulationEventReceipt>& ReactingMixtureCoupler::Trial::local_population_events() const
 {
     require(bool(d), "Empty reacting mixture trial.");
@@ -1056,6 +1418,12 @@ const Solver::TransportSnapshot& ReactingMixtureCoupler::Trial::transport_snapsh
 {
     require(bool(d), "Empty reacting mixture trial.");
     return d->flow.transport_snapshot();
+}
+
+std::span<const Solver::PhaseFaceTransport> ReactingMixtureCoupler::Trial::owned_phase_transport() const
+{
+    require(bool(d), "Empty reacting mixture trial.");
+    return d->flow.owned_phase_transport();
 }
 
 ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
@@ -1088,6 +1456,11 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
                                   d->options.population_events->identity + ":" +
                                   std::to_string(d->options.population_events->revision))
                             : std::string{}) +
+                    (d->options.qbmm_population
+                            ? (":qbmm:" + std::to_string(d->options.qbmm_population->metadata.identity.size()) + ":" +
+                                  d->options.qbmm_population->metadata.identity + ":" +
+                                  std::to_string(d->options.qbmm_population->metadata.revision))
+                            : std::string{}) +
                     (d->options.planar_motion
                             ? (":motion:" + std::to_string(d->options.planar_motion->identity.size()) + ":" +
                                   d->options.planar_motion->identity + ":" +
@@ -1117,8 +1490,10 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
                 d->options.source_relative_tolerance, d->options.maximum_correctors});
         });
     auto flow_trial =
-        d->motion ? d->flow->preview_ale_with_sources(dt, *d->motion, target_surface, std::move(provider), &d->lease)
-                  : d->flow->preview_with_sources(dt, std::move(provider), &d->lease);
+        d->motion ? d->flow->preview_ale_with_sources(dt, *d->motion, target_surface, std::move(provider), &*d->lease)
+        : !d->flow->options().qbmm_families.empty()
+            ? d->flow->preview_with_qbmm_sources(dt, std::move(provider), &*d->lease)
+            : d->flow->preview_with_sources(dt, std::move(provider), &*d->lease);
     collective_detail::collective_local_validation(mesh, "Reacting mixture immutable source receipt",
         [&]
         {
@@ -1144,9 +1519,15 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
                     }
             }
             const auto events = flow_trial.integrated_gross_events();
-            require(events.size() == receipt->prepared.result.gross_events.size() &&
-                        std::equal(events.begin(), events.end(), receipt->prepared.result.gross_events.begin()),
-                "Reaction receipt does not match the exact accepted gross events.");
+            const auto& supplied = receipt->prepared.result.gross_events;
+            require(events.size() == supplied.size(), "Reaction receipt gross cell layout differs.");
+            const auto enabled = std::ranges::count_if(
+                d->flow->options().qbmm_families, [](const auto& family) { return bool(family); });
+            const auto native_width = Solver::QbmmSourceReceipt::gross_channels * static_cast<size_t>(enabled);
+            for (size_t c = 0; c < events.size(); ++c)
+                require(events[c].size() == supplied[c].size() + native_width &&
+                            std::ranges::equal(std::span(events[c]).first(supplied[c].size()), supplied[c]),
+                    "Reaction receipt does not match the exact provider-supplied gross channels.");
         });
     const Solver::SourceStageContext final_context{flow_trial.transport_snapshot(), flow_trial.state(), mesh};
     // ALE receipts were producer/phase/epoch validated inside the active source callback.
@@ -1154,8 +1535,10 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
     // Its live geometry is now rolled back, so only fixed-grid previews repeat live-epoch validation.
     if (!d->motion)
         d->source_engine->validate_face_receipts(receipt->prepared, final_context);
+    if (!d->flow->options().qbmm_families.empty())
+        d->flow->finalize_qbmm_balances(flow_trial, std::span<const SpeciesSourceLedger>(receipt->prepared.ledgers));
     auto statistics = d->totals(receipt->prepared.ledgers, flow_trial.integrated_sources(),
-        receipt->prepared.population_events, flow_trial.final_thermal_evaluations(),
+        receipt->prepared.population_events, flow_trial.qbmm_source_cells(), flow_trial.final_thermal_evaluations(),
         flow_trial.diagnostics().source_evaluations, flow_trial.diagnostics());
     std::shared_ptr<Trial::Data> data;
     collective_detail::collective_local_validation(mesh, "Retain immutable reacting trial",
@@ -1191,9 +1574,9 @@ void ReactingMixtureCoupler::commit(const Trial& trial)
             candidate = trial.d->diagnostics;
         });
     if (d->motion)
-        d->flow->commit_ale(trial.d->flow, *d->motion, &d->lease);
+        d->flow->commit_ale(trial.d->flow, *d->motion, &*d->lease);
     else
-        d->flow->commit(trial.d->flow, &d->lease);
+        d->flow->commit(trial.d->flow, &*d->lease);
     d->diagnostics = std::move(candidate);
     ++d->generation;
 }
@@ -1223,9 +1606,9 @@ void ReactingMixtureCoupler::restore(const Checkpoint& checkpoint)
             restored = checkpoint.diagnostics;
         });
     if (d->motion)
-        d->flow->restore(checkpoint.flow, *d->motion, &d->lease);
+        d->flow->restore(checkpoint.flow, *d->motion, &*d->lease);
     else
-        d->flow->restore(checkpoint.flow, &d->lease);
+        d->flow->restore(checkpoint.flow, &*d->lease);
     d->diagnostics = std::move(restored);
     ++d->generation;
 }

@@ -2,11 +2,12 @@
  * @brief External transactional reaction controller for conservative low-Mach mixture flow.
  */
 #pragma once
-#include "utils/export_helper.hh"
 #include "equations/BubblePopulationKinetics.hh"
+#include "equations/QbmmPopulationEvents.hh"
 #include "equations/ReactionMechanism.hh"
 #include "solvers/LowMachMixtureSolver.hh"
 #include "solvers/MixtureFaceTransport.hh"
+#include "utils/export_helper.hh"
 #include <functional>
 #include <memory>
 #include <optional>
@@ -56,6 +57,28 @@ struct MixturePopulationEventProvider
     const std::uint64_t revision = 1, schema_fingerprint = 0;
     const std::function<std::vector<BubbleGasPhysics::PopulationNumberEvent>(const MixturePopulationEventContext&)>
         evaluate;
+    /** Explicit scope when coexisting with QBMM. An empty list retains the count-only controller convention. */
+    const std::vector<std::string> populations{};
+};
+
+struct MixtureQbmmContext
+{
+    const QbmmPopulationSchema& family;
+    std::size_t phase, owned_cell;
+    const QbmmQuadrature& quadrature;      ///< Transported pre-material family, with extensive weights.
+    const CellSpeciesState& material;      ///< Actual predecessor of this material stage.
+    std::span<const double> phase_volumes; ///< EOS occupied m3/cell at the current trial pressure and temperature.
+    std::span<const PhaseThermalState> phases;
+    const LowMachMixtureSolver::SourceStageMetadata& stage;
+    double time_step, accepted_time;
+};
+
+/** Integrated local allocation law. Its optional material slots use pressure-conditioned donor enthalpy. */
+struct MixtureQbmmProvider
+{
+    const ThermalLawIdentity metadata;
+    const std::shared_ptr<const InterphaseConfiguration> transfers;
+    const std::function<std::vector<QbmmEventOperation>(const MixtureQbmmContext&)> evaluate;
 };
 /** Exact local supplied events and their raw endpoint replay proof; aligned with physical phases. */
 struct MixturePopulationEventReceipt
@@ -64,6 +87,7 @@ struct MixturePopulationEventReceipt
     std::uint64_t provider_revision = 0, schema_fingerprint = 0;
     std::vector<BubbleGasPhysics::PopulationNumberEvent> events;
     LowMachMixtureSolver::SourceStageMetadata source_stage;
+    // Number-law predecessor and endpoint. A QBMM slot already includes its separately retained Q1 events.
     std::vector<std::optional<double>> transported_numbers, final_numbers;
     std::vector<double> births, deaths, changes;
 };
@@ -130,6 +154,7 @@ struct ReactingMixtureOptions
     std::shared_ptr<const MixturePlanarMotionProvider> planar_motion; ///< Optional prescribed closed planar ALE.
     std::shared_ptr<const MixtureInterphaseEventProvider>
         interphase; ///< Frozen material amounts before explicit number law.
+    std::shared_ptr<const MixtureQbmmProvider> qbmm_population;
 };
 
 class SIMPLEFLUID_SOLVERS_EXPORT ReactingMixtureCoupler
@@ -153,10 +178,13 @@ public:
         [[nodiscard]] const Diagnostics& diagnostics() const;
         /** Chemistry and declared reservoir ledgers; internal face packets remain distinct private receipts. */
         [[nodiscard]] const std::vector<SpeciesSourceLedger>& local_sources() const;
+        [[nodiscard]] const LowMachMixtureSolver::QbmmSourceCells& local_qbmm_sources() const;
         [[nodiscard]] const std::vector<MixturePopulationEventReceipt>& local_population_events() const;
         [[nodiscard]] const std::shared_ptr<const PressureConditionedThermalBatch>& interphase_receipt() const;
         [[nodiscard]] std::span<const PressureConditionedThermalEvaluation> final_thermal_evaluations() const;
         [[nodiscard]] const LowMachMixtureSolver::TransportSnapshot& transport_snapshot() const;
+        /** Rates used by native phase transport before this trial's material and thermal sources. */
+        [[nodiscard]] std::span<const LowMachMixtureSolver::PhaseFaceTransport> owned_phase_transport() const;
 
     private:
         friend class ReactingMixtureCoupler;
@@ -188,8 +216,12 @@ public:
     void restore(const Checkpoint& checkpoint);
     [[nodiscard]] const std::shared_ptr<LowMachMixtureSolver>& solver() const noexcept;
     [[nodiscard]] const Diagnostics& diagnostics() const noexcept;
+    /** Collective QBMM reporting on the solver communicator for the accepted state or a live trial. */
+    [[nodiscard]] LowMachMixtureSolver::QbmmReport qbmm_report() const;
+    [[nodiscard]] LowMachMixtureSolver::QbmmReport qbmm_report(const Trial& trial) const;
 
 private:
+    SIMPLEFLUID_SOLVERS_LOCAL LowMachMixtureSolver::QbmmReport qbmm_report_impl(const Trial* trial) const;
     struct SIMPLEFLUID_SOLVERS_LOCAL Implementation;
     std::unique_ptr<Implementation> d;
 };

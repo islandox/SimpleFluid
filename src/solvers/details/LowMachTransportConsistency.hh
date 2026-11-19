@@ -43,6 +43,41 @@ SIMPLEFLUID_SOLVERS_LOCAL inline double narrow(long double value)
         throw std::invalid_argument("Low-Mach transport packet is nonfinite or unrepresentable.");
     return result;
 }
+
+SIMPLEFLUID_SOLVERS_LOCAL inline void require_transport_roundoff(double rounded, long double value, const char* message)
+{
+    if (value == 0 ||
+        std::abs((static_cast<long double>(rounded) - value) / value) > std::numeric_limits<double>::epsilon())
+        throw std::invalid_argument(message);
+}
+
+SIMPLEFLUID_SOLVERS_LOCAL inline void set_owned_donor_packets(const Flow::Mesh& mesh, const Face& phase_flux,
+    const Scalar& concentration, Face& packets, bool require_relative_roundoff = false)
+{
+    for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
+    {
+        const LO face = static_cast<LO>(f);
+        const double phi = phase_flux.local_value(face);
+        if (mesh.is_geometry_exterior_face(face))
+        {
+            if (phi != 0)
+                throw std::invalid_argument("Closed phase transport has nonzero relative boundary flux.");
+            packets.set_owned_value(face, 0.);
+            continue;
+        }
+        const LO owner = mesh.owner_cell(face);
+        const LO donor = phi >= 0 ? owner : mesh.opposite_or_periodic_neighbor_cell(face, owner);
+        const double trace = concentration.local_value(donor);
+        const double packet = phi * trace;
+        if (!std::isfinite(packet) || (phi != 0 && trace != 0 && packet == 0))
+            throw std::invalid_argument("Canonical transport face packet is not representable.");
+        if (require_relative_roundoff && std::fpclassify(packet) == FP_SUBNORMAL)
+            require_transport_roundoff(
+                packet, static_cast<long double>(phi) * trace, "QBMM canonical face packet loses relative precision.");
+        packets.set_owned_value(face, packet);
+    }
+}
+
 /** The returned amounts, divided by Vnew exactly as the caller does, own all donor traces.
  * Every local sweep spends one remaining iteration of the original scalar solve.
  * This is the existing backward-Euler/upwind/zero-diffusion operator, including ALE;
@@ -108,28 +143,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline Result enforce(const SP<const Flow::Mesh>& grid
             });
         concentration.sync_ghosts();
         collective_detail::collective_local_validation(mesh, "Canonical local transport packets",
-            [&]
-            {
-                for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
-                {
-                    const LO face = static_cast<LO>(f);
-                    const double phi = phase_flux.local_value(face);
-                    if (mesh.is_geometry_exterior_face(face))
-                    {
-                        if (phi != 0)
-                            throw std::invalid_argument("Closed phase transport has nonzero relative boundary flux.");
-                        packets.set_owned_value(face, 0.);
-                        continue;
-                    }
-                    const LO owner = mesh.owner_cell(face),
-                             donor = phi >= 0 ? owner : mesh.opposite_or_periodic_neighbor_cell(face, owner);
-                    const double donor_trace = concentration.local_value(donor);
-                    const double packet = phi * donor_trace;
-                    if (!std::isfinite(packet) || (phi != 0 && donor_trace != 0 && packet == 0))
-                        throw std::invalid_argument("Canonical transport face packet is not representable.");
-                    packets.set_owned_value(face, packet);
-                }
-            });
+            [&] { set_owned_donor_packets(mesh, phase_flux, concentration, packets); });
         packets.sync_ghosts();
         double local_error = 0, error = 0;
         collective_detail::collective_local_validation(mesh, "Physical componentwise transport balance",
