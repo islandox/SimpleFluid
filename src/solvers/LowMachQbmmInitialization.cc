@@ -30,8 +30,9 @@ void LowMachMixtureSolver::supply_qbmm_shape(State& legacy, const QbmmInitializa
             for (std::size_t c = 0; c < legacy.cells.size(); ++c)
             {
                 auto& cell = legacy.cells[c];
-                if (!cell.qbmm_shape.empty() || cell.phases.size() != families.size() ||
-                    cell.phase_numbers.size() != families.size() || initialization.cells[c].size() != families.size())
+                if (!cell.qbmm_shape.empty() || !cell.qbmm_kinetic_closure.empty() ||
+                    cell.phases.size() != families.size() || cell.phase_numbers.size() != families.size() ||
+                    initialization.cells[c].size() != families.size())
                     throw std::invalid_argument("QBMM migration requires a count-only cell in physical phase order.");
                 cell.qbmm_shape.resize(families.size());
                 for (std::size_t p = 0; p < families.size(); ++p)

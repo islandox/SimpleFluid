@@ -126,11 +126,15 @@ Solver::QbmmCellFamilyReport qbmm_cell_report(const QbmmPopulationSchema& family
             phase.thermodynamics->evaluate(phase.temperature, phase.absolute_pressure, fractions(phase)).density;
         report.phase_density_kg_per_m3 = density;
         report.temperature_K = phase.temperature;
+        const bool kinetic = !cell.qbmm_kinetic_eos_volumes.empty();
         report.phase_volume_m3 =
-            qbmm_report_quotient(phase_mass, density, "QBMM report phase volume is not representable.");
+            kinetic ? cell.qbmm_kinetic_eos_volumes.at(phase_index)
+                    : qbmm_report_quotient(phase_mass, density, "QBMM report phase volume is not representable.");
         report.phase_fraction = qbmm_report_quotient(
             report.phase_volume_m3, bulk_volume, "QBMM report phase fraction is not representable.");
-        specific_volume = qbmm_report_quotient(1, density, "QBMM report phase specific volume is not representable.");
+        specific_volume =
+            kinetic ? qbmm_native_law_detail::kinetic_specific_volume(phase, report.phase_volume_m3)
+                    : qbmm_report_quotient(1, density, "QBMM report phase specific volume is not representable.");
         auto& concentrations = report.phase_concentration_mol_per_m3.emplace();
         concentrations.reserve(phase.moles.size());
         for (double moles : phase.moles)
@@ -228,22 +232,61 @@ void qbmm_report_applicability(const QbmmPopulationSchema& schema, const Solver:
         {
             const auto point =
                 liquid.thermodynamics->evaluate(liquid.temperature, liquid.absolute_pressure, fractions(liquid));
-            const double volume = qbmm_report_quotient(
-                mass, point.density, "QBMM applicability carrier-liquid volume is not representable.");
+            const double volume = state.qbmm_kinetic_eos_volumes.empty()
+                                      ? qbmm_report_quotient(mass, point.density,
+                                            "QBMM applicability carrier-liquid volume is not representable.")
+                                      : state.qbmm_kinetic_eos_volumes.at(*liquid_index);
             liquid_concentrations = qbmm_phase_concentrations(liquid.moles, volume);
             liquid_temperature = liquid.temperature;
         }
     }
-    const auto& drift = state.drift_velocity.at(phase_index);
-    const auto inputs = make_qbmm_law_inputs(schema,
-        {report.quadrature, report.geometry, report.species_moles, bulk_volume, report.phase_volume_m3,
-            report.absolute_pressure_pa, report.temperature_K, duration, gas_fraction, std::move(liquid_concentrations),
-            liquid_temperature, {drift.component(0), drift.component(1), drift.component(2)}});
+    const auto drift = qbmm_native_law_detail::mean_drift_velocity(state, phase_index);
+    const auto make_inputs = [&](std::optional<double> interval_duration)
+    {
+        return make_qbmm_law_inputs(
+            schema, {report.quadrature, report.geometry, report.species_moles, bulk_volume, report.phase_volume_m3,
+                        report.absolute_pressure_pa, report.temperature_K, interval_duration, gas_fraction,
+                        liquid_concentrations, liquid_temperature,
+                        {drift.component(0), drift.component(1), drift.component(2)}});
+    };
+    const auto inputs = make_inputs(duration);
     for (std::size_t i = 0; i < aggregate.law_metadata.size(); ++i)
     {
-        auto evaluation = evaluate_qbmm_applicability(aggregate.law_metadata[i], inputs);
-        const bool absent =
-            report.quadrature.status == InversionStatus::Absent && aggregate.law_metadata[i].requires_population;
+        const auto& law = aggregate.law_metadata[i];
+        auto evaluation = evaluate_qbmm_applicability(law, inputs);
+        if (law.kind == QbmmLawKind::NodeSlip && report.kinetic_closure && report.kinetic_closure->active_atoms > 0)
+        {
+            const auto endpoint_inputs = make_inputs(std::nullopt);
+            for (std::size_t atom = 0; atom < report.kinetic_closure->active_atoms; ++atom)
+            {
+                const double speed =
+                    qbmm_native_law_detail::kinetic_speed(report.kinetic_closure->node_velocities[atom]);
+                report.node_slip_applicability[atom] =
+                    evaluate_qbmm_node_slip_applicability(law, endpoint_inputs, atom, speed);
+            }
+            evaluation = *report.node_slip_applicability[0];
+            if (const auto& second = report.node_slip_applicability[1])
+            {
+                evaluation.applicable = evaluation.applicable && second->applicable;
+                evaluation.gate_passed = evaluation.gate_passed && second->gate_passed;
+                for (std::size_t r = 0; r < evaluation.ranges.size(); ++r)
+                {
+                    auto& first_range = evaluation.ranges[r];
+                    const auto& second_range = second->ranges[r];
+                    if (first_range.observed_minimum && second_range.observed_minimum)
+                    {
+                        first_range.observed_minimum =
+                            std::min(*first_range.observed_minimum, *second_range.observed_minimum);
+                        first_range.observed_maximum =
+                            std::max(*first_range.observed_maximum, *second_range.observed_maximum);
+                    }
+                    if (first_range.status != QbmmRangeStatus::MissingInput &&
+                        second_range.status != QbmmRangeStatus::WithinRange)
+                        first_range.status = second_range.status;
+                }
+            }
+        }
+        const bool absent = report.quadrature.status == InversionStatus::Absent && law.requires_population;
         ++aggregate.applicability_counts[i][absent ? 2 : evaluation.applicable ? 0 : 1];
         if (!evaluation.gate_passed)
             ++aggregate.applicability_gate_failures[i];
@@ -267,6 +310,13 @@ std::shared_ptr<const LowMachMixtureSolver::QbmmIntervalReport> LowMachMixtureSo
     interval->source_stage = transport.stage;
     interval->local_receipts = trial.qbmm_cells;
     interval->local_gross_events = trial.gross_events;
+    interval->kinetic_substeps = trial.statistics.kinetic_substeps;
+    interval->maximum_kinetic_cfl = trial.statistics.maximum_kinetic_cfl;
+    if (interval->kinetic_substeps > 0)
+    {
+        interval->local_face_transport = trial.phase_transport;
+        interval->local_kinetic_law_receipts = trial.kinetic_law_receipts;
+    }
     return interval;
 }
 
@@ -300,6 +350,7 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
 {
     const auto& mesh = *d->mesh;
     QbmmReport report;
+    report.family_transport = d->options.qbmm_model.family_transport;
     auto& provenance = report.provenance;
     const auto& catalog = d->eos.front()->catalog();
     const auto& families = d->options.qbmm_families;
@@ -406,6 +457,8 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                 FaceSum total_mass;
                 std::array<FaceSum, 3> drift_momentum, absolute_momentum;
                 cell.families.resize(families.size());
+                if (uses_qbmm_kinetic_transport(d->options.qbmm_model))
+                    qbmm_native_law_detail::validate_kinetic_closure(d->options, state.cells[c]);
                 for (std::size_t a = 0; a < families.size(); ++a)
                 {
                     const auto& phase = state.cells[c].phases[a];
@@ -414,17 +467,24 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                     total_mass.add_product(mass, 1.);
                     for (std::size_t axis = 0; axis < 3; ++axis)
                     {
-                        const double drift = state.cells[c].drift_velocity[a].component(axis);
-                        drift_momentum[axis].add_product(mass, drift);
-                        // Distribute the phase mass over carrier + drift to preserve both operands.
+                        drift_momentum[axis].add_product(mass, state.cells[c].drift_velocity[a].component(axis));
                         absolute_momentum[axis].add_product(mass, cell.carrier_velocity.component(axis));
-                        absolute_momentum[axis].add_product(mass, drift);
                     }
                     if (mass > 0 && !cell.temperature_K)
                         cell.temperature_K = phase.temperature;
                     if (families[a])
                     {
                         cell.families[a] = qbmm_cell_report(*families[a], state.cells[c], a, mass, cell.bulk_volume_m3);
+                        if (uses_qbmm_kinetic_transport(d->options.qbmm_model))
+                        {
+                            auto& family_report = *cell.families[a];
+                            family_report.kinetic_closure = state.cells[c].qbmm_kinetic_closure[a];
+                            if (family_report.kinetic_closure->active_atoms > 0)
+                                family_report.mean_node_slip_m_per_s =
+                                    qbmm_native_law_detail::mean_drift_velocity(state.cells[c], a);
+                            qbmm_native_law_detail::accumulate_kinetic_drift(
+                                *families[a], family_report.quadrature, *family_report.kinetic_closure, drift_momentum);
+                        }
                         qbmm_update_aggregate(*report.families[a], cell.families[a]->quadrature);
                         gas_volume += cell.families[a]->phase_volume_m3;
                     }
@@ -438,8 +498,11 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                 }
                 cell.mixture_density_kg_per_m3 = qbmm_report_quotient(
                     mixture_mass, cell.bulk_volume_m3, "QBMM report mixture density is not representable.");
-                cell.gas_volume_fraction = qbmm_report_quotient(
-                    gas_volume, cell.bulk_volume_m3, "QBMM report gas volume fraction is not representable.");
+                cell.gas_volume_fraction = uses_qbmm_kinetic_transport(d->options.qbmm_model)
+                                               ? qbmm_native_law_detail::kinetic_gas_fraction(state.cells[c],
+                                                     state.cells[c].qbmm_kinetic_eos_volumes, cell.bulk_volume_m3)
+                                               : qbmm_report_quotient(gas_volume, cell.bulk_volume_m3,
+                                                     "QBMM report gas volume fraction is not representable.");
                 const auto interval = trial ? nullptr : d->qbmm_publication ? d->qbmm_publication->interval : nullptr;
                 const std::optional<double> duration = trial      ? std::optional<double>(trial->transport.time_step)
                                                        : interval ? std::optional<double>(interval->time_step)
@@ -452,6 +515,7 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                 for (std::size_t axis = 0; axis < 3; ++axis)
                 {
                     const double drift = drift_momentum[axis].rounded(total_mass);
+                    absolute_momentum[axis].add_weighted(drift_momentum[axis], 1.);
                     const double barycentric = absolute_momentum[axis].rounded(total_mass);
                     check(std::isfinite(drift) && std::isfinite(barycentric),
                         "QBMM report drift or barycentric velocity is not finite.");
@@ -470,6 +534,8 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                 report.balances = d->qbmm_publication->balances;
             }
             const auto& diagnostics = trial ? trial->statistics : d->diagnostics;
+            report.kinetic_substeps = diagnostics.kinetic_substeps;
+            report.maximum_kinetic_cfl = diagnostics.maximum_kinetic_cfl;
             if (diagnostics.correctors > 0)
             {
                 auto& convergence = report.convergence.emplace();

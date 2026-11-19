@@ -85,6 +85,15 @@ public:
         std::vector<std::shared_ptr<const QbmmPopulationSchema>>
             qbmm_families; ///< Empty disables QBMM. Otherwise EOS-indexed, null for unbound phases.
         QbmmModelOptions qbmm_model;
+        std::vector<std::shared_ptr<const QbmmNodeSlipLaw>>
+            qbmm_node_slip_laws; ///< Kinetic-only, EOS-indexed and nonnull precisely for bound families.
+    };
+    struct QbmmKineticClosure
+    {
+        std::size_t active_atoms = 0;
+        std::array<Vector, 2> node_velocities{}; ///< Relative m/s in the endpoint quadrature's active order.
+        Vector drift_momentum{};                 ///< Extensive sum(count * mass * slip), kg m/s.
+        bool operator==(const QbmmKineticClosure&) const = default;
     };
     struct CellState
     {
@@ -96,6 +105,9 @@ public:
         std::vector<std::optional<double>>
             phase_numbers; ///< Engaged extensive finite N only for explicit dispersed roles.
         std::vector<std::optional<QbmmShapeState>> qbmm_shape; ///< Extensive H2,H3 only for enabled families.
+        std::vector<std::optional<QbmmKineticClosure>>
+            qbmm_kinetic_closure; ///< Solver-owned derived endpoint, in physical phase order for kinetic runs.
+        std::vector<double> qbmm_kinetic_eos_volumes; ///< Physical EOS volumes used for the retained endpoint law.
     };
     struct State
     {
@@ -227,6 +239,23 @@ public:
          */
         const std::optional<Vector> body_acceleration = std::nullopt;
     };
+    /** Actual interval-averaged atom transfers with owner-oriented signs, including for the backward direction. */
+    struct QbmmDirectionalFlux
+    {
+        std::vector<double> species_molar_flux;
+        QbmmMomentBlock moment_flux{};
+        double mass_flux = 0, internal_energy_flux = 0, material_volume_flux = 0;
+        Vector carrier_momentum_flux{}, drift_momentum_flux{}; ///< Frozen donor trace contributions.
+        double integrated_count = 0, integrated_mass = 0;      ///< Actual count and kg over the full interval.
+        bool operator==(const QbmmDirectionalFlux&) const = default;
+    };
+    struct QbmmKineticFaceFlux
+    {
+        QbmmDirectionalFlux forward, backward;
+        double theta = 0, slip_volume_flux = 0; ///< Frozen pressure coefficients over the actual substeps.
+        double pressure_rounding_flux = 0;      ///< Representation correction in m3/s at the stage carrier flux.
+        bool operator==(const QbmmKineticFaceFlux&) const = default;
+    };
     struct QbmmFaceFlux
     {
         std::vector<double> species_molar_flux; ///< Owner-oriented mol/s, ordered catalog.
@@ -236,11 +265,14 @@ public:
         double material_volume_flux = 0;        ///< Exact owner-oriented m3/s consumed by native work and continuity.
         double derived_mass_flux = 0;           ///< Species rates weighted by molar mass and rounded to double, kg/s.
         Vector derived_drift_momentum_flux{};   ///< Donor drift-weighted mass rate rounded to double, kg m/s2.
+        std::optional<QbmmKineticFaceFlux> kinetic;
         bool operator==(const QbmmFaceFlux&) const = default;
     };
     /** Exact owned-face packet used by the final conservative transport stage.
      * carrier_volume_flux is the STAGE-USED absolute carrier flux, before the last pressure correction.
-     * phase_volume_flux contains absolute carrier-plus-phase-slip fluxes, m3/s.
+     * phase_volume_flux contains absolute carrier-plus-phase-slip fluxes, m3/s, for ordinary/native phases.
+     * Kinetic slots use only the directional receipts in qbmm_flux and have zero phase_volume_flux
+     * and relative_phase_volume_flux entries.
      * material_fraction contains that phase's actual upwind EOS fraction; sums may exceed one in counterflow.
      * Trial::owned_volume_flux() instead contains the FINAL corrected absolute carrier flux.
      */
@@ -253,6 +285,14 @@ public:
         std::vector<std::optional<QbmmFaceFlux>> qbmm_flux; ///< EOS-indexed; engaged for bound families only.
         double momentum_mass_flux = 0; ///< Exact owner-oriented kg/s consumed by native momentum convection.
         Vector drift_momentum_flux{};  ///< Exact owner-oriented kg m/s2 consumed by native drift-momentum divergence.
+        double forward_mass_flux = 0, backward_mass_flux = 0; ///< Directional magnitudes across all physical phases.
+        Vector momentum_owner_velocity{},
+            momentum_neighbor_velocity{};        ///< Kinetic implicit carrier solve, before projection.
+        Vector implicit_carrier_momentum_flux{}; ///< Owner-oriented carrier momentum flux from that solve.
+        double symmetric_mass_flux = 0;          ///< Counterflow coefficient in the carrier convection solve, kg/s.
+        double theta = 0, slip_volume_flux = 0;  ///< Time-averaged physical material coefficients.
+        double pressure_rounding_flux = 0; ///< Difference between direct material flux and represented theta*phi + S.
+        double material_volume_flux = 0;   ///< All-phase direct volume rate at the stage carrier flux, m3/s.
         bool operator==(const PhaseFaceTransport&) const = default;
     };
     struct Diagnostics
@@ -318,6 +358,8 @@ public:
         TransportMultiRhsDiagnostics transport_multi_rhs = {};
         std::optional<double> maximum_fourier_gross_comparison_uncertainty_j;
         ///< Fourier operand comparison bound in joules, retained by portable v5 when known.
+        int kinetic_substeps = 0; ///< Actual globally synchronized substeps in the final corrector.
+        double maximum_kinetic_cfl = 0;
     };
     enum class QbmmStateKind
     {
@@ -363,6 +405,9 @@ public:
         std::optional<QbmmGeometryView> geometry; ///< Engaged for supported inversion, including exact absence.
         bool closure_evaluated = false, closure_validated = false; ///< Physical validation requires application data.
         std::vector<QbmmApplicabilityEvaluation> applicability;    ///< Supplied ranges; distinct from realizability.
+        std::optional<QbmmKineticClosure> kinetic_closure;
+        std::optional<Vector> mean_node_slip_m_per_s; ///< D/M for an occupied kinetic family.
+        std::array<std::optional<QbmmApplicabilityEvaluation>, 2> node_slip_applicability;
     };
     struct QbmmCellReport
     {
@@ -387,6 +432,14 @@ public:
         std::vector<std::array<std::uint64_t, 3>> applicability_counts;
         std::vector<std::uint64_t> applicability_gate_failures;
     };
+    struct QbmmKineticLawReceipt
+    {
+        Pack::global_ordinal_type geometry_cell_id = 0;
+        std::size_t phase = 0, substep = 0, atom = 0; ///< Physical phase, interval substep, and local active atom.
+        double duration = 0, mass_kg_per_bubble = 0;
+        Vector slip_velocity{};
+        QbmmApplicabilityEvaluation applicability;
+    };
     struct QbmmIntervalReport
     {
         std::uint64_t preview_id = 0, transported_from_revision = 0, transported_from_generation = 0;
@@ -395,6 +448,10 @@ public:
         SourceStageMetadata source_stage;
         QbmmSourceCells local_receipts;
         std::vector<std::vector<double>> local_gross_events; ///< Exact final per-cell corrector packets.
+        int kinetic_substeps = 0;
+        double maximum_kinetic_cfl = 0;
+        std::vector<PhaseFaceTransport> local_face_transport; ///< Final corrector's kinetic owned-face evidence.
+        std::vector<QbmmKineticLawReceipt> local_kinetic_law_receipts;
     };
     struct QbmmConvergenceReport
     {
@@ -429,6 +486,9 @@ public:
         std::shared_ptr<const QbmmIntervalReport> interval;
         std::optional<QbmmConvergenceReport> convergence;
         std::optional<QbmmBalances> balances;
+        QbmmModelOptions::FamilyTransport family_transport = QbmmModelOptions::FamilyTransport::NativeImplicit;
+        int kinetic_substeps = 0; ///< Last interval, including when portable history omits the face receipts.
+        double maximum_kinetic_cfl = 0;
     };
     class Checkpoint
     {
@@ -482,6 +542,7 @@ public:
         std::vector<PressureConditionedThermalEvaluation> thermal_evaluations;
         std::vector<double> face_flux;
         std::vector<PhaseFaceTransport> phase_transport;
+        std::vector<QbmmKineticLawReceipt> kinetic_law_receipts;
         const LowMachMixtureSolver* owner = nullptr;
         std::uint64_t nonce = 0, base_revision = 0, geometry_epoch = 0, logical_geometry = 0;
         std::shared_ptr<const ALEGeometryCertificate> ale_geometry;
@@ -650,7 +711,7 @@ private:
     SIMPLEFLUID_SOLVERS_LOCAL void rollback_failed_planar_restore(PlanarMotion& motion);
     SIMPLEFLUID_SOLVERS_LOCAL ControllerLease acquire_controller_for(std::string_view signature,
         bool legacy_compatible = true, std::optional<Vector> body_acceleration = {},
-        const PlanarMotion* motion = nullptr);
+        const PlanarMotion* motion = nullptr, const ControllerRestartDiagnostics* restart = nullptr);
     SIMPLEFLUID_SOLVERS_LOCAL void require_controller(const ControllerLease* controller) const;
     SIMPLEFLUID_SOLVERS_LOCAL void release_controller(std::uint64_t id) noexcept;
     SIMPLEFLUID_SOLVERS_LOCAL QbmmReport qbmm_report_impl(const Trial* trial) const;

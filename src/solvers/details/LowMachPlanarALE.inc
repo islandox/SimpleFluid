@@ -27,6 +27,8 @@ std::shared_ptr<LowMachMixtureSolver::ALEGeometryCertificate> LowMachMixtureSolv
     collective_detail::collective_local_validation(mesh, "Accepted planar geometry authority",
         [&]
         {
+            check(d->options.qbmm_model.velocity != QbmmModelOptions::Velocity::NodeDependentSlip,
+                "Kinetic QBMM requires fixed Cartesian geometry.");
             d->validate_planar_controller_authority(motion);
             check(d->initialized && d->epoch == mesh_geometry_epoch(mesh) && !motion.has_active_trial() &&
                       motion.mesh_ptr().get() == d->mesh.get() &&

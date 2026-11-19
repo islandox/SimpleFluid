@@ -9,6 +9,7 @@
 #include "solvers/details/LowMachFaceSourceComposition.hh"
 #include "solvers/details/LowMachPopulationSource.hh"
 #include "solvers/details/LowMachQbmmControllerRestart.hh"
+#include "solvers/details/LowMachQbmmLawInputs.hh"
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
@@ -192,6 +193,8 @@ struct SourceEngine
             require(transport.cells[c].phases.size() == np && cell.phases.size() == np,
                 "Transport/source physical phase counts do not agree.");
             cell.phase_numbers.resize(np);
+            const bool kinetic = uses_qbmm_kinetic_transport(flow->options().qbmm_model);
+            std::vector<double> kinetic_volumes(kinetic ? np : 0);
             for (size_t p = 0; p < np; ++p)
             {
                 cell.phase_numbers[p] = transport.cells[c].phases[p].population_number;
@@ -233,6 +236,8 @@ struct SourceEngine
                     }
                     const auto point = phase.thermodynamics->evaluate(phase.temperature, phase.absolute_pressure, x);
                     phase.internal_energy = double(phase_mass.value() * point.internal_energy);
+                    if (kinetic)
+                        kinetic_volumes[p] = static_cast<double>(phase_mass.value() / point.density);
                     require(std::isfinite(phase.internal_energy), "Rate-state phase energy overflow.");
                 }
                 else
@@ -241,6 +246,9 @@ struct SourceEngine
                     phase.internal_energy = 0;
                 }
             }
+            if (kinetic)
+                qbmm_native_law_detail::evaluate_kinetic_closure(flow->options(), cell,
+                    transport.new_control_volumes.at(c), kinetic_volumes, source_location(context, c));
             const auto initial = species(cell);
             for (size_t p = 0; p < np; ++p)
                 if (qbmm_bound(p))
@@ -430,6 +438,22 @@ struct SourceEngine
         return volumes;
     }
 
+    void refresh_kinetic_source_closure(
+        const Solver::SourceStageContext& context, size_t c, Solver::CellState& guess) const
+    {
+        if (uses_qbmm_kinetic_transport(flow->options().qbmm_model))
+        {
+            // Material stages own their original thermal operands. Evaluate slip using the EOS
+            // trace of this stage's actual material and publish just the closure to its callback.
+            auto rate_state = guess;
+            const auto volumes = qbmm_phase_volumes(rate_state);
+            qbmm_native_law_detail::evaluate_kinetic_closure(flow->options(), rate_state,
+                context.transport.new_control_volumes.at(c), volumes, source_location(context, c));
+            guess.qbmm_kinetic_closure = std::move(rate_state.qbmm_kinetic_closure);
+            guess.qbmm_kinetic_eos_volumes = std::move(rate_state.qbmm_kinetic_eos_volumes);
+        }
+    }
+
     void add_material(size_t c, size_t p, size_t s, double amount, std::vector<Faces::MolarTerm>& terms,
         Faces::LocalSourceAccumulator& sums) const
     {
@@ -502,6 +526,9 @@ struct SourceEngine
                     {
                         guess = material_guess(caloric_guess, transported, material);
                         phase_volumes = qbmm_phase_volumes(guess);
+                        if (uses_qbmm_kinetic_transport(flow->options().qbmm_model))
+                            qbmm_native_law_detail::evaluate_kinetic_closure(flow->options(), guess,
+                                transport.new_control_volumes.at(c), phase_volumes, source_location(context, c));
                     }
                     const double bulk_volume = transport.new_control_volumes.at(c);
                     std::optional<double> specific_volume, temperature;
@@ -516,7 +543,7 @@ struct SourceEngine
                     for (size_t other = 0; other < phase_volumes.size(); ++other)
                         if (guess.phases[other].thermodynamics->kind() == EOSKind::Gas)
                             gas_volume += phase_volumes[other];
-                    const auto& drift = caloric_guess.drift_velocity[p];
+                    const auto drift = qbmm_native_law_detail::mean_drift_velocity(guess, p);
                     const auto inputs = make_qbmm_law_inputs(family,
                         {quadrature, qbmm_geometry(family, pre, bulk_volume, specific_volume), pre.species_moles,
                             bulk_volume, phase_volumes[p], guess.phases[p].absolute_pressure, temperature,
@@ -650,6 +677,7 @@ struct SourceEngine
             FrozenInterphasePlan generic;
             if (options.interphase)
             {
+                refresh_kinetic_source_closure(context, c, guess);
                 auto amounts = options.interphase->integrate(
                     {catalog, donors[c], context.transport.cells[c], guess, context.transport.stage, c,
                         context.transport.time_step, context.transport.accepted_time, source_location(context, c)});
@@ -811,6 +839,7 @@ struct SourceEngine
                     std::vector<BubbleGasPhysics::PopulationNumberEvent> events;
                     if (options.population_events)
                     {
+                        refresh_kinetic_source_closure(context, c, guess);
                         events = options.population_events->evaluate({population_catalog, result.post_faces[c],
                             transported, guess, context.transport.stage, c, context.transport.time_step});
                         const auto& declared = options.population_events->populations;
@@ -991,6 +1020,9 @@ struct ReactingMixtureCoupler::Implementation
                     "Reacting mixture controller requires a mechanism, phases and valid iteration controls.");
                 require((!options.source || !options.source_identity.empty()) && options.source_revision > 0,
                     "A reaction source needs an explicit identity and a positive immutable revision.");
+                require(!uses_qbmm_kinetic_transport(flow->options().qbmm_model) ||
+                            (!options.planar_motion && !options.body_acceleration),
+                    "Node-dependent slip requires fixed geometry with body acceleration disabled.");
                 require(flow->initialized(), "Initialize low-Mach flow before constructing its reaction controller.");
                 if (options.body_acceleration)
                 {
@@ -1219,6 +1251,19 @@ struct ReactingMixtureCoupler::Implementation
                     for (const auto& name : options.population_events->populations)
                         signature << ':' << name.size() << ':' << name;
                 }
+                if (uses_qbmm_kinetic_transport(flow->options().qbmm_model))
+                {
+                    const auto& model = flow->options().qbmm_model;
+                    signature << ":kinetic-euler-v1:" << model.kinetic_cfl << ':' << model.maximum_kinetic_substeps;
+                    for (const auto& binding : flow->options().qbmm_node_slip_laws)
+                        if (binding)
+                        {
+                            const auto metadata = qbmm_law_signature(binding->metadata);
+                            signature << ':' << metadata.size() << ':' << metadata;
+                        }
+                        else
+                            signature << ":0:";
+                }
                 signature << ":qbmm:" << bool(options.qbmm_population);
                 if (options.qbmm_population)
                 {
@@ -1310,8 +1355,10 @@ struct ReactingMixtureCoupler::Implementation
             flow->options().qbmm_model.velocity == QbmmModelOptions::Velocity::SharedCarrier &&
             std::ranges::all_of(flow->options().qbmm_families,
                 [](const auto& family) { return !family || family->closure_versions().laws.empty(); });
-        lease.emplace(
-            flow->acquire_controller_for(schema_signature, legacy_compatible, options.body_acceleration, motion.get()));
+        const Solver::ControllerRestartDiagnostics restart{
+            options.mechanism->reactions().size(), nullptr, &diagnostics};
+        lease.emplace(flow->acquire_controller_for(
+            schema_signature, legacy_compatible, options.body_acceleration, motion.get(), &restart));
     }
 
     Diagnostics totals(const std::vector<SpeciesSourceLedger>& ledgers, std::span<const Solver::CellSources> applied,
@@ -1732,11 +1779,12 @@ void ReactingMixtureCoupler::restore(const Checkpoint& checkpoint)
 
 std::vector<std::byte> ReactingMixtureCoupler::serialize_qbmm_restart() const
 {
-    if (!d->motion)
+    if (!d->motion && !uses_qbmm_kinetic_transport(d->flow->options().qbmm_model))
         return d->flow->serialize_qbmm_restart();
-    const auto& target = *d->options.planar_motion;
+    const auto* target = d->options.planar_motion.get();
     const Solver::ControllerRestartDiagnostics diagnostics{d->options.mechanism->reactions().size(), &d->diagnostics};
-    return d->flow->serialize_qbmm_restart_impl(d->motion.get(), target.identity, target.revision, &diagnostics);
+    return d->flow->serialize_qbmm_restart_impl(
+        d->motion.get(), target ? std::string_view(target->identity) : "", target ? target->revision : 0, &diagnostics);
 }
 
 void ReactingMixtureCoupler::restore_qbmm_restart(std::span<const std::byte> payload)

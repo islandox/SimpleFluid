@@ -23,17 +23,25 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_configuration(
 {
     const auto& families = options.qbmm_families;
     const auto& model = options.qbmm_model;
+    const bool kinetic = uses_qbmm_kinetic_transport(model);
     require(model.transport.mode == FVM::AssemblyMode::Transient &&
                 model.transport.time == FVM::ScalarTimeScheme::BackwardEuler &&
                 model.transport.convection == FVM::ScalarConvectionScheme::Upwind,
         "Native QBMM transport requires transient backward Euler and first-order upwind.");
-    require(model.velocity == QbmmModelOptions::Velocity::SharedCarrier ||
-                model.velocity == QbmmModelOptions::Velocity::SuppliedPhaseSlip,
-        "Native QBMM requires shared carrier or explicitly supplied common phase slip.");
+    require(kinetic ? model.velocity == QbmmModelOptions::Velocity::NodeDependentSlip
+                    : model.family_transport == QbmmModelOptions::FamilyTransport::NativeImplicit &&
+                          (model.velocity == QbmmModelOptions::Velocity::SharedCarrier ||
+                              model.velocity == QbmmModelOptions::Velocity::SuppliedPhaseSlip),
+        "Native QBMM requires a compatible family integrator and velocity mode.");
     require(!model.variable_composition && !model.cross_family_coalescence && !model.bulk_gas_conversion,
         "Native QBMM requires fixed family composition and within-family population events.");
     require(!model.capillarity && !model.independent_node_temperatures,
         "Native QBMM requires common pressure and temperature with zero surface tension.");
+    const auto& node_laws = options.qbmm_node_slip_laws;
+    require(kinetic ? !families.empty() && node_laws.size() == families.size() && std::isfinite(model.kinetic_cfl) &&
+                          model.kinetic_cfl > 0 && model.kinetic_cfl <= 1 && model.maximum_kinetic_substeps > 0
+                    : node_laws.empty(),
+        "Kinetic QBMM requires an EOS-indexed node-law layout, a CFL in (0, 1], and a positive substep cap.");
     if (families.empty())
         return;
     require(families.size() == eos.size() && options.phase_roles.size() == eos.size(),
@@ -45,6 +53,8 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_configuration(
     for (size_t a = 0; a < families.size(); ++a)
     {
         const auto& family = families[a];
+        require(!kinetic || bool(node_laws[a]) == bool(family),
+            "Kinetic QBMM requires one node-slip law per bound family.");
         if (!family)
             continue;
         const auto& role = options.phase_roles[a];
@@ -52,7 +62,34 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_configuration(
                     eos[a]->kind() == EOSKind::Gas &&
                     eos[a]->catalog().fingerprint() == family->catalog().fingerprint(),
             "A native QBMM family must bind to its named dispersed-gas EOS phase and ordered catalog.");
+        const auto& declared = family->closure_versions().laws;
+        const auto node_law_count = std::ranges::count(declared, QbmmLawKind::NodeSlip, &QbmmLawMetadata::kind);
+        require(kinetic ? node_law_count == 1 && node_laws[a]->metadata.kind == QbmmLawKind::NodeSlip &&
+                              family->declares_law(node_laws[a]->metadata) && bool(node_laws[a]->evaluate) &&
+                              std::ranges::none_of(
+                                  declared, [](const auto& law) { return law.kind == QbmmLawKind::PhaseSlip; })
+                        : node_law_count == 0,
+            "A kinetic family requires a single matching node-slip contract and evaluator.");
     }
+}
+
+SIMPLEFLUID_SOLVERS_LOCAL inline void validate_kinetic_mesh(const Flow::Options& options, const Flow::Mesh& mesh)
+{
+    if (!uses_qbmm_kinetic_transport(options.qbmm_model))
+        return;
+    mesh.visit(
+        [](const auto& native)
+        {
+            using Native = std::remove_cvref_t<decltype(native)>;
+            if constexpr (std::is_same_v<Native, Flow::Mesh::Cartesian>)
+            {
+                for (std::size_t axis = 0; axis < 3; ++axis)
+                    require(!native.indexer().periodic_dimensions[axis],
+                        "Kinetic QBMM requires closed Cartesian topology.");
+            }
+            else
+                require(false, "Kinetic QBMM requires native Cartesian geometry.");
+        });
 }
 
 SIMPLEFLUID_SOLVERS_LOCAL inline void validate_stamps(const Flow::Options& options, const Flow::State& state)
@@ -86,7 +123,8 @@ SIMPLEFLUID_SOLVERS_LOCAL inline std::vector<std::optional<InversionStatus>> val
         {
             const double drift = cell.drift_velocity[a].component(axis);
             require(std::isfinite(drift), "Native QBMM supplied phase slip must be finite.");
-            require(options.qbmm_model.velocity == QbmmModelOptions::Velocity::SuppliedPhaseSlip || drift == 0,
+            require(drift == 0 || options.qbmm_model.velocity == QbmmModelOptions::Velocity::SuppliedPhaseSlip ||
+                        (uses_qbmm_kinetic_transport(options.qbmm_model) && !families[a]),
                 "Native QBMM nonzero phase slip requires the explicit SuppliedPhaseSlip velocity mode.");
         }
         const auto& family = families[a];

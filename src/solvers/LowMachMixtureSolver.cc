@@ -12,6 +12,7 @@
 #include "equations/details/LowMachScaledFaceSum.hh"
 #include "solvers/details/LowMachConditionedThermal.hh"
 #include "solvers/details/LowMachQbmmControllerRestart.hh"
+#include "solvers/details/LowMachQbmmKineticTransport.hh"
 #include "solvers/details/LowMachQbmmLawInputs.hh"
 #include "solvers/details/LowMachQbmmState.hh"
 #include "solvers/details/LowMachQbmmTransport.hh"
@@ -81,6 +82,13 @@ double phase_mass(const PhaseThermalState& phase)
         mass += phase.moles[s] * phase.thermodynamics->catalog().species()[s].molarMass;
     return mass;
 }
+Solver::Vector stored_drift_momentum(const Solver::CellState& cell, size_t phase, double mass)
+{
+    if (!cell.qbmm_kinetic_closure.empty() && cell.qbmm_kinetic_closure[phase])
+        return cell.qbmm_kinetic_closure[phase]->drift_momentum;
+    return cell.drift_velocity[phase] * mass;
+}
+
 std::vector<double> fractions(const PhaseThermalState& phase)
 {
     const double n = std::accumulate(phase.moles.begin(), phase.moles.end(), 0.0);
@@ -338,6 +346,7 @@ struct LowMachMixtureSolver::QbmmPublication
     std::shared_ptr<const QbmmIntervalReport> interval;
     std::optional<QbmmBalances> balances;
     std::optional<PlanarWallInterval> planar_wall_interval;
+    std::shared_ptr<const ReactingMixtureCoupler::Diagnostics> archived_controller_diagnostics;
 };
 
 struct LowMachMixtureSolver::Implementation
@@ -466,6 +475,7 @@ struct LowMachMixtureSolver::Implementation
                         "dispersed identities must be explicit.");
                 }
                 qbmm_detail::validate_configuration(options, eos);
+                qbmm_detail::validate_kinetic_mesh(options, *mesh);
                 planar_owner = std::make_shared<const ALEGeometryCertificate::OwnerIdentity>();
                 if (!options.qbmm_families.empty())
                     BelosLinearSolver<Pack>::validate_options(options.linear);
@@ -546,6 +556,14 @@ struct LowMachMixtureSolver::Implementation
         {
             collective_detail::require_uniform_value(
                 *mesh, int(options.qbmm_model.velocity), "Native QBMM velocity mode");
+            collective_detail::require_uniform_value(
+                *mesh, int(options.qbmm_model.family_transport), "Native QBMM family transport method");
+            if (options.qbmm_model.velocity == QbmmModelOptions::Velocity::NodeDependentSlip)
+            {
+                collective_detail::require_uniform_value(*mesh, options.qbmm_model.kinetic_cfl, "Kinetic CFL cap");
+                collective_detail::require_uniform_value(
+                    *mesh, options.qbmm_model.maximum_kinetic_substeps, "Kinetic subcycle limit");
+            }
             const auto& linear = options.linear;
             collective_detail::require_uniform_value(
                 *mesh, linear.max_iterations, "Native QBMM transport iteration budget");
@@ -1308,6 +1326,9 @@ void LowMachMixtureSolver::initialize(State candidate, const ControllerLease* co
                 auto& cell = candidate.cells[c];
                 check(cell.phases.size() == d->eos.size() && std::isfinite(cell.mechanical_pressure),
                     "Initial phase topology or mechanical pressure is invalid.");
+                if (uses_qbmm_kinetic_transport(d->options.qbmm_model) &&
+                    std::ranges::all_of(d->options.qbmm_families, [](const auto& family) { return bool(family); }))
+                    check(cell.drift_velocity.empty(), "A supplied phase-drift field conflicts with a kinetic family.");
                 if (cell.drift_velocity.empty())
                     cell.drift_velocity.resize(d->eos.size());
                 check(cell.drift_velocity.size() == d->eos.size(), "Phase drift topology is invalid.");
@@ -1387,6 +1408,13 @@ void LowMachMixtureSolver::initialize(State candidate, const ControllerLease* co
                           d->options.volume_relative_tolerance * mesh.cell_volume(static_cast<LO>(c)),
                     "Initial phase EOS volumes do not fill the physical cell.");
                 cell.phases = recovered.phases;
+                if (d->options.qbmm_model.velocity == QbmmModelOptions::Velocity::NodeDependentSlip)
+                    qbmm_native_law_detail::evaluate_kinetic_closure(d->options, cell,
+                        mesh.cell_volume(static_cast<LO>(c)), recovered.volumes,
+                        qbmm_native_law_detail::kinetic_location(mesh, static_cast<LO>(c)));
+                else
+                    check(cell.qbmm_kinetic_closure.empty() && cell.qbmm_kinetic_eos_volumes.empty(),
+                        "A kinetic endpoint requires node-dependent slip.");
             }
         });
     const auto face_rate = [&](LO face, const VectorField& velocity)
@@ -1494,6 +1522,8 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, const ControllerLeas
             check(!saved.qbmm_legacy_default_only || !d->controller_active || d->active_legacy_compatible,
                 "Legacy QBMM checkpoint requires default force and constitutive-law configuration.");
             qbmm_detail::validate_state(d->options, saved.state);
+            for (const auto& cell : saved.state.cells)
+                qbmm_native_law_detail::validate_kinetic_closure(d->options, cell);
             candidate = saved.state;
             statistics = saved.diagnostics;
             if (!d->options.qbmm_families.empty())
@@ -1562,6 +1592,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
     std::vector<CellSources> sources;
     const auto& mesh = *d->mesh;
     const bool has_qbmm = !d->options.qbmm_families.empty();
+    const bool kinetic = d->options.qbmm_model.velocity == QbmmModelOptions::Velocity::NodeDependentSlip;
     require_controller(controller);
     collective_detail::require_uniform_value(mesh, dt, "Low-Mach mixture timestep");
     collective_detail::require_uniform_value(mesh, int(ale != nullptr), "Low-Mach ALE transport selection");
@@ -1572,6 +1603,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
     collective_detail::collective_local_validation(mesh, "Low-Mach mixture step inputs",
         [&]
         {
+            check(!kinetic || (!ale && !d->active_body_acceleration && (!provider || !provider->body_acceleration)),
+                "Node-dependent slip requires a fixed mesh with body acceleration disabled.");
             check(!coherent_qbmm || (has_qbmm && controller && controller->reacting_source_authority && provider),
                 "Coherent QBMM sources require the reacting controller and an immutable source provider.");
             check(!has_qbmm || !provider || coherent_qbmm,
@@ -1686,6 +1719,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
     const auto& qbmm_families = d->options.qbmm_families;
     TransportSnapshot last_transport;
     std::vector<PhaseFaceTransport> last_phase_transport;
+    std::vector<QbmmKineticLawReceipt> last_kinetic_law_receipts;
     std::optional<TransportSnapshot> previous_transport;
     std::vector<CellSources> previous_sources;
     std::vector<std::vector<double>> gross_events, previous_events;
@@ -1726,7 +1760,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
     Diagnostics result;
     State trial = accepted;
     State thermodynamic_guess = accepted;
-    Vector pressure_impulse{};
+    std::array<FaceSum, 3> pressure_impulse;
     double caloric_transport_magnitude = 0, energy_transport_operand_magnitude = 0, phase_work_magnitude = 0,
            pressure_operand_magnitude = 0;
     try
@@ -1757,6 +1791,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             std::vector<std::unique_ptr<VectorField>> drift(np);
             std::vector<std::unique_ptr<FaceField>> phase_flux(np);
             std::vector<std::vector<QbmmFaceFlux>> qbmm_face_flux(np);
+            std::vector<qbmm_kinetic_detail::FaceIntegrals> kinetic_faces;
             std::vector<double> before(nc), after;
             if (ale)
             {
@@ -1765,8 +1800,27 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         d->trial_flux.set_owned_value(static_cast<LO>(f), ale->face_mesh_fluxes()[f]);
                 d->trial_flux.sync_ghosts();
             }
+            if (kinetic)
+            {
+                auto transported = qbmm_kinetic_detail::transport(d->mesh, d->options, accepted, thermodynamic_guess,
+                    trial, d->trial_flux, old_volumes, dt, static_cast<size_t>(iteration));
+                qbmm_face_flux = std::move(transported.owned_flux);
+                kinetic_faces = std::move(transported.integrated_faces);
+                adv_volumes = std::move(transported.advected_material_volumes);
+                last_kinetic_law_receipts = std::move(transported.law_receipts);
+                result.kinetic_substeps = transported.substeps;
+                result.maximum_kinetic_cfl = transported.maximum_cfl;
+                result.maximum_species_transport_residual = transported.maximum_species_residual;
+                result.maximum_population_transport_residual = transported.maximum_population_residual;
+                result.maximum_shape_transport_residual = transported.maximum_shape_residual;
+                result.maximum_energy_transport_residual = transported.maximum_energy_residual;
+                local_caloric_transport = transported.local_caloric_transport_magnitude;
+                local_energy_transport = transported.local_energy_transport_magnitude;
+            }
             for (size_t a = 0; a < np; ++a)
             {
+                if (kinetic && is_qbmm_bound(a))
+                    continue;
                 drift[a] = std::make_unique<VectorField>(d->mesh, "phase_drift");
                 phase_flux[a] = std::make_unique<FaceField>(d->mesh, 0.0, "phase_carrier_slip_flux");
                 for (size_t c = 0; c < nc; ++c)
@@ -1807,6 +1861,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             for (size_t a = 0; a < np; ++a)
             {
                 const bool qbmm_bound = is_qbmm_bound(a);
+                if (kinetic && qbmm_bound)
+                    continue;
                 if (qbmm_bound || !d->options.use_multi_rhs_transport)
                 {
                     if (qbmm_bound)
@@ -2106,6 +2162,13 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         {
                             if (!qbmm_families.empty() && qbmm_families[a])
                                 packet.qbmm_flux[a] = qbmm_face_flux[a][f];
+                            if (kinetic && qbmm_families[a])
+                            {
+                                packet.material_fraction[a] = packet.qbmm_flux[a]->kinetic->theta;
+                                // The tagged kinetic receipt carries two directional streams. These legacy
+                                // scalar slots have no corresponding family advection velocity.
+                                continue;
+                            }
                             packet.relative_phase_volume_flux[a] = phase_flux[a]->local_value(face);
                             packet.phase_volume_flux[a] =
                                 packet.relative_phase_volume_flux[a] + packet.mesh_volume_flux;
@@ -2592,8 +2655,12 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             }
             trial.thermodynamic_pressure = p0;
             std::vector<double> target(nc), volume_susceptibility(nc);
-            FaceField slip_volume(d->mesh, 0.0, "phase_slip_material_volume");
+            FaceField material_pressure_rate(
+                d->mesh, 0.0, kinetic ? "kinetic_anchored_material_rate" : "phase_slip_material_volume");
             FaceField carrier_fraction(d->mesh, 0.0, "phase_upwind_carrier_fraction");
+            std::optional<FaceField> bidirectional;
+            if (kinetic)
+                bidirectional.emplace(d->mesh, 0.0, "opposing_carrier_mass_rates");
             std::array<std::unique_ptr<FaceField>, 3> drift_momentum;
             for (auto& field : drift_momentum)
                 field = std::make_unique<FaceField>(d->mesh, 0.0, "phase_slip_momentum_flux");
@@ -2614,7 +2681,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                                 ? owner
                                                 : mesh.opposite_or_periodic_neighbor_cell(face, owner);
                         auto& receipt = last_phase_transport[f];
-                        double volume_slip = 0, theta = 0;
+                        FaceSum slip_rate, theta_sum, direct_volume_rate, pressure_rounding, forward_mass,
+                            backward_mass;
                         const double relative_carrier =
                             d->trial_flux.local_value(face) - (ale ? ale->face_mesh_fluxes()[f] : 0.);
                         Vector drift_flux{};
@@ -2622,11 +2690,13 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         std::array<FaceSum, 3> mixture_drift_rate;
                         for (size_t a = 0; a < np; ++a)
                         {
+                            auto* packet = qbmm_enabled && receipt.qbmm_flux[a] ? &*receipt.qbmm_flux[a] : nullptr;
+                            if (packet && packet->kinetic)
+                                continue; // The integrated kinetic sums below retain all families before rounding.
                             const double phi = phase_flux[a]->local_value(face);
                             const LO donor = phi >= 0 ? owner : neighbor;
                             const auto donor_drift = drift[a]->local_value(donor);
                             const auto& species = d->eos[a]->catalog().species();
-                            auto* packet = qbmm_enabled && receipt.qbmm_flux[a] ? &*receipt.qbmm_flux[a] : nullptr;
                             FaceSum phase_mass_rate;
                             if (packet)
                             {
@@ -2644,6 +2714,10 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             // Weight by donor drift and sum signed phase contributions before rounding
                             // to the face fields. The phase receipts store their own rounded values.
                             mixture_mass_rate.add_weighted(phase_mass_rate, 1.);
+                            if (phi >= 0)
+                                forward_mass.add_weighted(phase_mass_rate, 1.);
+                            else
+                                backward_mass.add_weighted(phase_mass_rate, -1.);
                             for (size_t axis = 0; axis < 3; ++axis)
                             {
                                 const double drift_component = donor_drift.component(axis);
@@ -2660,27 +2734,85 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                 }
                             }
                             const double phase_fraction = material_face_fraction[a]->local_value(face);
-                            theta += phase_fraction;
+                            theta_sum.add_product(phase_fraction, 1.);
+                            slip_rate.add_product(phi - relative_carrier, phase_fraction);
                             if (std::isnormal(phase_fraction))
-                                volume_slip += (phi - relative_carrier) * phase_fraction;
+                                direct_volume_rate.add_product(phi * phase_fraction, 1.);
                             else
                             {
-                                // Keep the directly rounded material rate in the pressure split.
                                 const auto& rates = small_fraction_volume_flux[a];
-                                volume_slip +=
-                                    std::fma(-relative_carrier, phase_fraction, rates.empty() ? 0. : rates[f]);
+                                const double direct = rates.empty() ? 0. : rates[f];
+                                direct_volume_rate.add_product(direct, 1.);
+                                pressure_rounding.add_product(-phi, phase_fraction);
+                                pressure_rounding.add_product(direct, 1.);
                             }
                         }
-                        const double mass_flux = mixture_mass_rate.rounded();
-                        for (size_t axis = 0; axis < 3; ++axis)
-                            drift_flux.component(axis) = mixture_drift_rate[axis].rounded();
-                        check(std::isfinite(mass_flux) && std::isfinite(volume_slip) && std::isfinite(theta) &&
-                                  theta >= 0,
+                        double mass_flux = mixture_mass_rate.rounded();
+                        receipt.theta = theta_sum.rounded();
+                        receipt.slip_volume_flux = slip_rate.rounded();
+                        receipt.material_volume_flux = direct_volume_rate.rounded();
+                        auto effective_slip = slip_rate;
+                        effective_slip.add_weighted(pressure_rounding, 1.);
+                        double pressure_input = effective_slip.rounded();
+                        if (kinetic)
+                        {
+                            // Pressure uses the directly accumulated material flux at this corrector's
+                            // frozen carrier flux. S remains the physical slip term, even near a kink.
+                            const auto& packet = kinetic_faces[f];
+                            auto theta = packet.theta, slip = packet.slip, work = packet.material_volume;
+                            theta.add_weighted(theta_sum, dt);
+                            slip.add_weighted(slip_rate, dt);
+                            work.add_weighted(direct_volume_rate, dt);
+                            receipt.theta = theta.rounded(dt);
+                            receipt.slip_volume_flux = slip.rounded(dt);
+                            receipt.material_volume_flux = work.rounded(dt);
+                            FaceSum representation;
+                            representation.add_product(receipt.material_volume_flux, 1.);
+                            representation.add_product(-receipt.theta, relative_carrier);
+                            representation.add_product(-receipt.slip_volume_flux, 1.);
+                            receipt.pressure_rounding_flux = representation.rounded();
+                            pressure_input = receipt.material_volume_flux;
+
+                            // Combine momenta before rounding any family's physical mass rate.
+                            auto net = packet.forward_mass;
+                            net.add_weighted(packet.backward_mass, -1.);
+                            net.add_weighted(mixture_mass_rate, dt);
+                            mass_flux = net.rounded(dt);
+                            auto forward = packet.forward_mass, backward = packet.backward_mass;
+                            forward.add_weighted(forward_mass, dt);
+                            backward.add_weighted(backward_mass, dt);
+                            receipt.forward_mass_flux = forward.rounded(dt);
+                            receipt.backward_mass_flux = backward.rounded(dt);
+                            receipt.symmetric_mass_flux =
+                                std::min(receipt.forward_mass_flux, receipt.backward_mass_flux);
+                            check(std::isfinite(receipt.forward_mass_flux) &&
+                                      std::isfinite(receipt.backward_mass_flux) && receipt.symmetric_mass_flux >= 0,
+                                "Directional carrier mass rates must be finite nonnegative magnitudes.");
+                            bidirectional->set_owned_value(face, receipt.symmetric_mass_flux);
+                            for (size_t axis = 0; axis < 3; ++axis)
+                            {
+                                auto drift = packet.drift[axis];
+                                drift.add_weighted(mixture_drift_rate[axis], dt);
+                                drift_flux.component(axis) = drift.rounded(dt);
+                            }
+                        }
+                        else
+                        {
+                            receipt.forward_mass_flux = forward_mass.rounded();
+                            receipt.backward_mass_flux = backward_mass.rounded();
+                            receipt.pressure_rounding_flux = pressure_rounding.rounded();
+                            for (size_t axis = 0; axis < 3; ++axis)
+                                drift_flux.component(axis) = mixture_drift_rate[axis].rounded();
+                        }
+                        check(std::isfinite(mass_flux) && std::isfinite(pressure_input) &&
+                                  std::isfinite(receipt.theta) && std::isfinite(receipt.slip_volume_flux) &&
+                                  std::isfinite(receipt.pressure_rounding_flux) &&
+                                  std::isfinite(receipt.material_volume_flux) && receipt.theta >= 0,
                             "Phase mass/material flux packet overflow.");
                         d->mass_flux.set_owned_value(face, mass_flux);
                         receipt.momentum_mass_flux = mass_flux;
-                        slip_volume.set_owned_value(face, volume_slip);
-                        carrier_fraction.set_owned_value(face, theta);
+                        material_pressure_rate.set_owned_value(face, pressure_input);
+                        carrier_fraction.set_owned_value(face, receipt.theta);
                         for (size_t component = 0; component < 3; ++component)
                         {
                             check(std::isfinite(drift_flux.component(component)),
@@ -2691,7 +2823,9 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     }
                 });
             d->mass_flux.sync_ghosts();
-            slip_volume.sync_ghosts();
+            if (bidirectional)
+                bidirectional->sync_ghosts();
+            material_pressure_rate.sync_ghosts();
             carrier_fraction.sync_ghosts();
             for (auto& field : drift_momentum)
                 field->sync_ghosts();
@@ -2743,6 +2877,9 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         for (const auto& phase : trial.cells[c].phases)
                             mass += phase_mass(phase);
                         d->rho.set_owned_value(cell, mass / volume);
+                        if (kinetic)
+                            qbmm_native_law_detail::evaluate_kinetic_closure(d->options, trial.cells[c], volume,
+                                thermal[c].volumes, qbmm_native_law_detail::kinetic_location(mesh, cell));
                         qbmm_native_law_detail::validate_transport_gates(
                             d->options, trial.cells[c], last_transport.new_control_volumes[c], dt, thermal[c].volumes);
                     }
@@ -2778,24 +2915,67 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 d->old_u, d->old_rho, d->rho, d->mass_flux, d->mu, dt, d->u,
                 [&](LO cell)
                 {
-                    Vector old_drift{}, new_drift{};
+                    std::array<FaceSum, 3> impulse;
                     for (size_t a = 0; a < np; ++a)
                     {
-                        old_drift = old_drift +
-                                    accepted.cells[cell].drift_velocity[a] * phase_mass(accepted.cells[cell].phases[a]);
-                        new_drift =
-                            new_drift + trial.cells[cell].drift_velocity[a] * phase_mass(trial.cells[cell].phases[a]);
+                        const auto old_drift =
+                            stored_drift_momentum(accepted.cells[cell], a, phase_mass(accepted.cells[cell].phases[a]));
+                        const auto new_drift =
+                            stored_drift_momentum(trial.cells[cell], a, phase_mass(trial.cells[cell].phases[a]));
+                        for (size_t axis = 0; axis < impulse.size(); ++axis)
+                        {
+                            impulse[axis].add_product(old_drift.component(axis), 1.);
+                            impulse[axis].add_product(new_drift.component(axis), -1.);
+                        }
                     }
-                    Vector force = d->pressure_gradient.local_value(cell) * -1.0 -
-                                   (new_drift - old_drift) / (dt * mesh.cell_volume(cell));
-                    if (!sources.empty())
-                        force = force + sources[cell].momentum / (dt * mesh.cell_volume(cell));
-                    for (size_t component = 0; component < 3; ++component)
-                        force.component(component) -=
-                            FVM::cell_flux_balance(mesh, *drift_momentum[component], cell) / mesh.cell_volume(cell);
+                    const double volume = mesh.cell_volume(cell);
+                    FaceSum storage;
+                    storage.add_product(volume, dt);
+                    Vector force{};
+                    for (size_t axis = 0; axis < impulse.size(); ++axis)
+                    {
+                        if (!sources.empty())
+                            impulse[axis].add_product(sources[cell].momentum.component(axis), 1.);
+                        impulse[axis].add_product(-d->pressure_gradient.local_value(cell).component(axis), dt, volume);
+                        for (const auto face : mesh.faces(cell))
+                            impulse[axis].add_product(
+                                drift_momentum[axis]->local_value(face), mesh.owner_cell(face) == cell ? -dt : dt);
+                        force.component(axis) = impulse[axis].rounded(storage);
+                    }
                     return force;
                 },
-                {}, {}, d->options.linear, FVM::NonOrthogonalTreatment::Implicit, ale);
+                {}, {}, d->options.linear, FVM::NonOrthogonalTreatment::Implicit, ale,
+                bidirectional ? &*bidirectional : nullptr);
+            if (kinetic)
+                collective_detail::collective_local_validation(mesh, "Implicit directional carrier momentum receipts",
+                    [&]
+                    {
+                        for (size_t f = 0; f < last_phase_transport.size(); ++f)
+                        {
+                            const LO face = static_cast<LO>(f);
+                            if (mesh.is_geometry_exterior_face(face))
+                                continue;
+                            auto& receipt = last_phase_transport[f];
+                            const LO left = mesh.owner_cell(face);
+                            receipt.momentum_owner_velocity = d->u.local_value(left);
+                            receipt.momentum_neighbor_velocity =
+                                d->u.local_value(mesh.opposite_or_periodic_neighbor_cell(face, left));
+                            const auto& upwind = receipt.momentum_mass_flux >= 0 ? receipt.momentum_owner_velocity
+                                                                                 : receipt.momentum_neighbor_velocity;
+                            for (size_t axis = 0; axis < 3; ++axis)
+                            {
+                                FaceSum rate;
+                                rate.add_product(receipt.momentum_mass_flux, upwind.component(axis));
+                                rate.add_product(
+                                    receipt.symmetric_mass_flux, receipt.momentum_owner_velocity.component(axis));
+                                rate.add_product(
+                                    -receipt.symmetric_mass_flux, receipt.momentum_neighbor_velocity.component(axis));
+                                receipt.implicit_carrier_momentum_flux.component(axis) = rate.rounded();
+                                check(std::isfinite(receipt.implicit_carrier_momentum_flux.component(axis)),
+                                    "Implicit directional momentum receipt overflows.");
+                            }
+                        }
+                    });
             FaceField predictor(d->mesh, 0.0, "low_mach_velocity_predictor_flux");
             std::vector<double> previous_flux(mesh.num_owned_faces());
             for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
@@ -2819,22 +2999,36 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 predictor.set_owned_value(face, velocity.dot(mesh.face_area_vector(face)) - pressure_flux);
             }
             predictor.sync_ghosts();
-            std::vector<Vector> predicted_velocity(nc);
-            for (size_t c = 0; c < nc; ++c)
+            std::vector<Vector> predicted_velocity;
+            collective_detail::collective_local_validation(mesh, "Carrier predictor pressure impulse",
+                [&]
+                {
+                    predicted_velocity.resize(nc);
+                    for (size_t c = 0; c < nc; ++c)
+                    {
+                        predicted_velocity[c] = d->u.local_value(static_cast<LO>(c));
+                        for (size_t axis = 0; axis < pressure_impulse.size(); ++axis)
+                            pressure_impulse[axis].add_product(
+                                -d->pressure_gradient.local_value(static_cast<LO>(c)).component(axis), dt,
+                                mesh.cell_volume(static_cast<LO>(c)));
+                    }
+                });
+            const auto projected = [&]
             {
-                predicted_velocity[c] = d->u.local_value(static_cast<LO>(c));
-                pressure_impulse = pressure_impulse - d->pressure_gradient.local_value(static_cast<LO>(c)) *
-                                                          (dt * mesh.cell_volume(static_cast<LO>(c)));
-            }
-            const auto projected =
-                ale ? d->pressure->project_material_ale_with_eos(d->rho, dt, target, volume_susceptibility,
-                          carrier_fraction, slip_volume, predictor, d->trial_flux, d->mechanical_pressure, d->u, *ale,
-                          d->options.linear, d->options.continuity_tolerance)
-                    : d->pressure->project_material_with_eos(d->rho, dt, target, volume_susceptibility,
-                          carrier_fraction, slip_volume, predictor, d->trial_flux, d->mechanical_pressure, d->u,
-                          d->options.linear, d->options.continuity_tolerance,
-                          body_forced ? LowMachPressureEquation::CellPressureGradient::Interior
-                                      : LowMachPressureEquation::CellPressureGradient::HomogeneousNeumann);
+                if (kinetic)
+                    return d->pressure->project_kinetic_material_with_eos(d->rho, dt, target, volume_susceptibility,
+                        carrier_fraction, material_pressure_rate, d->trial_flux, predictor, d->trial_flux,
+                        d->mechanical_pressure, d->u, d->options.linear, d->options.continuity_tolerance);
+                if (ale)
+                    return d->pressure->project_material_ale_with_eos(d->rho, dt, target, volume_susceptibility,
+                        carrier_fraction, material_pressure_rate, predictor, d->trial_flux, d->mechanical_pressure,
+                        d->u, *ale, d->options.linear, d->options.continuity_tolerance);
+                return d->pressure->project_material_with_eos(d->rho, dt, target, volume_susceptibility,
+                    carrier_fraction, material_pressure_rate, predictor, d->trial_flux, d->mechanical_pressure, d->u,
+                    d->options.linear, d->options.continuity_tolerance,
+                    body_forced ? LowMachPressureEquation::CellPressureGradient::Interior
+                                : LowMachPressureEquation::CellPressureGradient::HomogeneousNeumann);
+            }();
             trial.thermodynamic_pressure += projected.thermodynamic_pressure_increment;
             check(std::isfinite(trial.thermodynamic_pressure), "Uniform pressure gauge increment overflow.");
             result.pressure_linear = projected.linear;
@@ -2842,18 +3036,24 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             result.maximum_continuity_residual = projected.maximum_continuity_residual;
             result.maximum_occupancy_error = d->maximum(occupancy);
             double flux_change = 0, smallest_volume = std::numeric_limits<double>::infinity();
-            for (size_t c = 0; c < nc; ++c)
-            {
-                const LO cell = static_cast<LO>(c);
-                trial.cells[c].velocity = d->u.local_value(cell);
-                trial.cells[c].mechanical_pressure = d->mechanical_pressure.local_value(cell);
-                pressure_impulse = pressure_impulse + (d->u.local_value(cell) - predicted_velocity[c]) *
-                                                          (d->rho.local_value(cell) * mesh.cell_volume(cell));
-                smallest_volume = std::min(smallest_volume, mesh.cell_volume(cell));
-            }
-            for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
-                flux_change =
-                    std::max(flux_change, std::abs(d->trial_flux.local_value(static_cast<LO>(f)) - previous_flux[f]));
+            collective_detail::collective_local_validation(mesh, "Projected carrier velocity and pressure impulse",
+                [&]
+                {
+                    for (size_t c = 0; c < nc; ++c)
+                    {
+                        const LO cell = static_cast<LO>(c);
+                        trial.cells[c].velocity = d->u.local_value(cell);
+                        trial.cells[c].mechanical_pressure = d->mechanical_pressure.local_value(cell);
+                        for (size_t axis = 0; axis < pressure_impulse.size(); ++axis)
+                            pressure_impulse[axis].add_product(
+                                (d->u.local_value(cell) - predicted_velocity[c]).component(axis),
+                                d->rho.local_value(cell), mesh.cell_volume(cell));
+                        smallest_volume = std::min(smallest_volume, mesh.cell_volume(cell));
+                    }
+                    for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
+                        flux_change = std::max(
+                            flux_change, std::abs(d->trial_flux.local_value(static_cast<LO>(f)) - previous_flux[f]));
+                });
             double global_smallest_volume = 0;
             Teuchos::reduceAll(
                 *mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &smallest_volume, &global_smallest_volume);
@@ -2932,7 +3132,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
         detail::CompensatedSum<long double> old_energy, new_energy, external_energy;
         detail::CompensatedSum<long double> caloric_storage_scale, caloric_source_scale, energy_operand_scale;
         std::vector<double> old_species, new_species, source_species;
-        Vector old_momentum{}, new_momentum{}, external_momentum{}, momentum_operand_scale{};
+        std::array<FaceSum, 3> momentum_change, external_momentum;
+        Vector momentum_operand_scale{};
         collective_detail::collective_local_validation(mesh, "Low-Mach physical caloric ledger",
             [&]
             {
@@ -2943,24 +3144,27 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 result.species_errors.resize(ns);
                 for (size_t c = 0; c < nc; ++c)
                 {
-                    double accepted_mass = 0, candidate_mass = 0;
                     detail::CompensatedSum<long double> cell_source_caloric;
                     for (size_t a = 0; a < np; ++a)
                     {
                         const double ma = phase_mass(accepted.cells[c].phases[a]),
                                      mn = phase_mass(trial.cells[c].phases[a]);
+                        const auto old_drift = stored_drift_momentum(accepted.cells[c], a, ma);
+                        const auto new_drift = stored_drift_momentum(trial.cells[c], a, mn);
                         for (size_t component = 0; component < 3; ++component)
                             momentum_operand_scale.component(component) +=
-                                ma * (std::abs(accepted.cells[c].velocity.component(component)) +
-                                         std::abs(accepted.cells[c].drift_velocity[a].component(component))) +
-                                mn * (std::abs(trial.cells[c].velocity.component(component)) +
-                                         std::abs(trial.cells[c].drift_velocity[a].component(component)));
+                                ma * std::abs(accepted.cells[c].velocity.component(component)) +
+                                mn * std::abs(trial.cells[c].velocity.component(component)) +
+                                std::abs(old_drift.component(component)) + std::abs(new_drift.component(component));
                         old_mass += ma;
                         new_mass += mn;
-                        accepted_mass += ma;
-                        candidate_mass += mn;
-                        old_momentum = old_momentum + accepted.cells[c].drift_velocity[a] * ma;
-                        new_momentum = new_momentum + trial.cells[c].drift_velocity[a] * mn;
+                        for (size_t axis = 0; axis < momentum_change.size(); ++axis)
+                        {
+                            momentum_change[axis].add_product(mn, trial.cells[c].velocity.component(axis));
+                            momentum_change[axis].add_product(-ma, accepted.cells[c].velocity.component(axis));
+                            momentum_change[axis].add_product(new_drift.component(axis), 1.);
+                            momentum_change[axis].add_product(old_drift.component(axis), -1.);
+                        }
                         const auto& old_phase = accepted.cells[c].phases[a];
                         const auto& new_phase = trial.cells[c].phases[a];
                         if (ma > 0)
@@ -3008,10 +3212,9 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         }
                     }
                     caloric_source_scale += std::abs(cell_source_caloric.value());
-                    old_momentum = old_momentum + accepted.cells[c].velocity * accepted_mass;
-                    new_momentum = new_momentum + trial.cells[c].velocity * candidate_mass;
                     if (!sources.empty())
-                        external_momentum = external_momentum + sources[c].momentum;
+                        for (size_t axis = 0; axis < external_momentum.size(); ++axis)
+                            external_momentum[axis].add_product(sources[c].momentum.component(axis), 1.);
                 }
             });
         const double old_mass_global = d->sum(old_mass), new_mass_global = d->sum(new_mass);
@@ -3130,19 +3333,33 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                           std::max({old_n, new_n, std::abs(delta), std::numeric_limits<double>::min()}),
                 "Low-Mach physical species budget failed.");
         }
-        for (size_t component = 0; component < 3; ++component)
+        // Finish the local expansion before entering this interval's collective momentum ledger.
+        std::array<double, 12> local_budget{}, budget{};
+        collective_detail::collective_local_validation(mesh, "Physical momentum balance operands",
+            [&]
+            {
+                for (size_t axis = 0; axis < 3; ++axis)
+                {
+                    momentum_change[axis].add_weighted(external_momentum[axis], -1.);
+                    momentum_change[axis].add_weighted(pressure_impulse[axis], -1.);
+                    local_budget[axis] = momentum_change[axis].rounded();
+                    local_budget[3 + axis] = external_momentum[axis].rounded();
+                    local_budget[6 + axis] = pressure_impulse[axis].rounded();
+                    local_budget[9 + axis] = momentum_operand_scale.component(axis);
+                }
+                check(std::ranges::all_of(local_budget, [](double value) { return std::isfinite(value); }),
+                    "Physical momentum balance operands are not representable.");
+            });
+        Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, static_cast<int>(budget.size()),
+            local_budget.data(), budget.data());
+        for (size_t axis = 0; axis < 3; ++axis)
         {
-            const double old_p = d->sum(old_momentum.component(component)),
-                         new_p = d->sum(new_momentum.component(component));
-            const double external_p = d->sum(external_momentum.component(component));
-            const double pressure_p = d->sum(pressure_impulse.component(component));
-            result.pressure_impulse.component(component) = pressure_p;
-            result.external_impulse.component(component) = external_p;
-            result.momentum_error.component(component) = new_p - old_p - external_p - pressure_p;
-            check(std::abs(result.momentum_error.component(component)) <=
-                      d->options.conservation_relative_tolerance *
-                          std::max({std::abs(old_p), std::abs(new_p), std::abs(external_p), std::abs(pressure_p),
-                              d->sum(momentum_operand_scale.component(component)), std::numeric_limits<double>::min()}),
+            result.momentum_error.component(axis) = budget[axis];
+            result.external_impulse.component(axis) = budget[3 + axis];
+            result.pressure_impulse.component(axis) = budget[6 + axis];
+            const double scale = std::max({std::abs(budget[3 + axis]), std::abs(budget[6 + axis]), budget[9 + axis],
+                std::numeric_limits<double>::min()});
+            check(std::isfinite(scale) && std::abs(budget[axis]) <= d->options.conservation_relative_tolerance * scale,
                 "Low-Mach physical momentum budget failed.");
         }
         trial.time += dt;
@@ -3186,6 +3403,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
         staged.geometry_epoch = d->epoch;
         staged.logical_geometry = d->logical_geometry;
         staged.phase_transport = std::move(last_phase_transport);
+        staged.kinetic_law_receipts = std::move(last_kinetic_law_receipts);
         if (!qbmm_families.empty() && !coherent_qbmm)
             finalize_qbmm_balances(staged);
         return staged;
@@ -3215,7 +3433,8 @@ LowMachMixtureSolver::ControllerLease LowMachMixtureSolver::acquire_controller()
     return acquire_controller_for({});
 }
 LowMachMixtureSolver::ControllerLease LowMachMixtureSolver::acquire_controller_for(std::string_view signature,
-    bool legacy_compatible, std::optional<Vector> body_acceleration, const PlanarMotion* motion)
+    bool legacy_compatible, std::optional<Vector> body_acceleration, const PlanarMotion* motion,
+    const ControllerRestartDiagnostics* restart)
 {
     std::optional<std::uint64_t> binding;
     if (!d->options.qbmm_families.empty() && !signature.empty())
@@ -3227,6 +3446,9 @@ LowMachMixtureSolver::ControllerLease LowMachMixtureSolver::acquire_controller_f
     collective_detail::collective_local_validation(*d->mesh, "Low-Mach acquire controller",
         [&]
         {
+            check(d->options.qbmm_model.velocity != QbmmModelOptions::Velocity::NodeDependentSlip ||
+                      (!motion && !body_acceleration),
+                "Kinetic QBMM requires a fixed controller with body acceleration disabled.");
             check(!motion || (motion->mesh_ptr().get() == d->mesh.get() && !body_acceleration),
                 "Planar controller requires its exact mutable solver mesh and zero supplied body force.");
             check(signature.empty() || !d->accepted_planar_motion ||
@@ -3239,6 +3461,15 @@ LowMachMixtureSolver::ControllerLease LowMachMixtureSolver::acquire_controller_f
             check(!d->controller_active && d->controller_id != std::numeric_limits<std::uint64_t>::max() &&
                       d->trial_nonce != std::numeric_limits<std::uint64_t>::max(),
                 "Low-Mach solver already has an external controller or exhausted its lease counter.");
+            if (restart && restart->restored && d->qbmm_publication &&
+                d->qbmm_publication->archived_controller_diagnostics)
+            {
+                const auto& archived = *d->qbmm_publication->archived_controller_diagnostics;
+                check(d->needs_restart_controller && binding &&
+                          archived.reaction_extents.size() == restart->reaction_count,
+                    "QBMM restart archived diagnostics differ from the attached reaction mechanism.");
+                *restart->restored = archived;
+            }
         });
     collective_detail::require_uniform_value(*d->mesh, int(binding.has_value()), "QBMM controller binding presence");
     collective_detail::require_uniform_value(*d->mesh, binding.value_or(0), "QBMM controller binding signature");

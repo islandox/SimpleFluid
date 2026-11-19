@@ -18,8 +18,14 @@ struct QbmmModelOptions
         SharedCarrier, ///< Exactly zero drift on every physical phase.
         ZeroSlip = SharedCarrier,
         SuppliedPhaseSlip, ///< Immutable per-cell phase drift; all family atoms share its velocity, m/s.
-        NodeDependentSlip,
+        NodeDependentSlip, ///< Fixed Cartesian kinetic transport with one immutable law per family.
         IndependentPhaseMomentum
+    };
+    enum class FamilyTransport
+    {
+        NativeImplicit,
+        KineticEuler,
+        RealizableLinearSSPRK2 ///< Reserved for Q7c. The native solver rejects this selection.
     };
     FVM::ScalarTransportDiscretization transport;
     Velocity velocity = Velocity::SharedCarrier;
@@ -28,5 +34,13 @@ struct QbmmModelOptions
     bool bulk_gas_conversion = false;
     bool capillarity = false; ///< Laplace pressure and surface-energy closure.
     bool independent_node_temperatures = false;
+    FamilyTransport family_transport = FamilyTransport::NativeImplicit;
+    double kinetic_cfl = 1.; ///< Maximum sum of all outgoing fractions per active atom and substep, in (0, 1].
+    int maximum_kinetic_substeps = 1024;
 };
+
+[[nodiscard]] constexpr bool uses_qbmm_kinetic_transport(const QbmmModelOptions& model) noexcept
+{
+    return model.family_transport == QbmmModelOptions::FamilyTransport::KineticEuler;
+}
 } // namespace SimpleFluid::Reacting
