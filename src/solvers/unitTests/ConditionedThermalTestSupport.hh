@@ -6,6 +6,26 @@ namespace SimpleFluid::Testing::ConditionedTransfer
 {
 namespace R = Reacting;
 inline constexpr double gas_constant = 8.31446261815324, cv = 20, cp = cv + gas_constant, p_old = 100000, T0 = 300;
+inline std::shared_ptr<const R::PartialMolarEnthalpyLaw> liquid_partials(
+    std::shared_ptr<const R::SpeciesCatalog> catalog, double liquid_e, int& constitutive_calls)
+{
+    return std::make_shared<const R::PartialMolarEnthalpyLaw>(R::PartialMolarEnthalpyLaw{
+        {"analytic-incompressible-liquid-partials", 1, catalog->fingerprint()}, {250, 1200, 50000, 1000000},
+        [catalog, liquid_e, &constitutive_calls](double t, double p, std::span<const double>)
+        {
+            ++constitutive_calls;
+            R::PartialMolarEnthalpyPoint result;
+            const double h = liquid_e + 1000 * (t - 300) + p;
+            for (const auto& species : catalog->species())
+            {
+                result.value.push_back(species.molarMass * h);
+                result.temperature.push_back(species.molarMass * 1000);
+                result.pressure.push_back(species.molarMass);
+            }
+            return result;
+        }});
+}
+
 struct Fixture
 {
     std::shared_ptr<const R::SpeciesCatalog> catalog;
@@ -15,38 +35,25 @@ struct Fixture
     std::vector<double> Uadv, Vadv{.4, 0, .6};
     double nl = .4, ng = p_old * .6 / (gas_constant * T0), physical_U0 = (cv / gas_constant) * p_old * 1.4;
     int constitutive_calls = 0;
-    explicit Fixture(double vapor_reference_shift = 0, double inert_reference_shift = 0)
+    explicit Fixture(double vapor_reference_shift = 0, double inert_reference_shift = 0,
+        R::EnergyConvention convention = R::EnergyConvention::IncludesFormationEnergy)
     {
         catalog = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
             {44, "solvent_vapor", 1, {{"S", 1}}, {R::SpeciesPhase::Liquid, R::SpeciesPhase::Dispersed}},
             {709, "retained_noncondensable", .028, {{"G", 1}},
                 {R::SpeciesPhase::Dissolved, R::SpeciesPhase::Resolved}}});
         const double liquid_e = (2 * (cv / gas_constant) * p_old * .4) / .4 + vapor_reference_shift;
-        liquid = R::make_linear_compressible_mixture_liquid(catalog, {250, 1200, 50000, 1000000},
-            [liquid_e](std::span<const double>)
-            { return R::LinearCompressibleMixtureLiquid{300, p_old, 1, 1000, 0, 0, liquid_e, 0, 0}; });
+        liquid = R::make_linear_compressible_mixture_liquid(
+            catalog, {250, 1200, 50000, 1000000}, [liquid_e](std::span<const double>)
+            { return R::LinearCompressibleMixtureLiquid{300, p_old, 1, 1000, 0, 0, liquid_e, 0, 0}; }, convention);
         gas = R::make_ideal_gas_mixture(catalog,
             {{cv, 300, cv * 300 + vapor_reference_shift}, {cv, 300, cv * 300 + inert_reference_shift}},
-            {250, 1200, 50000, 1000000});
+            {250, 1200, 50000, 1000000}, convention);
         before = {{liquid, {nl, 0}, p_old, .4 * liquid_e, 300}, {gas, {0, 0}, p_old, 0, 0},
             {gas, {0, ng}, p_old, ng * (cv * 300 + inert_reference_shift), 300}};
         for (const auto& phase : before)
             Uadv.push_back(phase.internal_energy);
-        auto partial = std::make_shared<const R::PartialMolarEnthalpyLaw>(
-            R::PartialMolarEnthalpyLaw{{"analytic-incompressible-liquid-partials", 1, catalog->fingerprint()},
-                {250, 1200, 50000, 1000000}, [this, liquid_e](double t, double p, std::span<const double>)
-                {
-                    ++constitutive_calls;
-                    R::PartialMolarEnthalpyPoint result;
-                    const double h = liquid_e + 1000 * (t - 300) + p;
-                    for (const auto& species : catalog->species())
-                    {
-                        result.value.push_back(species.molarMass * h);
-                        result.temperature.push_back(species.molarMass * 1000);
-                        result.pressure.push_back(species.molarMass);
-                    }
-                    return result;
-                }});
+        auto partial = liquid_partials(catalog, liquid_e, constitutive_calls);
         R::InterphaseConfiguration config;
         config.metadata = {"frozen-full-vapor-transfer", 1, catalog->fingerprint()};
         config.phase_enthalpy = {partial, nullptr, nullptr};

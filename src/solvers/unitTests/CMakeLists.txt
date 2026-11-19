@@ -114,6 +114,18 @@ endforeach()
 
 # Conservative native mixture flow and its external reaction controller.
 foreach(_mixture_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME LowMachQbmmState_${_mixture_ranks}procs
+        TARGET testLowMachQbmmState PROCS ${_mixture_ranks}
+        LABELS "mpi;low_mach;qbmm;population;transaction;empty_rank" TIMEOUT 180)
+    simplefluid_add_mpi_test(NAME ReactingMixtureQbmmReleaseGate_${_mixture_ranks}procs
+        TARGET testReactingMixtureQbmmReleaseGate PROCS ${_mixture_ranks}
+        LABELS "mpi;low_mach;reacting;qbmm;population;conservation;transaction;empty_rank" TIMEOUT 300)
+    simplefluid_add_mpi_test(NAME LowMachQbmmTransport_${_mixture_ranks}procs
+        TARGET testLowMachQbmmTransport PROCS ${_mixture_ranks}
+        LABELS "mpi;low_mach;qbmm;population;conservation;transaction;empty_rank" TIMEOUT 180)
+    simplefluid_add_mpi_test(NAME ReactingMixtureQbmmSources_${_mixture_ranks}procs
+        TARGET testReactingMixtureQbmmSources PROCS ${_mixture_ranks}
+        LABELS "mpi;low_mach;reacting;qbmm;population;conservation;transaction;empty_rank" TIMEOUT 180)
     simplefluid_add_mpi_test(NAME NativeSourceDonors_${_mixture_ranks}procs
         TARGET testNativeSourceDonors PROCS ${_mixture_ranks}
         LABELS "mpi;low_mach;reacting;diffusion;thermal;transaction;empty_rank" TIMEOUT 120)
