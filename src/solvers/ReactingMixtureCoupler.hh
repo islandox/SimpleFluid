@@ -167,7 +167,10 @@ struct ReactingMixtureOptions
     std::shared_ptr<const MixtureInterphaseEventProvider>
         interphase; ///< Frozen material amounts before explicit number law.
     std::shared_ptr<const MixtureQbmmProvider> qbmm_population;
-    std::optional<LowMachMixtureSolver::Vector> body_acceleration; ///< Uniform fixed-grid acceleration, m/s².
+    /** Uniform fixed-grid acceleration in m/s². Each acceleration-dependent node-slip law must bind this vector.
+     * An engaged zero denotes a supplied acceleration.
+     */
+    std::optional<LowMachMixtureSolver::Vector> body_acceleration;
 };
 
 class SIMPLEFLUID_SOLVERS_EXPORT ReactingMixtureCoupler

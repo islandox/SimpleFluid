@@ -5,9 +5,12 @@
 #include "solvers/ReactingMixtureCoupler.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
+#include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdlib>
 #include <gtest/gtest.h>
+#include <limits>
 #include <numeric>
 
 namespace
@@ -47,7 +50,8 @@ struct Fixture : Thermo::Fixture
     explicit Fixture(std::vector<R::QbmmAtom> seed = {{4, 1}}, bool moving = false, bool bind_coarse = false,
         R::EnergyConvention convention = R::EnergyConvention::IncludesFormationEnergy,
         R::QbmmClosureVersions policies = {}, double liquid_stock = liquid_moles, bool kinetic = false,
-        bool initialize_flow = true, FamilyTransport family_transport = FamilyTransport::NativeImplicit)
+        bool initialize_flow = true, FamilyTransport family_transport = FamilyTransport::NativeImplicit,
+        std::optional<Flow::Vector> node_acceleration = {}, std::uint64_t slip_revision = 1)
         : Thermo::Fixture(0, 0, convention)
     {
         Flow::Mesh::DistributionOptions partition;
@@ -66,17 +70,23 @@ struct Fixture : Thermo::Fixture
         controls.qbmm_model.family_transport = family_transport;
         if (kinetic)
         {
-            const R::QbmmLawMetadata slip{"affine-mass-slip", 1, R::QbmmLawKind::NodeSlip,
+            controls.qbmm_eos_law_identities = {
+                R::ThermalLawIdentity{"conditioned constant liquid", 1, catalog->fingerprint()}, std::nullopt,
+                std::nullopt, std::nullopt};
+            const R::QbmmLawMetadata slip{"affine-mass-slip", slip_revision, R::QbmmLawKind::NodeSlip,
                 "mass in kg/bubble; constant direction along the column", "m/s"};
             policies.laws.push_back(slip);
             controls.qbmm_model.family_transport = R::QbmmModelOptions::FamilyTransport::KineticEuler;
             controls.qbmm_model.velocity = R::QbmmModelOptions::Velocity::NodeDependentSlip;
-            const auto node_slip = std::make_shared<const R::QbmmNodeSlipLaw>(
-                R::QbmmNodeSlipLaw{slip, [this](const R::QbmmNodeSlipInput& node)
-                    {
-                        ++slip_calls;
-                        return std::array{0., 0., kinetic_slope * node.mass_kg_per_bubble / scale};
-                    }});
+            const auto node_slip = std::make_shared<const R::QbmmNodeSlipLaw>(R::QbmmNodeSlipLaw{slip,
+                [this, node_acceleration](const R::QbmmNodeSlipInput& node)
+                {
+                    ++slip_calls;
+                    EXPECT_EQ(node.body_acceleration_m_per_s2, node_acceleration);
+                    const double factor = node.body_acceleration_m_per_s2 ? -node.body_acceleration_m_per_s2->z : 1.;
+                    return std::array{0., 0., factor * kinetic_slope * node.mass_kg_per_bubble / scale};
+                },
+                node_acceleration});
             controls.qbmm_node_slip_laws = {nullptr, node_slip, nullptr, nullptr};
         }
         family = std::make_shared<const R::QbmmPopulationSchema>(catalog, catalog->fingerprint(), "vapor",
@@ -313,24 +323,75 @@ TEST(ReactingMixtureQbmmSourcesTest, TypedLawScopesCallbacksAndRestartToItsDecla
 
 TEST(ReactingMixtureQbmmSourcesTest, BodyImpulseUsesEndMassAndDoesNotDuplicateReservoirImpulse)
 {
-    Fixture f;
-    constexpr double feed_mass = 2 * scale, feed_impulse = .034, gravity = -2.7, dt = .03125;
-    auto controls = f.options(
-        [](const auto&)
+    for (const bool kinetic : {false, true})
+    {
+        Fixture f({{4, 1}}, false, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, kinetic);
+        constexpr double feed_mass = 2 * scale, feed_impulse = .034, gravity = -2.7, dt = .03125;
+        auto controls = f.options(
+            [](const auto&)
+            {
+                return Ops{R::QbmmBirth{
+                    {{{1, 2}, {R::QbmmReservoirExchange{"feed", 1750, {feed_impulse, 0, 0}}, {feed_mass, 0}}}}}};
+            });
+        controls.body_acceleration = Flow::Vector{gravity, 0, 0};
+        Coupler controller(f.flow, controls);
+        const auto trial = controller.preview(dt);
+        const double vapor = 4 * scale;
+        const double inert =
+            (1 - liquid_moles) * Thermo::p_old / (Thermo::gas_constant * Thermo::T0) - vapor - coarse_moles;
+        const double mass = liquid_moles + vapor + coarse_moles + .028 * inert + feed_mass;
+        EXPECT_NEAR(trial.diagnostics().flow.external_impulse.component(0), feed_impulse + mass * gravity * dt, 3e-15);
+        const auto report = controller.qbmm_report(trial);
+        ASSERT_TRUE(report.external_impulses_kg_m_per_s);
+        ASSERT_TRUE(report.interval);
+        for (const auto& cell : report.interval->local_receipts)
         {
-            return Ops{R::QbmmBirth{
-                {{{1, 2}, {R::QbmmReservoirExchange{"feed", 1750, {feed_impulse, 0, 0}}, {feed_mass, 0}}}}}};
-        });
-    controls.body_acceleration = Flow::Vector{gravity, 0, 0};
-    Coupler controller(f.flow, controls);
-    const auto trial = controller.preview(dt);
-    const double vapor = 4 * scale;
-    const double inert =
-        (1 - liquid_moles) * Thermo::p_old / (Thermo::gas_constant * Thermo::T0) - vapor - coarse_moles;
-    const double mass = liquid_moles + vapor + coarse_moles + .028 * inert + feed_mass;
-    EXPECT_NEAR(trial.diagnostics().flow.external_impulse.component(0), feed_impulse + mass * gravity * dt, 3e-15);
-    EXPECT_EQ(trial.diagnostics().external_mass, feed_mass);
-    EXPECT_EQ(trial.diagnostics().external_heat, 0);
+            const auto& source = cell.at(1).value();
+            ASSERT_EQ(source.events.size(), 1u);
+            const auto& birth = source.events.front();
+            EXPECT_EQ(birth.gross_created, (R::QbmmMomentBlock{1., 2., 4., 8.}));
+            EXPECT_EQ(birth.moment_change, birth.gross_created);
+            EXPECT_EQ(birth.gross_consumed, R::QbmmMomentBlock{});
+            EXPECT_EQ(birth.material_mass_change_over_scale, 2.);
+            EXPECT_EQ(source.event_shape_change, (std::array{4., 8.}));
+        }
+        EXPECT_NEAR(report.external_impulses_kg_m_per_s->body.x, mass * gravity * dt, 3e-15);
+        EXPECT_EQ(report.external_impulses_kg_m_per_s->other, (Flow::Vector{feed_impulse, 0., 0.}));
+        EXPECT_EQ(report.pressure_impulse_kg_m_per_s, trial.diagnostics().flow.pressure_impulse);
+        EXPECT_EQ(trial.diagnostics().external_mass, feed_mass);
+        EXPECT_EQ(trial.diagnostics().external_heat, 0);
+    }
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, HydrostaticImpulsePreservesSmallSignedReservoirMomentum)
+{
+    constexpr double dt = .03125, feed_mass = 2 * scale;
+    for (const double other : {-1., 1.})
+    {
+        Fixture f({{4, 1}}, false, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, true);
+        auto controls = f.options(
+            [other](const auto&)
+            {
+                return Ops{R::QbmmBirth{
+                    {{{1, 2}, {R::QbmmReservoirExchange{"feed", 1750, {other, 0., 0.}}, {feed_mass, 0.}}}}}};
+            });
+        controls.body_acceleration = Flow::Vector{0x1p62, 0., 0.};
+        Coupler controller(f.flow, controls);
+        const auto trial = controller.preview(dt);
+        const auto& diagnostic = trial.diagnostics().flow;
+        ASSERT_TRUE(diagnostic.impulse_parts);
+        EXPECT_EQ(diagnostic.impulse_parts->other.x, other);
+        EXPECT_EQ(diagnostic.pressure_impulse.x, -diagnostic.impulse_parts->body.x);
+        EXPECT_EQ(diagnostic.external_impulse.x, diagnostic.impulse_parts->body.x);
+        for (const auto& cell : trial.state().cells)
+        {
+            double total_mass = 0.;
+            for (const auto& phase : cell.phases)
+                for (size_t species = 0; species < phase.moles.size(); ++species)
+                    total_mass += phase.moles[species] * f.catalog->species()[species].molarMass;
+            EXPECT_NEAR(total_mass * cell.velocity.x, other, 2e-12);
+        }
+    }
 }
 
 TEST(ReactingMixtureQbmmSourcesTest, ClosedBirthGrowthShrinkageAndDisappearanceMatchAnalyticCaloricEndpoint)
@@ -979,19 +1040,47 @@ TEST(ReactingMixtureQbmmSourcesTest, PairedEventsReserveCompensatedChemistryCred
     }
 }
 
-void exercise_coherent_transport(FamilyTransport family_transport)
+void expect_same_state(const Flow::State& actual, const Flow::State& expected)
+{
+    EXPECT_EQ(actual.time, expected.time);
+    EXPECT_EQ(actual.revision, expected.revision);
+    EXPECT_EQ(actual.thermodynamic_pressure, expected.thermodynamic_pressure);
+    ASSERT_EQ(actual.cells.size(), expected.cells.size());
+    for (std::size_t c = 0; c < actual.cells.size(); ++c)
+    {
+        const auto& x = actual.cells[c];
+        const auto& y = expected.cells[c];
+        EXPECT_EQ(x.qbmm_shape, y.qbmm_shape);
+        EXPECT_EQ(x.phase_numbers, y.phase_numbers);
+        EXPECT_EQ(x.qbmm_kinetic_closure, y.qbmm_kinetic_closure);
+        EXPECT_EQ(x.qbmm_kinetic_eos_volumes, y.qbmm_kinetic_eos_volumes);
+        EXPECT_EQ(x.velocity, y.velocity);
+        EXPECT_EQ(x.mechanical_pressure, y.mechanical_pressure);
+        for (std::size_t p = 0; p < x.phases.size(); ++p)
+        {
+            EXPECT_EQ(x.phases[p].moles, y.phases[p].moles);
+            EXPECT_EQ(x.phases[p].internal_energy, y.phases[p].internal_energy);
+            EXPECT_EQ(x.phases[p].temperature, y.phases[p].temperature);
+            EXPECT_EQ(x.phases[p].absolute_pressure, y.phases[p].absolute_pressure);
+        }
+    }
+}
+
+void exercise_coherent_transport(FamilyTransport family_transport, std::optional<Flow::Vector> gravity = {})
 {
     using LO = Flow::Pack::local_ordinal_type;
     constexpr double dt = .01;
     const bool kinetic = family_transport == FamilyTransport::KineticEuler;
     const bool linear = family_transport == FamilyTransport::RealizableLinearSSPRK2;
     const bool explicit_family = kinetic || linear;
-    const char* writer = kinetic  ? std::getenv("SIMPLEFLUID_Q7B_RESTART_WRITE")
-                         : linear ? std::getenv("SIMPLEFLUID_Q7C_RESTART_WRITE")
-                                  : nullptr;
-    const char* reader = kinetic  ? std::getenv("SIMPLEFLUID_Q7B_RESTART_READ")
-                         : linear ? std::getenv("SIMPLEFLUID_Q7C_RESTART_READ")
-                                  : nullptr;
+    const char* writer = gravity   ? std::getenv("SIMPLEFLUID_Q8B_RESTART_WRITE")
+                         : kinetic ? std::getenv("SIMPLEFLUID_Q7B_RESTART_WRITE")
+                         : linear  ? std::getenv("SIMPLEFLUID_Q7C_RESTART_WRITE")
+                                   : nullptr;
+    const char* reader = gravity   ? std::getenv("SIMPLEFLUID_Q8B_RESTART_READ")
+                         : kinetic ? std::getenv("SIMPLEFLUID_Q7B_RESTART_READ")
+                         : linear  ? std::getenv("SIMPLEFLUID_Q7C_RESTART_READ")
+                                   : nullptr;
     ASSERT_FALSE(writer && reader);
     Fixture f({{4, 1}, {4, 2}}, true, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, kinetic,
         !reader, family_transport);
@@ -1000,7 +1089,7 @@ void exercise_coherent_transport(FamilyTransport family_transport)
     bool fail_source = false;
     const auto make_options = [&](Fixture& fixture)
     {
-        return fixture.options(
+        auto options = fixture.options(
             [&, local_fixture = &fixture](const R::MixtureQbmmContext& context)
             {
                 EXPECT_EQ(context.quadrature.active_atoms, 2u);
@@ -1037,33 +1126,17 @@ void exercise_coherent_transport(FamilyTransport family_transport)
                     R::QbmmBreakup{1, .25, {{2, y / 2}}}};
             },
             true);
-    };
-    const auto expect_same_state = [](const Flow::State& actual, const Flow::State& expected)
-    {
-        EXPECT_EQ(actual.time, expected.time);
-        EXPECT_EQ(actual.revision, expected.revision);
-        EXPECT_EQ(actual.thermodynamic_pressure, expected.thermodynamic_pressure);
-        ASSERT_EQ(actual.cells.size(), expected.cells.size());
-        for (std::size_t c = 0; c < actual.cells.size(); ++c)
-        {
-            const auto& x = actual.cells[c];
-            const auto& y = expected.cells[c];
-            EXPECT_EQ(x.qbmm_shape, y.qbmm_shape);
-            EXPECT_EQ(x.phase_numbers, y.phase_numbers);
-            EXPECT_EQ(x.qbmm_kinetic_closure, y.qbmm_kinetic_closure);
-            EXPECT_EQ(x.qbmm_kinetic_eos_volumes, y.qbmm_kinetic_eos_volumes);
-            EXPECT_EQ(x.velocity, y.velocity);
-            EXPECT_EQ(x.mechanical_pressure, y.mechanical_pressure);
-            for (std::size_t p = 0; p < x.phases.size(); ++p)
-            {
-                EXPECT_EQ(x.phases[p].moles, y.phases[p].moles);
-                EXPECT_EQ(x.phases[p].internal_energy, y.phases[p].internal_energy);
-                EXPECT_EQ(x.phases[p].temperature, y.phases[p].temperature);
-                EXPECT_EQ(x.phases[p].absolute_pressure, y.phases[p].absolute_pressure);
-            }
-        }
+        options.body_acceleration = gravity;
+        return options;
     };
     const auto comm = f.mesh->owned_cell_map()->getComm();
+    if (gravity && (writer || reader))
+    {
+        const char* expected_ranks = std::getenv("SIMPLEFLUID_Q8B_RESTART_RANKS");
+        ASSERT_NE(expected_ranks, nullptr);
+        ASSERT_EQ(comm->getSize(), std::stoi(expected_ranks));
+        ::testing::Test::RecordProperty("mpi_ranks", comm->getSize());
+    }
     if (reader)
     {
         EXPECT_FALSE(f.flow->initialized());
@@ -1111,6 +1184,17 @@ void exercise_coherent_transport(FamilyTransport family_transport)
         EXPECT_EQ(actual.flow.pressure_work, expected.flow.pressure_work);
         EXPECT_EQ(actual.flow.pressure_impulse, expected.flow.pressure_impulse);
         EXPECT_EQ(actual.flow.external_impulse, expected.flow.external_impulse);
+        if (gravity)
+        {
+            EXPECT_EQ(report.body_acceleration_m_per_s2, gravity);
+            EXPECT_EQ(report.balanced_kinetic_pressure_policy, Flow::balanced_kinetic_pressure_revision);
+            EXPECT_EQ(report.forced_kinetic_thermal_policy, Flow::forced_kinetic_thermal_revision);
+            EXPECT_EQ(report.external_impulses_kg_m_per_s, actual.flow.impulse_parts);
+            EXPECT_EQ(report.pressure_impulse_kg_m_per_s, actual.flow.pressure_impulse);
+            EXPECT_EQ(report.kinetic_cfl_limit, fresh.flow->options().qbmm_model.kinetic_cfl);
+            EXPECT_EQ(report.kinetic_substep_limit, fresh.flow->options().qbmm_model.maximum_kinetic_substeps);
+            EXPECT_TRUE(actual.flow.impulse_parts.has_value());
+        }
         EXPECT_EQ(actual.flow.momentum_error, expected.flow.momentum_error);
         EXPECT_EQ(actual.flow.kinetic_substeps, expected.flow.kinetic_substeps);
         EXPECT_EQ(actual.flow.maximum_kinetic_cfl, expected.flow.maximum_kinetic_cfl);
@@ -1145,6 +1229,12 @@ void exercise_coherent_transport(FamilyTransport family_transport)
     }
     const auto accepted = f.flow->state();
     const auto before = f.flow->serialize_qbmm_restart();
+    if (gravity)
+    {
+        ASSERT_GT(before.size(), 3 * sizeof(std::uint64_t));
+        EXPECT_EQ(before[8], std::byte{9});
+        EXPECT_EQ(before[16], std::byte{3});
+    }
     const auto trial = controller.preview(dt);
     EXPECT_EQ(f.flow->serialize_qbmm_restart(), before);
     EXPECT_GE(trial.diagnostics().flow.source_evaluations, 2);
@@ -1421,6 +1511,16 @@ TEST(ReactingMixtureQbmmSourcesTest, KineticTransportFeedsCoherentEventsThermals
     exercise_coherent_transport(FamilyTransport::KineticEuler);
 }
 
+TEST(ReactingMixtureQbmmSourcesTest, ForcedKineticTaggedRestart)
+{
+    exercise_coherent_transport(FamilyTransport::KineticEuler, Flow::Vector{0., 0., -.125});
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, ZeroForceKineticTaggedRestart)
+{
+    exercise_coherent_transport(FamilyTransport::KineticEuler, Flow::Vector{});
+}
+
 TEST(ReactingMixtureQbmmSourcesTest, LinearTransportFeedsCoherentEventsThermalsCommitAndRestart)
 {
     exercise_coherent_transport(FamilyTransport::RealizableLinearSSPRK2);
@@ -1455,6 +1555,404 @@ TEST(ReactingMixtureQbmmSourcesTest, CountOnlyMigrationReportsTheReceivingLinear
     EXPECT_EQ(migrated.linear_substeps, 0);
     EXPECT_EQ(migrated.linear_stages, 0);
     EXPECT_EQ(migrated.maximum_linear_cfl, 0.);
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, KineticLawAccelerationIsCollectivelyValidatedAtConstruction)
+{
+    Fixture f({{4, 1}}, false, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, true);
+    const auto comm = f.mesh->owned_cell_map()->getComm();
+    const int local_owner = f.mesh->num_owned_cells() > 0;
+    int owners = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_owner, &owners);
+    EXPECT_EQ(owners, 1);
+    const Flow::Vector acceleration{0., 0., -2.};
+    std::vector<std::optional<Flow::Vector>> last_rank_dependencies{
+        Flow::Vector{0., 0., std::numeric_limits<double>::quiet_NaN()}};
+    if (comm->getSize() > 1)
+    {
+        last_rank_dependencies.push_back(Flow::Vector{0., 0., -3.});
+        last_rank_dependencies.push_back(std::nullopt);
+    }
+    for (const auto& last_rank_dependency : last_rank_dependencies)
+    {
+        auto options = f.flow->options();
+        const auto dependency =
+            comm->getRank() == comm->getSize() - 1 ? last_rank_dependency : std::optional{acceleration};
+        const auto metadata = options.qbmm_node_slip_laws.at(1)->metadata;
+        options.qbmm_node_slip_laws[1] = std::make_shared<const R::QbmmNodeSlipLaw>(R::QbmmNodeSlipLaw{metadata,
+            [](const auto&)
+            {
+                ADD_FAILURE() << "Invalid dependency reached the evaluator.";
+                return std::array{0., 0., 0.};
+            },
+            dependency});
+        EXPECT_THROW((void) Flow(f.mesh, {f.liquid, f.gas, f.gas, f.gas}, options), std::exception);
+    }
+}
+
+std::vector<std::byte> changed_restart_number(
+    const Teuchos::Comm<int>& comm, std::vector<std::byte> image, size_t index, double value, bool change_local_image)
+{
+    // A repaired shard and image checksum exercise semantic decoding.
+    constexpr auto word = sizeof(std::uint64_t);
+    image.resize(image.size() - 2 * word);
+    if (change_local_image)
+    {
+        std::vector<std::byte> component;
+        RestartIO::append_restart_word(component, std::bit_cast<std::uint64_t>(value));
+        std::copy(component.begin(), component.end(), image.begin() + index * word);
+    }
+    RestartIO::append_restart_checksums(comm, image);
+    return image;
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, KineticNodeSlipAccelerationIsImmutableAcrossReplays)
+{
+    const Flow::Vector force{0., 0., -2.};
+    constexpr double dt = .015625;
+    const auto kinetic = [&](std::uint64_t revision, bool initialize)
+    {
+        return Fixture({{2, 1}, {1, 3}}, false, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles,
+            true, initialize, FamilyTransport::NativeImplicit, force, revision);
+    };
+    auto f = kinetic(1, true);
+    const auto comm = f.mesh->owned_cell_map()->getComm();
+    const auto initialized = f.flow->state();
+    for (const auto& cell : initialized.cells)
+    {
+        const auto& closure = *cell.qbmm_kinetic_closure.at(1);
+        EXPECT_EQ(closure.active_atoms, 2u);
+        EXPECT_DOUBLE_EQ(closure.node_velocities.at(0).z, 2 * kinetic_slope);
+        EXPECT_DOUBLE_EQ(closure.node_velocities.at(1).z, 6 * kinetic_slope);
+    }
+    auto controls = f.options([](const auto&) { return Ops{}; });
+    const auto initial_callbacks = f.slip_calls;
+    EXPECT_THROW((void) f.flow->preview(dt), std::exception);
+    EXPECT_THROW((void) Coupler(f.flow, controls), std::exception);
+    controls.body_acceleration = Flow::Vector{};
+    EXPECT_THROW((void) Coupler(f.flow, controls), std::exception);
+    controls.body_acceleration = comm->getRank() == comm->getSize() - 1 ? Flow::Vector{0., 0., -3.} : force;
+    EXPECT_THROW((void) Coupler(f.flow, controls), std::exception);
+    EXPECT_EQ(f.slip_calls, initial_callbacks);
+    EXPECT_EQ(f.law_calls, 0);
+    expect_same_state(f.flow->state(), initialized);
+
+    controls.body_acceleration = force;
+    Coupler valid(f.flow, controls);
+    valid.advance(dt);
+    const auto archived = valid.serialize_qbmm_restart();
+    ASSERT_GE(archived.size(), 9 * sizeof(std::uint64_t));
+    EXPECT_EQ(archived[sizeof(std::uint64_t)], std::byte{9});
+
+    const auto checkpoint = valid.checkpoint();
+    valid.advance(dt);
+    const auto expected = f.flow->state();
+    const auto callbacks = [&] { return std::array{f.slip_calls, f.law_calls, f.constitutive_calls}; };
+    const auto before_restore = callbacks();
+    valid.restore(checkpoint);
+    EXPECT_EQ(callbacks(), before_restore);
+    EXPECT_EQ(valid.qbmm_report().body_acceleration_m_per_s2, force);
+    const auto retained = valid.preview(dt);
+
+    auto resumed = kinetic(1, false);
+    resumed.flow->restore_qbmm_restart(archived);
+    EXPECT_EQ(resumed.slip_calls, 0);
+    EXPECT_EQ(resumed.flow->qbmm_report().body_acceleration_m_per_s2, force);
+    EXPECT_THROW((void) resumed.flow->preview(dt), std::exception);
+    auto revised = kinetic(2, false);
+    EXPECT_THROW(revised.flow->restore_qbmm_restart(archived), std::exception);
+    EXPECT_EQ(revised.slip_calls, 0);
+    EXPECT_FALSE(revised.flow->initialized());
+
+    Fixture incompatible(
+        {{2, 1}, {1, 3}}, false, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, false, false);
+    EXPECT_THROW(incompatible.flow->restore_qbmm_restart(archived), std::exception);
+    EXPECT_FALSE(incompatible.flow->initialized());
+    for (const size_t offset : {1u, 2u, 3u, 7u, 8u})
+    {
+        // Corrupt only the version, payload type, force presence, or algorithm revision and repair both checksums.
+        auto damaged = archived;
+        damaged.resize(damaged.size() - 2 * sizeof(std::uint64_t));
+        if (comm->getRank() == 0)
+            damaged[offset * sizeof(std::uint64_t)] ^= std::byte{16};
+        RestartIO::append_restart_checksums(*comm, damaged);
+        EXPECT_THROW(valid.restore_qbmm_restart(damaged), std::exception);
+    }
+    const auto corrupted = changed_restart_number(*comm, archived, 6, -4., comm->getRank() == comm->getSize() - 1);
+    const auto before_corruption = callbacks();
+    EXPECT_THROW(valid.restore_qbmm_restart(corrupted), std::exception);
+    EXPECT_THROW(resumed.flow->restore_qbmm_restart(corrupted), std::exception);
+    EXPECT_EQ(callbacks(), before_corruption);
+    EXPECT_EQ(resumed.slip_calls, 0);
+    EXPECT_DOUBLE_EQ(resumed.flow->state().time, dt);
+
+    auto pending = resumed.options([](const auto&) { return Ops{}; });
+    pending.body_acceleration = force;
+    Coupler continued(resumed.flow, pending);
+    EXPECT_EQ(resumed.slip_calls, 0);
+    continued.advance(dt);
+    valid.commit(retained);
+    expect_same_state(resumed.flow->state(), expected);
+    expect_same_state(f.flow->state(), expected);
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, ForcedKineticRestartAndCheckpointBindForceWithoutLawDependency)
+{
+    Fixture f({{4, 1}}, false, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, true);
+    Fixture resumed(
+        {{4, 1}}, false, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, true, false);
+    constexpr double dt = .015625;
+    auto controls = f.options();
+    controls.body_acceleration = Flow::Vector{};
+    Flow::Checkpoint initialized, checkpoint;
+    std::vector<std::byte> archived;
+    {
+        Coupler valid(f.flow, controls);
+        initialized = f.flow->checkpoint();
+        valid.advance(dt);
+        checkpoint = f.flow->checkpoint();
+        archived = valid.serialize_qbmm_restart();
+    }
+    const auto slip_calls = f.slip_calls;
+    f.flow->restore(initialized);
+    EXPECT_EQ(f.slip_calls, slip_calls);
+    EXPECT_DOUBLE_EQ(f.flow->state().time, 0.);
+    EXPECT_EQ(f.flow->qbmm_report().body_acceleration_m_per_s2, controls.body_acceleration);
+    const auto recoded_initial = f.flow->serialize_qbmm_restart();
+    ASSERT_GT(recoded_initial.size(), sizeof(std::uint64_t));
+    EXPECT_EQ(recoded_initial[sizeof(std::uint64_t)], std::byte{9});
+    f.flow->restore(checkpoint);
+    EXPECT_EQ(f.slip_calls, slip_calls);
+    EXPECT_EQ(f.flow->qbmm_report().body_acceleration_m_per_s2, controls.body_acceleration);
+    EXPECT_THROW((void) f.flow->preview(dt), std::exception);
+    auto absent = f.options();
+    EXPECT_THROW((void) Coupler(f.flow, absent), std::exception);
+    absent.body_acceleration = Flow::Vector{0., 0., -2.};
+    EXPECT_THROW((void) Coupler(f.flow, absent), std::exception);
+    EXPECT_EQ(f.slip_calls, slip_calls);
+
+    const auto comm = f.mesh->owned_cell_map()->getComm();
+    // Every rank supplies the same changed component. Only the force-aware binding distinguishes this image.
+    const auto altered = changed_restart_number(*comm, archived, 6, -2., true);
+    EXPECT_THROW(resumed.flow->restore_qbmm_restart(altered), std::exception);
+    // Word 12 is the body's x impulse, which must be exactly zero for this archived acceleration.
+    for (const bool every_rank : {false, true})
+    {
+        const auto impossible = changed_restart_number(*comm, archived, 12, 1., every_rank || comm->getRank() == 0);
+        EXPECT_THROW(resumed.flow->restore_qbmm_restart(impossible), std::exception);
+    }
+    EXPECT_EQ(resumed.slip_calls, 0);
+    EXPECT_FALSE(resumed.flow->initialized());
+    resumed.flow->restore_qbmm_restart(recoded_initial);
+    EXPECT_EQ(resumed.slip_calls, 0);
+    EXPECT_DOUBLE_EQ(resumed.flow->state().time, 0.);
+    EXPECT_EQ(resumed.flow->qbmm_report().body_acceleration_m_per_s2, controls.body_acceleration);
+    resumed.flow->restore_qbmm_restart(archived);
+    EXPECT_EQ(resumed.slip_calls, 0);
+    EXPECT_EQ(resumed.flow->qbmm_report().body_acceleration_m_per_s2, controls.body_acceleration);
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, BareKineticV7RestartRetainsAbsentForce)
+{
+    Fixture f({{4, 1}}, false, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, true);
+    Fixture restored(
+        {{4, 1}}, false, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, true, false);
+    constexpr double dt = .015625;
+    f.flow->advance(dt);
+    const auto image = f.flow->serialize_qbmm_restart();
+    ASSERT_GT(image.size(), sizeof(std::uint64_t));
+    EXPECT_EQ(image[sizeof(std::uint64_t)], std::byte{7});
+    restored.flow->restore_qbmm_restart(image);
+    EXPECT_EQ(restored.slip_calls, 0);
+    const auto earlier = restored.flow->preview(dt);
+    const auto callbacks = restored.slip_calls;
+    auto controls = restored.options();
+    for (const auto acceleration : {Flow::Vector{}, Flow::Vector{0., 0., -2.}})
+    {
+        controls.body_acceleration = acceleration;
+        EXPECT_THROW((void) Coupler(restored.flow, controls), std::exception);
+        EXPECT_EQ(restored.slip_calls, callbacks);
+    }
+    restored.flow->commit(earlier);
+    EXPECT_DOUBLE_EQ(restored.flow->state().time, 2 * dt);
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, ForcedKineticRestartBindsAllPhysicalProviders)
+{
+    for (const bool occupied : {false, true})
+    {
+        SCOPED_TRACE(occupied);
+        const auto seed = occupied ? std::vector<R::QbmmAtom>{{4, 1}} : std::vector<R::QbmmAtom>{};
+        Fixture f(seed, false, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, true);
+        const auto opaque_gas = std::make_shared<const R::MixtureThermodynamics>(
+            f.catalog, f.gas->bounds(), R::EOSKind::Gas, R::EnthalpyPressureDependence::PressureIndependent,
+            [gas = f.gas](double t, double p, std::span<const double> x) { return gas->evaluate(t, p, x); },
+            f.gas->energy_convention());
+        auto options = f.flow->options();
+        options.qbmm_eos_law_identities[3] =
+            R::ThermalLawIdentity{"custom coarse gas evaluator", 1, f.catalog->fingerprint()};
+        options.mixture_dynamic_viscosity = [](auto, auto) { return 0.; };
+        options.qbmm_mixture_viscosity_identity =
+            R::ThermalLawIdentity{"supplied zero mixture viscosity", 1, f.catalog->fingerprint()};
+        const auto make_flow = [&](const Flow::Options& controls, std::shared_ptr<const R::MixtureThermodynamics> vapor)
+        {
+            return std::make_shared<Flow>(f.mesh, std::vector{f.liquid, std::move(vapor), f.gas, opaque_gas}, controls);
+        };
+        auto source = make_flow(options, f.gas);
+        auto initial = f.flow->state();
+        for (auto& cell : initial.cells)
+        {
+            cell.qbmm_kinetic_closure.clear();
+            cell.qbmm_kinetic_eos_volumes.clear();
+            EXPECT_EQ(cell.phases[1].moles.front() > 0., occupied);
+        }
+        source->initialize(std::move(initial));
+        auto controls = f.options();
+        controls.body_acceleration = Flow::Vector{};
+        Coupler controller(source, controls);
+        const auto archive = controller.serialize_qbmm_restart();
+
+        const auto changed_cv = R::make_ideal_gas_mixture(f.catalog,
+            {{Thermo::cv + 1., Thermo::T0, Thermo::cv * Thermo::T0}, {Thermo::cv, Thermo::T0, Thermo::cv * Thermo::T0}},
+            f.gas->bounds(), f.gas->energy_convention());
+        const std::array composition{1., 0.};
+        const auto old_gas = f.gas->evaluate(Thermo::T0, Thermo::p_old, composition);
+        const auto new_gas = changed_cv->evaluate(Thermo::T0, Thermo::p_old, composition);
+        EXPECT_EQ(old_gas.density, new_gas.density);
+        EXPECT_EQ(old_gas.internal_energy, new_gas.internal_energy);
+        EXPECT_NE(old_gas.internal_energy_temperature, new_gas.internal_energy_temperature);
+        const auto slip_calls = f.slip_calls;
+        const auto reject = [&](const Flow::Options& altered, std::shared_ptr<const R::MixtureThermodynamics> vapor)
+        {
+            const auto target = make_flow(altered, std::move(vapor));
+            EXPECT_THROW(target->restore_qbmm_restart(archive), std::exception);
+            EXPECT_FALSE(target->initialized());
+        };
+        reject(options, changed_cv);
+        reject(options,
+            R::make_ideal_gas_mixture(f.catalog,
+                {{Thermo::cv, Thermo::T0, Thermo::cv * Thermo::T0}, {Thermo::cv, Thermo::T0, Thermo::cv * Thermo::T0}},
+                f.gas->bounds(), f.gas->energy_convention(), Thermo::gas_constant + 1.));
+        auto altered = options;
+        ++altered.qbmm_eos_law_identities[0]->revision;
+        reject(altered, f.gas);
+        altered = options;
+        ++altered.qbmm_eos_law_identities[3]->revision;
+        reject(altered, f.gas);
+        altered = options;
+        ++altered.qbmm_mixture_viscosity_identity->revision;
+        reject(altered, f.gas);
+        const auto matching = make_flow(options, f.gas);
+        matching->restore_qbmm_restart(archive);
+        EXPECT_EQ(f.slip_calls, slip_calls);
+        EXPECT_TRUE(matching->initialized());
+        EXPECT_EQ(matching->qbmm_report().body_acceleration_m_per_s2, controls.body_acceleration);
+    }
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, ForcedKineticAttachmentRequiresDeclaredUniformPhysicalProviders)
+{
+    Fixture f({{4, 1}}, false, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, true);
+    const auto comm = f.mesh->owned_cell_map()->getComm();
+    auto initial = f.flow->state();
+    for (auto& cell : initial.cells)
+    {
+        cell.qbmm_kinetic_closure.clear();
+        cell.qbmm_kinetic_eos_volumes.clear();
+    }
+    auto controls = f.options();
+    controls.body_acceleration = Flow::Vector{};
+    const auto attach =
+        [&](const Flow::Options& options, std::shared_ptr<const R::MixtureThermodynamics> vapor, bool valid)
+    {
+        auto receiving = std::make_shared<Flow>(f.mesh, std::vector{f.liquid, std::move(vapor), f.gas, f.gas}, options);
+        receiving->initialize(initial);
+        const auto before = f.slip_calls;
+        if (valid)
+            EXPECT_NO_THROW((void) Coupler(receiving, controls));
+        else
+            EXPECT_THROW((void) Coupler(receiving, controls), std::exception);
+        EXPECT_EQ(f.slip_calls, before);
+        EXPECT_DOUBLE_EQ(receiving->state().time, 0.);
+    };
+
+    auto options = f.flow->options();
+    options.qbmm_eos_law_identities.clear();
+    attach(options, f.gas, false);
+    const auto& existing_slip = *options.qbmm_node_slip_laws[1];
+    options.qbmm_node_slip_laws[1] = std::make_shared<const R::QbmmNodeSlipLaw>(
+        R::QbmmNodeSlipLaw{existing_slip.metadata, existing_slip.evaluate, Flow::Vector{}});
+    EXPECT_THROW((void) Flow(f.mesh, {f.liquid, f.gas, f.gas, f.gas}, options), std::exception);
+    options = f.flow->options();
+    options.mixture_dynamic_viscosity = [](auto, auto) { return 0.; };
+    attach(options, f.gas, false);
+    const auto supplied_transport = R::make_ideal_gas_mixture(f.catalog,
+        {{Thermo::cv, Thermo::T0, Thermo::cv * Thermo::T0}, {Thermo::cv, Thermo::T0, Thermo::cv * Thermo::T0}},
+        f.gas->bounds(), f.gas->energy_convention(), Thermo::gas_constant,
+        [](double, double, std::span<const double>) { return std::pair{0., 0.}; });
+    options = f.flow->options();
+    attach(options, supplied_transport, false);
+    options.qbmm_eos_law_identities[1] =
+        R::ThermalLawIdentity{"supplied zero gas transport", 1, f.catalog->fingerprint()};
+    attach(options, supplied_transport, true);
+    if (comm->getSize() > 1)
+    {
+        if (comm->getRank() == comm->getSize() - 1)
+            ++options.qbmm_eos_law_identities[1]->revision;
+        attach(options, supplied_transport, false);
+    }
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, CountOnlyMigrationRequiresMatchingKineticAcceleration)
+{
+    const Flow::Vector force{0., 0., -2.};
+    constexpr double dt = .015625;
+    Fixture f({{4, 1}}, false, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, true, true,
+        FamilyTransport::NativeImplicit, force);
+    auto count_only_options = f.flow->options();
+    count_only_options.qbmm_families.clear();
+    count_only_options.qbmm_node_slip_laws.clear();
+    count_only_options.qbmm_model = {};
+    auto previous = std::make_shared<Flow>(f.mesh, std::vector{f.liquid, f.gas, f.gas, f.gas}, count_only_options);
+    auto count_only = f.flow->state();
+    count_only.qbmm_families.clear();
+    Flow::QbmmInitialization shapes;
+    for (auto& cell : count_only.cells)
+    {
+        cell.qbmm_shape.clear();
+        cell.qbmm_kinetic_closure.clear();
+        cell.qbmm_kinetic_eos_volumes.clear();
+        shapes.cells.push_back({std::nullopt, Flow::QbmmMonodisperse{}, std::nullopt, std::nullopt});
+    }
+    previous->initialize(count_only);
+    const auto unforced = previous->checkpoint();
+    auto controls = f.options();
+    controls.body_acceleration = force;
+    Coupler prior_controller(previous, controls);
+    prior_controller.advance(dt);
+    const auto forced = previous->checkpoint();
+
+    Coupler destination(f.flow, controls);
+    const auto earlier = destination.preview(dt);
+    const auto callbacks = f.slip_calls;
+    EXPECT_THROW(destination.restore_qbmm_checkpoint(*previous, unforced, shapes), std::exception);
+    EXPECT_EQ(f.slip_calls, callbacks);
+    EXPECT_DOUBLE_EQ(f.flow->state().time, 0.);
+    destination.commit(earlier);
+    const auto before_migration = f.slip_calls;
+    destination.restore_qbmm_checkpoint(*previous, forced, shapes);
+    EXPECT_EQ(f.slip_calls - before_migration, int(f.mesh->num_owned_cells()));
+    EXPECT_DOUBLE_EQ(f.flow->state().time, previous->state().time);
+    EXPECT_EQ(destination.diagnostics().flow.body_acceleration_m_per_s2, force);
+    EXPECT_FALSE(destination.diagnostics().flow.impulse_parts);
+    EXPECT_EQ(destination.diagnostics().flow.external_impulse, previous->diagnostics().external_impulse);
+    const auto report = destination.qbmm_report();
+    EXPECT_EQ(report.provenance.origin, Flow::QbmmStateOrigin::CountOnlyMigration);
+    EXPECT_EQ(report.body_acceleration_m_per_s2, force);
+    EXPECT_EQ(report.receipt_history, Flow::QbmmReceiptHistory::UnavailableAfterCountOnlyMigration);
+    const auto next = destination.preview(dt);
+    EXPECT_DOUBLE_EQ(next.state().time, 2 * dt);
+    EXPECT_EQ(next.diagnostics().flow.body_acceleration_m_per_s2, force);
 }
 
 TEST(ReactingMixtureQbmmSourcesTest, HeatingPreservesAUnitImpulseBetweenOpposingKineticFamilies)
@@ -2004,5 +2502,97 @@ TEST(ReactingMixtureQbmmSourcesTest, MismatchedRankPolicyRejectsBeforeLawsAndNon
     EXPECT_EQ(f.flow->serialize_qbmm_restart(), before);
     EXPECT_EQ(f.law_calls, int(f.mesh->num_owned_cells()) * trial.diagnostics().flow.source_evaluations);
     controller.commit(trial);
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, ForcedKineticAcceptedControllerAndDiagnosticsSurviveDetachment)
+{
+    constexpr double dt = .015625, feed_mass = 2 * scale;
+    const auto kinetic = [](bool initialize)
+    {
+        return Fixture(
+            {{4, 1}}, false, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, true, initialize);
+    };
+    const auto options = [](Fixture& fixture, std::uint64_t revision)
+    {
+        auto result = fixture.options([](const auto&)
+            { return Ops{R::QbmmBirth{{{{1, 2}, {R::QbmmReservoirExchange{"feed", 1750, {}}, {feed_mass, 0}}}}}}; });
+        result.body_acceleration = Flow::Vector{-2., 1., 0.};
+        result.source_revision = revision;
+        return result;
+    };
+    auto original = kinetic(true), foreign = kinetic(true), resumed = kinetic(false);
+    const auto matching = options(original, 1);
+    const auto revised = options(original, 2);
+    std::vector<std::byte> foreign_archive;
+    {
+        Coupler different_controller(foreign.flow, options(foreign, 2));
+        foreign_archive = different_controller.serialize_qbmm_restart();
+    }
+    Coupler::Diagnostics accepted_diagnostics;
+    {
+        Coupler controller(original.flow, matching);
+        controller.advance(dt);
+        const auto before = controller.serialize_qbmm_restart();
+        EXPECT_EQ(original.flow->serialize_qbmm_restart(), before);
+        const auto retained = controller.preview(dt);
+        EXPECT_EQ(original.flow->serialize_qbmm_restart(), before);
+        EXPECT_THROW(controller.restore_qbmm_restart(foreign_archive), std::exception);
+        const auto comm = original.mesh->owned_cell_map()->getComm();
+        ASSERT_TRUE(controller.diagnostics().flow.impulse_parts);
+        const auto body = controller.diagnostics().flow.impulse_parts->body;
+        ASSERT_LT(body.x, 0.);
+        ASSERT_GT(body.y, 0.);
+        for (const bool every_rank : {false, true})
+        {
+            const bool change = every_rank || comm->getRank() == 0;
+            // v9 contains the global body/other vectors at words 12 and 15, duration at 19,
+            // and independently retained rank-local body operands at word 20.
+            const auto wrong_direction = changed_restart_number(*comm, before, 12, 2 * body.x, change);
+            const auto wrong_other = changed_restart_number(*comm, before, 15, 4096., change);
+            const auto wrong_duration = changed_restart_number(*comm, before, 19, 2 * dt, change);
+            for (const auto* malformed : {&wrong_direction, &wrong_other, &wrong_duration})
+                EXPECT_THROW(controller.restore_qbmm_restart(*malformed), std::exception);
+        }
+        auto wrong_body = changed_restart_number(*comm, before, 12, 2 * body.x, true);
+        wrong_body = changed_restart_number(*comm, std::move(wrong_body), 13, 2 * body.y, true);
+        const bool owned = !original.flow->state().cells.empty();
+        wrong_body = changed_restart_number(*comm, std::move(wrong_body), 20, 2 * body.x, owned);
+        wrong_body = changed_restart_number(*comm, std::move(wrong_body), 21, 2 * body.y, owned);
+        EXPECT_THROW(controller.restore_qbmm_restart(wrong_body), std::exception);
+        EXPECT_EQ(controller.serialize_qbmm_restart(), before);
+        controller.commit(retained);
+        accepted_diagnostics = controller.diagnostics();
+    }
+    ASSERT_GT(accepted_diagnostics.correctors, 0);
+    EXPECT_DOUBLE_EQ(accepted_diagnostics.external_mass, feed_mass);
+    ASSERT_GT(accepted_diagnostics.population_births.size(), 1u);
+    EXPECT_DOUBLE_EQ(accepted_diagnostics.population_births[1], 1.);
+    const auto accepted = original.flow->state();
+    const auto archived = original.flow->serialize_qbmm_restart();
+    EXPECT_THROW((void) Coupler(original.flow, revised), std::exception);
+    EXPECT_THROW(original.flow->restore_qbmm_restart(foreign_archive), std::exception);
+    EXPECT_EQ(original.flow->serialize_qbmm_restart(), archived);
+    expect_same_state(original.flow->state(), accepted);
+
+    resumed.flow->restore_qbmm_restart(archived);
+    const auto recoded = resumed.flow->serialize_qbmm_restart();
+    resumed.flow->restore_qbmm_restart(recoded);
+    expect_same_state(resumed.flow->state(), accepted);
+    EXPECT_EQ(resumed.flow->qbmm_report().receipt_history, Flow::QbmmReceiptHistory::UnavailableAfterPortableRestart);
+    Coupler reattached(original.flow, matching);
+    Coupler restored(resumed.flow, options(resumed, 1));
+    for (const auto* candidate : {&reattached.diagnostics(), &restored.diagnostics()})
+    {
+        EXPECT_EQ(candidate->correctors, accepted_diagnostics.correctors);
+        EXPECT_EQ(candidate->population_births, accepted_diagnostics.population_births);
+        EXPECT_EQ(candidate->population_deaths, accepted_diagnostics.population_deaths);
+        EXPECT_EQ(candidate->population_number_changes, accepted_diagnostics.population_number_changes);
+        EXPECT_EQ(candidate->reaction_extents, accepted_diagnostics.reaction_extents);
+        EXPECT_DOUBLE_EQ(candidate->external_mass, accepted_diagnostics.external_mass);
+        EXPECT_DOUBLE_EQ(candidate->net_thermal_energy, accepted_diagnostics.net_thermal_energy);
+    }
+    reattached.advance(dt);
+    restored.advance(dt);
+    expect_same_state(original.flow->state(), resumed.flow->state());
 }
 } // namespace

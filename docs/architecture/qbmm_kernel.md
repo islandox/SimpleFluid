@@ -1,6 +1,6 @@
 # QBMM family kernel and native integration contract
 
-The contract below binds phases Q0 through Q7c of [SF-QBMM-CODE-001](qbmm_reacting_bubbles.md)
+The contract below extends the Q0 through Q7c implementation of [SF-QBMM-CODE-001](qbmm_reacting_bubbles.md)
 to the SimpleFluid source baseline `0029a93f`. The physical assumptions and moment definitions
 are in [SF-QBMM-MODEL-001](../modeling/qbmm_reacting_bubbles.md). Q1 provides local numerical
 operations. Q2 supplies native state ownership, Q3 couples local population sources to the native corrector,
@@ -10,6 +10,8 @@ application-declared constitutive ranges. Q7a extends the native transport and r
 to prescribed planar ALE with the same two velocity modes. Q7b adds first-order kinetic transport
 with node-dependent slip on a fixed, closed Cartesian mesh. Q7c adds common-block linear
 reconstruction and SSPRK(2,2) for shared-carrier families on fixed orthogonal meshes.
+Q8a couples Fourier contacts inside the thermal corrector. Q8b admits supplied uniform
+acceleration for fixed closed Cartesian kinetic families.
 
 ## Source alignment
 
@@ -267,6 +269,14 @@ moments at their own scales. Phase concentrations use the current physical EOS v
 
 ## Q5 reporting and numerical release gate
 
+The public moment diagnostics use binary64. An unavailable SI mass-moment density or
+Jacobi coefficient is reported as quiet NaN if its magnitude cannot be represented.
+Exact vacuum densities are zero. The inversion and conservation gates evaluate their
+scaled operands before narrowing diagnostics. Rebuild C++ consumers against these report
+and callback layouts when upgrading to Q8b. The interval report preserves original event
+donors, products and material packets. Its derived event-moment summaries use binary64;
+the source corrector retains the original precision for replay and convergence.
+
 On either the native flow or its reacting controller, call `qbmm_report()` for accepted state
 or `qbmm_report(trial)` for a retained candidate. All ranks call the same overload and select
 the same trial, including ranks with no cells. Both calls return an owned snapshot. Each report
@@ -286,7 +296,7 @@ temperature. It does not run kinetic or population callbacks.
 | Native thermodynamic state | Family gas fraction, volume and phase mass refer to the identified physical gas. Total gas fraction also includes background gas, while mixture density includes all phases. The common cell temperature remains available when only the host liquid is present. |
 | Quadrature and geometry | Status, active rank, Jacobi conditioning and reconstruction residuals accompany each cell. Common-pressure equivalent-sphere radii/diameters, size extrema, area per bulk m³, and Sauter diameter follow from that measure. Exact absence has zero area and no size extrema or d32. |
 | Collective family diagnostics | The EOS-indexed family stamp identifies the coordinate scale. Counts by inversion status, minimum occupied Hankel margins and per-order maximum reconstruction residuals use all owned cells. |
-| Interval and balances | Local raw Q1 receipts and the fixed-layout gross corrector record belong to the accepted or selected trial interval. The report identifies the source stage, pre-transport generation/time and residuals. Global species defects include reaction conversion. Mass and declared-element defects in the coupled report charge external reservoir material. The energy defect includes applied heat and native pressure work, in joules. |
+| Interval and balances | Local Q1 event reports and the fixed-layout gross corrector record belong to the accepted or selected trial interval. The report identifies the source stage, pre-transport generation/time and residuals. Global species defects include reaction conversion. Mass and declared-element defects in the coupled report charge external reservoir material. The energy defect includes applied heat and native pressure work, in joules. |
 
 The physical mass and element gates compare the change of each global inventory with its
 declared external input. Each gate uses the configured conservation tolerance times the largest
@@ -304,11 +314,11 @@ fraction and an energy-balanced timestep give no empirical validity range for a 
 | --- | --- |
 | Native mesh and boundaries | Closed, supported orthogonal native geometry with common pressure and equilibrium temperature. Prescribed fixed-topology planar ALE supports Cartesian X/Y/Z, cylindrical axial Z on a nonperiodic sector, and `SemiStructuredXY_Z` axial Z. Moving geometry requires nonperiodic topology, zero mixture viscosity and native slip walls. General remap, AMR and open-reservoir face transport are outside this capability. |
 | Velocity and order | `NativeImplicit` admits `SharedCarrier` (default) and `SuppliedPhaseSlip`. Fixed closed Cartesian meshes also admit `NodeDependentSlip` with `KineticEuler`. Fixed closed orthogonal Cartesian, native cylindrical and cylindrical `SemiStructuredXY_Z` meshes admit `SharedCarrier` with `RealizableLinearSSPRK2`. The scalar background uses transient backward Euler and upwind. Independent phase momentum, steady assembly, BDF2 and ordinary scalar high-order limiters reject. |
-| Gravity and applicability | Native implicit transport on a fixed grid admits optional SI acceleration. Moving and explicit-family controllers require acceleration to be disabled, including when a supplied vector has zero magnitude. Applicability ranges come from the supplied laws. |
+| Gravity and applicability | Fixed native implicit transport and fixed closed Cartesian kinetic Euler admit optional SI acceleration. Planar ALE and realizable linear SSPRK2 require absent acceleration, including for callers prescribing a zero vector. Applicability ranges come from the supplied laws. |
 | Family schema | One named fixed-composition family per dispersed gas phase; catalog, family stamp, reference scale and phase ordering agree on all ranks. Variable composition, cross-family coalescence and unmigrated count-only state reject. |
 | Local material and topology | Constructive paired birth, growth, shrinkage, disappearance, coalescence and breakup; transfers may involve the liquid carrier or a declared external reservoir. Declaring either direction of a family-to-background-gas material slot rejects. Generic chemistry, face transport and interphase laws can act on unbound compartments. A legacy number law must name only unbound populations. Selective or unpaired family material returned by a law rejects the preview. |
 | Thermal and pool closures | Common temperature and pressure, zero surface tension. Separate phase or node temperatures, bulk-gas conversion and capillary/surface-energy closures reject. A separate background gas may carry its own inventory. |
-| Transactions and restart | All owners use a common numerical configuration and controller selection. Commit publishes one retained trial. Rejection preserves accepted canonical state, histories and other compatible previews. Fixed-grid restart supports versions 1–5 under their original modes, version 7 for kinetic Euler and version 8 for realizable linear SSPRK2. Moving restart uses version 6 and binds the original and accepted geometry, motion controls, partition, target policy and supplied physics. |
+| Transactions and restart | All owners use a common numerical configuration and controller selection. Commit publishes one retained trial. Rejection preserves accepted canonical state, histories and other compatible previews. Fixed-grid restart supports versions 1–5 under their original modes, version 7 for unforced kinetic Euler, version 8 for realizable linear SSPRK2, and tagged version 9 for kinetic Euler with supplied acceleration. Moving restart uses version 6 and binds the original and accepted geometry, motion controls, partition, target policy and supplied physics. |
 
 The release suite follows circulating polydisperse gas across partition faces into exact vacuum,
 combines it with population events, unrelated mole-changing chemistry and heat, and checks the
@@ -424,7 +434,7 @@ upper interval radii. Heat entering the named cell is positive. Equal residuals
 use the smallest geometry cell ID, then stage kind, stage index, gross slot and face
 ID. All ranks receive the same winning operands. A capped solve exposes the trace
 through `SourceCorrectorExhausted`. Accepted trials expose it through flow diagnostics.
-The live trace is omitted from portable restart v5–v8.
+The live trace is omitted from portable restart v5–v9.
 
 The original lagged 16×16 corrector rejected its first 1/128 s step at evaluation
 80. Ordered face stage 0, gross slot 48, cell 149, face 159 carried heat out of the
@@ -662,9 +672,128 @@ A fresh native flow can restore an image from a reacting controller and report i
 Attaching the matching controller restores its accepted diagnostics before the next preview.
 The archive binds the endpoint EOS volumes used for applicability and the corresponding
 retained velocities. Hard instantaneous ranges are checked on these operands during restore.
-Earlier portable versions require their original model selections. Prescribed planar ALE, supplied
-body acceleration (including explicit zero), SSPRK2 or BDF2, separate temperatures, variable
-composition, bulk-gas conversion and capillarity remain outside the kinetic admission.
+Earlier portable versions require their original model selections. Kinetic transport rejects
+moving and cylindrical meshes, SSPRK2, BDF2, separate temperatures, variable composition,
+bulk-gas conversion and capillarity.
+
+### Q8b fixed Cartesian kinetic gravity
+
+A reacting controller may supply a uniform `body_acceleration` in m/s² with
+`NodeDependentSlip + KineticEuler`. A prescribed node law supplies its own relative
+velocity. A gravity-dependent law sets `required_body_acceleration_m_per_s2` at
+construction and receives that same acceleration in its input, including during
+initialization of old drift momentum. The receiving controller must match the declared
+dependency on every rank. A supplied zero vector selects the forced pressure and restart
+policies. With acceleration absent, kinetic transport retains the v7 policy.
+
+For the face from owner \(L\) to neighbor \(R\), use the owner-oriented area vector \(A_f\),
+cell-center displacement \(d_f\), mean post-material density \(\bar\rho_f=(\rho_L+\rho_R)/2\)
+and the same pressure residual in both reconstructions,
+
+\[
+r_f=\pi_R-\pi_L-\bar\rho_f g\cdot d_f,\qquad
+G_c\pi=\rho_c g+\operatorname{LS}_{\rm interior,c}(r).
+\]
+
+The provisional absolute face rate is
+\[
+\tilde\phi_f=\overline{\tilde u}\cdot A_f
++\Delta t\,\overline{(G\pi-\rho g)/\rho}\cdot A_f
+-\frac{\Delta t\,|A_f|}{\bar\rho_f |d_f|}r_f .
+\]
+Static walls have zero rate and supply no gradient sample. The cell pressure correction
+uses `CellPressureGradient::Interior`. The directly accumulated volume rate anchors
+\(F^V_f(\phi)=F^V_{f,0}+\bar\theta_f(\phi-\phi_{f,0})\). Exact ties use the symmetric
+half derivative. The operator checks nonnegative mobility, EOS anchoring where mobility
+vanishes, and the final corrected physical material continuity.
+
+In the unconditioned caloric solve, a forced kinetic candidate retains the transported
+temperature when it exactly satisfies the recovered enthalpy equation at the current
+pressure. Otherwise the existing bracketed inversion and all physical gates apply.
+This preserves an exact stationary volume without charging a kinetic withdrawal for
+roundoff introduced by thermal bisection.
+
+For a stationary one-dimensional Cartesian column with axial gravity, an absolute
+pressure rounded to binary64 can leave a small apparent edge imbalance. The column
+check integrates the trapezoidal head from actual densities and requires one common
+pressure datum consistent with every cell's asymmetric rounding interval, including
+ties-to-even. This applies only to mechanical pressures recovered from those same
+absolute pressures, with unchanged physical inventories, zero material transport,
+zero volume target, zero slip and no other impulse. Independent higher-precision
+mechanical data and resolvable column-head errors retain their driving residual.
+Multidimensional heads use the direct interior residual.
+
+The source stage books one post-material \(M_c g\Delta t\) per corrector candidate.
+The carrier predictor includes old-to-new node drift momentum and both directional
+mass rates. The solved predictor velocity enters the implicit carrier face receipt.
+Projection supplies the final cell velocity and its pressure impulse. Body and other
+external impulses are retained separately in kg m/s before their sum enters the physical
+momentum equation. In the balanced predictor the hydrostatic pressure contribution cancels
+the matching booked body impulse before rounding, preserving a small collinear reservoir
+impulse. The force creates no caloric source.
+
+Portable v9 uses little-endian 64-bit words. Magic and version are followed by the payload
+type (3 for fixed kinetic), force presence, three SI components, the balanced pressure
+and thermal revisions, advancement controls, the physical-provider fingerprint, and the
+accepted split impulse when available. An advanced image also carries the interval start,
+duration and rank-local body, other and total impulse operands. Restore checks the
+clock, the local body impulse against the canonical post-material species mass, and the
+three independently reduced totals before publishing the endpoint. The common
+state header checks the rank-local mesh and partition, ordered phase roles, declared EOS
+schema, species catalog, family stamps, law and controller signatures, and the kinetic
+CFL and substep policy. It retains the v7 endpoint node velocities, drift momentum,
+EOS volumes, accepted face rates and interval summaries. A receiving flow can report
+the accepted endpoint before attachment. Continuation requires the matching controller.
+Owner checkpoints retain raw interval receipts. Portable history exposes only the saved
+summaries. Unforced kinetic, linear, planar and fixed implicit archives keep their
+original wire versions and decoders.
+
+For a built-in ideal gas, v9 binds the gas constant and every species' heat capacity,
+reference temperature and reference energy. For an opaque EOS, liquid property law or
+supplied gas transport callback, declare a `ThermalLawIdentity` in the corresponding
+physical-phase slot of `Options::qbmm_eos_law_identities`. A supplied mixture
+viscosity law also needs `Options::qbmm_mixture_viscosity_identity`. Each declaration
+contains a name, revision and matching catalog fingerprint. Update its revision when
+the callback or its parameters change. These bindings include unoccupied phases.
+A forced accepted endpoint retains its controller signature and aggregate diagnostics
+across detachment, reattachment and native re-encoding.
+
+The serial, MPI-2 and MPI-4 column oracles integrate the hydrostatic head from the
+actual ideal-gas and liquid inventories. Three accepted steps gave zero maximum
+speed, absolute face rate and edge defect for the stratified and reversed columns
+and the nonaxial constant-density head with dyadic data. With axial gravity of
+−0.981 m/s², speed and face rate remained zero and the maximum raw edge defect
+was 5.33×10⁻¹⁵ Pa. Opposite 0.001 Pa perturbations produced opposite vertical
+velocities of magnitude 4.74×10⁻⁶ m/s. The flat-pressure stratified starts gave mean
+vertical velocities of −0.014677 and +0.014684 m/s on the first step.
+For weights 2 and 1 at scaled masses 1 and 3, the isolated-face test used
+\(s=1/8\) m/s and \(A/V=4\) m⁻¹. The four upward rates were 2, 4, 10 and 28 per second.
+
+The four-step closed plume transports two sizes across a rank face. The table gives
+the serial values. The same assertions ran on two and four ranks.
+
+| Quantity at 1/16 s | Prescribed slip, force absent | Prescribed slip with gravity |
+| --- | ---: | ---: |
+| Fine / coarse number centroids (m) | 0.504762 / 0.512477 | 0.504153 / 0.511876 |
+| Gas mass centroid (m) | 0.509391 | 0.508787 |
+| Fine / coarse mean rates into the top layer (s⁻¹) | 0.842330 / 1.223470 | 0.817766 / 1.210114 |
+| Gas retained in the top layer (kg) | 0.0176279 | 0.0173754 |
+| Integrated liquid return volume (m³) | 0.000861892 | 0.00134738 |
+| Bottom minus top pressure (Pa) | −1.40745 | 9.65712 |
+
+A separate two-cell counterflow took four kinetic substeps. The independent donor
+replay transferred 0.00774147 kg upward and 0.0140850 kg downward, recovered the
+change in drift momentum and checked the carrier momentum row. The full-step
+body impulse was −0.4375 kg m/s along the column. MPI-4 used two empty owners.
+
+The forced and explicit-zero restart fixtures each write two successive accepted
+states. A separate process reads the first image, advances once, and compares its
+canonical state, retained closure, face rates and diagnostics with the second image
+on the same partition. Owner-checkpoint replay checks the same continuation in memory.
+The rejection cases vary force presence and components, node-law revision, EOS and
+viscosity bindings, controller signature, payload type, method, interval duration and
+impulse totals. A failure on one owner preserves the accepted state and the previously
+valid preview. The v7 continuation check retains absent forcing.
 
 ## Q7c realizable linear SSPRK(2,2) on fixed meshes
 

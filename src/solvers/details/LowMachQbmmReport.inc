@@ -88,6 +88,17 @@ double qbmm_report_phase_mass(const PhaseThermalState& phase)
     return mass;
 }
 
+double qbmm_report_mass_moment_density(long double fraction, int exponent)
+{
+    constexpr auto unavailable = std::numeric_limits<double>::quiet_NaN();
+    const auto density = std::scalbn(fraction, exponent);
+    if (!std::isfinite(density) || density <= 0 || density > std::numeric_limits<double>::max())
+        return unavailable;
+    const auto rounded = static_cast<double>(density);
+    const auto rounded_fraction = std::scalbn(static_cast<long double>(rounded), -exponent);
+    return std::abs((rounded_fraction - fraction) / fraction) <= qbmm_reconstruction_tolerance ? rounded : unavailable;
+}
+
 Solver::QbmmCellFamilyReport qbmm_cell_report(const QbmmPopulationSchema& family, const Solver::CellState& cell,
     std::size_t phase_index, double phase_mass, double bulk_volume)
 {
@@ -109,15 +120,23 @@ Solver::QbmmCellFamilyReport qbmm_cell_report(const QbmmPopulationSchema& family
     for (double moles : phase.moles)
         report.bulk_concentration_mol_per_m3.push_back(
             qbmm_report_quotient(moles, bulk_volume, "QBMM report bulk molar concentration is not representable."));
-    long double scale_power = 1;
+    // Form the power and the quotient at bounded scale. The exponent can exceed binary64 range
+    // even when the dimensionless moments and physical endpoint are valid.
+    int scale_exponent, volume_exponent;
+    const auto scale_fraction = std::frexp(family.mass_scale_kg(), &scale_exponent);
+    const auto volume_fraction = std::frexp(bulk_volume, &volume_exponent);
+    long double scale_fraction_power = 1;
     for (std::size_t k = 0; k < report.moments.size(); ++k)
     {
-        const auto density = scale_power * report.moments[k] / bulk_volume;
-        check(std::isfinite(density) && (report.moments[k] == 0 || density > 0),
-            "QBMM report SI mass moment density is not representable.");
-        report.mass_moment_density_si[k] = density;
-        if (k + 1 < report.moments.size())
-            scale_power *= family.mass_scale_kg();
+        if (const auto moment = report.moments[k]; moment != 0)
+        {
+            int moment_exponent;
+            const auto moment_fraction = std::frexp(moment, &moment_exponent);
+            report.mass_moment_density_si[k] =
+                qbmm_report_mass_moment_density(scale_fraction_power * moment_fraction / volume_fraction,
+                    static_cast<int>(k) * scale_exponent + moment_exponent - volume_exponent);
+        }
+        scale_fraction_power *= scale_fraction;
     }
     std::optional<double> specific_volume;
     if (number > 0)
@@ -155,15 +174,24 @@ void qbmm_update_aggregate(Solver::QbmmFamilyReport& family, const QbmmQuadratur
     if (quadrature.status == InversionStatus::Absent)
         return;
     const auto& conditioning = quadrature.conditioning;
-    const auto add_margin = [](std::optional<long double>& current, long double margin)
-    { current = current ? std::min(*current, margin) : margin; };
+    const auto add_margin = [](std::optional<double>& current, double margin)
+    {
+        if (!current || std::isnan(margin) || margin < *current)
+            current = margin;
+    };
     add_margin(family.minimum_hankel_margin, conditioning.hankel_margin);
     add_margin(family.minimum_shifted_hankel_margin, conditioning.shifted_hankel_margin);
+    const auto add_magnitude = [](double& current, double residual)
+    {
+        const auto magnitude = std::abs(residual);
+        if (std::isnan(magnitude) || magnitude > current)
+            current = magnitude;
+    };
     for (std::size_t k = 0; k < quadrature.reconstruction.absolute.size(); ++k)
     {
         auto& maximum = family.maximum_reconstruction;
-        maximum.absolute[k] = std::max(maximum.absolute[k], std::abs(quadrature.reconstruction.absolute[k]));
-        maximum.relative[k] = std::max(maximum.relative[k], std::abs(quadrature.reconstruction.relative[k]));
+        add_magnitude(maximum.absolute[k], quadrature.reconstruction.absolute[k]);
+        add_magnitude(maximum.relative[k], quadrature.reconstruction.relative[k]);
     }
 }
 
@@ -182,36 +210,31 @@ void qbmm_reduce_aggregate(const Teuchos::Comm<int>& comm, Solver::QbmmFamilyRep
         const auto local_failures = family.applicability_gate_failures[i];
         Teuchos::reduceAll(comm, Teuchos::REDUCE_SUM, 1, &local_failures, &family.applicability_gate_failures[i]);
     }
-#ifdef HAVE_TEUCHOS_MPI
-    if (const auto* mpi = dynamic_cast<const Teuchos::MpiComm<int>*>(&comm))
+    // Max over negated margins and residual magnitudes. Keep empty and unavailable distinct, and use
+    // an ordered value for unavailable so the reduction does not depend on MPI's NaN behavior.
+    constexpr auto infinity = std::numeric_limits<double>::infinity();
+    const auto encode = [=](double value) { return std::isnan(value) ? infinity : value; };
+    const auto decode = [=](double value)
+    { return value == infinity ? std::numeric_limits<double>::quiet_NaN() : value; };
+    std::array<double, 10> local{encode(-family.minimum_hankel_margin.value_or(infinity)),
+        encode(-family.minimum_shifted_hankel_margin.value_or(infinity))};
+    std::array<double, 10> global{};
+    auto& maximum = family.maximum_reconstruction;
+    for (std::size_t k = 0; k < maximum.absolute.size(); ++k)
     {
-        // A single maximum reduction retains the sign and precision of both Hankel extrema.
-        constexpr auto negative_infinity = -std::numeric_limits<long double>::infinity();
-        using Extrema = std::array<long double, 10>;
-        Extrema local{-family.minimum_hankel_margin.value_or(-negative_infinity),
-            -family.minimum_shifted_hankel_margin.value_or(-negative_infinity)};
-        Extrema global{};
-        for (std::size_t k = 0; k < family.maximum_reconstruction.absolute.size(); ++k)
-        {
-            local[2 + k] = family.maximum_reconstruction.absolute[k];
-            local[6 + k] = family.maximum_reconstruction.relative[k];
-        }
-        if (MPI_Allreduce(local.data(), global.data(), static_cast<int>(local.size()), MPI_LONG_DOUBLE, MPI_MAX,
-                *mpi->getRawMpiComm()) != MPI_SUCCESS)
-            throw std::runtime_error("QBMM report extrema reduction failed.");
-        if (global[0] != negative_infinity)
-            family.minimum_hankel_margin = -global[0];
-        if (global[1] != negative_infinity)
-            family.minimum_shifted_hankel_margin = -global[1];
-        for (std::size_t k = 0; k < family.maximum_reconstruction.absolute.size(); ++k)
-        {
-            family.maximum_reconstruction.absolute[k] = global[2 + k];
-            family.maximum_reconstruction.relative[k] = global[6 + k];
-        }
-        return;
+        local[2 + k] = encode(maximum.absolute[k]);
+        local[6 + k] = encode(maximum.relative[k]);
     }
-#endif
-    throw std::invalid_argument("Distributed QBMM reporting requires a native MPI communicator.");
+    Teuchos::reduceAll(comm, Teuchos::REDUCE_MAX, static_cast<int>(local.size()), local.data(), global.data());
+    if (global[0] != -infinity)
+        family.minimum_hankel_margin = -decode(global[0]);
+    if (global[1] != -infinity)
+        family.minimum_shifted_hankel_margin = -decode(global[1]);
+    for (std::size_t k = 0; k < maximum.absolute.size(); ++k)
+    {
+        maximum.absolute[k] = decode(global[2 + k]);
+        maximum.relative[k] = decode(global[6 + k]);
+    }
 }
 
 void qbmm_report_applicability(const QbmmPopulationSchema& schema, const Solver::CellState& state,
@@ -293,6 +316,26 @@ void qbmm_report_applicability(const QbmmPopulationSchema& schema, const Solver:
         report.applicability.push_back(std::move(evaluation));
     }
 }
+template<size_t N> std::array<double, N> report_moments(const std::array<long double, N>& input)
+{
+    std::array<double, N> result;
+    std::ranges::transform(input, result.begin(), [](auto value) { return qbmm_detail::diagnostic_double(value); });
+    return result;
+}
+
+Solver::QbmmSourceReport qbmm_source_report(const Solver::QbmmSourceReceipt& receipt)
+{
+    Solver::QbmmSourceReport report{{}, receipt.final_count, receipt.final_moles, receipt.final_shape,
+        receipt.family_fingerprint, report_moments(receipt.event_shape_change)};
+    report.events.reserve(receipt.events.size());
+    for (const auto& event : receipt.events)
+        report.events.push_back({event.population, event.provider, event.family_fingerprint, event.catalog_fingerprint,
+            event.provider_revision, event.substep, event.duration, event.kind, event.donors, event.products,
+            event.transfers, report_moments(event.gross_consumed), report_moments(event.gross_created),
+            report_moments(event.moment_change),
+            qbmm_detail::diagnostic_double(event.material_mass_change_over_scale)});
+    return report;
+}
 } // namespace
 
 std::shared_ptr<const LowMachMixtureSolver::QbmmIntervalReport> LowMachMixtureSolver::qbmm_interval(const Trial& trial)
@@ -308,7 +351,14 @@ std::shared_ptr<const LowMachMixtureSolver::QbmmIntervalReport> LowMachMixtureSo
     interval->catalog_fingerprint = transport.schema_fingerprint;
     interval->time_step = transport.time_step;
     interval->source_stage = transport.stage;
-    interval->local_receipts = trial.qbmm_cells;
+    interval->local_receipts.reserve(trial.qbmm_cells.size());
+    for (const auto& cell : trial.qbmm_cells)
+    {
+        auto& row = interval->local_receipts.emplace_back(cell.size());
+        for (size_t phase = 0; phase < cell.size(); ++phase)
+            if (cell[phase])
+                row[phase] = qbmm_source_report(*cell[phase]);
+    }
     interval->local_gross_events = trial.gross_events;
     interval->family_transport = trial.statistics.family_transport;
     interval->kinetic_substeps = trial.statistics.kinetic_substeps;
@@ -326,7 +376,7 @@ std::shared_ptr<const LowMachMixtureSolver::QbmmIntervalReport> LowMachMixtureSo
 }
 
 std::shared_ptr<const LowMachMixtureSolver::QbmmPublication> LowMachMixtureSolver::prepare_qbmm_publication(
-    const Trial& trial) const
+    const Trial& trial, const ControllerRestartDiagnostics* controller_diagnostics) const
 {
     if (d->options.qbmm_families.empty())
         return {};
@@ -335,6 +385,37 @@ std::shared_ptr<const LowMachMixtureSolver::QbmmPublication> LowMachMixtureSolve
     publication->balances = trial.qbmm_balances;
     publication->history = QbmmReceiptHistory::Available;
     publication->interval = qbmm_interval(trial);
+    if (uses_qbmm_kinetic_transport(d->options.qbmm_model) && trial.statistics.body_acceleration_m_per_s2)
+    {
+        check(controller_diagnostics && controller_diagnostics->saved && d->active_qbmm_controller,
+            "Forced kinetic QBMM publication requires diagnostics from the active reacting controller.");
+        const auto& prepared = *controller_diagnostics->saved;
+        check(prepared.correctors == trial.statistics.correctors &&
+                  prepared.reaction_extents.size() == controller_diagnostics->reaction_count,
+            "Forced kinetic QBMM controller diagnostics differ from the accepted interval.");
+        publication->controller_diagnostics = std::make_shared<const ReactingMixtureCoupler::Diagnostics>(prepared);
+        auto& interval = publication->forced_kinetic_interval.emplace();
+        interval.old_time = trial.transport.accepted_time;
+        interval.time_step = trial.transport.time_step;
+        std::array<FaceSum, 3> body, other;
+        for (const auto& source : trial.sources)
+        {
+            const auto& parts = source.impulse_parts.value();
+            for (size_t axis = 0; axis < 3; ++axis)
+            {
+                body[axis].add_product(parts.body.component(axis), 1.);
+                other[axis].add_product(parts.other.component(axis), 1.);
+            }
+        }
+        // Retain the three independent roundings entering the momentum reduction.
+        for (size_t axis = 0; axis < 3; ++axis)
+        {
+            interval.local_body.component(axis) = body[axis].rounded();
+            interval.local_other.component(axis) = other[axis].rounded();
+            body[axis].add_weighted(other[axis], 1.);
+            interval.local_external.component(axis) = body[axis].rounded();
+        }
+    }
     if (const auto& geometry = trial.ale_geometry)
         publication->planar_wall_interval =
             PlanarWallInterval{geometry->source.surface_elevation(), geometry->target_surface, geometry->time_step};
@@ -539,6 +620,26 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                 report.balances = d->qbmm_publication->balances;
             }
             const auto& diagnostics = trial ? trial->statistics : d->diagnostics;
+            report.body_acceleration_m_per_s2 = diagnostics.body_acceleration_m_per_s2;
+            if (!trial && diagnostics.correctors == 0 && d->controller_active)
+                report.body_acceleration_m_per_s2 = acceleration_vector(d->active_body_acceleration);
+            if (uses_qbmm_kinetic_transport(d->options.qbmm_model))
+            {
+                report.kinetic_cfl_limit = d->options.qbmm_model.kinetic_cfl;
+                report.kinetic_substep_limit = d->options.qbmm_model.maximum_kinetic_substeps;
+                if (report.body_acceleration_m_per_s2)
+                {
+                    report.balanced_kinetic_pressure_policy = balanced_kinetic_pressure_revision;
+                    report.forced_kinetic_thermal_policy = forced_kinetic_thermal_revision;
+                }
+            }
+            if (diagnostics.correctors > 0)
+            {
+                report.pressure_impulse_kg_m_per_s = diagnostics.pressure_impulse;
+                report.external_impulses_kg_m_per_s = diagnostics.impulse_parts;
+                if (diagnostics.kinetic_substeps > 0 && !report.body_acceleration_m_per_s2)
+                    report.external_impulses_kg_m_per_s = ExternalImpulseParts{{}, diagnostics.external_impulse};
+            }
             report.kinetic_substeps = diagnostics.kinetic_substeps;
             report.maximum_kinetic_cfl = diagnostics.maximum_kinetic_cfl;
             report.linear_substeps = diagnostics.linear_substeps;

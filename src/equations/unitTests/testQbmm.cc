@@ -155,6 +155,31 @@ TEST(QbmmInversionTest, RankAndReconstructionSurviveCountAndCoordinateRescaling)
     }
 }
 
+TEST(QbmmInversionTest, JacobiVarianceOutsideDoubleRangeDoesNotRejectRepresentableAtoms)
+{
+    // The count cancels from b1, whose magnitude scales with the square of the
+    // coordinate. Choose inverse count scaling to keep all four input moments finite.
+    for (const auto [count_exponent, coordinate_exponent] : {std::pair{-640, 520}, std::pair{640, -550}})
+    {
+        SCOPED_TRACE(coordinate_exponent);
+        const double w = std::ldexp(1., count_exponent), x = std::ldexp(1., coordinate_exponent);
+        const std::array atoms{R::QbmmAtom{2 * w, x}, R::QbmmAtom{3 * w, 4 * x}};
+        const auto h = integrate(atoms);
+        const auto q = R::invert_qbmm_moments(h);
+        ASSERT_EQ(q.status, R::InversionStatus::TwoNodes);
+        ASSERT_EQ(q.active_atoms, atoms.size());
+        EXPECT_TRUE(std::isnan(q.conditioning.b1));
+        EXPECT_NEAR(q.conditioning.a0 / x, 14. / 5, 1e-13);
+        EXPECT_NEAR(q.conditioning.a1 / x, 11. / 5, 1e-13);
+        for (std::size_t i = 0; i < atoms.size(); ++i)
+        {
+            EXPECT_NEAR(q.atoms[i].count / atoms[i].count, 1., 1e-13);
+            EXPECT_NEAR(q.atoms[i].mass_over_scale / atoms[i].mass_over_scale, 1., 1e-13);
+        }
+        check_reconstruction(q, h, 1e-13);
+    }
+}
+
 TEST(QbmmInversionTest, WideNodeAndWeightRatiosPreserveBothAtomsOrIdentifyUnresolvedSupport)
 {
     const std::array atoms{R::QbmmAtom{1, 1}, R::QbmmAtom{std::ldexp(1., -32), std::ldexp(1., 18)}};

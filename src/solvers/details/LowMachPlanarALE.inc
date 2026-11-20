@@ -27,7 +27,7 @@ std::shared_ptr<LowMachMixtureSolver::ALEGeometryCertificate> LowMachMixtureSolv
     collective_detail::collective_local_validation(mesh, "Accepted planar geometry authority",
         [&]
         {
-            check(!uses_qbmm_explicit_transport(d->options.qbmm_model), "Explicit QBMM requires fixed geometry.");
+            qbmm_detail::validate_capability(d->options, mesh, true, acceleration_vector(d->active_body_acceleration));
             d->validate_planar_controller_authority(motion);
             check(d->initialized && d->epoch == mesh_geometry_epoch(mesh) && !motion.has_active_trial() &&
                       motion.mesh_ptr().get() == d->mesh.get() &&
@@ -117,13 +117,13 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_planar_impl(double dt,
                       !motion.has_active_trial(),
                 "Planar preview requires initialized accepted geometry and its explicit idle motion authority.");
             const bool has_qbmm = !d->options.qbmm_families.empty();
-            check(!uses_qbmm_explicit_transport(d->options.qbmm_model), "Explicit QBMM requires fixed geometry.");
+            qbmm_detail::validate_capability(d->options, mesh, true,
+                d->active_body_acceleration ? acceleration_vector(d->active_body_acceleration)
+                                            : (provider ? provider->body_acceleration : std::nullopt));
             check(!has_qbmm || !provider || coherent_qbmm,
                 "Planar QBMM source providers require the coherent reacting controller.");
             check(!coherent_qbmm || (has_qbmm && controller && controller->reacting_source_authority && provider),
                 "Planar QBMM source preview requires the reacting controller and an immutable source provider.");
-            check(!d->active_body_acceleration && (!provider || !provider->body_acceleration),
-                "Supplied body acceleration requires fixed native geometry.");
             check(std::isfinite(dt) && dt > 0 && std::isfinite(target_surface),
                 "Planar preview needs a finite target and positive finite timestep.");
             validate_planar_mesh(mesh);
@@ -289,6 +289,7 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, PlanarMotion& motion
         [&]
         {
             d->validate_planar_controller_authority(motion);
+            qbmm_detail::validate_capability(d->options, mesh, true, acceleration_vector(d->active_body_acceleration));
             check(saved.owner == this && saved.ale_geometry && saved.ale_geometry->owner == d->planar_owner &&
                       saved.ale_geometry->motion_identity == motion.d_authority &&
                       saved.ale_geometry->geometry_identity == mesh.geometry_identity() &&

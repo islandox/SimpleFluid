@@ -64,6 +64,10 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     simplefluid_discover_tests(${TEST_NAME}
       XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q7b/$<CONFIG>"
       PROPERTIES LABELS "qbmm\\;kinetic\\;low_mach\\;conservation")
+  elseif(TEST_NAME STREQUAL "testQbmmKineticGravity")
+    simplefluid_discover_tests(${TEST_NAME}
+      XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q8b/$<CONFIG>"
+      PROPERTIES LABELS "qbmm\\;kinetic\\;low_mach\\;conservation")
   elseif(TEST_NAME STREQUAL "testQbmmApplicationBenchmarks")
     simplefluid_discover_tests(${TEST_NAME}
       TEST_FILTER "QbmmApplicationBenchmarks.*"
@@ -155,10 +159,10 @@ function(add_qbmm_restart_tests name target filter environment_prefix labels)
             if(TEST "${test}")
                 if(stage STREQUAL "Write")
                     set_tests_properties("${test}" PROPERTIES FIXTURES_SETUP "${fixture}"
-                        ENVIRONMENT "${environment_prefix}_WRITE=${prefix}")
+                        ENVIRONMENT "${environment_prefix}_WRITE=${prefix};${environment_prefix}_RANKS=${ranks}")
                 else()
                     set_tests_properties("${test}" PROPERTIES FIXTURES_REQUIRED "${fixture}"
-                        ENVIRONMENT "${environment_prefix}_READ=${prefix}")
+                        ENVIRONMENT "${environment_prefix}_READ=${prefix};${environment_prefix}_RANKS=${ranks}")
                 endif()
             endif()
         endforeach()
@@ -177,6 +181,12 @@ add_qbmm_restart_tests(QbmmLinearControllerRestart testReactingMixtureQbmmSource
     ReactingMixtureQbmmSourcesTest.LinearTransportFeedsCoherentEventsThermalsCommitAndRestart
     SIMPLEFLUID_Q7C_RESTART "qbmm;restart;transaction;conservation")
 
+foreach(kind IN ITEMS Forced ZeroForce)
+    add_qbmm_restart_tests(Qbmm${kind}KineticRestart testReactingMixtureQbmmSources
+        ReactingMixtureQbmmSourcesTest.${kind}KineticTaggedRestart
+        SIMPLEFLUID_Q8B_RESTART "qbmm;kinetic;gravity;restart;transaction")
+endforeach()
+
 foreach(_linear_ranks IN ITEMS 2 4)
     simplefluid_add_mpi_test(NAME LowMachQbmmLinearTransport_${_linear_ranks}procs
         TARGET testLowMachQbmmLinearTransport PROCS ${_linear_ranks}
@@ -184,7 +194,7 @@ foreach(_linear_ranks IN ITEMS 2 4)
 endforeach()
 
 foreach(_kinetic_ranks IN ITEMS 2 4)
-    foreach(_kinetic_case IN ITEMS LowMachQbmmKinetic LowMachQbmmKineticTransport)
+    foreach(_kinetic_case IN ITEMS LowMachQbmmKinetic LowMachQbmmKineticTransport QbmmKineticGravity)
         simplefluid_add_mpi_test(NAME ${_kinetic_case}_${_kinetic_ranks}procs
             TARGET test${_kinetic_case} PROCS ${_kinetic_ranks}
             LABELS "mpi;qbmm;kinetic;low_mach;conservation;transaction;empty_rank" TIMEOUT 180)

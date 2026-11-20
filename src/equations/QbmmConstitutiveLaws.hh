@@ -3,6 +3,7 @@
  */
 #pragma once
 
+#include "dataclass/vec3.hh"
 #include "equations/QbmmMoments.hh"
 #include "equations/ReactionMechanism.hh"
 
@@ -183,6 +184,7 @@ struct QbmmNodeSlipInput
     std::uint64_t family_fingerprint, catalog_fingerprint;
     std::string_view population;
     std::optional<ReactionLocation> location;
+    std::optional<vec3<double>> body_acceleration_m_per_s2{}; ///< Engaged only for an explicitly dependent law.
 };
 
 /** Immutable transport closure. The supplied callback must be deterministic and MPI-free. */
@@ -190,7 +192,29 @@ struct QbmmNodeSlipLaw
 {
     const QbmmLawMetadata metadata;
     const std::function<std::array<double, 3>(const QbmmNodeSlipInput&)> evaluate; ///< Relative velocity in m/s.
+    /** Immutable SI dependency. When engaged, the solver supplies this vector to the law and requires
+     * the reacting controller to use the same acceleration. A zero vector is an explicit dependency.
+     */
+    const std::optional<vec3<double>> required_body_acceleration_m_per_s2{};
 };
+
+/** Extend the original kinetic law encoding only when an acceleration dependency is declared. */
+[[nodiscard]] inline std::string qbmm_node_slip_signature(const QbmmNodeSlipLaw& law)
+{
+    auto result = qbmm_law_signature(law.metadata);
+    if (const auto& acceleration = law.required_body_acceleration_m_per_s2)
+    {
+        result += "body-acceleration-si-v1";
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            const double value = acceleration->component(axis);
+            const auto bits = std::bit_cast<std::uint64_t>(value);
+            for (unsigned shift = 0; shift < 64; shift += 8)
+                result.push_back(static_cast<char>(bits >> shift));
+        }
+    }
+    return result;
+}
 
 /** No epsilon volume or concentration exists for an absent phase. */
 [[nodiscard]] inline std::optional<std::vector<double>> qbmm_phase_concentrations(

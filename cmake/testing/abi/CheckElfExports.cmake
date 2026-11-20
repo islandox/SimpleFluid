@@ -447,16 +447,15 @@ simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::advance_reactions[(]SimpleFluid::Reacting::ReactionMechanism const&, SimpleFluid::Reacting::CellSpeciesState const&, SimpleFluid::Reacting::ReactionEnvironment const&, double, SimpleFluid::Reacting::ReactionSourceInput const&, SimpleFluid::Reacting::ReactionAdvanceOptions const&[)]$" 1)
 
 # Composition-aware caloric providers replace the five scalar-liquid definitions.
-# Seven class definitions (including the two constructor entries) and six pure
-# factory/recovery/exchange functions are the entire new thermodynamic surface.
-set(simplefluid_reacting_thermodynamic_public_symbol_budget 13)
+# Q8b adds the immutable built-in ideal-gas parameter query used in forced restart binding.
+set(simplefluid_reacting_thermodynamic_public_symbol_budget 14)
 set(simplefluid_reacting_const_double_span
     "std::(__[0-9]+::)?span<double const, [0-9]+u?l*>")
 set(simplefluid_reacting_phase_span
     "std::(__[0-9]+::)?span<SimpleFluid::Reacting::PhaseThermalState const, [0-9]+u?l*>")
 simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::MixtureThermodynamics::MixtureThermodynamics[(]${simplefluid_reacting_catalog_pointer_pattern}, SimpleFluid::Reacting::ThermodynamicBounds, SimpleFluid::Reacting::EOSKind, std::(__[0-9]+::)?function<SimpleFluid::Reacting::MixtureThermodynamicPoint [(]double, double, ${simplefluid_reacting_const_double_span}[)]>, SimpleFluid::Reacting::EnergyConvention, std::(__[0-9]+::)?function<.* [(]double, double, ${simplefluid_reacting_const_double_span}[)]>[)]$" 2)
-foreach(simplefluid_thermodynamic_query IN ITEMS bounds catalog kind energy_convention)
+foreach(simplefluid_thermodynamic_query IN ITEMS bounds catalog kind energy_convention builtin_ideal_gas_identity)
     simplefluid_require_reacting_api(
         "^SimpleFluid::Reacting::MixtureThermodynamics::${simplefluid_thermodynamic_query}[(][)] const$" 1)
 endforeach()
@@ -973,6 +972,10 @@ simplefluid_require_reacting_api(
 math(EXPR simplefluid_qbmm_transport_public_symbol_budget "${simplefluid_qbmm_transport_public_symbol_budget} + 1")
 simplefluid_require_reacting_api(
     "^${qbmm_ns}LowMachPressureEquation::project_kinetic_material_with_eos[(]${simplefluid_stage3_scalar_cell} const&, double, ${simplefluid_reacting_const_double_span}, ${simplefluid_reacting_const_double_span}, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face}&, ${simplefluid_stage3_scalar_cell}&, ${simplefluid_stage3_vector_cell}&, SimpleFluid::LinearSolverOptions const&, double[)]$" 1)
+# Q8b adds the cell-gradient policy to fixed anchored projection.
+math(EXPR simplefluid_qbmm_transport_public_symbol_budget "${simplefluid_qbmm_transport_public_symbol_budget} + 1")
+simplefluid_require_reacting_api(
+    "^${qbmm_ns}LowMachPressureEquation::project_kinetic_material_with_eos[(]${simplefluid_stage3_scalar_cell} const&, double, ${simplefluid_reacting_const_double_span}, ${simplefluid_reacting_const_double_span}, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face}&, ${simplefluid_stage3_scalar_cell}&, ${simplefluid_stage3_vector_cell}&, SimpleFluid::LinearSolverOptions const&, double, ${qbmm_ns}LowMachPressureEquation::CellPressureGradient[)]$" 1)
 
 # Q5 accepted and trial reporting entry points on the native flow and its controller.
 set(simplefluid_qbmm_report_public_symbol_budget 4)

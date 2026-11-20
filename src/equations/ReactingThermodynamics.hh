@@ -57,6 +57,21 @@ struct MixtureThermodynamicPoint
     double dynamic_viscosity = 0, thermal_conductivity = 0; ///< Pa s, W/(m K); supplied transport closure.
 };
 
+struct IdealGasCaloricSpecies
+{
+    double molar_heat_capacity_v = 0;     ///< J/(mol K).
+    double reference_temperature = 0;     ///< K.
+    double reference_internal_energy = 0; ///< J/mol, including formation energy when selected.
+};
+
+/** Immutable inputs used by the built-in ideal gas. The caloric span borrows the EOS lifetime. */
+struct BuiltinIdealGasIdentity
+{
+    std::span<const IdealGasCaloricSpecies> caloric;
+    double gas_constant; ///< J/(mol K).
+    bool has_supplied_transport;
+};
+
 /** Immutable shared provider. Nonideal gas requires fugacities or an explicit chemical-potential hook.
  * Captures must own immutable property data for the provider lifetime. No physical correlations are inferred.
  */
@@ -79,6 +94,7 @@ public:
     [[nodiscard]] const SpeciesCatalog& catalog() const noexcept;
     [[nodiscard]] EOSKind kind() const noexcept;
     [[nodiscard]] EnergyConvention energy_convention() const noexcept;
+    [[nodiscard]] std::optional<BuiltinIdealGasIdentity> builtin_ideal_gas_identity() const noexcept;
 
 private:
     std::shared_ptr<const SpeciesCatalog> catalog_;
@@ -88,13 +104,6 @@ private:
     Evaluator evaluator_;
     EnergyConvention convention_;
     ChemicalPotentialEvaluator chemical_potentials_;
-};
-
-struct IdealGasCaloricSpecies
-{
-    double molar_heat_capacity_v = 0;     ///< J/(mol K).
-    double reference_temperature = 0;     ///< K.
-    double reference_internal_energy = 0; ///< J/mol, including formation energy when selected.
 };
 
 using MixtureTransportEvaluator = std::function<std::pair<double, double>(double, double, std::span<const double>)>;

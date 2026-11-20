@@ -60,8 +60,8 @@ struct QbmmFrozenLawState
         family.fingerprint(), family.catalog().fingerprint(), family.population(), frozen.location};
 }
 
-[[nodiscard]] inline QbmmNodeSlipInput make_qbmm_node_slip_input(
-    const QbmmLawInputs& input, std::size_t atom, double phase_volume_m3)
+[[nodiscard]] inline QbmmNodeSlipInput make_qbmm_node_slip_input(const QbmmLawInputs& input, std::size_t atom,
+    double phase_volume_m3, std::optional<vec3<double>> body_acceleration_m_per_s2 = {})
 {
     if (!input.geometry || atom >= input.quadrature.active_atoms || atom >= input.geometry->active_atoms ||
         !input.phase_concentration_mol_per_m3 || !input.temperature_K || !input.gas_volume_fraction ||
@@ -76,7 +76,7 @@ struct QbmmFrozenLawState
         input.quadrature.atoms[atom].count, input.bulk_volume_m3, phase_volume_m3, input.absolute_pressure_pa,
         *input.temperature_K, *input.gas_volume_fraction, input.geometry->number_density, input.geometry->area_density,
         *input.phase_concentration_mol_per_m3, liquid, input.carrier_liquid_temperature_K, input.family_fingerprint,
-        input.catalog_fingerprint, input.population, input.location};
+        input.catalog_fingerprint, input.population, input.location, body_acceleration_m_per_s2};
 }
 
 [[nodiscard]] inline QbmmApplicabilityEvaluation evaluate_qbmm_node_slip_applicability(

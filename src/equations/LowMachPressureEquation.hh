@@ -95,6 +95,17 @@ public:
         FaceField& corrected_carrier_flux, ScalarField& mechanical_pressure, VectorField& velocity,
         const LinearSolverOptions& linear = {}, double continuity_tolerance = 1e-10);
 
+    /** Fixed anchored material projection with an explicit cell-gradient policy.
+     * Interior reconstruction changes the cell velocity correction at body-forced walls.
+     * Both policies use the same anchored flux law, wall rates, mobilities and pressure gauge.
+     */
+    Result project_kinetic_material_with_eos(const ScalarField& density, double time_step,
+        std::span<const double> integrated_material_volume_target, std::span<const double> volume_susceptibility,
+        const FaceField& material_carrier_fraction, const FaceField& anchored_material_rate,
+        const FaceField& reference_carrier_flux, const FaceField& predictor_carrier_flux,
+        FaceField& corrected_carrier_flux, ScalarField& mechanical_pressure, VectorField& velocity,
+        const LinearSolverOptions& linear, double continuity_tolerance, CellPressureGradient cell_gradient);
+
     /** Explicit fixed-material cell-gradient policy for a consistently reconstructed body-force predictor.
      * Changes only the cell velocity correction; face mobility, continuity and pressure gauge are unchanged.
      * Existing overloads retain their homogeneous-Neumann cell reconstruction.

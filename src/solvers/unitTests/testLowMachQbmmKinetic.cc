@@ -509,11 +509,11 @@ TEST(LowMachQbmmKineticTest, RejectsUnsupportedModePairsAndUnqualifiedPhysicsWit
         try
         {
             (void) f.flow.preview_with_sources(f.dt, gravity);
-            ADD_FAILURE() << "Supplied gravity must reject on the kinetic path.";
+            ADD_FAILURE() << "Supplied kinetic gravity requires a reacting controller.";
         }
         catch (const std::exception& error)
         {
-            EXPECT_NE(std::string(error.what()).find("body acceleration disabled"), std::string::npos);
+            EXPECT_NE(std::string(error.what()).find("requires the matching reacting controller"), std::string::npos);
         }
     }
     EXPECT_EQ(f.flow.serialize_qbmm_restart(), before);

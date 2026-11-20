@@ -28,6 +28,7 @@ class LocalSourceAccumulator
     std::vector<std::vector<std::vector<long double>>> raw_energy_;
     std::vector<std::vector<long double>> raw_declared_;
     std::vector<std::array<Sum, 3>> momentum_;
+    std::vector<Flow::ExternalImpulseParts> impulse_parts_;
     static double narrow(long double value)
     {
         const double result = static_cast<double>(value);
@@ -45,6 +46,7 @@ public:
         raw_energy_.assign(cells, std::vector<std::vector<long double>>(phases));
         raw_declared_.assign(cells, {});
         momentum_.assign(cells, {});
+        impulse_parts_.clear();
     }
     void add_material(std::size_t c, std::size_t phase, std::size_t species, long double moles)
     {
@@ -79,6 +81,16 @@ public:
         if (!std::isfinite(impulse))
             throw std::invalid_argument("Nonfinite raw external impulse.");
         momentum_.at(c).at(axis) += impulse;
+    }
+    // The controller books gravity once, after every other physical momentum source.
+    void add_body_momentum(std::size_t c, std::size_t axis, long double impulse)
+    {
+        if (impulse_parts_.empty())
+            impulse_parts_.resize(momentum_.size());
+        auto& parts = impulse_parts_.at(c);
+        parts.other.component(axis) = narrow(momentum_.at(c).at(axis).value());
+        parts.body.component(axis) = narrow(impulse);
+        add_momentum(c, axis, impulse);
     }
     void add_faces(const Receipt& receipt, const SpeciesCatalog& catalog)
     {
@@ -124,6 +136,8 @@ public:
                 !std::isfinite(applied_scale.value()) || !std::isfinite(bound) || !std::isfinite(discrepancy.value()) ||
                 std::abs(discrepancy.value()) > bound)
                 throw std::invalid_argument("Final phase packets lost declared raw thermal energy.");
+            if (!impulse_parts_.empty())
+                result[c].impulse_parts = impulse_parts_[c];
             for (std::size_t axis = 0; axis < 3; ++axis)
                 result[c].momentum.component(axis) = narrow(momentum_[c][axis].value());
         }

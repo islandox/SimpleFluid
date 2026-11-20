@@ -89,6 +89,12 @@ public:
         QbmmModelOptions qbmm_model;
         std::vector<std::shared_ptr<const QbmmNodeSlipLaw>>
             qbmm_node_slip_laws; ///< Kinetic-only, EOS-indexed and nonnull precisely for bound families.
+        /** Q8b physical provider identities in EOS phase order, including phases with no current stock.
+         * A built-in ideal gas supplies its intrinsic data. Declare the immutable evaluator for any other EOS,
+         * including a liquid property evaluator, and for a built-in ideal gas's optional transport law.
+         */
+        std::vector<std::optional<ThermalLawIdentity>> qbmm_eos_law_identities;
+        std::optional<ThermalLawIdentity> qbmm_mixture_viscosity_identity; ///< Required for a supplied Q8b closure.
     };
     struct QbmmKineticClosure
     {
@@ -118,6 +124,11 @@ public:
         std::uint64_t revision = 0;
         QbmmFamilyLayout qbmm_families; ///< Also required on empty owners.
     };
+    struct ExternalImpulseParts
+    {
+        Vector body{}, other{}; ///< Integrated kg m/s, separated before summing the physical momentum packet.
+        bool operator==(const ExternalImpulseParts&) const = default;
+    };
     struct CellSources
     {
         std::vector<std::vector<double>> species_moles; ///< Integrated signed mol per phase/species; empty means zero.
@@ -127,6 +138,7 @@ public:
             population_number_changes; ///< Integrated signed number per physical phase; empty means zero.
         std::vector<std::optional<QbmmShapeState>>
             qbmm_shape_changes; ///< Signed integrated shape packet; empty means zero.
+        std::optional<ExternalImpulseParts> impulse_parts; ///< Retained when the reacting controller supplies gravity.
     };
     /** A transport inventory is before local sources, Fourier heat and pressure work.
      * advected_material_volume is the exact work/continuity packet. It is NOT
@@ -257,7 +269,7 @@ public:
          * includes the matching integrated physical impulse M*g*dt in each cell's momentum packet, using
          * the current trial mixture mass, alongside any other external impulses. Direct providers must
          * satisfy this contract too: metadata alone supplies no force and must not be used without that impulse.
-         * Absent and exactly zero values use the same pressure reconstruction; their metadata remain distinct.
+         * Kinetic Euler selects the interior residual reconstruction for every supplied vector, including zero.
          * Presence and all components must agree across ranks, including empty owners.
          */
         const std::optional<Vector> body_acceleration = std::nullopt;
@@ -427,6 +439,8 @@ public:
         double maximum_linear_stage_residual = 0, maximum_linear_step_residual = 0;
         ///< Local block residuals normalized by the physical conservation gate, reduced over owners.
         std::vector<GrossResidualEvaluation> gross_residual_evaluations; ///< Live source trace; omitted by restart.
+        std::optional<Vector> body_acceleration_m_per_s2;
+        std::optional<ExternalImpulseParts> impulse_parts; ///< Accepted global body and other impulses in kg m/s.
     };
     enum class QbmmStateKind
     {
@@ -462,7 +476,8 @@ public:
     {
         std::vector<double> species_moles; ///< Catalog order, mol/cell.
         QbmmMomentBlock moments{};         ///< Extensive H0..H3 in family coordinates. H1 is derived from species.
-        std::array<long double, 4> mass_moment_density_si{}; ///< Sum(N*m^k)/Vcell, kg^k/m3 (bulk), k=0..3.
+        /// Sum(N*m^k)/Vcell, kg^k/m3 (bulk), k=0..3. NaN marks an unrepresentable density.
+        std::array<double, 4> mass_moment_density_si{};
         std::vector<double> bulk_concentration_mol_per_m3;
         std::optional<std::vector<double>> phase_concentration_mol_per_m3;
         double phase_fraction = 0, phase_mass_kg = 0, phase_volume_m3 = 0, bulk_mass_density_kg_per_m3 = 0;
@@ -492,7 +507,7 @@ public:
         std::string population;
         QbmmFamilyStamp stamp;
         std::array<std::uint64_t, status_count> inversion_counts{}; ///< Index by InversionStatus.
-        std::optional<long double> minimum_hankel_margin, minimum_shifted_hankel_margin;
+        std::optional<double> minimum_hankel_margin, minimum_shifted_hankel_margin;
         MomentResiduals maximum_reconstruction;    ///< Per-moment maxima over owned cells on all ranks.
         std::vector<QbmmLawMetadata> law_metadata; ///< Immutable contracts in family schema order.
         // Per-law cell totals: within all ranges, outside/missing input, absent; reduced over all ranks.
@@ -507,13 +522,37 @@ public:
         Vector slip_velocity{};
         QbmmApplicabilityEvaluation applicability;
     };
+    /** Report projection of the raw source receipt. Donors, products and transfer packets are exact inputs.
+     * Derived quantities outside binary64 range use the endpoint report's quiet NaN convention.
+     */
+    struct QbmmEventReport
+    {
+        std::string population, provider;
+        std::uint64_t family_fingerprint = 0, catalog_fingerprint = 0, provider_revision = 0, substep = 0;
+        double duration = 0;
+        QbmmEventKind kind = QbmmEventKind::Birth;
+        std::vector<QbmmDonorAtom> donors;
+        std::vector<QbmmAtom> products;
+        std::vector<QbmmMaterialTransferReceipt> transfers;
+        QbmmMomentBlock gross_consumed{}, gross_created{}, moment_change{};
+        double material_mass_change_over_scale = 0;
+    };
+    struct QbmmSourceReport
+    {
+        std::vector<QbmmEventReport> events;
+        double final_count = 0;
+        std::vector<double> final_moles;
+        QbmmShapeState final_shape;
+        std::uint64_t family_fingerprint = 0;
+        std::array<double, 2> event_shape_change{};
+    };
     struct QbmmIntervalReport
     {
         std::uint64_t preview_id = 0, transported_from_revision = 0, transported_from_generation = 0;
         std::uint64_t old_geometry_epoch = 0, new_geometry_epoch = 0, catalog_fingerprint = 0;
         double transported_from_time = 0, time_step = 0;
         SourceStageMetadata source_stage;
-        QbmmSourceCells local_receipts;
+        std::vector<std::vector<std::optional<QbmmSourceReport>>> local_receipts;
         std::vector<std::vector<double>> local_gross_events; ///< Exact final per-cell corrector packets.
         int kinetic_substeps = 0;
         double maximum_kinetic_cfl = 0;
@@ -548,9 +587,20 @@ public:
         std::vector<double> external_species_moles;        ///< Catalog order, signed. Empty for legacy archives.
         std::map<std::string, double> element_defects_mol; ///< Moles of atoms, change minus external input.
     };
+    enum : std::uint64_t
+    {
+        balanced_kinetic_pressure_revision = 1,
+        forced_kinetic_thermal_revision = 1
+    };
     struct QbmmReport
     {
         QbmmReportProvenance provenance;
+        std::optional<Vector> body_acceleration_m_per_s2;
+        std::optional<std::uint64_t> balanced_kinetic_pressure_policy, forced_kinetic_thermal_policy;
+        std::optional<ExternalImpulseParts> external_impulses_kg_m_per_s;
+        std::optional<Vector> pressure_impulse_kg_m_per_s;
+        double kinetic_cfl_limit = 0;
+        int kinetic_substep_limit = 0;
         std::vector<SpeciesId> species_ids;                    ///< Native catalog order for moles and concentrations.
         std::vector<QbmmCellReport> cells;                     ///< Locally owned cells in mesh order.
         std::vector<std::optional<QbmmFamilyReport>> families; ///< Collective diagnostics in EOS order.
@@ -581,6 +631,7 @@ public:
         std::optional<std::uint64_t> qbmm_controller_signature;
         std::optional<std::array<double, 3>> count_only_body_acceleration;
         bool qbmm_legacy_default_only = false;
+        bool kinetic_force_provenance_recorded = false;
     };
     class ControllerLease
     {
@@ -791,11 +842,14 @@ private:
         const PlanarMotion* motion = nullptr, const ControllerRestartDiagnostics* restart = nullptr);
     SIMPLEFLUID_SOLVERS_LOCAL void require_controller(const ControllerLease* controller) const;
     SIMPLEFLUID_SOLVERS_LOCAL void release_controller(std::uint64_t id) noexcept;
+    SIMPLEFLUID_SOLVERS_LOCAL void commit_fixed(const Trial& trial, const ControllerLease* controller,
+        const ControllerRestartDiagnostics* controller_diagnostics = nullptr);
     SIMPLEFLUID_SOLVERS_LOCAL QbmmReport qbmm_report_impl(const Trial* trial) const;
     SIMPLEFLUID_SOLVERS_LOCAL void finalize_qbmm_balances(
         Trial& trial, std::optional<std::span<const SpeciesSourceLedger>> chemistry = std::nullopt) const;
     SIMPLEFLUID_SOLVERS_LOCAL static std::shared_ptr<const QbmmIntervalReport> qbmm_interval(const Trial& trial);
-    SIMPLEFLUID_SOLVERS_LOCAL std::shared_ptr<const QbmmPublication> prepare_qbmm_publication(const Trial& trial) const;
+    SIMPLEFLUID_SOLVERS_LOCAL std::shared_ptr<const QbmmPublication> prepare_qbmm_publication(
+        const Trial& trial, const ControllerRestartDiagnostics* controller_diagnostics = nullptr) const;
     struct SIMPLEFLUID_SOLVERS_LOCAL Implementation;
     std::unique_ptr<Implementation> d;
 };

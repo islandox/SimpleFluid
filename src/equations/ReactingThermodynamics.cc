@@ -31,6 +31,36 @@ bool finite(double value)
     return std::isfinite(value);
 }
 
+struct IdealGasEvaluator
+{
+    std::shared_ptr<const SpeciesCatalog> catalog;
+    std::vector<IdealGasCaloricSpecies> caloric;
+    double gas_constant;
+    MixtureTransportEvaluator transport;
+
+    MixtureThermodynamicPoint operator()(double t, double p, std::span<const double> x) const
+    {
+        double molecular_weight = 0, cv = 0, reference_e = 0, sensible_e = 0;
+        for (std::size_t i = 0; i < x.size(); ++i)
+        {
+            molecular_weight += x[i] * catalog->species()[i].molarMass;
+            cv += x[i] * caloric[i].molar_heat_capacity_v;
+            reference_e += x[i] * caloric[i].reference_internal_energy;
+            sensible_e += x[i] * (caloric[i].molar_heat_capacity_v * (t - caloric[i].reference_temperature));
+        }
+        const double e = reference_e + sensible_e;
+        const double h = reference_e + (sensible_e + gas_constant * t);
+        const double rho = p * molecular_weight / (gas_constant * t);
+        MixtureThermodynamicPoint result{rho, e / molecular_weight, h / molecular_weight,
+            cv / molecular_weight, 0, -rho / t, rho / p, {}, {}};
+        if (transport)
+            std::tie(result.dynamic_viscosity, result.thermal_conductivity) = transport(t, p, x);
+        for (double fraction : x)
+            result.fugacities.push_back(fraction * p);
+        return result;
+    }
+};
+
 void validate_bounds(const ThermodynamicBounds& b)
 {
     require(finite(b.minimum_temperature) && finite(b.maximum_temperature) && finite(b.minimum_pressure) &&
@@ -168,6 +198,14 @@ EnergyConvention MixtureThermodynamics::energy_convention() const noexcept
     return convention_;
 }
 
+std::optional<BuiltinIdealGasIdentity> MixtureThermodynamics::builtin_ideal_gas_identity() const noexcept
+{
+    const auto* ideal = evaluator_.target<IdealGasEvaluator>();
+    if (!ideal || chemical_potentials_)
+        return std::nullopt;
+    return BuiltinIdealGasIdentity{ideal->caloric, ideal->gas_constant, bool(ideal->transport)};
+}
+
 MixtureThermodynamicPoint MixtureThermodynamics::evaluate(
     double temperature, double pressure, std::span<const double> x) const
 {
@@ -245,28 +283,7 @@ std::shared_ptr<const MixtureThermodynamics> make_ideal_gas_mixture(std::shared_
                     finite(species.reference_temperature) && species.reference_temperature > 0 &&
                     finite(species.reference_internal_energy),
             "Ideal gas caloric properties are invalid.");
-    auto evaluate = [catalog, caloric = std::move(caloric), gas_constant, transport = std::move(transport)](
-                        double t, double p, std::span<const double> x)
-    {
-        double molecular_weight = 0, cv = 0, reference_e = 0, sensible_e = 0;
-        for (std::size_t i = 0; i < x.size(); ++i)
-        {
-            molecular_weight += x[i] * catalog->species()[i].molarMass;
-            cv += x[i] * caloric[i].molar_heat_capacity_v;
-            reference_e += x[i] * caloric[i].reference_internal_energy;
-            sensible_e += x[i] * (caloric[i].molar_heat_capacity_v * (t - caloric[i].reference_temperature));
-        }
-        const double e = reference_e + sensible_e;
-        const double h = reference_e + (sensible_e + gas_constant * t);
-        const double rho = p * molecular_weight / (gas_constant * t);
-        MixtureThermodynamicPoint result{rho, e / molecular_weight, h / molecular_weight,
-            cv / molecular_weight, 0, -rho / t, rho / p, {}, {}};
-        if (transport)
-            std::tie(result.dynamic_viscosity, result.thermal_conductivity) = transport(t, p, x);
-        for (double fraction : x)
-            result.fugacities.push_back(fraction * p);
-        return result;
-    };
+    auto evaluate = IdealGasEvaluator{catalog, std::move(caloric), gas_constant, std::move(transport)};
     return std::make_shared<const MixtureThermodynamics>(std::move(catalog), bounds, EOSKind::Gas,
         EnthalpyPressureDependence::PressureIndependent, std::move(evaluate), convention);
 }

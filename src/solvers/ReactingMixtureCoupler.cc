@@ -10,6 +10,7 @@
 #include "solvers/details/LowMachPopulationSource.hh"
 #include "solvers/details/LowMachQbmmControllerRestart.hh"
 #include "solvers/details/LowMachQbmmLawInputs.hh"
+#include "solvers/details/LowMachQbmmState.hh"
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
@@ -80,7 +81,7 @@ bool identical_sources(std::span<const Solver::CellSources> a, std::span<const S
     {
         if (a[c].species_moles != b[c].species_moles || a[c].internal_energy != b[c].internal_energy ||
             a[c].population_number_changes != b[c].population_number_changes ||
-            a[c].qbmm_shape_changes != b[c].qbmm_shape_changes)
+            a[c].qbmm_shape_changes != b[c].qbmm_shape_changes || a[c].impulse_parts != b[c].impulse_parts)
             return false;
         for (size_t axis = 0; axis < 3; ++axis)
             if (a[c].momentum.component(axis) != b[c].momentum.component(axis))
@@ -917,7 +918,7 @@ struct SourceEngine
             for (size_t axis = 0; axis < 3; ++axis)
             {
                 const auto impulse = mass.value() * options.body_acceleration->component(axis) * dt;
-                sums.add_momentum(cell, axis, impulse);
+                sums.add_body_momentum(cell, axis, impulse);
                 gross[cell].push_back(population_source_detail::narrow(std::abs(impulse)));
             }
         }
@@ -1065,17 +1066,9 @@ struct ReactingMixtureCoupler::Implementation
                     "Reacting mixture controller requires a mechanism, phases and valid iteration controls.");
                 require((!options.source || !options.source_identity.empty()) && options.source_revision > 0,
                     "A reaction source needs an explicit identity and a positive immutable revision.");
-                require(!uses_qbmm_explicit_transport(flow->options().qbmm_model) ||
-                            (!options.planar_motion && !options.body_acceleration),
-                    "Explicit QBMM requires fixed geometry with body acceleration disabled.");
+                qbmm_detail::validate_capability(
+                    flow->options(), mesh, bool(options.planar_motion), options.body_acceleration);
                 require(flow->initialized(), "Initialize low-Mach flow before constructing its reaction controller.");
-                if (options.body_acceleration)
-                {
-                    require(!options.planar_motion, "Supplied body acceleration requires a fixed mesh.");
-                    for (size_t axis = 0; axis < 3; ++axis)
-                        require(std::isfinite(options.body_acceleration->component(axis)),
-                            "Supplied body acceleration must be finite in every component.");
-                }
                 if (options.planar_motion)
                 {
                     const auto& law = *options.planar_motion;
@@ -1300,10 +1293,12 @@ struct ReactingMixtureCoupler::Implementation
                 {
                     const auto& model = flow->options().qbmm_model;
                     signature << ":kinetic-euler-v1:" << model.kinetic_cfl << ':' << model.maximum_kinetic_substeps;
+                    if (options.body_acceleration)
+                        signature << ":balanced-kinetic-pressure:" << Solver::balanced_kinetic_pressure_revision;
                     for (const auto& binding : flow->options().qbmm_node_slip_laws)
                         if (binding)
                         {
-                            const auto metadata = qbmm_law_signature(binding->metadata);
+                            const auto metadata = qbmm_node_slip_signature(*binding);
                             signature << ':' << metadata.size() << ':' << metadata;
                         }
                         else
@@ -1792,7 +1787,10 @@ void ReactingMixtureCoupler::commit(const Trial& trial)
     if (d->motion)
         d->flow->commit_ale(trial.d->flow, *d->motion, &*d->lease);
     else
-        d->flow->commit(trial.d->flow, &*d->lease);
+    {
+        const Solver::ControllerRestartDiagnostics diagnostics{d->options.mechanism->reactions().size(), &candidate};
+        d->flow->commit_fixed(trial.d->flow, &*d->lease, &diagnostics);
+    }
     d->diagnostics = std::move(candidate);
     ++d->generation;
 }
@@ -1808,6 +1806,7 @@ ReactingMixtureCoupler::Checkpoint ReactingMixtureCoupler::checkpoint() const
     result.owner = this;
     result.flow = d->motion ? d->flow->checkpoint(*d->motion) : d->flow->checkpoint();
     result.diagnostics = d->diagnostics;
+    result.diagnostics.flow.body_acceleration_m_per_s2 = result.flow.diagnostics.body_acceleration_m_per_s2;
     return result;
 }
 void ReactingMixtureCoupler::restore(const Checkpoint& checkpoint)
@@ -1870,7 +1869,10 @@ void ReactingMixtureCoupler::restore_qbmm_checkpoint(
             restored.flow = saved.diagnostics;
         });
     d->flow->restore_qbmm_checkpoint(previous, saved, initialization, &*d->lease);
-    restored.flow.family_transport = d->flow->diagnostics().family_transport;
+    const auto& migrated = d->flow->diagnostics();
+    restored.flow.family_transport = migrated.family_transport;
+    restored.flow.body_acceleration_m_per_s2 = migrated.body_acceleration_m_per_s2;
+    restored.flow.impulse_parts = migrated.impulse_parts;
     d->diagnostics = std::move(restored);
     ++d->generation;
 }

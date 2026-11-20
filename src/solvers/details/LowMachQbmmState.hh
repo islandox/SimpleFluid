@@ -21,6 +21,22 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void require(bool valid, const char* message)
 SIMPLEFLUID_SOLVERS_LOCAL inline void validate_configuration(
     const Flow::Options& options, std::span<const std::shared_ptr<const MixtureThermodynamics>> eos)
 {
+    const auto catalog = eos.front()->catalog().fingerprint();
+    const auto validate_identity = [catalog](const ThermalLawIdentity& law)
+    {
+        require(!law.identity.empty() && law.revision > 0 && law.schema_fingerprint == catalog,
+            "QBMM physical law identity needs an immutable name, positive revision and matching catalog.");
+    };
+    require(options.qbmm_eos_law_identities.empty() || options.qbmm_eos_law_identities.size() == eos.size(),
+        "QBMM EOS law identities must use native physical phase order.");
+    for (const auto& law : options.qbmm_eos_law_identities)
+        if (law)
+            validate_identity(*law);
+    if (options.qbmm_mixture_viscosity_identity)
+    {
+        require(bool(options.mixture_dynamic_viscosity), "QBMM viscosity identity requires a supplied mixture law.");
+        validate_identity(*options.qbmm_mixture_viscosity_identity);
+    }
     const auto& families = options.qbmm_families;
     const auto& model = options.qbmm_model;
     const bool kinetic = uses_qbmm_kinetic_transport(model);
@@ -29,18 +45,6 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_configuration(
                 model.transport.time == FVM::ScalarTimeScheme::BackwardEuler &&
                 model.transport.convection == FVM::ScalarConvectionScheme::Upwind,
         "Native QBMM transport requires transient backward Euler and first-order upwind.");
-    using Velocity = QbmmModelOptions::Velocity;
-    using FamilyTransport = QbmmModelOptions::FamilyTransport;
-    const bool implicit = model.family_transport == FamilyTransport::NativeImplicit;
-    const bool supported_implicit_velocity =
-        model.velocity == Velocity::SharedCarrier || model.velocity == Velocity::SuppliedPhaseSlip;
-    require((kinetic && model.velocity == Velocity::NodeDependentSlip) ||
-                (linear && model.velocity == Velocity::SharedCarrier) || (implicit && supported_implicit_velocity),
-        "Native QBMM requires a compatible family integrator and velocity mode.");
-    require(!model.variable_composition && !model.cross_family_coalescence && !model.bulk_gas_conversion,
-        "Native QBMM requires fixed family composition and within-family population events.");
-    require(!model.capillarity && !model.independent_node_temperatures,
-        "Native QBMM requires common pressure and temperature with zero surface tension.");
     const auto& node_laws = options.qbmm_node_slip_laws;
     require(kinetic ? !families.empty() && node_laws.size() == families.size() && std::isfinite(model.kinetic_cfl) &&
                           model.kinetic_cfl > 0 && model.kinetic_cfl <= 1 && model.maximum_kinetic_substeps > 0
@@ -80,11 +84,46 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_configuration(
     }
 }
 
-SIMPLEFLUID_SOLVERS_LOCAL inline void validate_explicit_mesh(const Flow::Options& options, const Flow::Mesh& mesh)
+/** Check the admitted physics, topology and transport combinations on every owner.
+ * Construction can precede selection of a reacting controller. Its immutable node-law dependencies must still agree.
+ */
+SIMPLEFLUID_SOLVERS_LOCAL inline void validate_capability(const Flow::Options& options, const Flow::Mesh& mesh,
+    bool moving, std::optional<Flow::Vector> force, bool force_known = true)
 {
-    if (!uses_qbmm_explicit_transport(options.qbmm_model))
+    const auto& model = options.qbmm_model;
+    const bool kinetic = uses_qbmm_kinetic_transport(model), linear = uses_qbmm_linear_transport(model);
+    using Velocity = QbmmModelOptions::Velocity;
+    require((kinetic && model.velocity == Velocity::NodeDependentSlip) ||
+                (linear && model.velocity == Velocity::SharedCarrier) ||
+                (model.family_transport == QbmmModelOptions::FamilyTransport::NativeImplicit &&
+                    (model.velocity == Velocity::SharedCarrier || model.velocity == Velocity::SuppliedPhaseSlip)),
+        "Native QBMM requires a compatible family integrator and velocity mode.");
+    require(!model.variable_composition && !model.cross_family_coalescence && !model.bulk_gas_conversion,
+        "Native QBMM requires fixed family composition and within-family population events.");
+    require(!model.capillarity && !model.independent_node_temperatures,
+        "Native QBMM requires common pressure and temperature with zero surface tension.");
+    const auto validate_finite_force = [](const Flow::Vector& acceleration)
+    {
+        require(std::isfinite(acceleration.x) && std::isfinite(acceleration.y) && std::isfinite(acceleration.z),
+            "Supplied body acceleration must be finite in every component.");
+    };
+    if (force)
+        validate_finite_force(*force);
+    require(!moving || (!kinetic && !linear && !force),
+        "Planar ALE requires implicit transport and absent body acceleration.");
+    require(!linear || !force, "Realizable linear QBMM requires absent body acceleration.");
+    std::optional<Flow::Vector> declared_force;
+    for (const auto& law : options.qbmm_node_slip_laws)
+        if (law && law->required_body_acceleration_m_per_s2)
+        {
+            const auto& dependency = law->required_body_acceleration_m_per_s2;
+            validate_finite_force(*dependency);
+            require((!declared_force || declared_force == dependency) && (!force_known || force == dependency),
+                "QBMM node-slip acceleration dependencies must match the supplied body acceleration.");
+            declared_force = dependency;
+        }
+    if (!kinetic && !linear)
         return;
-    const bool linear = uses_qbmm_linear_transport(options.qbmm_model);
     mesh.visit(
         [linear](const auto& native)
         {
@@ -103,13 +142,12 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_explicit_mesh(const Flow::Options
             else
                 require(false, "Explicit QBMM requires a supported native orthogonal mesh.");
         });
-    if (linear)
-        for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
-        {
-            const auto face = static_cast<Flow::Pack::local_ordinal_type>(f);
-            require(!mesh.is_geometry_exterior_face(face) || mesh.is_boundary_face(face),
-                "Realizable linear QBMM requires physical walls at geometric exterior faces.");
-        }
+    for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
+    {
+        const auto face = static_cast<Flow::Pack::local_ordinal_type>(f);
+        require(!mesh.is_geometry_exterior_face(face) || mesh.is_boundary_face(face),
+            "Explicit QBMM requires physical walls at geometric exterior faces.");
+    }
 }
 
 SIMPLEFLUID_SOLVERS_LOCAL inline void validate_stamps(const Flow::Options& options, const Flow::State& state)

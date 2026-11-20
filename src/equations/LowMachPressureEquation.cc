@@ -69,9 +69,20 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_kinetic_materia
     FaceField& corrected, ScalarField& pressure, VectorField& velocity, const LinearSolverOptions& options,
     double tolerance)
 {
+    return project_kinetic_material_with_eos(rho, dt, target, susceptibility, fraction, anchored_material_rate,
+        reference_carrier_flux, predictor, corrected, pressure, velocity, options, tolerance,
+        CellPressureGradient::HomogeneousNeumann);
+}
+
+LowMachPressureEquation::Result LowMachPressureEquation::project_kinetic_material_with_eos(const ScalarField& rho,
+    double dt, std::span<const double> target, std::span<const double> susceptibility, const FaceField& fraction,
+    const FaceField& anchored_material_rate, const FaceField& reference_carrier_flux, const FaceField& predictor,
+    FaceField& corrected, ScalarField& pressure, VectorField& velocity, const LinearSolverOptions& options,
+    double tolerance, CellPressureGradient cell_gradient)
+{
     const MaterialAnchor anchor{anchored_material_rate, reference_carrier_flux};
     return project_impl(rho, dt, target, susceptibility, true, &fraction, nullptr, predictor, corrected, pressure,
-        velocity, options, tolerance, nullptr, CellPressureGradient::HomogeneousNeumann, &anchor);
+        velocity, options, tolerance, nullptr, cell_gradient, &anchor);
 }
 
 LowMachPressureEquation::Result LowMachPressureEquation::project_material_ale_with_eos(const ScalarField& rho,
@@ -122,8 +133,7 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
                 tolerance <= 0 || target.size() != mesh.num_owned_cells() ||
                 (linearize_eos && susceptibility.size() != mesh.num_owned_cells()))
                 throw std::invalid_argument("Invalid low-Mach projection timestep/target/tolerance.");
-            if (material != bool(slip || anchor) || (slip && anchor) ||
-                (anchor && (ale || cell_gradient != CellPressureGradient::HomogeneousNeumann)))
+            if (material != bool(slip || anchor) || (slip && anchor) || (anchor && ale))
                 throw std::invalid_argument("Material projection needs a fraction and a compatible face flux law.");
             if (material)
             {

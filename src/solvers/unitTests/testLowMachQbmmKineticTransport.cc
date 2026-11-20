@@ -102,6 +102,45 @@ void check_moments(const R::QbmmMomentBlock& actual, const R::QbmmMomentBlock& e
     }
 }
 
+TEST(LowMachQbmmKineticTransportTest, TwoSizeColumnHasAnalyticUpwardMomentRates)
+{
+    // Distinguish the face area (2 m²) from the donor volume (0.5 m³).
+    const auto grid = std::make_shared<Flow::Mesh>(
+        std::make_shared<Flow::Mesh::Cartesian>(Vec3D<ArrReal>{{{0., 2.}, {0., 1.}, {0., .25, .5}}}),
+        Flow::Mesh::DistributionOptions{.allow_empty_partitions = true,
+            .orthogonal_partitions =
+                std::array<size_t, 3>{1, 1, static_cast<size_t>(Tpetra::getDefaultComm()->getSize())}});
+    Operator op(grid, 16.);
+    record_ownership(*grid, 2);
+    constexpr double s = .125, dt = .25, area_over_volume = 4.;
+    const auto opts = options(
+        op.species, [](const R::QbmmNodeSlipInput& atom)
+        { return std::array{0., 0., atom.mass_kg_per_bubble < 2. ? s : 2. * s}; }, op.bounds);
+    op.fill(
+        opts, [](auto x) { return x.z < .25 ? R::QbmmMomentBlock{3., 5., 11., 29.} : R::QbmmMomentBlock{}; },
+        [](auto) { return 1.; });
+    Flow::State endpoint;
+    const auto result = op.advance(opts, endpoint, dt);
+    EXPECT_EQ(result.substeps, 1);
+    constexpr R::QbmmMomentBlock coefficients{4., 8., 20., 56.};
+    double error = 0.;
+    op.interior_flux(result,
+        [&](auto face, const auto& p, auto a)
+        {
+            EXPECT_EQ(op.carrier.owned_value(face), 0.);
+            const double sign = std::copysign(1., a.z);
+            const R::QbmmMomentBlock rates{
+                p.population_number_flux, p.derived_mass_flux, p.shape_flux.H2, p.shape_flux.H3};
+            for (size_t k = 0; k < rates.size(); ++k)
+            {
+                const double expected = coefficients[k] * s * area_over_volume;
+                EXPECT_NEAR(sign * rates[k], expected, 2e-13);
+                error = std::max(error, std::abs(sign * rates[k] - expected));
+            }
+        });
+    record_maximum(*grid, "maximum_analytic_moment_rate_error", error);
+}
+
 TEST(LowMachQbmmKineticTransportTest, CancellingKineticFamiliesRetainExactSpeciesWeightedMassRemainder)
 {
     constexpr double width = 0x1p25, pressure = 8.;

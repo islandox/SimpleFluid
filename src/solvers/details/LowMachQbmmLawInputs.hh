@@ -215,7 +215,8 @@ SIMPLEFLUID_SOLVERS_LOCAL inline Flow::QbmmKineticClosure evaluate_node_slip(con
     for (std::size_t i = 0; i < closure.active_atoms; ++i)
     {
         validate_node_slip_gate(family, evaluate_qbmm_node_slip_applicability(law.metadata, inputs, i, std::nullopt));
-        const auto velocity = law.evaluate(make_qbmm_node_slip_input(inputs, i, occupied_volume));
+        const auto velocity = law.evaluate(
+            make_qbmm_node_slip_input(inputs, i, occupied_volume, law.required_body_acceleration_m_per_s2));
         auto& retained = closure.node_velocities[i];
         retained = {velocity[0], velocity[1], velocity[2]};
         auto applicability = evaluate_qbmm_node_slip_applicability(law.metadata, inputs, i, kinetic_speed(retained));

@@ -83,14 +83,17 @@ inline constexpr double qbmm_reconstruction_tolerance = 128 * std::numeric_limit
 
 struct MomentResiduals
 {
-    std::array<long double, 4> absolute{}, relative{}; ///< Scaled moment units and fraction of the input, respectively.
+    /// Scaled moment units and fraction of the input. NaN means the residual is outside the double range.
+    std::array<double, 4> absolute{}, relative{};
 };
 
 struct ConditioningReport
 {
     int coordinate_exponent = 0; ///< Internal binary rescaling of the mass_over_scale coordinate.
-    long double hankel_margin = 0, shifted_hankel_margin = 0; ///< (ad-bc)/(ad+bc) in each Hankel matrix.
-    long double a0 = 0, b1 = 0, a1 = 0; ///< Jacobi recurrence in the caller's mass_over_scale coordinate.
+    /// (ad-bc)/(ad+bc) in each Hankel matrix. NaN marks an unrepresentable margin.
+    double hankel_margin = 0, shifted_hankel_margin = 0;
+    /// Jacobi recurrence in the caller's mass_over_scale coordinate. NaN marks an unrepresentable coefficient.
+    double a0 = 0, b1 = 0, a1 = 0;
 };
 
 struct QbmmQuadrature

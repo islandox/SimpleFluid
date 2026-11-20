@@ -284,18 +284,37 @@ TEST(LowMachPressureContractsTest, KineticProjectionCorrectsTheReferenceDifferen
     reference.sync_ghosts();
     for (size_t c = 0; c < f.target.size(); ++c)
         f.target[c] = f.lower(static_cast<LO>(c)) ? .875 : -.875;
-    const auto result = f.equation.project_kinetic_material_with_eos(f.rho, 1., f.target, f.chi, f.theta, f.slip,
-        reference, f.predictor, f.corrected, f.mechanical, f.velocity, f.linear(), 1e-12);
-    // W0=.125 at phi0=.25, so the .875 target requires phi=1.25.
-    // Bare mobility .25 and predictor .5 give p_lower-p_upper=3.
-    EXPECT_TRUE(result.linear.converged);
-    EXPECT_LE(result.maximum_continuity_residual, 1e-12);
-    EXPECT_LE(result.maximum_linearized_continuity_residual, 1e-12);
-    for (const auto face : f.corrected.owned_face_ids())
-        if (!f.grid->is_geometry_exterior_face(face))
-            EXPECT_NEAR(f.corrected.value(face), 1.25 * f.orientation(face), 1e-12);
-    for (size_t c = 0; c < f.target.size(); ++c)
-        EXPECT_NEAR(f.mechanical.value(static_cast<LO>(c)), 3. * (f.lower(static_cast<LO>(c)) - f.gauge_lower), 1e-12);
+    for (const bool interior : {false, true})
+    {
+        SCOPED_TRACE(interior);
+        f.reset_outputs();
+        const auto result =
+            interior ? f.equation.project_kinetic_material_with_eos(f.rho, 1., f.target, f.chi, f.theta, f.slip,
+                           reference, f.predictor, f.corrected, f.mechanical, f.velocity, f.linear(), 1e-12,
+                           Pressure::CellPressureGradient::Interior)
+                     : f.equation.project_kinetic_material_with_eos(f.rho, 1., f.target, f.chi, f.theta, f.slip,
+                           reference, f.predictor, f.corrected, f.mechanical, f.velocity, f.linear(), 1e-12);
+        // W0=.125 at phi0=.25, so the .875 target requires phi=1.25.
+        // Bare mobility .25 and predictor .5 give p_lower-p_upper=3.
+        EXPECT_TRUE(result.linear.converged);
+        EXPECT_LE(result.maximum_continuity_residual, 1e-12);
+        EXPECT_LE(result.maximum_linearized_continuity_residual, 1e-12);
+        for (const auto face : f.corrected.owned_face_ids())
+            if (f.grid->is_geometry_exterior_face(face))
+                EXPECT_DOUBLE_EQ(f.corrected.value(face), 0.);
+            else
+                EXPECT_NEAR(f.corrected.value(face), 1.25 * f.orientation(face), 1e-12);
+        for (size_t c = 0; c < f.target.size(); ++c)
+        {
+            const auto cell = static_cast<LO>(c);
+            EXPECT_NEAR(f.mechanical.value(cell), 3. * (f.lower(cell) - f.gauge_lower), 1e-12);
+            // The interior gradient is -3/2. The homogeneous Neumann wall sample increases Nzz from 4 to 5.
+            const auto u = f.velocity.value(cell);
+            EXPECT_NEAR(u.z, interior ? .75 : .6, 1e-12);
+            EXPECT_NEAR(u.x, 0., 1e-12);
+            EXPECT_NEAR(u.y, 0., 1e-12);
+        }
+    }
 }
 
 TEST(LowMachPressureContractsTest, KineticZeroDerivativeRequiresEOSAnchoringAndRetainsTheDirectPacket)
@@ -307,7 +326,8 @@ TEST(LowMachPressureContractsTest, KineticZeroDerivativeRequiresEOSAnchoringAndR
     const auto project = [&]
     {
         return f.equation.project_kinetic_material_with_eos(f.rho, 1., f.target, f.chi, f.theta, f.slip, f.predictor,
-            f.predictor, f.corrected, f.mechanical, f.velocity, f.linear(), 1e-12);
+            f.predictor, f.corrected, f.mechanical, f.velocity, f.linear(), 1e-12,
+            Pressure::CellPressureGradient::Interior);
     };
     const auto before = f.snapshot();
     EXPECT_THROW((void) project(), std::invalid_argument);
