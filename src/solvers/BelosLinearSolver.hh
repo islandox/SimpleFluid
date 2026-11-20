@@ -194,6 +194,18 @@ struct LinearSolverOptions
 {
     int max_iterations = 200;
     real_t tolerance = 1.0e-10;
+    /**
+     * @brief Absolute residual acceptance bound for the true residual norm.
+     *
+     * Zero (the default) keeps the pure RHS-relative stopping test. When
+     * positive, the solve also accepts ||b - A*x|| <= absolute_tolerance
+     * and a zero initial guess with ||b|| <= absolute_tolerance returns
+     * the zero solution immediately without entering Krylov. This gives
+     * cold-start and compatibility-projected systems a safe short-circuit
+     * that never overwrites a warm solution: the zero-guess contract is
+     * the incremental/correction form only.
+     */
+    real_t absolute_tolerance = {};
     int verbosity = Belos::Errors + Belos::Warnings;
     /**
      * CG is intended only when both the operator and configured

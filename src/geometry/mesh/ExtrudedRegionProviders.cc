@@ -142,13 +142,19 @@ ExtrudedGeometry::ExtrudedGeometry(std::shared_ptr<const ExtrudedTopology> topol
                 throw std::invalid_argument("Independent extruded base cells must be strictly convex and counter-clockwise.");
         }
         d_areas.push_back(area2/2); d_cell_centers.push_back(origin+Vec3{cx/(3*area2),cy/(3*area2),0});
+        // Region-local mirror: identical centroid bits expressed against the first node, with
+        // the per-cell origin offset folded in so all local centers share one common frame.
+        d_cell_centers_local.push_back(Vec3{origin.x-d_nodes[0].x+cx/(3*area2),origin.y-d_nodes[0].y+cy/(3*area2),0});
     }
     for(const auto& edge:d_topology->native_topology().side_faces())
     {
         const auto a=d_nodes[edge.nodes[0]], b=d_nodes[edge.nodes[1]], d=b-a;
         const auto length=std::hypot(d.x,d.y);
         if(!std::isfinite(length) || !(length>0)) throw std::invalid_argument("Extruded base edges require positive finite length.");
-        d_lengths.push_back(length); d_edge_centers.push_back({std::midpoint(a.x,b.x),std::midpoint(a.y,b.y),0}); d_edge_normals.push_back({d.y/length,-d.x/length,0});
+        d_lengths.push_back(length); d_edge_centers.push_back({std::midpoint(a.x,b.x),std::midpoint(a.y,b.y),0});
+        d_edge_centers_local.push_back({std::midpoint(a.x-d_nodes[0].x,b.x-d_nodes[0].x),
+            std::midpoint(a.y-d_nodes[0].y,b.y-d_nodes[0].y),0});
+        d_edge_normals.push_back({d.y/length,-d.x/length,0});
     }
 }
 real_t ExtrudedGeometry::cell_volume(size_t c) const
@@ -188,9 +194,56 @@ ExtrudedGeometry::Vec3 ExtrudedGeometry::node_coordinates(size_t n) const
     CHECK_BOUNDS(n, 0, layout().nodes);
     const auto id=d_topology->indexer().node_id(n); auto p=d_nodes[id.ij]; p.z=d_z[id.k]; return p;
 }
+ExtrudedGeometry::Vec3 ExtrudedGeometry::local_reference() const
+{
+    if(d_nodes.empty() || d_z.empty())
+        throw std::out_of_range("Extruded local reference requires stored nodes and axial edges.");
+    return {d_nodes[0].x,d_nodes[0].y,d_z[0]};
+}
+ExtrudedGeometry::Vec3 ExtrudedGeometry::cell_centroid_local(size_t c) const
+{
+    CHECK_BOUNDS(c, 0, layout().cells);
+    const auto id=d_topology->indexer().cell_id(c); auto center=d_cell_centers_local[id.ij];
+    center.z=std::midpoint(d_z[id.k]-d_z[0],d_z[id.k+1]-d_z[0]);
+    return center;
+}
+ExtrudedGeometry::Vec3 ExtrudedGeometry::face_centroid_local(size_t f) const
+{
+    CHECK_BOUNDS(f, 0, layout().faces);
+    const auto id=d_topology->indexer().face_id(f);
+    auto center=id.orientation==SemiStructuredIndexer::AXIAL?d_cell_centers_local[id.ij]:d_edge_centers_local[id.ij];
+    center.z=id.orientation==SemiStructuredIndexer::AXIAL?d_z[id.k]-d_z[0]
+        :std::midpoint(d_z[id.k]-d_z[0],d_z[id.k+1]-d_z[0]);
+    return center;
+}
+ExtrudedGeometry::Vec3 ExtrudedGeometry::cell_center_vector(size_t face, size_t cell) const
+{
+    CHECK_BOUNDS(face, 0, layout().faces);
+    CHECK_BOUNDS(cell, 0, layout().cells);
+    const auto owner=d_topology->owner_cell(face);
+    const auto neighbor=d_topology->neighbor_cell(face);
+    if(neighbor==UnstructuredMesh::invalid_ordinal)
+        throw std::out_of_range("Extruded cell-center displacement requires an interior face.");
+    size_t other;
+    if(cell==owner) other=static_cast<size_t>(neighbor);
+    else if(cell==neighbor) other=static_cast<size_t>(owner);
+    else throw std::invalid_argument("Cell is not incident to extruded face.");
+    const auto id=d_topology->indexer().cell_id(cell), adjacent=d_topology->indexer().cell_id(other);
+    // Both incident calls evaluate this expression with swapped operands, so the two
+    // directions stay exact component-wise opposites.
+    auto result=d_cell_centers_local[adjacent.ij]-d_cell_centers_local[id.ij];
+    result.z=std::midpoint(d_z[adjacent.k]-d_z[0],d_z[adjacent.k+1]-d_z[0])
+        -std::midpoint(d_z[id.k]-d_z[0],d_z[id.k+1]-d_z[0]);
+    return result;
+}
+real_t ExtrudedGeometry::cell_to_face_distance(size_t face, size_t cell) const
+{
+    return (face_centroid_local(face)-cell_centroid_local(cell)).norm();
+}
 MeshStorageReport ExtrudedGeometry::storage_report() const
 {
-    return {.geometry=(d_nodes.capacity()+d_cell_centers.capacity()+d_edge_centers.capacity()+d_edge_normals.capacity())*sizeof(Vec3)
+    return {.geometry=(d_nodes.capacity()+d_cell_centers.capacity()+d_edge_centers.capacity()+d_edge_normals.capacity()
+        +d_cell_centers_local.capacity()+d_edge_centers_local.capacity())*sizeof(Vec3)
         +(d_z.capacity()+d_areas.capacity()+d_lengths.capacity())*sizeof(real_t)};
 }
 EntityRange<EntityRange<uint64_t>> ExtrudedGeometry::xy_cell_nodes() const

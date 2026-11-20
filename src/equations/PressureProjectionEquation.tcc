@@ -12,6 +12,7 @@
 #include "geometry/MeshConcepts.hh"
 #include "PressureProjectionEquation.hh"
 #include "PressureProjectionOperator.hh"
+#include "utils/CompensatedSum.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 
@@ -101,11 +102,11 @@ void PressureProjectionEquation<Pack, MeshType>::validate_projection_policy(
         if (failure) std::rethrow_exception(failure);
         throw std::invalid_argument("Invalid pressure-projection policy on another rank.");
     }
-    const std::array<double, 7> local{static_cast<double>(options.max_iterations), options.tolerance,
+    const std::array<double, 8> local{static_cast<double>(options.max_iterations), options.tolerance,
         static_cast<double>(options.verbosity), static_cast<double>(options.backend),
         static_cast<double>(options.preconditioner), options.reuse_preconditioner ? 1.0 : 0.0,
-        static_cast<double>(method)};
-    std::array<double, 7> minimum{}, maximum{};
+        static_cast<double>(method), options.absolute_tolerance};
+    std::array<double, 8> minimum{}, maximum{};
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 7, local.data(), minimum.data());
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 7, local.data(), maximum.data());
     if (minimum != maximum)
@@ -720,26 +721,41 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
     {
         d_cached_rhs = Teuchos::rcp(new typename Pack::vector_type(d_mesh->owned_cell_map(), false));
     }
-
+    scalar_type cold_start_rhs_floor{};
     {
         const auto predictor_flux_values = FVM::face_flux_balance_read_view(d_cached_face_fluxes);
         const auto rhs_values = d_cached_rhs->getLocalViewHost(Tpetra::Access::OverwriteAll);
-        scalar_type local_compatibility_residual{};
-        scalar_type local_compatibility_scale{};
+        // Compensated local accumulation: the compatibility residual is a
+        // near-zero difference of large fluxes, so its own reduction must not
+        // contribute roundoff at the acceptance scale.
+        SimpleFluid::detail::CompensatedSum<long double> local_compatibility_residual;
+        SimpleFluid::detail::CompensatedSum<long double> local_compatibility_scale;
+        SimpleFluid::detail::CompensatedSum<long double> local_rhs_mean;
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid = static_cast<local_ordinal_type>(owned);
             const auto balance =
                 d_flux_balance_cache.balance(predictor_flux_values, cell_lid);
             const auto target = continuity_target.integrated_rate(cell_lid);
-            local_compatibility_residual += balance - target;
-            local_compatibility_scale += std::abs(balance) + std::abs(target);
+            local_compatibility_residual += static_cast<long double>(balance) - static_cast<long double>(target);
+            local_compatibility_scale += std::abs(static_cast<long double>(balance))
+                + std::abs(static_cast<long double>(target));
             const auto row_gid = owned_map->getGlobalElement(cell_lid);
             const auto is_pressure_gauge = d_pressure_gauge_gid && row_gid == *d_pressure_gauge_gid;
-            rhs_values(owned, 0) = is_pressure_gauge ? scalar_type{} : (-balance + target) / time_step;
+            // Keep the time step on the equation's left side: the integral
+            // RHS stays in m^3/s and the operator carries dt, so a small
+            // cold-start time step cannot amplify closure noise.
+            rhs_values(owned, 0) = is_pressure_gauge ? scalar_type{} : -balance + target;
+            if (!is_pressure_gauge)
+            {
+                local_rhs_mean += static_cast<long double>(rhs_values(owned, 0));
+            }
         }
-        const std::array<scalar_type, 2> local_values{local_compatibility_residual, local_compatibility_scale};
-        std::array<scalar_type, 2> global_values{};
+        const std::array<scalar_type, 3> local_values{
+            static_cast<scalar_type>(local_compatibility_residual.value()),
+            static_cast<scalar_type>(local_compatibility_scale.value()),
+            static_cast<scalar_type>(local_rhs_mean.value())};
+        std::array<scalar_type, 3> global_values{};
         Teuchos::reduceAll(*owned_map->getComm(), Teuchos::REDUCE_SUM, static_cast<int>(local_values.size()),
             local_values.data(), global_values.data());
         const auto tolerance = scalar_type{1.0e-12} + scalar_type{1.0e-10} * global_values[1];
@@ -753,6 +769,40 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
                     << global_values[0] << " m^3/s, tolerance=" << tolerance
                     << " m^3/s, scale=" << global_values[1] << " m^3/s.";
             throw std::invalid_argument(message.str());
+        }
+        // Machine-noise floor of the integral RHS, derived from the global
+        // flux/target magnitude. A RHS at or below it carries no physical
+        // signal and the projection accepts a zero correction.
+        cold_start_rhs_floor = scalar_type{64} * std::numeric_limits<scalar_type>::epsilon() * global_values[1];
+        if (d_pressure_gauge_gid)
+        {
+            // Pure-Neumann compatibility projection. Accumulated geometric
+            // closure drift sits in the constant nullspace mode; removing the
+            // compensated mean of the integral RHS over the Poisson rows
+            // strips it before the Krylov solve. The guard compares the
+            // compensated global sum against the noise floor of that sum
+            // (both scale with the flux magnitude): comparing the mean
+            // against the sum-scaled floor would inflate the threshold by
+            // the Poisson-row count and could strip genuine subtle net
+            // volume sources on large meshes. A sum above the floor is
+            // physical signal (an integrated continuity target), never
+            // drift, and is left to the gauge row, which always keeps its
+            // prescribed zero value.
+            const auto poisson_rows = owned_map->getGlobalNumElements() - 1;
+            if (poisson_rows > 0)
+            {
+                const auto mean = global_values[2] / static_cast<scalar_type>(poisson_rows);
+                if (std::abs(global_values[2]) <= cold_start_rhs_floor)
+                {
+                    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+                    {
+                        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+                        const auto row_gid = owned_map->getGlobalElement(cell_lid);
+                        if (row_gid == *d_pressure_gauge_gid) continue;
+                        rhs_values(owned, 0) -= mean;
+                    }
+                }
+            }
         }
     }
 
@@ -856,12 +906,14 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
     {
         field_type operator_pressure(d_mesh, "pressure_operator_input");
         using full_operator_type = detail::PressureProjectionOperator<Pack>;
+        // The time step stays on the operator's left side: the full corrected
+        // equation is dt*(A - C) x = b with the integral RHS in m^3/s.
         const auto full_operator = Teuchos::rcp(new full_operator_type(const_matrix,
             [&](const typename Pack::vector_type& input, typename Pack::vector_type& correction)
             {
                 operator_pressure.owned_data().update(scalar_type{1}, input, scalar_type{});
                 compute_non_orthogonal_correction(operator_pressure, correction);
-            }));
+            }, time_step));
         // Belos retains its latest operator. Clear solve-local captures on every
         // exit while preserving the operator's owned matrix and stable maps.
         struct CallbackLifetime
@@ -871,8 +923,10 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
         } callback_lifetime{full_operator};
         // A zero correction can already meet the original predictor-scaled
         // criterion on an adjacent corrector. Check it before starting Krylov.
+        // The absolute cold-start floor also accepts a pure-noise RHS.
         const bool zero_correction_converged = std::isfinite(base_norm) && std::isfinite(correction_scale) &&
-            base_norm <= d_linear_options.tolerance * correction_scale;
+            (base_norm <= d_linear_options.tolerance * correction_scale ||
+                base_norm <= cold_start_rhs_floor);
         if (zero_correction_converged)
             linear_statistics.converged = true;
         else
@@ -884,8 +938,9 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
         // Recompute the accepted pressure gradient and independently check the
         // identical full-equation residual used to accept an Anderson iterate.
         compute_non_orthogonal_correction(pressure_correction, rhs_change);
-        d_cached_rhs->update(scalar_type{1}, base_rhs, scalar_type{1}, rhs_change, scalar_type{});
-        const_matrix->apply(pressure_correction.owned_data(), rhs_change);
+        d_cached_rhs->update(scalar_type{1}, base_rhs, time_step, rhs_change, scalar_type{});
+        const_matrix->apply(pressure_correction.owned_data(), rhs_change, Teuchos::NO_TRANS, time_step,
+            scalar_type{});
         rhs_change.update(-scalar_type{1}, *d_cached_rhs, scalar_type{1});
         const auto defect_norm = rhs_change.norm2();
         correction_converged = defect_norm <= d_linear_options.tolerance * correction_scale ||
@@ -894,23 +949,44 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
     else
     {
         auto correction_linear_options = d_linear_options;
+        // Combined absolute stopping for the inner Krylov solves: the
+        // cold-start floor bounds accumulated geometric closure noise.
+        correction_linear_options.absolute_tolerance = cold_start_rhs_floor;
         typename Pack::vector_type fixed_point_residual(owned_map, false);
         typename Pack::vector_type previous_fixed_point_rhs(owned_map, false);
         typename Pack::vector_type previous_fixed_point_residual(owned_map, false);
         scalar_type previous_fixed_point_norm_squared{};
         bool have_fixed_point_history = false;
+        // The time step stays on the system's left side: solve
+        // (dt*A) x = b with the integral RHS, preconditioning from the
+        // unchanged geometric matrix so its factorization survives dt reuse.
+        const auto scaled_operator = Teuchos::rcp(new detail::ScaledLinearOperator<Pack>(const_matrix, time_step));
+        if (std::isfinite(base_norm) && base_norm <= cold_start_rhs_floor)
+        {
+            // Cold-start short-circuit: the integral RHS is pure machine
+            // noise. Accept the exact zero correction; the gradient
+            // evaluation below still refreshes the stored pressure gradient
+            // of the zero field, and the accumulated pressure is preserved.
+            compute_non_orthogonal_correction(pressure_correction, rhs_change);
+            correction_converged = true;
+            linear_statistics.converged = true;
+            linear_statistics.rhs_norm = base_norm;
+        }
+        else
         for (int corrector = 0; corrector < 100; ++corrector)
         {
             fixed_point_residual.update(scalar_type{1}, *d_cached_rhs, scalar_type{});
             linear_statistics = d_linear_solver.solve_with_statistics(
-                const_matrix, *d_cached_rhs, pressure_correction.owned_data(), correction_linear_options, residual_scaling);
+                scaled_operator, *d_cached_rhs, pressure_correction.owned_data(), correction_linear_options,
+                residual_scaling, const_matrix);
             total_iterations += linear_statistics.iterations;
             if (!linear_statistics.converged)
                 throw std::runtime_error("PressureProjectionEquation projection solve did not converge.");
             compute_non_orthogonal_correction(pressure_correction, rhs_change);
-            d_cached_rhs->update(scalar_type{1}, base_rhs, scalar_type{1}, rhs_change, scalar_type{});
+            d_cached_rhs->update(scalar_type{1}, base_rhs, time_step, rhs_change, scalar_type{});
             // Check the full corrected equation, including the inner linear residual.
-            const_matrix->apply(pressure_correction.owned_data(), rhs_change);
+            const_matrix->apply(pressure_correction.owned_data(), rhs_change, Teuchos::NO_TRANS, time_step,
+                scalar_type{});
             rhs_change.update(-scalar_type{1}, *d_cached_rhs, scalar_type{1});
             const auto defect_norm = rhs_change.norm2();
             if (defect_norm <= d_linear_options.tolerance * correction_scale || defect_norm == scalar_type{})

@@ -86,6 +86,21 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_impl(
         }
         solution.putScalar(scalar_type{});
         residual_workspace(rhs).update(scalar_type{1}, rhs, scalar_type{});
+        // Safe zero-RHS short-circuit: the zero-guess contract is the
+        // incremental/correction form, so returning the exact zero solution
+        // is the correct correction and never discards a warm field. The
+        // global norm agrees on every rank, keeping the exit collective
+        // without entering Krylov.
+        if (options.absolute_tolerance > magnitude_type{})
+        {
+            Teuchos::Array<magnitude_type> zero_rhs_norms(rhs.getNumVectors());
+            rhs.norm2(zero_rhs_norms());
+            magnitude_type zero_rhs_norm{};
+            for (std::size_t column = 0; column < rhs.getNumVectors(); ++column)
+                zero_rhs_norm = std::max(zero_rhs_norm, zero_rhs_norms[column]);
+            if (std::isfinite(zero_rhs_norm) && zero_rhs_norm <= options.absolute_tolerance)
+                return {true, 0, scalar_type{}, static_cast<real_t>(zero_rhs_norm)};
+        }
     }
     else
         prepare_initial_guess(matrix, rhs, solution);
@@ -166,6 +181,9 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_impl(
         return standard;
     };
     auto achieved_tolerance = checked_residual();
+    // Tracks whether the shared residual workspace still holds a fresh
+    // true residual for the original RHS; break paths leave it stale.
+    bool residual_workspace_current = true;
 
     // Recurrence residuals can pass while b - A*x is still just above the
     // requested tolerance. GMRES may instead report loss of accuracy (LOA)
@@ -229,6 +247,7 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_impl(
                 if (!d_problem->setProblem())
                 {
                     restore_original_vectors();
+                    residual_workspace_current = false;
                     break;
                 }
                 return_status = d_solver->solve();
@@ -250,16 +269,42 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_impl(
             configure(refinement_options);
             d_solver->setParameters(d_parameters);
             if (!set_problem_with_prepared_residual())
+            {
+                residual_workspace_current = false;
                 break;
+            }
             return_status = d_solver->solve();
             iterations += d_solver->getNumIters();
         }
         achieved_tolerance = checked_residual();
+        residual_workspace_current = true;
         refinement_residuals[refinement_count++] = achieved_tolerance;
     }
 
-    const bool converged = std::isfinite(achieved_tolerance)
+    bool converged = std::isfinite(achieved_tolerance)
         && achieved_tolerance <= options.tolerance;
+    // Combined stopping test: a positive absolute tolerance also accepts a
+    // true residual at or below it, independent of the RHS norm. This is
+    // the cold-start exit for compatibility-projected systems whose RHS is
+    // pure roundoff noise.
+    if (!converged && options.absolute_tolerance > magnitude_type{})
+    {
+        if (!residual_workspace_current)
+        {
+            (void)true_relative_residual(matrix, rhs, solution, residual_scaling, nullptr);
+        }
+        Teuchos::Array<magnitude_type> absolute_norms(rhs.getNumVectors());
+        residual_workspace(rhs).norm2(absolute_norms());
+        for (std::size_t column = 0; column < rhs.getNumVectors(); ++column)
+        {
+            if (std::isfinite(absolute_norms[column])
+                && absolute_norms[column] <= options.absolute_tolerance)
+            {
+                converged = true;
+                break;
+            }
+        }
+    }
     // Belos::Errors is zero and denotes diagnostics that are always printed.
     if (!converged)
     {

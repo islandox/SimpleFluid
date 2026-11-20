@@ -84,6 +84,16 @@ public:
     Vec3 face_centroid(size_t f) const;
     Vec3 face_area_vector(size_t f) const;
     Vec3 node_coordinates(size_t n) const;
+    /** @brief Lower corner of the global edge arrays; origin of the region-local frame. */
+    Vec3 local_reference() const noexcept;
+    /** @brief Exact region-local cell centroid: per axis std::midpoint of reference-shifted edges. */
+    Vec3 cell_centroid_local(size_t c) const;
+    /** @brief Exact region-local face centroid: shifted raw edge on the normal axis, shifted midpoints elsewhere. */
+    Vec3 face_centroid_local(size_t f) const;
+    /** @brief Same-region cell-center displacement across an interior face, oriented away from the passed cell. */
+    Vec3 cell_center_vector(size_t face, size_t cell) const;
+    /** @brief Exact half cell width along the face-normal axis for a cell owning that face. */
+    real_t cell_to_face_distance(size_t face, size_t cell) const;
     std::uint64_t geometry_epoch() const noexcept { return 0; }
     const void* storage_identity() const { return this; }
     MeshStorageReport storage_report() const;

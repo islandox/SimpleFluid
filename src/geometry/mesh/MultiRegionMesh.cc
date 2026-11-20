@@ -1104,16 +1104,70 @@ MultiRegionMesh::Vec3 MultiRegionMesh::periodic_translation(RegionFace n) const
 MultiRegionMesh::Vec3 MultiRegionMesh::face_center_vector(ID f,ID c) const
 {
     check_face_id(f); check_cell_id(c);
-    if(c==owner_cell(f)) return face_centroid(f)-cell_centroid(c);
-    if(c==neighbor_cell(f)) return face_centroid(f)+periodic_translation(f)-cell_centroid(c);
-    throw std::invalid_argument("Cell is not incident to composite face.");
+    const auto n=native_face(f);
+    const auto [cell_region,cell_id]=native_cell(c);
+    if(c==owner_cell(f))
+    {
+        return geometry(n.region,[&](const auto& g)->Vec3
+        {
+            if constexpr (requires { g.face_centroid_local(n.face); g.cell_centroid_local(cell_id); })
+                return transformed_displacement(g.face_centroid_local(n.face)-g.cell_centroid_local(cell_id));
+            else return face_centroid(f)-cell_centroid(c);
+        });
+    }
+    if(c!=neighbor_cell(f)) throw std::invalid_argument("Cell is not incident to composite face.");
+    const auto shift=periodic_translation(f);
+    return geometry(n.region,[&](const auto& g)->Vec3
+    {
+        return geometry(cell_region,[&](const auto& cell_geometry)->Vec3
+        {
+            // Region-local frames when both providers expose them; the owner-branch image and
+            // the periodic term keep the exact previous semantics otherwise.
+            if constexpr (requires { g.face_centroid_local(n.face); g.local_reference(); }
+                && requires { cell_geometry.cell_centroid_local(cell_id); cell_geometry.local_reference(); })
+                return transformed_displacement(
+                    g.face_centroid_local(n.face)-cell_geometry.cell_centroid_local(cell_id))
+                    +transformed_displacement(g.local_reference()-cell_geometry.local_reference())+shift;
+            else return face_centroid(f)+shift-cell_centroid(c);
+        });
+    });
 }
 MultiRegionMesh::Vec3 MultiRegionMesh::cell_center_vector(ID f,ID c) const
 {
     check_face_id(f); check_cell_id(c);
     const auto other=opposite_cell(f,c);
     if(other==invalid_cell_id()) throw std::invalid_argument("Exterior face has no adjacent cell.");
-    return cell_centroid(other)-cell_centroid(c)+periodic_translation(f)*(c==owner_cell(f)?-1.0:1.0);
+    const auto shift=periodic_translation(f)*(c==owner_cell(f)?-1.0:1.0);
+    const auto n=native_face(f);
+    const auto [cell_region,cell_id]=native_cell(c);
+    const auto [other_region,other_id]=native_cell(other);
+    if(cell_region==n.region && other_region==n.region
+        && topology(n.region,[&](const auto& t){return t.neighbor_cell(n.face);})!=invalid_cell_id())
+    {
+        // Same-region native adjacency: the provider displacement avoids subtracting
+        // origin-scale stored centroids; both incident cells evaluate the same expression.
+        return geometry(n.region,[&](const auto& g)->Vec3
+        {
+            if constexpr (requires { g.cell_center_vector(n.face,cell_id); })
+                return transformed_displacement(g.cell_center_vector(n.face,cell_id))+shift;
+            else if constexpr (requires { g.local_reference(); g.cell_centroid_local(cell_id); })
+                return transformed_displacement(g.cell_centroid_local(other_id)-g.cell_centroid_local(cell_id))+shift;
+            else return cell_centroid(other)-cell_centroid(c)+shift;
+        });
+    }
+    // Cross-image adjacency: use both region-local frames when they are available.
+    return geometry(cell_region,[&](const auto& cell_geometry)->Vec3
+    {
+        return geometry(other_region,[&](const auto& other_geometry)->Vec3
+        {
+            if constexpr (requires { cell_geometry.local_reference(); cell_geometry.cell_centroid_local(cell_id); }
+                && requires { other_geometry.local_reference(); other_geometry.cell_centroid_local(other_id); })
+                return transformed_displacement(other_geometry.cell_centroid_local(other_id)
+                    -cell_geometry.cell_centroid_local(cell_id))
+                    +transformed_displacement(other_geometry.local_reference()-cell_geometry.local_reference())+shift;
+            else return cell_centroid(other)-cell_centroid(c)+shift;
+        });
+    });
 }
 
 real_t MultiRegionMesh::axial_scale() const noexcept

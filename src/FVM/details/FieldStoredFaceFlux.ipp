@@ -23,7 +23,11 @@ auto stored_interior_face_linear_weights(const FaceGeometry& mesh, LocalOrdinal 
     {
         return {scalar_type{0.5}, scalar_type{0.5}};
     }
-    return {neighbor_distance / total_distance, owner_distance / total_distance};
+    // Compute the owner weight once and derive the neighbor weight by
+    // subtraction from one, so the pair sums to exactly 1.0 in floating
+    // point. Interpolating a constant field then reproduces it bit-exactly.
+    const auto owner_weight = neighbor_distance / total_distance;
+    return {owner_weight, scalar_type{1} - owner_weight};
 }
 
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>

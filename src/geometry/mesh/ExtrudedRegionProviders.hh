@@ -67,6 +67,16 @@ public:
     Vec3 face_centroid(size_t f) const;
     Vec3 face_area_vector(size_t f) const;
     Vec3 node_coordinates(size_t n) const;
+    /** @brief First node XY and first axial edge; origin of the region-local frame. */
+    Vec3 local_reference() const;
+    /** @brief Exact region-local cell centroid from local cell-center and axial-edge storage. */
+    Vec3 cell_centroid_local(size_t c) const;
+    /** @brief Exact region-local face centroid from local cell/edge centers and axial edges. */
+    Vec3 face_centroid_local(size_t f) const;
+    /** @brief Same-region cell-center displacement across an interior face, oriented away from the passed cell. */
+    Vec3 cell_center_vector(size_t face, size_t cell) const;
+    /** @brief Norm of the local face-centroid to cell-centroid displacement. */
+    real_t cell_to_face_distance(size_t face, size_t cell) const;
     MeshStorageReport storage_report() const;
     const Arr<Vec3>& xy_nodes() const { return d_nodes; }
     const ArrReal& z_edges() const { return d_z; }
@@ -74,6 +84,9 @@ public:
 private:
     std::shared_ptr<const ExtrudedTopology> d_topology;
     Arr<Vec3> d_nodes, d_cell_centers, d_edge_centers, d_edge_normals;
+    // Region-local mirrors of the cached centers, relative to the first node and z edge,
+    // so displacements subtract only cell-scale values and never origin-scale coordinates.
+    Arr<Vec3> d_cell_centers_local, d_edge_centers_local;
     ArrReal d_z, d_areas, d_lengths;
 };
 using ExtrudedRegion=IsoRegion<ExtrudedTopology,ExtrudedGeometry>;

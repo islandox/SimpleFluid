@@ -372,6 +372,8 @@ private:
     void replace_axial_edges_fixed_topology(ArrReal edges);
     Vec3 transformed_point(Vec3 point) const;
     Vec3 transformed_area_vector(Vec3 vector) const;
+    /** @brief Composite axial motion applied to a region-local displacement; transverse components pass through. */
+    Vec3 transformed_displacement(Vec3 displacement) const noexcept { return {displacement.x, displacement.y, displacement.z * axial_scale()}; }
     real_t axial_scale() const noexcept;
     struct Boundary { size_t region; int native_id; int id; std::string name; };
     // One sorted list per explicit slave patch. Regular patches use no face lists.
@@ -470,28 +472,74 @@ private:
         resolved.area_vector = transformed_area_vector(geometry.face_area_vector(face));
         resolved.centroid = transformed_point(geometry.face_centroid(face));
         resolved.owner_centroid = transformed_point(geometry.cell_centroid(owner));
+        if constexpr (requires { geometry.face_centroid_local(face); geometry.cell_centroid_local(owner); })
+            resolved.owner_to_face = transformed_displacement(geometry.face_centroid_local(face)
+                - geometry.cell_centroid_local(owner));
+        else
+            resolved.owner_to_face = resolved.centroid - resolved.owner_centroid;
         Vec3 shift{};
         if (adjacent != invalid_cell_id())
         {
             resolved.neighbor = d_cells[r] + adjacent;
             resolved.neighbor_centroid = transformed_point(geometry.cell_centroid(adjacent));
+            // Same-region interior: analytic or region-local displacements keep full cell-scale
+            // precision; the reverse direction is the exact component-wise negation.
+            if constexpr (requires { geometry.cell_center_vector(face, owner); })
+            {
+                resolved.owner_to_neighbor = transformed_displacement(geometry.cell_center_vector(face, owner));
+                resolved.neighbor_to_owner = resolved.owner_to_neighbor * -1.0;
+            }
+            else if constexpr (requires { geometry.local_reference(); geometry.cell_centroid_local(owner); })
+            {
+                resolved.owner_to_neighbor = transformed_displacement(geometry.cell_centroid_local(adjacent)
+                    - geometry.cell_centroid_local(owner));
+                resolved.neighbor_to_owner = resolved.owner_to_neighbor * -1.0;
+            }
+            else
+            {
+                resolved.owner_to_neighbor = resolved.neighbor_centroid - resolved.owner_centroid + shift * -1.0;
+                resolved.neighbor_to_owner = resolved.owner_centroid - resolved.neighbor_centroid + shift * 1.0;
+            }
+            if constexpr (requires { geometry.face_centroid_local(face); geometry.cell_centroid_local(adjacent); })
+                resolved.neighbor_to_face = transformed_displacement(geometry.face_centroid_local(face)
+                    - geometry.cell_centroid_local(adjacent));
+            else
+                resolved.neighbor_to_face = resolved.centroid + shift - resolved.neighbor_centroid;
+            return resolved;
         }
-        else if (const auto other = partner({r, face}, true))
+        if (const auto other = partner({r, face}, true))
         {
+            shift = periodic_translation(RegionFace{r, face});
             std::visit([&](const auto& neighbor_region)
             {
                 const auto cell = neighbor_region.topology().owner_cell(other->face);
                 resolved.neighbor = d_cells[other->region] + cell;
                 resolved.neighbor_centroid = transformed_point(neighbor_region.geometry().cell_centroid(cell));
+                if constexpr (requires { geometry.local_reference(); geometry.cell_centroid_local(owner);
+                    geometry.face_centroid_local(face); }
+                    && requires { neighbor_region.geometry().local_reference();
+                        neighbor_region.geometry().cell_centroid_local(cell); })
+                {
+                    // Cross-image displacement in region-local frames: cell-scale differences plus
+                    // the constant frame offset, with the periodic shift applied exactly as before.
+                    const auto& neighbor_geometry = neighbor_region.geometry();
+                    resolved.owner_to_neighbor = transformed_displacement(
+                        neighbor_geometry.cell_centroid_local(cell) - geometry.cell_centroid_local(owner))
+                        + transformed_displacement(neighbor_geometry.local_reference() - geometry.local_reference())
+                        + shift * -1.0;
+                    resolved.neighbor_to_owner = resolved.owner_to_neighbor * -1.0;
+                    resolved.neighbor_to_face = transformed_displacement(geometry.face_centroid_local(face)
+                        - neighbor_geometry.cell_centroid_local(cell))
+                        + transformed_displacement(geometry.local_reference() - neighbor_geometry.local_reference())
+                        + shift;
+                }
+                else
+                {
+                    resolved.owner_to_neighbor = resolved.neighbor_centroid - resolved.owner_centroid + shift * -1.0;
+                    resolved.neighbor_to_owner = resolved.owner_centroid - resolved.neighbor_centroid + shift * 1.0;
+                    resolved.neighbor_to_face = resolved.centroid + shift - resolved.neighbor_centroid;
+                }
             }, d_regions[other->region]);
-            shift = periodic_translation(RegionFace{r, face});
-        }
-        resolved.owner_to_face = resolved.centroid - resolved.owner_centroid;
-        if (resolved.interior())
-        {
-            resolved.owner_to_neighbor = resolved.neighbor_centroid - resolved.owner_centroid + shift * -1.0;
-            resolved.neighbor_to_owner = resolved.owner_centroid - resolved.neighbor_centroid + shift * 1.0;
-            resolved.neighbor_to_face = resolved.centroid + shift - resolved.neighbor_centroid;
         }
         return resolved;
     }

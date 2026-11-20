@@ -33,6 +33,12 @@ void BelosLinearSolver<Pack>::validate_options(const LinearSolverOptions& option
         throw std::invalid_argument(
             "BelosLinearSolver requires a positive finite tolerance.");
     }
+    if (!std::isfinite(options.absolute_tolerance)
+        || options.absolute_tolerance < real_t{})
+    {
+        throw std::invalid_argument(
+            "BelosLinearSolver requires a non-negative finite absolute tolerance.");
+    }
     static_cast<void>(to_string(options.backend));
     static_cast<void>(to_string(options.preconditioner));
     if (options.backend == LinearSolverBackend::Cg

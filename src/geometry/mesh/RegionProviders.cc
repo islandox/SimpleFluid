@@ -124,6 +124,69 @@ RectilinearGeometry::Vec3 RectilinearGeometry::node_coordinates(size_t n) const
     const auto id = d_indexer.node_id(n);
     return {d_edges[0][id.i], d_edges[1][id.j], d_edges[2][id.k]};
 }
+RectilinearGeometry::Vec3 RectilinearGeometry::local_reference() const noexcept
+{
+    return {d_edges[0][0], d_edges[1][0], d_edges[2][0]};
+}
+RectilinearGeometry::Vec3 RectilinearGeometry::cell_centroid_local(size_t c) const
+{
+    CHECK_BOUNDS(c, 0, d_indexer.total_cells());
+    const auto id = d_indexer.cell_id(c);
+    return {std::midpoint(d_edges[0][id.i] - d_edges[0][0], d_edges[0][id.i + 1] - d_edges[0][0]),
+        std::midpoint(d_edges[1][id.j] - d_edges[1][0], d_edges[1][id.j + 1] - d_edges[1][0]),
+        std::midpoint(d_edges[2][id.k] - d_edges[2][0], d_edges[2][id.k + 1] - d_edges[2][0])};
+}
+RectilinearGeometry::Vec3 RectilinearGeometry::face_centroid_local(size_t f) const
+{
+    CHECK_BOUNDS(f, 0, d_indexer.total_faces());
+    const auto id = d_indexer.face_id(f);
+    const std::array<unsigned, 3> n{id.i, id.j, id.k};
+    std::array<real_t, 3> result;
+    for (size_t a = 0; a < 3; ++a)
+        result[a] = a == id.orientation ? d_edges[a][n[a]] - d_edges[a][0]
+            : std::midpoint(d_edges[a][n[a]] - d_edges[a][0], d_edges[a][n[a] + 1] - d_edges[a][0]);
+    return {result[0], result[1], result[2]};
+}
+RectilinearGeometry::Vec3 RectilinearGeometry::cell_center_vector(size_t face, size_t cell) const
+{
+    CHECK_BOUNDS(face, 0, d_indexer.total_faces());
+    CHECK_BOUNDS(cell, 0, d_indexer.total_cells());
+    const auto id = d_indexer.face_id(face);
+    const auto center = d_indexer.cell_id(cell);
+    const std::array<unsigned, 3> n{id.i, id.j, id.k};
+    const std::array<unsigned, 3> c{center.i, center.j, center.k};
+    const auto axis = id.orientation;
+    for (size_t a = 0; a < 3; ++a)
+        if (a != axis && c[a] != n[a])
+            throw std::invalid_argument("Cell is not incident to rectilinear face.");
+    const bool lower = c[axis] + 1 == n[axis];
+    if (!lower && c[axis] != n[axis])
+        throw std::invalid_argument("Cell is not incident to rectilinear face.");
+    const auto& edges = d_edges[axis];
+    if (n[axis] == 0 || n[axis] + 1 >= edges.size())
+        throw std::out_of_range("Rectilinear cell-center displacement requires an interior face.");
+    // The rectilinear topology owner is the lower cell, so the shared owner-to-neighbor value
+    // is positive along the axis; the neighbor-side call negates it component-wise.
+    const auto toward_upper = std::midpoint(edges[n[axis]] - edges[0], edges[n[axis] + 1] - edges[0])
+        - std::midpoint(edges[n[axis] - 1] - edges[0], edges[n[axis]] - edges[0]);
+    Vec3 result{};
+    result.component(axis) = toward_upper;
+    return lower ? result : result * -1.0;
+}
+real_t RectilinearGeometry::cell_to_face_distance(size_t face, size_t cell) const
+{
+    CHECK_BOUNDS(face, 0, d_indexer.total_faces());
+    CHECK_BOUNDS(cell, 0, d_indexer.total_cells());
+    const auto id = d_indexer.face_id(face);
+    const auto center = d_indexer.cell_id(cell);
+    const std::array<unsigned, 3> n{id.i, id.j, id.k};
+    const std::array<unsigned, 3> c{center.i, center.j, center.k};
+    const auto axis = id.orientation;
+    for (size_t a = 0; a < 3; ++a)
+        if ((a != axis && c[a] != n[a]) || (a == axis && c[a] != n[axis] && c[axis] + 1 != n[axis]))
+            throw std::invalid_argument("Cell is not incident to rectilinear face.");
+    return (d_edges[axis][c[axis] + 1] - d_edges[axis][c[axis]]) / 2;
+}
 MeshStorageReport RectilinearGeometry::storage_report() const
 {
     return {.geometry = (d_edges[0].capacity() + d_edges[1].capacity() + d_edges[2].capacity()) * sizeof(real_t)};

@@ -526,3 +526,38 @@ TEST(MultiRegionMeshTest, ExplicitConstituentsKeepStaticMotionContract)
     EXPECT_FALSE(geometry->supports_axial_motion());
     EXPECT_THROW((PlanarALEMeshMotion<>(mesh)),std::invalid_argument);
 }
+
+TEST(MultiRegionMeshTest, LocalDisplacementsMatchGlobalUpToRounding)
+{
+    // Region-local displacement paths must reproduce the stored-global-centroid arithmetic
+    // to rounding, with exact owner/neighbor bit symmetry on every interior face.
+    const auto near = [](MeshUtils::Vec3 actual, MeshUtils::Vec3 expected, uint64_t face)
+    {
+        for (size_t i = 0; i < 3; ++i)
+            EXPECT_NEAR(actual.component(i), expected.component(i), 1e-12) << "face " << face << " component " << i;
+    };
+    const std::array<std::shared_ptr<const MultiRegionMesh>, 3> meshes{test::two_regions(3),
+        test::coarse_fine_regions(), test::independent_extruded_regions()};
+    for (const auto& mesh : meshes)
+    {
+        for (uint64_t f = 0; f < mesh->num_faces(); ++f)
+        {
+            const auto owner = mesh->owner_cell(f);
+            const auto neighbor = mesh->neighbor_cell(f);
+            near(mesh->face_center_vector(f, owner), mesh->face_centroid(f) - mesh->cell_centroid(owner), f);
+            if (neighbor == MultiRegionMesh::invalid_cell_id())
+            {
+                EXPECT_THROW(mesh->cell_center_vector(f, owner), std::invalid_argument);
+                continue;
+            }
+            const auto owner_vector = mesh->cell_center_vector(f, owner);
+            const auto neighbor_vector = mesh->cell_center_vector(f, neighbor);
+            near(owner_vector, mesh->cell_centroid(neighbor) - mesh->cell_centroid(owner), f);
+            near(neighbor_vector, mesh->cell_centroid(owner) - mesh->cell_centroid(neighbor), f);
+            EXPECT_EQ(owner_vector.x, -neighbor_vector.x) << "face " << f;
+            EXPECT_EQ(owner_vector.y, -neighbor_vector.y) << "face " << f;
+            EXPECT_EQ(owner_vector.z, -neighbor_vector.z) << "face " << f;
+            near(mesh->face_center_vector(f, neighbor), mesh->face_centroid(f) - mesh->cell_centroid(neighbor), f);
+        }
+    }
+}

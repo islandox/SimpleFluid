@@ -5,6 +5,7 @@
 #include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_RCP.hpp>
 
+#include <cmath>
 #include <cstddef>
 #include <functional>
 #include <stdexcept>
@@ -25,9 +26,10 @@ public:
     using multi_vector_type = typename Pack::multi_vector_type;
     using correction_type = std::function<void(const vector_type&, vector_type&)>;
 
-    PressureProjectionOperator(Teuchos::RCP<const matrix_type> compact_matrix, correction_type correction)
+    PressureProjectionOperator(Teuchos::RCP<const matrix_type> compact_matrix, correction_type correction,
+        scalar_type left_hand_scale = scalar_type{1})
         : d_compact_matrix(std::move(compact_matrix)), d_correction(std::move(correction)),
-          d_correction_result(d_compact_matrix->getRangeMap(), false)
+          d_left_hand_scale(left_hand_scale), d_correction_result(d_compact_matrix->getRangeMap(), false)
     {
     }
 
@@ -77,16 +79,61 @@ public:
             ++d_correction_applications;
             d_result->getVectorNonConst(column)->update(-scalar_type{1}, d_correction_result, scalar_type{1});
         }
-        output.update(alpha, *d_result, beta);
+        // The scale keeps the time step on the equation's left side:
+        // dt * (A - C) x = b holds the integral RHS in physical units.
+        output.update(alpha * d_left_hand_scale, *d_result, beta);
     }
 
 private:
     Teuchos::RCP<const matrix_type> d_compact_matrix;
     correction_type d_correction;
+    scalar_type d_left_hand_scale = scalar_type{1};
     mutable vector_type d_correction_result;
     mutable Teuchos::RCP<multi_vector_type> d_result;
     mutable std::size_t d_applications = 0;
     mutable std::size_t d_correction_applications = 0;
+};
+
+/**
+ * @brief Internal constant-scaled CRS operator wrapper.
+ *
+ * Multiplies the wrapped matrix into the Krylov operator so the time step
+ * stays on the linear system's left side without rebuilding the cached
+ * geometric matrix or invalidating its preconditioner. Preconditioning can
+ * keep using the unscaled matrix object.
+ */
+template<TpetraTypePack Pack>
+class ScaledLinearOperator final : public Pack::operator_type
+{
+public:
+    using scalar_type = typename Pack::scalar_type;
+    using map_type = typename Pack::map_type;
+    using matrix_type = typename Pack::matrix_type;
+    using multi_vector_type = typename Pack::multi_vector_type;
+
+    ScaledLinearOperator(Teuchos::RCP<const matrix_type> matrix, scalar_type scale)
+        : d_matrix(std::move(matrix)), d_scale(scale)
+    {
+        if (d_matrix.is_null() || !std::isfinite(d_scale) || d_scale <= scalar_type{})
+            throw std::invalid_argument("ScaledLinearOperator requires a matrix and a positive finite scale.");
+    }
+
+    Teuchos::RCP<const map_type> getDomainMap() const override { return d_matrix->getDomainMap(); }
+    Teuchos::RCP<const map_type> getRangeMap() const override { return d_matrix->getRangeMap(); }
+    bool hasTransposeApply() const override { return false; }
+
+    void apply(const multi_vector_type& input, multi_vector_type& output,
+        Teuchos::ETransp mode = Teuchos::NO_TRANS, scalar_type alpha = scalar_type{1},
+        scalar_type beta = scalar_type{}) const override
+    {
+        if (mode != Teuchos::NO_TRANS)
+            throw std::invalid_argument("ScaledLinearOperator supports only non-transpose application.");
+        d_matrix->apply(input, output, mode, alpha * d_scale, beta);
+    }
+
+private:
+    Teuchos::RCP<const matrix_type> d_matrix;
+    scalar_type d_scale;
 };
 
 } // namespace SimpleFluid::detail

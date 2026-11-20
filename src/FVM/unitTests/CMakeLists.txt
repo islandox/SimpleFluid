@@ -245,3 +245,13 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         COMPILE_OPTIONS -fvisibility=hidden -fvisibility-inlines-hidden)
     unset(_stored_transport_test_providers)
 endif()
+
+foreach(_closure_procs IN ITEMS 2 4)
+    simplefluid_add_mpi_test(
+        NAME PressurePoissonClosure_${_closure_procs}procs
+        TARGET testPressurePoissonClosure
+        PROCS ${_closure_procs}
+        ARGS "--gtest_filter=PressurePoissonClosureTest.MultiRank*"
+        LABELS "mpi;pressure_closure;multi_region;empty_rank"
+        TIMEOUT 120)
+endforeach()

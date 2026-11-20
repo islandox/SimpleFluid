@@ -16,7 +16,9 @@
 #include "utils/debug_check.hh"
 
 #include <array>
+#include <cmath>
 #include <limits>
+#include <numeric>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -184,7 +186,11 @@ inline Vec3 tetra_centroid(const Vec3& a, const Vec3& b, const Vec3& c, const Ve
 /**
  * @brief Estimate hexahedral cell volume using tetrahedral decomposition.
  *
- * @tparam Vec3 Vector type used for point coordinates.
+ * Vertex coordinates are first shifted to the hexahedron's first vertex and
+ * the tetrahedral fan is accumulated in long double, so meshes placed far
+ * from the coordinate origin do not lose cancellation-limited low bits.
+ *
+ * @param Vec3 Vector type used for point coordinates.
  * @param x Hexahedral vertex coordinates.
  * @return Total hexahedral volume.
  */
@@ -192,11 +198,31 @@ template <class Vec3>
 inline real_t hex_volume(const std::vector<Vec3>& x)
 {
     CHECK(x.size() >= 8);
-    return tetra_volume(x[0], x[1], x[3], x[4])
-         + tetra_volume(x[1], x[2], x[3], x[6])
-         + tetra_volume(x[1], x[4], x[5], x[6])
-         + tetra_volume(x[3], x[4], x[6], x[7])
-         + tetra_volume(x[1], x[3], x[4], x[6]);
+    using long_vec3 = vec3<long double>;
+    auto local = [&](size_t i)
+    {
+        return long_vec3{static_cast<long double>(x[i].x), static_cast<long double>(x[i].y),
+            static_cast<long double>(x[i].z)}
+             - long_vec3{static_cast<long double>(x[0].x), static_cast<long double>(x[0].y),
+                 static_cast<long double>(x[0].z)};
+    };
+    constexpr std::array<std::array<size_t, 4>, 5> tetrahedra{{
+        {{0, 1, 3, 4}},
+        {{1, 2, 3, 6}},
+        {{1, 4, 5, 6}},
+        {{3, 4, 6, 7}},
+        {{1, 3, 4, 6}},
+    }};
+    long double volume = 0.0L;
+    for (const auto& tetrahedron : tetrahedra)
+    {
+        const auto a = local(tetrahedron[0]);
+        const auto b = local(tetrahedron[1]);
+        const auto c = local(tetrahedron[2]);
+        const auto d = local(tetrahedron[3]);
+        volume += std::abs((b - a).dot((c - a).cross(d - a))) / 6.0L;
+    }
+    return static_cast<real_t>(volume);
 }
 
 /**
@@ -250,7 +276,10 @@ inline Vec3 hex_centroid(const std::vector<Vec3>& x)
 /**
  * @brief Estimate wedge cell volume using tetrahedral decomposition.
  *
- * @tparam Vec3 Vector type used for point coordinates.
+ * Vertex coordinates are first shifted to the wedge's first vertex and the
+ * fan is accumulated in long double, mirroring @ref hex_volume.
+ *
+ * @param Vec3 Vector type used for point coordinates.
  * @param x Wedge vertex coordinates.
  * @return Total wedge volume.
  */
@@ -258,9 +287,29 @@ template <class Vec3>
 inline real_t wedge_volume(const std::vector<Vec3>& x)
 {
     CHECK(x.size() >= 6);
-    return tetra_volume(x[0], x[1], x[2], x[3])
-         + tetra_volume(x[1], x[2], x[4], x[3])
-         + tetra_volume(x[2], x[4], x[5], x[3]);
+    using long_vec3 = vec3<long double>;
+    auto local = [&](size_t i)
+    {
+        return long_vec3{static_cast<long double>(x[i].x), static_cast<long double>(x[i].y),
+            static_cast<long double>(x[i].z)}
+             - long_vec3{static_cast<long double>(x[0].x), static_cast<long double>(x[0].y),
+                 static_cast<long double>(x[0].z)};
+    };
+    constexpr std::array<std::array<size_t, 4>, 3> tetrahedra{{
+        {{0, 1, 2, 3}},
+        {{1, 2, 4, 3}},
+        {{2, 4, 5, 3}},
+    }};
+    long double volume = 0.0L;
+    for (const auto& tetrahedron : tetrahedra)
+    {
+        const auto a = local(tetrahedron[0]);
+        const auto b = local(tetrahedron[1]);
+        const auto c = local(tetrahedron[2]);
+        const auto d = local(tetrahedron[3]);
+        volume += std::abs((b - a).dot((c - a).cross(d - a))) / 6.0L;
+    }
+    return static_cast<real_t>(volume);
 }
 
 /**
@@ -349,6 +398,10 @@ inline Vec3 face_centroid(const std::vector<Vec3>& x)
 /**
  * @brief Compute the oriented area vector for a face.
  *
+ * The fan is anchored at the first vertex (a local origin) and accumulated
+ * in long double before one final cast, keeping far-from-origin meshes free
+ * of cancellation-limited roundoff in the stored face geometry.
+ *
  * @tparam Vec3 Vector type used for point coordinates.
  * @param x Face vertex coordinates in order.
  * @return Area vector of the face.
@@ -357,16 +410,21 @@ template <class Vec3>
 inline Vec3 face_area_vector(const std::vector<Vec3>& x)
 {
     CHECK(x.size() >= 3);
-    Vec3 area{};
+    vec3<long double> area{};
     for (size_t i = 1; i + 1 < x.size(); ++i)
-        area = area + (x[i] - x[0]).cross(x[i + 1] - x[0]) * 0.5;
-    return area;
+    {
+        const vec3<long double> a{x[i].x - x[0].x, x[i].y - x[0].y, x[i].z - x[0].z};
+        const vec3<long double> b{x[i + 1].x - x[0].x, x[i + 1].y - x[0].y, x[i + 1].z - x[0].z};
+        area = area + a.cross(b) * (0.5L);
+    }
+    return {static_cast<real_t>(area.x), static_cast<real_t>(area.y), static_cast<real_t>(area.z)};
 }
 
 /**
  * @brief Signed-fan centroid of a simple planar polygon, including concavity.
  * The caller validates planarity and simplicity. Signed triangle weights are
  * essential: a fan from a concave polygon vertex can extend outside the face.
+ * Moments are accumulated in long double around the first-vertex local origin.
  */
 template <class Vec3>
 inline Vec3 polygon_centroid(const std::vector<Vec3>& x)
@@ -378,15 +436,16 @@ inline Vec3 polygon_centroid(const std::vector<Vec3>& x)
     if (!(area > 0.0) || !std::isfinite(area))
         throw std::invalid_argument("Cannot compute a degenerate polygon centroid.");
     const auto normal = area_vector / area;
-    Vec3 moment{};
+    vec3<long double> moment{};
     for (size_t i = 1; i + 1 < x.size(); ++i)
     {
-        const auto a = x[i] - x[0];
-        const auto b = x[i + 1] - x[0];
-        const auto weight = a.cross(b).dot(normal) * 0.5;
-        moment = moment + (a + b) * (weight / 3.0);
+        const vec3<long double> a{x[i].x - x[0].x, x[i].y - x[0].y, x[i].z - x[0].z};
+        const vec3<long double> b{x[i + 1].x - x[0].x, x[i + 1].y - x[0].y, x[i + 1].z - x[0].z};
+        const auto weight = a.cross(b).dot(vec3<long double>{normal.x, normal.y, normal.z}) * (0.5L);
+        moment = moment + (a + b) * (weight / 3.0L);
     }
-    return x[0] + moment / area;
+    return x[0] + Vec3{static_cast<real_t>(moment.x / area), static_cast<real_t>(moment.y / area),
+                       static_cast<real_t>(moment.z / area)};
 }
 
 /**
@@ -414,6 +473,10 @@ inline Arr<T> consec_diff(const Arr<T>& arr)
 
 /**
  * @brief Compute midpoints of consecutive values in an ordered array.
+ *
+ * Uses std::midpoint: the difference is taken before halving, so a large
+ * coordinate offset shared by both edges cannot contaminate the stored
+ * centroid, and the operation cannot overflow.
  * @tparam T Arithmetic value type.
  * @param arr Input values.
  * @return Array containing consecutive arithmetic midpoints, or empty for
@@ -430,7 +493,7 @@ inline Arr<T> consec_mid(const Arr<T>& arr)
     Arr<T> result(arr.size() - 1);
     for (size_t i = 0; i + 1 < arr.size(); ++i)
     {
-        result[i] = (arr[i] + arr[i + 1]) / static_cast<T>(2);
+        result[i] = std::midpoint(arr[i], arr[i + 1]);
     }
     return result;
 }

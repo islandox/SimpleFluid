@@ -175,30 +175,52 @@ OrthogonalCartesian3D::face_normal_impl(face_id_t id) const -> Vec3
     return normal;
 }
 
-/** Wrapped geometric displacement, including the two-cell periodic case. */
+/** Wrapped geometric displacement, including the two-cell periodic case.
+ *
+ * The displacement is built analytically from the stored per-cell axis
+ * widths instead of subtracting global centroid coordinates, so its rounding
+ * does not grow with the mesh's distance from the coordinate origin. The
+ * owner/neighbor results remain exact component-wise negations. */
 inline auto OrthogonalCartesian3D::cell_center_vector(face_id_t face, cell_id_t cell) const -> Vec3
 {
     const auto other=opposite_cell(face,cell);
     if (other==invalid_cell_id()) throw std::invalid_argument("Exterior face has no center displacement.");
-    auto displacement=cell_centroid(other)-cell_centroid(cell);
     const auto axis=static_cast<size_t>(face.orientation);
-    const std::array coordinates{face.i,face.j,face.k};
-    if (d_indexer.periodic_dimensions[axis] && coordinates[axis]==0)
-        displacement.component(axis)+=(owner_cell(face)==cell ? 1 : -1)
+    const std::array<size_t,3> face_coordinates{face.i,face.j,face.k};
+    const std::array<size_t,3> cell_coordinates{cell.i,cell.j,cell.k};
+    const auto m=face_coordinates[axis], a=cell_coordinates[axis];
+    const auto n=static_cast<size_t>(d_indexer.num_cells_per_dim[axis]);
+    real_t displacement=0.0;
+    if (d_indexer.periodic_dimensions[axis] && m==0)
+    {
+        // The wrapped pair (cell n-1, cell 0) meets through the face-0 image.
+        const auto span=d_cell_edges[axis].back()-d_cell_edges[axis].front();
+        const auto halves=(d_cell_widths[axis][0]+d_cell_widths[axis][n-1])/2;
+        displacement = a==0 ? span-halves : halves-span;
+    }
+    else if (a+1==m)
+        displacement=(d_cell_widths[axis][a]+d_cell_widths[axis][m])/2;
+    else
+        displacement=-(d_cell_widths[axis][m-1]+d_cell_widths[axis][a])/2;
+    Vec3 result{};
+    result.component(axis)=displacement;
+    if (d_indexer.periodic_dimensions[axis] && m==0)
+        result.component(axis)+=(owner_cell(face)==cell ? 1 : -1)
             *(d_cell_edges[axis].back()-d_cell_edges[axis].front());
-    return displacement;
+    return result;
 }
 
 inline real_t OrthogonalCartesian3D::cell_to_face_distance(face_id_t face, cell_id_t cell) const
 {
     if (owner_cell(face)!=cell && (neighbor_cell(face)==invalid_cell_id() || neighbor_cell(face)!=cell))
         throw std::invalid_argument("Cell is not adjacent to requested face.");
-    auto point=face_centroid(face);
+    // The face centroid and the owning-cell centroid share their transverse
+    // coordinates, so the distance is exactly half the cell's axis width.
+    // This stays independent of the mesh's distance from the origin, and the
+    // periodic image reproduces the same value the wrapped centroid did.
     const auto axis=static_cast<size_t>(face.orientation);
-    const std::array coordinates{face.i,face.j,face.k};
-    if (d_indexer.periodic_dimensions[axis] && coordinates[axis]==0 && owner_cell(face)==cell)
-        point.component(axis)+=d_cell_edges[axis].back()-d_cell_edges[axis].front();
-    return (point-cell_centroid(cell)).norm();
+    const std::array<size_t,3> cell_coordinates{cell.i,cell.j,cell.k};
+    return d_cell_widths[axis][cell_coordinates[axis]]/2;
 }
 
 inline real_t OrthogonalCartesian3D::face_cell_center_distance(face_id_t face) const

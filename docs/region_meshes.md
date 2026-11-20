@@ -138,7 +138,14 @@ No vector/tensor rotation is inferred from a logical index permutation.
 
 `face_center_vector()` and `cell_center_vector()` use the incident cell's
 periodic image. Reconstruction, diffusion distances, mesh-quality checks and
-Rhie–Chow geometry use those vectors. Periodic faces share one canonical signed
+Rhie–Chow geometry use those vectors. Where a region geometry exposes a
+region-local frame (`local_reference()`, `cell_centroid_local()` and the
+same-region `cell_center_vector()`), composite displacements are built from
+that local data, and cross-region pairs add the exact constant
+region-reference difference; only providers without a local frame fall back
+to global centroid subtraction. This keeps cell-scale displacement and
+operator coefficients independent of how far the mesh sits from the
+coordinate origin. Periodic faces share one canonical signed
 flux and receive no physical boundary condition. Rotated periodic field
 transformations and time-dependent translations are outside this support.
 Native cylindrical discretization/quadrature is preserved; matching a native
