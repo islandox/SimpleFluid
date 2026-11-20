@@ -761,7 +761,7 @@ std::shared_ptr<const NativeCellIncidenceProof> NativePublicationSession::incide
             (!is_first && (!second || second->key() != source->source().key)) ||
             (is_first ? first.revision() : second->revision()) != source->source().revision)
             throw std::invalid_argument("Completed subface occurrence has a foreign source revision.");
-        auto face = piece.materialize_native(geometry_budget, identities, admission_).geometry;
+        auto face = piece.materialize_native(geometry_budget, identities, admission_);
         if (!is_first)
         {
             face = Planar::reversed(*face, admission_);

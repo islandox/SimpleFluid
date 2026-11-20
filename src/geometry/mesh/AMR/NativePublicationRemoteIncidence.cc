@@ -84,11 +84,9 @@ AdaptiveTile transfer(const CanonicalSubfaceView& view, const NativeIncidenceNum
     const auto& admission = storage.owner->admission();
     result.domain = NativeImmutableSequenceAccess::snapshot<char>(view.domain(), admission);
     result.surface = NativeImmutableSequenceAccess::snapshot<char>(view.support(), admission);
-    storage.owner->copy(result.identity, view.identity());
-    const auto physical = view.materialize_native(budget, identities, admission);
-    if (!std::ranges::equal(physical.identity, result.identity))
-        throw std::invalid_argument("Captured original subface key differs from full materializer.");
-    result.geometry = physical.geometry;
+    storage.owner->reserve(result.identity, view.identity_size());
+    view.append_identity(result.identity);
+    result.geometry = view.materialize_native(budget, identities, admission);
     const auto first = view.first();
     const auto second = view.second();
     result.first = NativeAdaptiveKeyCodec::copy(first.key(), storage);

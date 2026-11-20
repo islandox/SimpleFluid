@@ -113,13 +113,6 @@ struct MaterializedCanonicalSubface
     AdaptiveBytes identity;
 };
 
-/** Identity borrows the exact immutable piece page held by the calling view.
- * Only the geometry owns newly admitted storage. */
-struct NativeMaterializedCanonicalSubface
-{
-    PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> geometry;
-    std::span<const char> identity;
-};
 /** Canonical first-cell physical loop, outward from first. The view pins
  * immutable point/provenance pages and is independent of the session. */
 class SIMPLEFLUID_LOCAL CanonicalSubfaceView
@@ -131,7 +124,9 @@ public:
     [[nodiscard]] std::optional<CanonicalSubfaceIncident> second() const;
     [[nodiscard]] int outward_sign() const noexcept { return side_ ? -1 : 1; }
     [[nodiscard]] std::span<const char> support() const;
-    [[nodiscard]] std::span<const char> identity() const;
+    [[nodiscard]] std::size_t identity_size() const;
+    /** Append the immutable authority key to a buffer with sufficient admitted capacity. */
+    void append_identity(AdaptiveBytes&) const;
     [[nodiscard]] std::span<const char> domain() const;
     [[nodiscard]] std::string_view boundary() const;
     [[nodiscard]] std::uint64_t generation() const;
@@ -143,7 +138,7 @@ public:
      * edge enrichment. The returned physical geometry includes the final loop. */
     [[nodiscard]] MaterializedCanonicalSubface materialize(Budget&, IdentityBudget&) const;
     /** Persistent output overrides can transfer exact support into their own admission domain. */
-    [[nodiscard]] NativeMaterializedCanonicalSubface materialize_native(Budget&, IdentityBudget&,
+    [[nodiscard]] PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> materialize_native(Budget&, IdentityBudget&,
         const geometry_detail::NativeConstructionAdmission&, bool detached_support = false) const;
     [[nodiscard]] const void* page_identity() const noexcept { return page_.get(); }
     [[nodiscard]] PLIC::details::NativeWeakOwnerObservation weak_page_observation() const;

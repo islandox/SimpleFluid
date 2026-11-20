@@ -438,6 +438,8 @@ inline const char* contact_payload_role_name(ContactPayloadRole role) noexcept
             return "SubfaceBoundaryNames";
         case ContactPayloadRole::SubfaceBoundaryBytes:
             return "SubfaceBoundaryBytes";
+        case ContactPayloadRole::SubfaceAuthorityKeyBytes:
+            return "SubfaceAuthorityKeyBytes";
         case ContactPayloadRole::SubfaceShifts:
             return "SubfaceShifts";
         case ContactPayloadRole::SubfaceRingObject:

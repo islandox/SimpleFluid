@@ -20,6 +20,7 @@
 #include <map>
 #include <numeric>
 #include <set>
+#include <span>
 
 namespace
 {
@@ -106,6 +107,7 @@ TEST(AdaptiveSubfaceSnapshot, AuthenticatedPiecesMatchLegacyAuthorityForEveryPro
         std::shared_ptr<const AdaptiveSubfaceSnapshot> snapshot;
         CanonicalSubfaceView escaped;
         std::optional<ContactPointIdentity> saved_point;
+        AdaptiveBytes saved_identity;
         {
             IdentityBudget identities;
             DistributedAdaptiveIncidenceSession session(*input.kernel, comm, {}, {}, *arena, identities, arena);
@@ -118,6 +120,23 @@ TEST(AdaptiveSubfaceSnapshot, AuthenticatedPiecesMatchLegacyAuthorityForEveryPro
                 continue;
             EXPECT_EQ(snapshot->context(), ContactHaloContext{});
             EXPECT_EQ(snapshot->size(), old.size());
+            if (factory == &cartesian && !old.empty())
+            {
+                // Legacy authority supplies the full framed length independently of the snapshot.
+                const auto expanded_bytes = std::accumulate(old.begin(), old.end(), std::size_t(0),
+                    [](std::size_t bytes, const auto& tile) { return bytes + tile.identity.size(); });
+                std::set<const void*> buffers;
+                std::size_t stored_bytes = 0;
+                snapshot->visit_borrowed_payload(
+                    [&](const ContactPayloadAllocation& allocation)
+                    {
+                        if (allocation.identity.role == ContactPayloadRole::SubfaceAuthorityKeyBytes &&
+                            buffers.insert(allocation.identity.address).second)
+                            stored_bytes += allocation.payload_bytes;
+                    });
+                EXPECT_GT(stored_bytes, 0u);
+                EXPECT_LE(stored_bytes, expanded_bytes / 2);
+            }
             AdaptiveAuthorityStats snapshot_stats;
             std::vector<AdaptiveNode> numbered_nodes;
             const auto numbered = publish_adaptive_subfaces(
@@ -149,11 +168,6 @@ TEST(AdaptiveSubfaceSnapshot, AuthenticatedPiecesMatchLegacyAuthorityForEveryPro
             snapshot->visit_pieces(
                 [&](const auto& view)
                 {
-                    if (!escaped)
-                    {
-                        escaped = view;
-                        saved_point = view.point(0);
-                    }
                     Budget output{ample};
                     IdentityBudget retained;
                     const auto piece = view.materialize(output, retained);
@@ -161,6 +175,18 @@ TEST(AdaptiveSubfaceSnapshot, AuthenticatedPiecesMatchLegacyAuthorityForEveryPro
                     ASSERT_NE(found, expected.end());
                     const auto& reference = *found->second;
                     expected.erase(found);
+                    AdaptiveBytes packet{'x'};
+                    packet.reserve(1 + reference.identity.size());
+                    EXPECT_EQ(view.identity_size(), reference.identity.size());
+                    view.append_identity(packet);
+                    EXPECT_EQ(packet.front(), 'x');
+                    EXPECT_TRUE(std::ranges::equal(std::span(packet).subspan(1), reference.identity));
+                    if (!escaped)
+                    {
+                        escaped = view;
+                        saved_point = view.point(0);
+                        saved_identity = reference.identity;
+                    }
                     EXPECT_EQ(view.first().key(), reference.first);
                     EXPECT_EQ(view.first().owner(), reference.first_owner);
                     ASSERT_EQ(bool(view.second()), bool(reference.second));
@@ -216,7 +242,13 @@ TEST(AdaptiveSubfaceSnapshot, AuthenticatedPiecesMatchLegacyAuthorityForEveryPro
         snapshot.reset();
         arena.reset();
         if (escaped)
+        {
             EXPECT_EQ(escaped.point(0), *saved_point);
+            AdaptiveBytes identity;
+            identity.reserve(saved_identity.size());
+            escaped.append_identity(identity);
+            EXPECT_EQ(identity, saved_identity);
+        }
     }
 }
 
@@ -416,10 +448,9 @@ TEST(AdaptiveSubfaceSnapshot, DirtyReplaySharesUnchangedPagesAndPreservesOldView
     EXPECT_EQ(historical.point(0), *saved);
 }
 
-TEST(AdaptiveSubfaceSnapshot, DeepSupportMaterializationAdmitsExactPeakAndRejectsOneByteShort)
+static void check_deep_subface(const std::array<PLIC::GeometryPoint, 4>& vertices)
 {
     using Face = PLIC::PlanarFace<ordinary>;
-    const std::array<PLIC::GeometryPoint, 4> vertices{{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}};
     auto face = Face::make(vertices);
     for (unsigned depth = 0; depth < 96; ++depth)
         face = face->translated({1. / 1024, -1. / 2048, 1. / 4096});
@@ -451,6 +482,17 @@ TEST(AdaptiveSubfaceSnapshot, DeepSupportMaterializationAdmitsExactPeakAndReject
     IdentityBudget measured_ids;
     const auto expected = view.materialize(measured, measured_ids);
     EXPECT_EQ(expected.geometry->encode_incidence(), face->encode_incidence());
+    EXPECT_EQ(view.identity_size(), expected.identity.size());
+    ASSERT_FALSE(expected.identity.empty());
+    AdaptiveBytes short_destination{'x'};
+    short_destination.reserve(expected.identity.size());
+    ASSERT_EQ(short_destination.capacity(), expected.identity.size());
+    EXPECT_THROW(view.append_identity(short_destination), std::invalid_argument);
+    EXPECT_EQ(short_destination, AdaptiveBytes{'x'});
+    AdaptiveBytes destination;
+    destination.reserve(expected.identity.size());
+    view.append_identity(destination);
+    EXPECT_EQ(destination, expected.identity);
     EXPECT_GE(measured.peak, 6 * face->encoded_incidence_size() + face->encoding_scratch_bytes());
     ASSERT_GT(measured.peak, 0u);
     Budget exact{measured.peak};
@@ -460,6 +502,12 @@ TEST(AdaptiveSubfaceSnapshot, DeepSupportMaterializationAdmitsExactPeakAndReject
     Budget one_short{measured.peak - 1};
     IdentityBudget short_ids;
     EXPECT_THROW((void) view.materialize(one_short, short_ids), std::exception);
+}
+
+TEST(AdaptiveSubfaceSnapshot, DeepSupportMaterializationAdmitsExactPeakAndRejectsOneByteShort)
+{
+    check_deep_subface({{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}});
+    check_deep_subface({{{-1, -1, -1}, {0, -1, 0}, {0, 0, 1}, {-1, 0, 0}}});
 }
 
 TEST(AdaptiveSubfaceSnapshot, ThreeGenerationsAdmitSharedPartialPointCreditsExactlyOnce)

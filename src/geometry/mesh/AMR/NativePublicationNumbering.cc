@@ -367,7 +367,7 @@ std::shared_ptr<NativePublicationNumbering> NativeSparseAssembler::number(
                         IdentityBudget identity_budget;
                         identity_budget.bind_native(a, inputs.byte_budget);
                         record.physical.override_geometry =
-                            view.materialize_native(geometry, identity_budget, a, /*detached_support=*/true).geometry;
+                            view.materialize_native(geometry, identity_budget, a, /*detached_support=*/true);
                     }
                     auto intern = [&](bool image, auto& points)
                     {
@@ -497,7 +497,7 @@ std::shared_ptr<NativePublicationNumbering> NativeSparseAssembler::number(
                         throw std::invalid_argument("Local numbered face has no owner-local incident.");
                     const auto domain = view.domain();
                     const auto boundary = view.boundary();
-                    const auto identity = view.identity();
+                    const auto identity_size = view.identity_size();
                     const auto support = view.support();
                     const auto& image = record.physical.second_image;
                     const auto image_size = PLIC::canonical_key_size(image);
@@ -509,7 +509,7 @@ std::shared_ptr<NativePublicationNumbering> NativeSparseAssembler::number(
                             checked_sum(3 * sizeof(std::uint64_t), encoded_adaptive_key_size(second->key())));
                     definition_size = checked_sum(definition_size, checked_sum(image_size, boundary.size()));
                     const auto extent = checked_sum(9 * sizeof(std::uint64_t),
-                        checked_sum(definition_size, checked_sum(identity.size(), support.size())));
+                        checked_sum(definition_size, checked_sum(identity_size, support.size())));
                     Writer w;
                     send_storage.owner->reserve(w.data, extent);
                     w.word(slot);
@@ -518,7 +518,8 @@ std::shared_ptr<NativePublicationNumbering> NativeSparseAssembler::number(
                     w.word(mask);
                     w.word(mask & 1 ? record.first_native_face : UINT64_MAX);
                     w.word(mask & 2 ? record.second_native_face : UINT64_MAX);
-                    w.bytes(identity);
+                    w.word(identity_size);
+                    view.append_identity(w.data);
                     w.bytes(support);
                     w.word(definition_size);
                     w.bytes(domain);

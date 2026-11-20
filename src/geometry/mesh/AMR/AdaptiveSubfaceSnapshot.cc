@@ -104,12 +104,83 @@ struct Group
     std::size_t boundary;
     bool operator==(const Group&) const = default;
 };
+constexpr auto absent_provenance_slot = std::numeric_limits<std::uint8_t>::max();
+static_assert(2 * page_records <= absent_provenance_slot);
+
+std::uint8_t provenance_slot(std::size_t slot)
+{
+    if (slot == absent)
+        return absent_provenance_slot;
+    if (slot >= absent_provenance_slot)
+        throw std::invalid_argument("Subface provenance slot exceeds page capacity.");
+    return static_cast<std::uint8_t>(slot);
+}
+
 struct Provenance
 {
-    std::size_t group, first, second, shift;
     std::uint64_t emission;
+    std::size_t physical_identity_size;
     AdaptiveBytes authority_identity;
+    std::uint8_t group, first, second, shift;
+
+    template<class Visit> bool visit_physical_identity(const Visit& visit) const
+    {
+        if (authority_identity.size() == physical_identity_size)
+        {
+            for (const char byte : authority_identity)
+                if (!visit(byte))
+                    return false;
+            return true;
+        }
+        auto packed = authority_identity.begin();
+        std::size_t remaining = physical_identity_size;
+        while (remaining)
+        {
+            auto mask = static_cast<std::uint8_t>(*packed++);
+            const auto count = std::min<std::size_t>(remaining, 8);
+            for (std::size_t byte = 0; byte < count; ++byte, mask >>= 1)
+                if (!visit(mask & 1 ? *packed++ : char{}))
+                    return false;
+            remaining -= count;
+        }
+        return true;
+    }
 };
+
+AdaptiveBytes capture_physical_identity(std::span<const char> key, PageCharge& charge)
+{
+    const auto masks = key.size() / 8 + (key.size() % 8 != 0);
+    const auto zeros = static_cast<std::size_t>(std::count(key.begin(), key.end(), char{}));
+    const auto extent = zeros > masks ? key.size() - (zeros - masks) : key.size();
+    charge.add(extent);
+    AdaptiveBytes result;
+    result.reserve(extent);
+    if (result.capacity() != extent)
+        throw std::invalid_argument("Native authority key capacity differs from admission.");
+    if (extent == key.size())
+        result.insert(result.end(), key.begin(), key.end());
+    else
+    {
+        while (!key.empty())
+        {
+            const auto group = key.first(std::min<std::size_t>(key.size(), 8));
+            const auto mask_index = result.size();
+            result.push_back(0);
+            std::uint8_t mask = 0;
+            for (std::size_t byte = 0; byte < group.size(); ++byte)
+                if (group[byte] != 0)
+                {
+                    mask |= std::uint8_t(1) << byte;
+                    result.push_back(group[byte]);
+                }
+            result[mask_index] = static_cast<char>(mask);
+            key = key.subspan(group.size());
+        }
+    }
+    if (result.size() != extent)
+        throw std::logic_error("Captured authority key differs from derived extent.");
+    return result;
+}
 } // namespace
 
 struct SubfaceProvenancePage
@@ -309,9 +380,7 @@ SubfaceProvenanceRef SubfaceProvenanceBuilder::append(const ReceivedTileRecipe& 
     const auto group =
         intern(page.groups, Group{page.supports->capture(state.pools.supports, *support).value,
                                 page.domains->capture(state.pools.domains, *domain).value, generation, boundary});
-    // Capture the original authority identity at the delivery seam while the
-    // already validated intrinsic face is available. Warm native numbering
-    // borrows these bytes and never reconstructs that face merely for its key.
+    // Capture the authority's physical key while the validated intrinsic face is available.
     PageCharge identity_scratch(state.charge.arena);
     const auto encoded = recipe.face->encoded_incidence_size();
     identity_scratch.add(checked_product(encoded, 6));
@@ -322,16 +391,10 @@ SubfaceProvenanceRef SubfaceProvenanceBuilder::append(const ReceivedTileRecipe& 
     const auto reverse = authority->reversed();
     const auto forward_key = PLIC::canonical_face_key(*authority), reverse_key = PLIC::canonical_face_key(*reverse);
     const auto& physical_key = std::min(forward_key, reverse_key);
-    const auto identity_bytes = checked_sum(16, checked_sum(recipe.support.size(), physical_key.size()));
-    page.charge.add(identity_bytes);
-    Writer identity;
-    identity.data.reserve(identity_bytes);
-    if (identity.data.capacity() != identity_bytes)
-        throw std::invalid_argument("Native authority key capacity differs from admission.");
-    identity.bytes(recipe.support);
-    identity.bytes(physical_key);
+    auto identity = capture_physical_identity(physical_key, page.charge);
     page.charge.append(page.records);
-    page.records.push_back({group, first, second, shift, recipe.emission, std::move(identity.data)});
+    page.records.push_back({recipe.emission, physical_key.size(), std::move(identity), provenance_slot(group),
+        provenance_slot(first), provenance_slot(second), provenance_slot(shift)});
     return {state.pages.back(), page.records.size() - 1};
 }
 void SubfaceProvenanceBuilder::freeze()
@@ -802,13 +865,35 @@ std::optional<CanonicalSubfaceIncident> CanonicalSubfaceView::second() const
 {
     const auto& record = piece(page_, slot_);
     const auto slot = provenance(record).second;
-    if (slot == absent)
+    if (slot == absent_provenance_slot)
         return std::nullopt;
     return CanonicalSubfaceIncident(record.provenance.page, slot);
 }
-std::span<const char> CanonicalSubfaceView::identity() const
+std::size_t CanonicalSubfaceView::identity_size() const
 {
-    return provenance(piece(page_, slot_)).authority_identity;
+    return checked_sum(16, checked_sum(support().size(), provenance(piece(page_, slot_)).physical_identity_size));
+}
+void CanonicalSubfaceView::append_identity(AdaptiveBytes& destination) const
+{
+    const auto& record = provenance(piece(page_, slot_));
+    const auto support_key = support();
+    const auto extent = checked_sum(16, checked_sum(support_key.size(), record.physical_identity_size));
+    if (extent > destination.capacity() - destination.size())
+        throw std::invalid_argument("Destination has insufficient admitted subface key capacity.");
+    const auto append_word = [&](std::uint64_t value)
+    {
+        for (unsigned byte = 0; byte < 8; ++byte)
+            destination.push_back(static_cast<char>(value >> (8 * byte)));
+    };
+    append_word(support_key.size());
+    destination.insert(destination.end(), support_key.begin(), support_key.end());
+    append_word(record.physical_identity_size);
+    record.visit_physical_identity(
+        [&](char byte)
+        {
+            destination.push_back(byte);
+            return true;
+        });
 }
 std::span<const char> CanonicalSubfaceView::support() const
 {
@@ -906,7 +991,8 @@ MaterializedCanonicalSubface CanonicalSubfaceView::materialize(Budget& budget, I
         page_->planes->get({record.plane}), page_->normals->get({record.normal}).values};
     const auto initial = PLIC::restore_incidence_loop(frame, points);
     const auto shift = provenance(record).shift;
-    const auto authority = shift == absent ? initial : initial->translated(record.provenance.page->shifts.at(shift));
+    const auto authority =
+        shift == absent_provenance_slot ? initial : initial->translated(record.provenance.page->shifts.at(shift));
     const auto reversed = authority->reversed();
     const auto encoded = authority->encoded_incidence_size();
     // Match the qualified authority-key envelope. Both directional keys
@@ -937,7 +1023,7 @@ MaterializedCanonicalSubface CanonicalSubfaceView::materialize(Budget& budget, I
     return {std::move(geometry), std::move(identity.data)};
 }
 
-NativeMaterializedCanonicalSubface CanonicalSubfaceView::materialize_native(
+PLIC::PlanarFacePtr<ordinary> CanonicalSubfaceView::materialize_native(
     Budget& budget, IdentityBudget& identities, const geometry_detail::NativeConstructionAdmission& admission,
     bool detached_support) const
 {
@@ -996,9 +1082,9 @@ NativeMaterializedCanonicalSubface CanonicalSubfaceView::materialize_native(
         frame.support = std::move(retained);
     }
     const auto initial = Access::retained(points, frame.normal, frame.support, admission);
-    const auto shift = provenance(record).shift;
-    const auto authority =
-        shift == absent ? initial : Access::translated(*initial, record.provenance.page->shifts.at(shift), admission);
+    const auto& captured = provenance(record);
+    const auto authority = captured.shift == absent_provenance_slot ? initial :
+        Access::translated(*initial, record.provenance.page->shifts.at(captured.shift), admission);
     const auto reversed = Access::reversed(*authority, admission);
     const auto encoded = authority->encoded_incidence_size();
     logical.add(checked_product(encoded, 6));
@@ -1012,10 +1098,10 @@ NativeMaterializedCanonicalSubface CanonicalSubfaceView::materialize_native(
     logical.add(output_bytes);
     // The already authenticated page owns this exact key. Verify its full
     // original construction bytes without creating another owning key buffer.
-    Reader key{identity()};
-    if (!std::ranges::equal(key.bytes_view(), support()) || !std::ranges::equal(key.bytes_view(), canonical))
+    auto position = canonical.begin();
+    if (canonical.size() != captured.physical_identity_size ||
+        !captured.visit_physical_identity([&](char byte) { return byte == *position++; }))
         throw std::invalid_argument("Captured original subface key differs from full materializer.");
-    key.done();
     auto geometry = initial;
     if (record.explicit_loop || record.certified)
     {
@@ -1026,7 +1112,7 @@ NativeMaterializedCanonicalSubface CanonicalSubfaceView::materialize_native(
     }
     identities.face(budget, *geometry);
     logical.bytes -= output_bytes; // Preserve the original numerical Budget contract.
-    return {std::move(geometry), identity()};
+    return geometry;
 }
 
 namespace subface_index_detail
