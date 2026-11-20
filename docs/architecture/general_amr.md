@@ -77,7 +77,8 @@ that measurement. [AMR heap attribution](amr_heap_attribution.md)
 Contact and subface snapshots exercise all five providers in serial and at two and four ranks. The distributed
 native-operator, adaptive-state and finite VoF remap checks exercise both MPI sizes, including empty owners.
 Conservative, Product, Polyhedral and Mixed remap have dedicated two-rank registrations. The four-rank cubic
-storage probes use 64 MiB for canonical N16 and explicit-row N32, and 96 MiB for full canonical N32 construction.
+storage probes use 64 MiB per rank for canonical N16, explicit-row N32 and full canonical N32. A separate
+registration exercises full canonical N32 at 96 MiB.
 The default Cartesian hierarchy retains its 64 MiB budget. [Cubic halo measurements](spatial_adaptive_closure.md#cubic-halo-storage)
 
 ## Architectural Components

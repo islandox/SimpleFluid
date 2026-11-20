@@ -38,7 +38,8 @@ Detailed workstream status is tracked in [docs/verification/](docs/verification/
   hierarchy budget. [Demand, admission and compatibility paths](docs/architecture/general_amr.md#persistent-geometry-demand-storage-and-prepared-page-policy)
 - [x] **Persistent owner-local topology with certified contact/subface reuse.** Stage 8 covers Cartesian, Product,
   Polyhedral, Static and Mixed snapshots in serial and at two and four ranks. The four-rank cubic probes passed
-  at 64 MiB for explicit-row N32 and canonical N16, and at 96 MiB for full canonical N32 in RelWithDebInfo.
+  at 64 MiB for canonical N16, explicit-row N32 and full canonical N32. Full canonical N32 also passed its separate
+  96 MiB registration in RelWithDebInfo.
   [Cubic halo measurements](docs/architecture/spatial_adaptive_closure.md#cubic-halo-storage)
 
 ## Active roadmap

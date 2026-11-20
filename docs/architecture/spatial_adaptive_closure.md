@@ -166,13 +166,24 @@ and the associated pair requirements are recomputed. Empty owners participate in
 the same collective phases. A failed plan discards the candidate and its overlay,
 leaving the accepted hierarchy, cache and source observations intact.
 
+The persistent support directory can encode one Cartesian domain and region prefix.
+It packs the three coordinate words, axis and level into a private selector when
+each coordinate fits eight bits, the level fits five, and the original domain
+fits the frame. A sparse, persistent presence mask distinguishes an interned
+key from a representable key that was never inserted. Other keys retain literal
+storage. Comparisons and transport use the complete original bytes. A detached
+provenance page retains its own frame for packed supports and captures physical
+pool pages for literal supports.
+
 Explicit incidence identity pools store full values in pages of sixteen records. Byte,
 cell and point keys use templated hashing policies and flat hash-slot lookup with
 full-value collision checks; plane, normal and image keys retain tree lookup. Point hashing isolates and
 restores the caller's floating-point environment while emitting canonical words. Hash buckets and stable pool slots are private
 references, not numerical or canonical ordering. Forks share existing page owners
 and copy lookup metadata, then append to a private page instead of changing a
-shared page.
+shared page. A flat fork admits that shared body in its own arena. When the
+source uses a borrowed budget, destroying the source pool retires its control
+credit even if the fork still reads the page at the same address.
 Hashing and dynamic-payload accounting are template policies; forks preserve
 their configuration. Shared plane payload remains in the separate identity ledger.
 Fork overlap includes every current-source pool credit object. A credit required
@@ -349,7 +360,12 @@ surface ordinals after the complete support receipt has been authenticated.
 The local surface supplies its native face locator and boundary name. A foreign
 incident keeps its source surface locator until native publication fetches that
 source. The piece keeps the authority's support, domain, generation, emission
-order, and periodic displacement.
+order, and periodic displacement. Provenance retains the original orientation-independent
+physical face key. It stores groups of eight bytes with a nonzero-byte mask when
+that representation is smaller, and keeps dense keys in their original encoding.
+Publication writes the authenticated support and physical key, with their original
+length words, directly into admitted destination capacity. An escaped piece can
+reproduce these bytes after its session is released.
 
 After line completion, a piece references its existing intrinsic tile page, an
 exact certified source loop, or the immutable buffer transferred from the final
@@ -528,17 +544,17 @@ reservations for encoding and decoding, which can use all remaining headroom.
 Retained bytes measure the live charge after the first refinement query.
 Cumulative admission includes retired reservations and can exceed the cap.
 
-The measured values below are bytes, in **peak / retained** order. The N16
-canonical and N32 explicit-row measurements use GCC Debug at 64 MiB. The
-full canonical N32 measurement uses GCC RelWithDebInfo at 96 MiB. The same
-full N32 case reached its 1,800-second Debug timeout during construction.
+All three probes below use a 64 MiB per-rank cap. The N16 canonical and N32
+explicit-row measurements use GCC Debug. Full canonical N32 uses GCC RelWithDebInfo.
+A separate four-rank registration exercises the same full canonical N32 oracle at 96 MiB.
+The table gives **peak / retained bytes**.
 
 | Rank | Canonical N16 | Explicit-row N32 | Full canonical N32 |
 | ---: | ---: | ---: | ---: |
-| 0 | 67,108,864 / 13,227,574 | 23,041,944 / 19,924,388 | 100,663,296 / 88,614,998 |
-| 1 | 67,108,864 / 11,284,228 | 23,037,000 / 20,715,321 | 100,663,296 / 80,443,759 |
-| 2 | 67,108,864 / 13,260,793 | 23,037,000 / 20,713,122 | 100,663,296 / 88,809,622 |
-| 3 | 67,108,864 / 10,833,917 | 23,044,840 / 19,926,895 | 100,663,296 / 78,411,794 |
+| 0 | 67,108,864 / 9,915,032 | 23,041,944 / 19,924,388 | 67,108,864 / 63,775,774 |
+| 1 | 67,108,864 / 8,204,788 | 23,037,000 / 20,715,321 | 67,108,864 / 57,258,503 |
+| 2 | 67,108,864 / 9,949,830 | 23,037,000 / 20,713,122 | 67,108,864 / 63,972,428 |
+| 3 | 67,108,864 / 7,835,445 | 23,044,840 / 19,926,895 | 67,108,864 / 55,847,690 |
 
 At N16 each rank owns 1,024 records. Ranks 0 and 3 each fetch and decode 256
 remote records and ranks 1 and 2 each fetch and decode 512. At N32 each rank
