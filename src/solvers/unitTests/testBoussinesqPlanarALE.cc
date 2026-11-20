@@ -6,6 +6,8 @@
 #include "solvers/unitTests/CoupledBackendTestSupport.hh"
 #include <gtest/gtest.h>
 
+#include "ALESpeciesDenseOracle.hh"
+#include "GeneralGasModelTestSupport.hh"
 #include "ReactingMixtureTestSupport.hh"
 #include "SurfaceGasFixtureSupport.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
@@ -13,6 +15,7 @@
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "solvers/MultiphysicsSolverCoupler.hh"
+#include "solvers/details/ALESpeciesVisit.hh"
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -23,6 +26,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -3413,7 +3417,7 @@ double global_mass(const Model& model)
     Teuchos::reduceAll(*field.mesh().owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local, &global);
     return global;
 }
-ConfiguredCase make(double heat_rate = .4, bool bubbles = false, bool fail_expanded_volume = false)
+ConfiguredCase make_with_settings(const SimpleFluid::ReactingGasOptions& settings, int maximum_correctors)
 {
     Handle::DistributionOptions distribution;
     distribution.allow_empty_partitions = true;
@@ -3429,6 +3433,19 @@ ConfiguredCase make(double heat_rate = .4, bool bubbles = false, bool fail_expan
         physical_options());
     auto coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
     coupling->configure_material_feedback(material_feedback_options());
+    auto& gas = coupling->configure_reacting_gas(settings);
+    gas.set_transport_linear_solver_options(linear);
+    coupling->initialize_heated_box(300, 300);
+    auto options = free_surface_options(maximum_correctors);
+    options.initial_liquid_volume.reset();
+    options.liquid_mass.initial_liquid_mass = global_mass(gas);
+    coupling->configure_free_surface(options);
+    return {std::move(grid), std::move(solver), std::move(coupling), nullptr};
+}
+
+ConfiguredCase make(double heat_rate = .4, bool bubbles = false, bool fail_expanded_volume = false,
+    decltype(SimpleFluid::ReactingGasOptions::species_source) custom_source = {}, int maximum_correctors = 60)
+{
     M::Mixture mixture(false, false, R::EnergyConvention::SensibleEnergy, 0);
     mixture.liquid = R::make_linear_compressible_mixture_liquid(
         mixture.catalog, M::bounds, [](std::span<const double>)
@@ -3463,16 +3480,378 @@ ConfiguredCase make(double heat_rate = .4, bool bubbles = false, bool fail_expan
         source.heat.integratedEnergy = heat_rate * duration * context.environment.bulkVolume;
         return source;
     };
-    auto& gas = coupling->configure_reacting_gas(settings);
-    gas.set_transport_linear_solver_options(linear);
-    coupling->initialize_heated_box(300, 300);
-    auto options = free_surface_options(60);
-    options.initial_liquid_volume.reset();
-    options.liquid_mass.initial_liquid_mass = global_mass(gas);
-    coupling->configure_free_surface(options);
-    return {std::move(grid), std::move(solver), std::move(coupling), nullptr};
+    if (custom_source)
+        settings.species_source = std::move(custom_source);
+    return make_with_settings(settings, maximum_correctors);
 }
 } // namespace TypedSpeciesSurface
+
+namespace Dense = SimpleFluid::Testing::ALESpeciesDense;
+
+struct ObservedGasSlots
+{
+    const Dense::State& dense;
+    int rank;
+    std::size_t ordinal = 0;
+
+    void skip(std::size_t count)
+    {
+        ASSERT_LE(count, dense.size() - ordinal) << "oversized skip at dense ordinal " << ordinal;
+        for (; count > 0; --count, ++ordinal)
+        {
+            const auto& slot = dense[ordinal];
+            SCOPED_TRACE(testing::Message() << "rank " << rank << ", skipped slot " << ordinal << " " << slot.identity);
+            EXPECT_TRUE(slot.structural_zero);
+            EXPECT_EQ(slot.value, 0.);
+            EXPECT_EQ(slot.allowance, 0.L);
+        }
+    }
+
+    void ordinary(double value) { emitted(Dense::SlotKind::Ordinary, value, 0); }
+    void signed_net(double value, long double allowance) { emitted(Dense::SlotKind::SignedNet, value, allowance); }
+
+    void emitted(Dense::SlotKind kind, double value, long double allowance)
+    {
+        ASSERT_LT(ordinal, dense.size());
+        const auto& slot = dense[ordinal];
+        SCOPED_TRACE(testing::Message() << "rank " << rank << ", emitted slot " << ordinal << " " << slot.identity);
+        ++ordinal;
+        EXPECT_FALSE(slot.structural_zero);
+        EXPECT_EQ(kind, slot.kind);
+        EXPECT_EQ(value, slot.value);
+        EXPECT_EQ(allowance, slot.allowance);
+        if (slot.value == 0.)
+            EXPECT_EQ(std::signbit(value), std::signbit(slot.value));
+        if (slot.allowance == 0.L)
+            EXPECT_EQ(std::signbit(allowance), std::signbit(slot.allowance));
+    }
+};
+
+template<class Model> Dense::State check_gas_slots(const Model& gas, const Handle& mesh)
+{
+    auto expected = Dense::capture(gas, mesh);
+    ObservedGasSlots observed{expected, mesh.owned_cell_map()->getComm()->getRank()};
+    SimpleFluid::detail::ale_species::visit_typed_gas_state(gas, mesh, observed);
+    EXPECT_EQ(observed.ordinal, expected.size());
+    return expected;
+}
+
+class DenseCorrectorTrace
+{
+public:
+    explicit DenseCorrectorTrace(const ConfiguredCase& fixture)
+        : mesh(*fixture.mesh), gas(*fixture.coupling->find_reacting_gas_model()), previous(check_gas_slots(gas, mesh))
+    {
+    }
+
+    void observe(const SimpleFluid::ALEConvergenceObservation& row)
+    {
+        SCOPED_TRACE(testing::Message() << "corrector " << row.corrector);
+        auto current = check_gas_slots(gas, mesh);
+        last = Dense::compare(previous, current);
+        previous = std::move(current);
+        rows.push_back(row);
+        local_maxima.push_back(last.residual);
+    }
+
+    std::vector<double> check_gates() const
+    {
+        const auto& comm = *mesh.owned_cell_map()->getComm();
+        const int count = static_cast<int>(local_maxima.size());
+        int shortest = 0, longest = 0;
+        Teuchos::reduceAll(comm, Teuchos::REDUCE_MIN, 1, &count, &shortest);
+        Teuchos::reduceAll(comm, Teuchos::REDUCE_MAX, 1, &count, &longest);
+        EXPECT_EQ(shortest, longest);
+        std::vector<double> global(shortest);
+        if (shortest > 0)
+            Teuchos::reduceAll(comm, Teuchos::REDUCE_MAX, shortest, local_maxima.data(), global.data());
+        for (int i = 0; i < shortest; ++i)
+        {
+            SCOPED_TRACE(i);
+            EXPECT_EQ(rows[i].corrector, i + 1);
+            EXPECT_EQ((rows[i].blocking_mask & (std::size_t{1} << 6)) != 0, global[i] > rows[i].gas_tolerance);
+        }
+        return global;
+    }
+
+    const Handle& mesh;
+    const TypedSpeciesSurface::Model& gas;
+    Dense::State previous;
+    Dense::Maximum last;
+    std::vector<SimpleFluid::ALEConvergenceObservation> rows;
+    std::vector<double> local_maxima;
+};
+
+TEST(ALESpeciesDenseOracleTest, VisitsNamedSlotsForChemistryPopulationExchangeAndEscape)
+{
+    namespace G = SimpleFluid::Testing::GeneralGasModel;
+    namespace M = TypedSpeciesSurface::M;
+    namespace R = TypedSpeciesSurface::R;
+    using P = R::SpeciesPhase;
+    auto parameters = G::populated(); // Both named bins contain both gases and slip through the top boundary.
+    parameters.reactant_concentration = .1;
+    parameters.source = [](const R::ReactionContext& context, double dt)
+    {
+        const double cell = context.environment.location.value().centroid[2] > .5 ? 2. : 1.;
+        const double n = cell * 1e-6 * dt;
+        R::ReactionSourceInput source;
+        source.integratedExtents = {{M::conversion, 4 * n}};
+        source.heat.integratedEnergy = .125 * cell * dt;
+        source.externalTransfers = {{"liquid", M::reactant, P::Liquid, n, .010 * n, cell, {}, {}},
+            {"dissolved", M::gas_two, P::Dissolved, 3 * n, .004 * (3 * n), -2 * cell, {0., cell, 0.}, {}},
+            {"feed", M::gas_one, P::Dispersed, n, .002 * n, 3 * cell, {-5 * cell, 7 * cell, 11 * cell}, "large"},
+            {"draw", M::gas_one, P::Dispersed, -2 * n, .002 * (-2 * n), -13 * cell, {17 * cell, -19 * cell, -23 * cell},
+                "large"}};
+        return source;
+    };
+    parameters.population = [](const G::B::MultispeciesPopulationContext&, double dt)
+    {
+        G::B::MultispeciesPopulationPacket packet;
+        packet.transfers = {{M::gas_two, P::Dissolved, P::Dispersed, {}, "micro", 2e-7 * dt},
+            {M::gas_one, P::Dispersed, P::Dissolved, "large", {}, 1e-7 * dt}};
+        return packet;
+    };
+    G::Fixture<Handle> fixture(make_column(), parameters);
+    fixture.initialize();
+    const auto& gas = fixture.model;
+    EXPECT_TRUE(gas.source_ledgers().empty());
+    EXPECT_TRUE(gas.population_ledgers().empty());
+    EXPECT_TRUE(gas.escape_ledgers().empty());
+    const auto initial = check_gas_slots(gas, *fixture.grid);
+    constexpr double dt = .01;
+    fixture.advance(dt, dt);
+    const auto populated = check_gas_slots(gas, *fixture.grid);
+    EXPECT_EQ(initial.size(), populated.size());
+
+    const auto& catalog = gas.options().reaction_mechanism->catalog();
+    const auto owned = fixture.grid->num_owned_cells();
+    ASSERT_EQ(gas.source_ledgers().size(), owned);
+    ASSERT_EQ(gas.population_ledgers().size(), owned);
+    ASSERT_EQ(gas.escape_ledgers().size(), owned);
+    for (std::size_t i = 0; i < owned; ++i)
+    {
+        const bool top = fixture.grid->cell_centroid(static_cast<Pack::local_ordinal_type>(i)).z > .5;
+        const auto& source = gas.source_ledgers()[i];
+        EXPECT_LT(source.chemicalChange.amount(catalog, M::reactant, P::Liquid), 0.);
+        EXPECT_GT(source.externalChange.amount(catalog, M::reactant, P::Liquid), 0.);
+        EXPECT_LT(source.externalChange.amount(catalog, M::gas_one, P::Dispersed, "large"), 0.);
+        const auto& exchange = gas.population_ledgers()[i].chemicalChange;
+        EXPECT_GT(exchange.amount(catalog, M::gas_two, P::Dispersed, "micro"), 0.);
+        EXPECT_LT(exchange.amount(catalog, M::gas_one, P::Dispersed, "large"), 0.);
+        const auto escaped = gas.escape_ledgers()[i].externalChange.amount(catalog, M::gas_one, P::Dispersed, "large");
+        if (top)
+            EXPECT_LT(escaped, 0.);
+        else
+            EXPECT_EQ(escaped, 0.);
+    }
+    const auto subset = std::ranges::find(populated, "subset/finite_reactant/solution", &Dense::Entry::identity);
+    ASSERT_NE(subset, populated.end());
+    EXPECT_LT(subset->value, 0.);
+    EXPECT_GT(subset->allowance, 0.L);
+}
+
+TEST(ALESpeciesDenseOracleTest, SuccessiveMixedPopulationTrialsMatchDenseResidualHistory)
+{
+    auto fixture = TypedSpeciesSurface::make(0, true);
+    auto& coupling = *fixture.coupling;
+    const auto& gas = *coupling.find_reacting_gas_model();
+    EXPECT_TRUE(gas.source_ledgers().empty());
+    EXPECT_TRUE(gas.population_ledgers().empty());
+    EXPECT_TRUE(gas.escape_ledgers().empty());
+    DenseCorrectorTrace trace(fixture);
+    coupling.set_ale_convergence_observer([&](const auto& row) { trace.observe(row); });
+    coupling.step();
+    const auto expected = trace.check_gates();
+    const auto& history = coupling.planar_ale_diagnostics().gas_state_residual_history;
+    ASSERT_EQ(history.size(), expected.size());
+    ASSERT_GE(history.size(), 2u);
+    EXPECT_EQ(expected.front(), 1.);
+    EXPECT_LT(expected.back(), expected.front());
+    EXPECT_GT(gas.physical_escape_events().size(), 0u);
+    for (std::size_t i = 0; i < expected.size(); ++i)
+        EXPECT_EQ(history[i], expected[i]) << "corrector " << i + 1;
+}
+
+TEST(ALESpeciesDenseOracleTest, DissolvedOnlyGrossEventsStraddleTheGasGateAfterLiquidOnlyOmissions)
+{
+    namespace R = TypedSpeciesSurface::R;
+    using Phase = R::SpeciesPhase;
+    constexpr R::SpeciesId solvent = 73, tracer = 19;
+    constexpr auto convention = R::EnergyConvention::SensibleEnergy;
+    const auto catalog = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
+        {solvent, "solvent", 1., {{"S", 1}}, {Phase::Liquid}}, {tracer, "tracer", .5, {{"T", 1}}, {Phase::Dissolved}}});
+    SimpleFluid::ReactingGasOptions settings;
+    settings.mode = SimpleFluid::ReactingGasMode::Species;
+    settings.solution_transport = SimpleFluid::ReactingTransportMode::Advective;
+    settings.bubble_transport = SimpleFluid::BubbleTransportMode::General;
+    settings.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ZeroSlip;
+    settings.free_surface_patches = {"zmax"};
+    settings.population_ids = {"small", "large"};
+    settings.reference_pressure = 101325.;
+    settings.reaction_mechanism =
+        std::make_shared<const R::ReactionMechanism>(catalog, std::vector<R::ReactionDefinition>{}, convention);
+    const R::ThermodynamicBounds bounds{250, 500, 10000, 2e6};
+    settings.gas_thermodynamics = R::make_ideal_gas_mixture(catalog, {{20, 300, 0}, {20, 300, 0}}, bounds, convention);
+    settings.liquid_thermodynamics = R::make_linear_compressible_mixture_liquid(
+        catalog, bounds, [](std::span<const double>)
+        { return R::LinearCompressibleMixtureLiquid{300, 101325, 10, 2, 0, 0, 0, .01, 0}; }, convention);
+    settings.initial_species_state = [catalog](const R::ReactionEnvironment& env, std::int64_t)
+    {
+        R::CellSpeciesState state(*catalog);
+        state.dispersedPopulations = {{"small", {0., 0.}}, {"large", {0., 0.}}};
+        state.set_amount(*catalog, solvent, Phase::Liquid, 9.5 * env.bulkVolume);
+        state.set_amount(*catalog, tracer, Phase::Dissolved, env.bulkVolume);
+        return state;
+    };
+    settings.initial_population_numbers = [](const R::ReactionContext&) { return std::vector<double>{0., 0.}; };
+
+    // Adjacent binary64 packet sizes straddle the gate. The power-of-two dt
+    // and two-cell sum preserve their relative difference in the global receipts.
+    constexpr double gate = 1e-10, dt = 1. / 64;
+    const double above = 1. - gate;
+    const double below = std::nextafter(above, 1.);
+    ASSERT_GT(1. - above, gate);
+    ASSERT_LT(1. - below, gate);
+    for (const double scale : {below, above})
+    {
+        SCOPED_TRACE(testing::Message() << "expected residual " << std::setprecision(17) << 1. - scale);
+        settings.species_source = [scale](const R::ReactionContext& context, double duration)
+        {
+            const double moles = duration * (context.environment.time < duration / 2 ? 1. : scale);
+            R::ReactionSourceInput source;
+            source.externalTransfers = {{"in", tracer, Phase::Dissolved, moles, .5 * moles, 0., {}, {}},
+                {"out", tracer, Phase::Dissolved, -moles, -.5 * moles, 0., {}, {}}};
+            return source;
+        };
+        auto fixture = TypedSpeciesSurface::make_with_settings(settings, 4);
+        auto& coupling = *fixture.coupling;
+        fixture.solver->set_time_step(dt);
+        const auto& gas = *coupling.find_reacting_gas_model();
+        EXPECT_TRUE(gas.source_ledgers().empty());
+        EXPECT_TRUE(gas.population_ledgers().empty());
+        EXPECT_TRUE(gas.escape_ledgers().empty());
+        const auto cold = check_gas_slots(gas, *fixture.mesh);
+        // Five nonliquid compartments in seven cell arrays, eight event slots
+        // per compartment, and the gas subset. The dissolved-only tracer contributes none.
+        const auto omitted = 35 * fixture.mesh->num_owned_cells() + 5 * 8 + 1;
+        EXPECT_EQ(std::ranges::count(cold, true, &Dense::Entry::structural_zero), omitted);
+        coupling.step();
+        EXPECT_EQ(gas.source_ledgers().size(), fixture.mesh->num_owned_cells());
+        EXPECT_EQ(gas.population_ledgers().size(), fixture.mesh->num_owned_cells());
+        EXPECT_EQ(gas.escape_ledgers().size(), fixture.mesh->num_owned_cells());
+
+        DenseCorrectorTrace trace(fixture);
+        const auto tracer_net =
+            std::ranges::find(trace.previous, "event/tracer/dissolved/signed source", &Dense::Entry::identity);
+        EXPECT_NE(tracer_net, trace.previous.end());
+        if (tracer_net != trace.previous.end())
+        {
+            EXPECT_FALSE(tracer_net->structural_zero);
+            EXPECT_EQ(tracer_net->value, 0.);
+            EXPECT_GT(tracer_net->allowance, 0.L);
+        }
+        coupling.set_ale_convergence_observer([&](const auto& row) { trace.observe(row); });
+        coupling.step();
+        const auto residuals = trace.check_gates();
+        ASSERT_FALSE(residuals.empty());
+        EXPECT_EQ(residuals.front(), 1. - scale);
+        EXPECT_EQ(trace.rows.front().gas_tolerance, gate);
+        EXPECT_EQ(coupling.planar_ale_diagnostics().gas_state_residual_history, residuals);
+        EXPECT_EQ(residuals.size(), scale == above ? 2u : 1u);
+    }
+}
+
+void expect_dense_failure_slot(const DenseCorrectorTrace& trace, const std::string& reason)
+{
+    ASSERT_LT(trace.last.slot, trace.previous.size());
+    EXPECT_FALSE(trace.previous[trace.last.slot].structural_zero);
+    // This winner follows omitted slots, so a packed-storage index would differ.
+    EXPECT_TRUE(std::any_of(trace.previous.begin(), trace.previous.begin() + trace.last.slot,
+        [](const auto& entry) { return entry.structural_zero; }));
+    EXPECT_NE(reason.find("Local largest species/event residual at entry " + std::to_string(trace.last.slot) + ":"),
+        std::string::npos)
+        << reason;
+}
+
+TEST(ALESpeciesDenseOracleTest, OpposingPacketsSelectDenseSlotAndRollbackBeforeRetry)
+{
+    namespace M = TypedSpeciesSurface::M;
+    namespace R = TypedSpeciesSurface::R;
+    using Phase = R::SpeciesPhase;
+    const auto source = [](const R::ReactionContext& context, double dt)
+    {
+        const bool upper = context.environment.location.value().centroid[2] > .5;
+        const bool expanded = context.environment.bulkVolume > .5 * (1 + 1e-8);
+        const double z = expanded ? (upper ? 4. : 2.) : 1.;
+        const double amount = 1e-4 * dt;
+        R::ReactionSourceInput input;
+        input.heat.integratedEnergy = dt > 1e-3 ? .4 * dt * context.environment.bulkVolume : 0.;
+        input.externalTransfers = {{"feed", M::gas_two, Phase::Dissolved, amount, .004 * amount, 3., {-5., 7., z}, {}},
+            {"draw", M::gas_two, Phase::Dissolved, -2 * amount, -.008 * amount, -3., {5., -7., -z}, {}},
+            {"replace", M::product, Phase::Liquid, amount, .004 * amount, 0., {}, {}}};
+        return input;
+    };
+    constexpr int limit = 2;
+    auto fixture = TypedSpeciesSurface::make(0, false, false, source, limit);
+    auto& coupling = *fixture.coupling;
+    const auto& gas = *coupling.find_reacting_gas_model();
+    const auto accepted = Dense::capture(gas, *fixture.mesh);
+    const auto receipt = gas.species_event_receipt();
+    const auto history_size = coupling.free_surface_history().size();
+    const auto geometry = capture_geometry(*fixture.mesh);
+    DenseCorrectorTrace failure(fixture);
+    coupling.set_ale_convergence_observer([&](const auto& row) { failure.observe(row); });
+    EXPECT_THROW(coupling.step(), std::runtime_error);
+    const auto rejected = failure.check_gates();
+    ASSERT_EQ(rejected.size(), limit);
+    EXPECT_EQ(rejected.back(), .75);
+    const auto& diagnostics = coupling.planar_ale_diagnostics();
+    EXPECT_EQ(diagnostics.rejected_transactions, 1u);
+    expect_dense_failure_slot(failure, diagnostics.last_rejection_reason);
+    EXPECT_EQ(check_gas_slots(gas, *fixture.mesh), accepted);
+    EXPECT_EQ(gas.species_event_receipt(), receipt);
+    EXPECT_EQ(coupling.free_surface_history().size(), history_size);
+    EXPECT_EQ(fixture.solver->time(), 0.);
+    expect_geometry_restored(*fixture.mesh, geometry);
+
+    fixture.solver->set_time_step(1e-3);
+    DenseCorrectorTrace retry(fixture);
+    coupling.set_ale_convergence_observer([&](const auto& row) { retry.observe(row); });
+    coupling.step();
+    const auto expected = retry.check_gates();
+    EXPECT_EQ(coupling.planar_ale_diagnostics().gas_state_residual_history, expected);
+    ASSERT_GE(expected.size(), 2u);
+    EXPECT_EQ(expected.front(), rejected.front());
+    EXPECT_EQ(gas.species_event_receipt().revision, receipt.revision + 1);
+    EXPECT_EQ(coupling.free_surface_history().size(), history_size + 1);
+    const auto& events = gas.species_step_events();
+    const auto draw = std::ranges::find_if(
+        events, [](const auto& e) { return e.species == M::gas_two && e.phase == Phase::Dissolved; });
+    EXPECT_NE(draw, events.end());
+    if (draw != events.end())
+    {
+        EXPECT_GT(draw->external_supply, 0.);
+        EXPECT_GT(draw->external_withdrawal, draw->external_supply);
+        EXPECT_LT(draw->signed_source_change, 0.);
+    }
+
+    const auto populated = Dense::capture(gas, *fixture.mesh);
+    const auto accepted_receipt = gas.species_event_receipt();
+    const auto accepted_history = coupling.planar_ale_diagnostics().gas_state_residual_history;
+    fixture.solver->set_time_step(.01);
+    DenseCorrectorTrace warm(fixture);
+    coupling.set_ale_convergence_observer([&](const auto& row) { warm.observe(row); });
+    EXPECT_THROW(coupling.step(), std::runtime_error);
+    const auto warm_residuals = warm.check_gates();
+    ASSERT_EQ(warm_residuals.size(), limit);
+    EXPECT_EQ(warm_residuals.back(), .75);
+    expect_dense_failure_slot(warm, coupling.planar_ale_diagnostics().last_rejection_reason);
+    EXPECT_EQ(check_gas_slots(gas, *fixture.mesh), populated);
+    EXPECT_EQ(gas.species_event_receipt(), accepted_receipt);
+    EXPECT_EQ(coupling.planar_ale_diagnostics().gas_state_residual_history, accepted_history);
+    EXPECT_EQ(fixture.solver->time(), accepted_receipt.interval_end);
+    EXPECT_EQ(coupling.free_surface_history().size(), history_size + 1);
+}
 
 TEST(BoussinesqSpeciesPlanarALETest, FollowsTransportedLiquidAndExactEOSFacePacketsOnActualEmptyOwners)
 {

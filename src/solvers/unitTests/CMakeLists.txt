@@ -82,6 +82,11 @@ foreach(_species_surface_ranks IN ITEMS 2 4)
         LABELS "mpi;species;ale;boussinesq;conservation;transaction;empty_rank" TIMEOUT 120)
 endforeach()
 
+simplefluid_add_mpi_test(NAME ALESpeciesDenseOracle_2procs
+    TARGET testBoussinesqPlanarALE PROCS 2
+    ARGS "--gtest_filter=ALESpeciesDenseOracleTest.*"
+    LABELS "mpi;species;ale;boussinesq;convergence;transaction" TIMEOUT 120)
+
 # Raw accepted population events preserve tiny material/count endpoints and replay.
 foreach(_raw_population_ranks IN ITEMS 2 4)
     foreach(_raw_population_case IN ITEMS PopulationRawCountReplay PopulationRawMaterialReplay PopulationChemicalDonors)

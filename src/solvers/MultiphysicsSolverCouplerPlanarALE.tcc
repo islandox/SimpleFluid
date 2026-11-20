@@ -7,7 +7,8 @@
  * rollback or MPI work.
  */
 
-#include "solvers/details/ALESpeciesConvergence.hh"
+#include "solvers/details/ALESpeciesSnapshot.hh"
+#include "solvers/details/ALESpeciesVisit.hh"
 
 namespace SimpleFluid
 {
@@ -15,14 +16,14 @@ namespace SimpleFluid
 /** @brief Own one accepted snapshot and the trial schedule for a planar-ALE step. */
 template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALEStep
 {
-    using GasStateEntry = detail::ale_species::ConvergenceEntry;
+    using GasReference = detail::ale_species::SnapshotReference;
 
     /** Preview ownership lasts through commit or internal replay of one corrector. */
     struct TrialState
     {
         std::optional<typename liquid_mass_inventory_type::PhaseChangePreview> temperature_mass_preview;
         std::vector<scalar_type> next_density_guess, next_heat_capacity_guess;
-        std::vector<GasStateEntry> current_gas_state;
+        GasReference pending_gas_reference;
         std::optional<typename liquid_mass_inventory_type::PhaseChangePreview> liquid_preview;
         std::optional<typename free_surface_model_type::UpdatePreview> surface_preview;
         std::optional<FreeSurfaceAccountingPreview> species_accounting;
@@ -86,15 +87,14 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
     SP<const typename temperature_equation_type::boundary_cache_type> accepted_thermal_flux;
     std::unique_ptr<field_type> thermal_guess;
     std::vector<scalar_type> target_guess, density_guess, heat_capacity_guess;
-    std::vector<GasStateEntry> previous_gas_state;
+    GasReference previous_gas_state;
+    std::optional<detail::ale_species::LiquidOnlySlots> gas_slots;
     scalar_type accepted_mesh_level{}, top_area{}, candidate_level{}, mesh_volume_correction_rate{};
     scalar_type last_level_residual{}, last_target_change{}, last_continuity_maximum{};
     scalar_type last_level_tolerance{}, last_target_tolerance{}, last_pool_volume_mismatch{},
         last_pool_volume_tolerance{};
     scalar_type last_material_state_residual{}, last_gas_state_residual{}, last_thermal_state_residual{};
-    std::size_t last_local_species_entry = std::numeric_limits<std::size_t>::max();
-    scalar_type last_local_species_before{}, last_local_species_after{};
-    long double last_local_species_before_allowance{}, last_local_species_after_allowance{};
+    detail::ale_species::SnapshotMaximum last_local_species;
     static constexpr scalar_type state_relative_tolerance{1.0e-10};
     std::vector<scalar_type> level_residual_history, target_change_history, continuity_maximum_history;
     std::vector<scalar_type> material_state_residual_history, gas_state_residual_history;
@@ -314,122 +314,44 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
         }
 
         // Compare accepted-to-trial gas state first, then successive new-time trials.
-        collective_detail::collective_local_validation(
-            *d_solver.d_mesh, "ALE accepted species/source state", [&] { previous_gas_state = capture_gas_state(); });
+        collective_detail::collective_local_validation(*d_solver.d_mesh, "ALE accepted species/source state", [&] {
+            if (coupler.species_surface_enabled())
+                gas_slots.emplace(coupler.d_reacting_gas_model->options().reaction_mechanism->catalog());
+            previous_gas_state = GasReference::capture(gas_state_layout(), [&](auto& sink) { visit_gas_state(sink); });
+        });
     }
 
-    /** @brief Capture authoritative inventory and feedback inputs for nonlinear convergence. */
-    std::vector<GasStateEntry> capture_gas_state() const
+    /** @brief Size the typed species convergence snapshot from the model's current schema. */
+    detail::ale_species::SnapshotLayout gas_state_layout() const
     {
-        std::vector<GasStateEntry> state;
-        if (coupler.species_surface_enabled())
-        {
-            const auto& model = *coupler.d_reacting_gas_model;
-            const auto& options = model.options();
-            for (std::size_t owned = 0; owned < d_solver.d_mesh->num_owned_cells(); ++owned)
-            {
-                const auto cell = static_cast<local_ordinal_type>(owned);
-                const auto species = model.cell_species_state(cell);
-                state.insert(state.end(), species.amounts.begin(), species.amounts.end());
-                for (const auto& population : species.dispersedPopulations)
-                    state.insert(state.end(), population.amounts.begin(), population.amounts.end());
-                for (const auto& population : options.population_ids)
-                    state.push_back(
-                        model.population_number_field(population).value(cell) * d_solver.d_mesh->cell_volume(cell));
-                // The subtractive material-volume diagnostic does not drive the ALE target.
-                // Exact old/new material volumes and transport packets have their own physical gate.
-                if (!std::isfinite(model.material_volume_source().value(cell)))
-                    throw std::runtime_error("ALE material-volume diagnostic is nonfinite.");
-                for (const auto* field : {&model.thermal_source(), &model.liquid_mass_density(),
-                         &model.pure_liquid_density(), &model.absolute_pressure()})
-                    state.push_back(field->value(cell));
-                const auto append_delta = [&](const Reacting::CellSpeciesState* delta)
-                {
-                    if (delta && (delta->amounts.size() != species.amounts.size() ||
-                                     delta->dispersedPopulations.size() != species.dispersedPopulations.size()))
-                        throw std::logic_error("ALE source delta has a foreign phase/population shape.");
-                    for (std::size_t i = 0; i < species.amounts.size(); ++i)
-                        state.push_back(delta ? delta->amounts[i] : scalar_type{});
-                    for (std::size_t pop = 0; pop < species.dispersedPopulations.size(); ++pop)
-                    {
-                        if (delta && (delta->dispersedPopulations[pop].id != species.dispersedPopulations[pop].id ||
-                                         delta->dispersedPopulations[pop].amounts.size() !=
-                                             species.dispersedPopulations[pop].amounts.size()))
-                            throw std::logic_error("ALE source delta has a foreign population identity.");
-                        for (std::size_t i = 0; i < species.dispersedPopulations[pop].amounts.size(); ++i)
-                            state.push_back(delta ? delta->dispersedPopulations[pop].amounts[i] : scalar_type{});
-                    }
-                };
-                for (const auto* ledgers :
-                    {&model.source_ledgers(), &model.population_ledgers(), &model.escape_ledgers()})
-                {
-                    const auto* ledger = owned < ledgers->size() ? &(*ledgers)[owned] : nullptr;
-                    append_delta(ledger ? &ledger->chemicalChange : nullptr);
-                    append_delta(ledger ? &ledger->externalChange : nullptr);
-                    // Escaped moles drive headspace/volume closure. Their carried h/momentum are
-                    // passive traces in this Boussinesq/prescribed-temperature headspace model;
-                    // they remain fully recorded and validated but are not nonlinear source inputs.
-                    if (ledgers == &model.escape_ledgers())
-                        continue;
-                    state.push_back(ledger ? ledger->externalHeat : scalar_type{});
-                    state.push_back(ledger ? ledger->reactionHeat : scalar_type{});
-                    state.push_back(ledger ? ledger->transferEnergy : scalar_type{});
-                    const auto compartments = std::size_t{4} + options.population_ids.size();
-                    std::vector<detail::CompensatedSum<long double>> carried(8 * compartments);
-                    if (ledger)
-                        for (const auto& event : ledger->externalTransfers)
-                        {
-                            std::size_t compartment = static_cast<std::size_t>(event.phase);
-                            if (!event.population.empty())
-                            {
-                                const auto found = std::ranges::find(options.population_ids, event.population);
-                                if (event.phase != Reacting::SpeciesPhase::Dispersed ||
-                                    found == options.population_ids.end())
-                                    throw std::logic_error("ALE transfer budget has a foreign population.");
-                                compartment = 4 + static_cast<std::size_t>(found - options.population_ids.begin());
-                            }
-                            if (compartment >= compartments)
-                                throw std::logic_error("ALE transfer budget has an invalid phase.");
-                            const auto add = [&](std::size_t offset, double value)
-                            {
-                                carried[8 * compartment + offset + (value < 0 ? 1 : 0)] +=
-                                    std::abs(static_cast<long double>(value));
-                            };
-                            add(0, event.energy);
-                            for (std::size_t axis = 0; axis < 3; ++axis)
-                                add(2 + 2 * axis, event.momentum[axis]);
-                        }
-                    for (const auto& budget : carried)
-                        state.push_back(detail::surface_species::narrow(budget.value()));
-                }
-            }
-            for (const auto& event : model.species_step_events())
-            {
-                state.push_back(event.chemical_production);
-                state.push_back(event.chemical_consumption);
-                state.push_back(event.external_supply);
-                state.push_back(event.external_withdrawal);
-                state.push_back(event.interphase_inflow);
-                state.push_back(event.interphase_outflow);
-                state.push_back(event.physical_outflow);
-                // Keep the raw signed receipt. Only its own opposing source operands
-                // establish arithmetic uncertainty; physical escape never contributes.
-                state.emplace_back(event.signed_source_change,
-                    detail::ale_species::source_cancellation_allowance(event));
-            }
-            for (const auto& event : model.species_subset_source_changes())
-            {
-                state.push_back(event.gas_source_moles);
-                // A sole allowed solution phase is the identical source net. General
-                // multi-phase solution subsets and all gas subsets retain no allowance.
-                state.emplace_back(event.solution_source_moles,
-                    detail::ale_species::solution_subset_cancellation_allowance(
-                        model.options().reaction_mechanism->catalog(), event.species, model.species_step_events()));
-            }
-            return state;
-        }
+        if (!coupler.species_surface_enabled())
+            return {};
 
-        return state;
+        const auto& model = *coupler.d_reacting_gas_model;
+        const auto& options = model.options();
+        const auto& catalog = options.reaction_mechanism->catalog();
+        const auto& slots = gas_slots.value();
+        slots.require_catalog(catalog);
+        const auto& events = model.species_step_events();
+        const auto& subsets = model.species_subset_source_changes();
+        detail::ale_species::PhaseOmissions omitted{slots.count()};
+        if (omitted.liquid_only_species != 0)
+        {
+            for (const auto& event : events)
+                omitted.nonliquid_events += slots.omit_event(catalog, event);
+            for (const auto& subset : subsets)
+                omitted.gas_subsets += slots.liquid_only(catalog, subset.species);
+        }
+        return detail::ale_species::SnapshotLayout::typed(d_solver.d_mesh->num_owned_cells(),
+            catalog.species().size(), options.population_ids.size(), events.size(), subsets.size(), omitted);
+    }
+
+    /** @brief Visit authoritative inventory and feedback inputs in nonlinear convergence order. */
+    template<class Sink> void visit_gas_state(Sink& sink) const
+    {
+        if (coupler.species_surface_enabled())
+            detail::ale_species::visit_typed_gas_state(*coupler.d_reacting_gas_model, *d_solver.d_mesh,
+                gas_slots.value(), sink);
     }
 
     /** @brief Restore accepted physics; internal replay may defer metric reconstruction. */
@@ -716,25 +638,9 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
             collective_detail::collective_local_validation(*d_solver.d_mesh, "ALE full species/event convergence",
                 [&]
                 {
-                    trial.current_gas_state = capture_gas_state();
-                    if (previous_gas_state.size() != trial.current_gas_state.size())
-                        throw std::logic_error("ALE species/event schema changed during a trial.");
-                    last_local_species_entry = std::numeric_limits<std::size_t>::max();
-                    for (std::size_t i = 0; i < trial.current_gas_state.size(); ++i)
-                    {
-                        const auto& before = previous_gas_state[i];
-                        const auto& after = trial.current_gas_state[i];
-                        const auto residual = detail::ale_species::relative_change(before, after);
-                        if (residual > local)
-                        {
-                            last_local_species_entry = i;
-                            last_local_species_before = before.value;
-                            last_local_species_after = after.value;
-                            last_local_species_before_allowance = before.cancellation_allowance;
-                            last_local_species_after_allowance = after.cancellation_allowance;
-                        }
-                        local = std::max(local, residual);
-                    }
+                    trial.pending_gas_reference = GasReference::stage(std::exchange(previous_gas_state, {}),
+                        gas_state_layout(), [&](auto& sink) { visit_gas_state(sink); }, last_local_species);
+                    local = last_local_species.residual;
                 });
             Teuchos::reduceAll(*d_solver.d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local,
                 &trial.gas_state_residual);
@@ -743,30 +649,9 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
             return;
         }
         const auto phase_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEResidual);
-        trial.current_gas_state = capture_gas_state();
-        // Entry zero retains the original aggregate comparison. The remaining
-        // entries attribute that same arithmetic to each authoritative field.
         std::array<scalar_type, 1 + ALEConvergenceObservation::gas_field_count> local{}, global{};
-        if (coupler.d_reacting_gas_model && coupler.d_reacting_gas_model->enabled())
-        {
-            if (previous_gas_state.size() != trial.current_gas_state.size())
-            {
-                local.fill(scalar_type{1});
-            }
-            else
-            {
-                for (size_t entry = 0; entry < trial.current_gas_state.size(); ++entry)
-                {
-                    const auto scale = std::max({scalar_type{1}, std::abs(previous_gas_state[entry].value),
-                        std::abs(trial.current_gas_state[entry].value)});
-                    const auto residual =
-                        std::abs(trial.current_gas_state[entry].value - previous_gas_state[entry].value) / scale;
-                    local[0] = std::max(local[0], residual);
-                    const auto field = entry / d_solver.d_mesh->num_owned_cells();
-                    local[1 + field] = std::max(local[1 + field], residual);
-                }
-            }
-        }
+        if (coupler.d_reacting_gas_model && coupler.d_reacting_gas_model->enabled() && !previous_gas_state.empty())
+            local.fill(scalar_type{1});
         Teuchos::reduceAll(*d_solver.d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
             static_cast<int>(local.size()), local.data(), global.data());
         trial.gas_state_residual = global[0];
@@ -1236,7 +1121,6 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
         {
             SafeguardedAitken::Products local_products{}, global_products{};
             collective_detail::collective_local_validation(*d_solver.d_mesh, "ALE Aitken target residual", [&] {
-                next_target.resize(target_guess.size());
                 std::vector<double> residual(target_guess.size()), weights(target_guess.size());
                 if (!std::isfinite(accepted_mesh_volume) || accepted_mesh_volume <= 0.0 ||
                     !std::isfinite(time_step) || time_step <= 0.0)
@@ -1257,34 +1141,33 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
                 static_cast<int>(local_products.size()), local_products.data(), global_products.data());
             relaxation = static_cast<scalar_type>(target_aitken->finish(global_products));
         }
-        else
+        collective_detail::collective_local_validation(*d_solver.d_mesh, "ALE replay guesses", [&] {
             next_target.resize(target_guess.size());
-        for (size_t owned = 0; owned < next_target.size(); ++owned)
-        {
-            next_target[owned] = target_guess[owned] + relaxation * (trial.volume_trial->target().integrated_rate(
-                                                                         static_cast<local_ordinal_type>(owned)) -
-                                                                        target_guess[owned]);
-        }
-        // No geometry-dependent consumer runs between this internal
-        // rollback and the next candidate's begin_trial/refresh. Preserve
-        // all accepted physical state now; reconstruct metrics only for
-        // the candidate. Any exception (including begin/refresh failure)
-        // reaches the eager restore below before leaving this function.
-        if (thermal_guess)
-        {
+            for (size_t owned = 0; owned < next_target.size(); ++owned)
+            {
+                next_target[owned] = target_guess[owned] + relaxation * (trial.volume_trial->target().integrated_rate(
+                    static_cast<local_ordinal_type>(owned)) - target_guess[owned]);
+            }
+            if (thermal_guess)
             {
                 const auto source = d_solver.temperature().owned_read_view();
                 auto destination = thermal_guess->owned_write_view();
                 for (size_t owned = 0; owned < d_solver.d_mesh->num_owned_cells(); ++owned)
                     destination(owned, 0) = source(owned, 0);
             }
+        });
+        // No geometry-dependent consumer runs between this internal
+        // rollback and the next candidate's begin_trial/refresh. Preserve
+        // all accepted physical state now; reconstruct metrics only for
+        // the candidate. Any exception (including begin/refresh failure)
+        // reaches the eager restore below before leaving this function.
+        if (thermal_guess)
             thermal_guess->sync_ghosts();
-        }
         restore_accepted(false);
         target_guess = std::move(next_target);
         density_guess = std::move(trial.next_density_guess);
         heat_capacity_guess = std::move(trial.next_heat_capacity_guess);
-        previous_gas_state = std::move(trial.current_gas_state);
+        previous_gas_state = std::move(trial.pending_gas_reference);
     }
 
     /** @brief Report the last physical residuals when correctors are exhausted. */
@@ -1303,11 +1186,11 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
                 << " (tolerance=" << state_relative_tolerance << "), gas-state residual=" << last_gas_state_residual
                 << " (tolerance=" << state_relative_tolerance
                 << "), thermal-state residual=" << last_thermal_state_residual << " (tolerance=1).";
-        if (coupler.species_surface_enabled() && last_local_species_entry != std::numeric_limits<std::size_t>::max())
-            message << " Local largest species/event residual at entry " << last_local_species_entry
-                    << ": before=" << last_local_species_before << ", after=" << last_local_species_after
-                    << ", before_cancellation_allowance=" << last_local_species_before_allowance
-                    << ", after_cancellation_allowance=" << last_local_species_after_allowance << '.';
+        if (coupler.species_surface_enabled() && last_local_species.index != std::numeric_limits<std::size_t>::max())
+            message << " Local largest species/event residual at entry " << last_local_species.index
+                    << ": before=" << last_local_species.before.value << ", after=" << last_local_species.after.value
+                    << ", before_cancellation_allowance=" << last_local_species.before.cancellation_allowance
+                    << ", after_cancellation_allowance=" << last_local_species.after.cancellation_allowance << '.';
         throw std::runtime_error(message.str());
     }
 

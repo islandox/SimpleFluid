@@ -75,6 +75,30 @@ gross events keep their original binary64 relative comparison. This comparison
 rule changes no inventory, source, receipt or physical conservation gate and uses
 no unit-dependent absolute floor.
 
+The step holds one exact-size array of binary64 values for the retained comparison
+slots. When a species declares **only Liquid** in the catalog, only its liquid
+inventory and liquid ledger deltas participate. Its nonliquid compartment events
+and gas-subset value have no slots; its liquid events and signed solution-subset
+value still participate. Other species (including dissolved-only species) keep
+their original layout. Population counts, feedback fields, and shared heat and
+carried-transfer budgets are unchanged. This selection uses the catalog, not the
+current amounts: a permitted slot still participates when zero or when its ledger
+row is absent. Physical fields and receipt histories remain unchanged.
+
+Only retained signed compartment and solution-subset entries have an auxiliary
+`long double` allowance. Largest-residual diagnostics still use the original
+catalog/compartment ordinal, not a packed array index. No current-value array is
+materialized.
+
+The first corrector consumes the accepted reference; a subsequent corrector
+consumes its predecessor. As each slot is visited, the solver compares it
+before overwriting it and copies out the first largest residual's diagnostic.
+The trial owns the resulting buffer until internal replay successfully
+restores the physical checkpoint. Only then is it promoted. A failure while
+visiting a rank, in a later gate or during replay discards the candidate; an
+outward retry rebuilds the reference from accepted physics, never from the
+partially written array. A converged trial needs no next reference.
+
 The mirrored `S_alpha_total` is `(alpha_g_final - alpha_g_step_start)/dt` over the
 whole accepted interval, including transport, accepted sources, temperature and
 headspace-pressure refreshes. Intermediate mirrors serve material coupling and do

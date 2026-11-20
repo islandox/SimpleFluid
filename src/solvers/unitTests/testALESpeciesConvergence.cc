@@ -1,8 +1,10 @@
 #include "solvers/details/ALESpeciesConvergence.hh"
+#include "solvers/details/ALESpeciesSnapshot.hh"
 
 #include <gtest/gtest.h>
 #include <cmath>
 #include <limits>
+#include <type_traits>
 
 namespace
 {
@@ -174,5 +176,193 @@ TEST(ALESpeciesConvergenceTest, InvalidOperandsAndEntriesRejectWithoutAnInfinite
     EXPECT_TRUE(std::isfinite(allowance));
     EXPECT_GT(A::relative_change(entry(std::numeric_limits<double>::max(), large),
                   entry(-std::numeric_limits<double>::max(), large)), 1.99);
+}
+
+using DenseState = std::vector<A::ConvergenceEntry>;
+
+auto visit_fixture(const DenseState& entries)
+{
+    return [&entries](auto& sink) {
+        for (std::size_t index = 0; index < entries.size(); ++index)
+            if (index == 109 || index == 117 || index == 119)
+                sink.signed_net(entries[index].value, entries[index].cancellation_allowance);
+            else
+                sink.ordinary(entries[index].value);
+    };
+}
+
+A::SnapshotMaximum dense_oracle(const DenseState& previous, const DenseState& current)
+{
+    A::SnapshotMaximum maximum;
+    for (std::size_t index = 0; index < previous.size(); ++index)
+    {
+        const auto& before = previous[index];
+        const auto& after = current[index];
+        const double scale = std::max(std::abs(before.value), std::abs(after.value));
+        double residual = 0;
+        if (scale != 0 && !before.cancellation_allowance && !after.cancellation_allowance)
+            residual = std::abs(after.value - before.value) / scale;
+        else if (scale != 0)
+        {
+            const long double delta = std::abs(static_cast<long double>(after.value) - before.value);
+            residual = static_cast<double>(
+                std::max(0.L, delta - before.cancellation_allowance - after.cancellation_allowance) / scale);
+        }
+        if (residual > maximum.residual)
+            maximum = {residual, index, before, after};
+    }
+    return maximum;
+}
+
+void check_maximum(const A::SnapshotMaximum& actual, const A::SnapshotMaximum& expected)
+{
+    EXPECT_EQ(actual.residual, expected.residual);
+    EXPECT_EQ(actual.index, expected.index);
+    EXPECT_EQ(actual.before.value, expected.before.value);
+    EXPECT_EQ(actual.after.value, expected.after.value);
+    EXPECT_EQ(actual.before.cancellation_allowance, expected.before.cancellation_allowance);
+    EXPECT_EQ(actual.after.cancellation_allowance, expected.after.cancellation_allowance);
+    EXPECT_EQ(actual.residual <= 1e-10, expected.residual <= 1e-10);
+}
+
+TEST(ALESpeciesConvergenceTest, StreamingMatchesDenseMaximaAndFirstTieAcrossCorrectors)
+{
+    const auto layout = A::SnapshotLayout::typed(1, 1, 0, 2, 1);
+    ASSERT_EQ(layout.cell_values, 102U);
+    ASSERT_EQ(layout.values, 120U);
+    ASSERT_EQ(layout.allowances, 3U);
+    DenseState previous(120);
+    previous[4] = 1.0;
+    previous[109] = {2e-12, 2e-13L};
+    previous[119] = {1e-24, 1e-22L};
+    auto reference = A::SnapshotReference::capture(layout, visit_fixture(previous));
+    auto current = previous;
+    const auto compare = [&] {
+        A::SnapshotMaximum maximum;
+        reference = A::SnapshotReference::stage(std::move(reference), layout, visit_fixture(current), maximum);
+        check_maximum(maximum, dense_oracle(previous, current));
+        previous = current;
+        return maximum;
+    };
+    EXPECT_EQ(compare().residual, 0);
+    current[5] = 1e-300;
+    current[6] = -1e-300;
+    EXPECT_EQ(compare().index, 5U);
+    current[5] = current[6] = 0.0;
+    EXPECT_EQ(compare().index, 5U);
+    current[109] = {4e-12, 7e-13L};
+    current[119] = {-1e-24, 1e-22L};
+    EXPECT_EQ(compare().index, 109U);
+    for (const auto after : {1.0 - 1e-10, std::nextafter(1.0 - 1e-10, 1.0)})
+    {
+        current[4] = after;
+        compare();
+        current[4] = 1.0;
+        compare();
+    }
+    for (const auto equal : {std::size_t{4}, std::size_t{119}})
+    {
+        current[equal] = 1e10;
+        compare();
+        current[equal] = 1e10 - 1;
+        EXPECT_EQ(compare().residual, 1e-10);
+        current[equal] = 1e10;
+        compare();
+        current[equal] = std::nextafter(1e10 - 1, 0.);
+        EXPECT_GT(compare().residual, 1e-10);
+    }
+}
+
+TEST(ALESpeciesConvergenceTest, IncompleteOrInvalidStreamCannotPublishACandidate)
+{
+    const auto layout = A::SnapshotLayout::typed(1, 1, 0, 2, 1);
+    const DenseState accepted(120, 1.0);
+    A::SnapshotMaximum maximum{.residual = .25, .index = 31};
+    const auto capture = [&] { return A::SnapshotReference::capture(layout, visit_fixture(accepted)); };
+    auto reference = capture();
+    const auto interrupted = [](auto& sink) { sink.ordinary(17.); throw std::runtime_error("interrupted"); };
+    EXPECT_THROW(reference = A::SnapshotReference::stage(std::move(reference), layout, interrupted, maximum),
+        std::runtime_error);
+    EXPECT_TRUE(reference.empty());
+    EXPECT_EQ(maximum.index, 31U);
+    EXPECT_EQ(maximum.residual, .25);
+    EXPECT_THROW(A::SnapshotReference::stage(capture(), layout, [](auto& sink) { sink.ordinary(4.); }, maximum),
+        std::logic_error);
+    EXPECT_THROW(A::SnapshotReference::stage(capture(), layout, [](auto& sink) { sink.signed_net(1., 0.L); }, maximum),
+        std::logic_error);
+    auto retry = capture();
+    auto trial = accepted;
+    trial.back() = 0.;
+    retry = A::SnapshotReference::stage(std::move(retry), layout, visit_fixture(trial), maximum);
+    check_maximum(maximum, dense_oracle(accepted, trial));
+    EXPECT_THROW(A::SnapshotLayout::typed(std::numeric_limits<std::size_t>::max(), 1, 0, 0, 0), std::length_error);
+}
+
+TEST(ALESpeciesConvergenceTest, SnapshotSizesCountRankEventsOnceEvenWithoutOwnedCells)
+{
+    static_assert(!std::is_copy_constructible_v<A::SnapshotReference>);
+    const auto populated = A::SnapshotLayout::typed(153458, 7, 2, 42, 7);
+    EXPECT_EQ(populated.cell_values, 153458U * 402U);
+    EXPECT_EQ(populated.values, populated.cell_values + 350);
+    EXPECT_EQ(populated.allowances, 49U);
+
+    const auto empty_rank = A::SnapshotLayout::typed(0, 7, 2, 42, 7);
+    ASSERT_EQ(empty_rank.cell_values, 0U);
+    ASSERT_EQ(empty_rank.values, 350U);
+    ASSERT_EQ(empty_rank.allowances, 49U);
+    const auto emit = [](auto& sink, double last_net) {
+        for (size_t event = 0; event < 42; ++event)
+        {
+            for (size_t field = 0; field < 7; ++field) sink.ordinary(0.);
+            sink.signed_net(0., 0.L);
+        }
+        for (size_t subset = 0; subset < 7; ++subset)
+        {
+            sink.ordinary(0.);
+            sink.signed_net(subset == 6 ? last_net : 0., 0.L);
+        }
+    };
+    auto ref = A::SnapshotReference::capture(empty_rank, [&](auto& sink) { emit(sink, 0.); });
+    A::SnapshotMaximum maximum;
+    ref = A::SnapshotReference::stage(std::move(ref), empty_rank, [&](auto& sink) { emit(sink, 1e-290); }, maximum);
+    EXPECT_EQ(maximum.index, 349U);
+    EXPECT_EQ(maximum.residual, 1.);
+}
+
+TEST(ALESpeciesConvergenceTest, LiquidOnlyOmissionsReduceStorageButKeepDenseEventOrdinals)
+{
+    const auto sized = A::SnapshotLayout::typed(153458, 7, 2, 42, 7, {6, 30, 6});
+    EXPECT_EQ(sized.cell_values, 153458U * 192U);
+    EXPECT_EQ(sized.values, sized.cell_values + 104);
+    EXPECT_EQ(sized.allowances, 19U);
+    EXPECT_EQ(sized.logical_cell_values, 153458U * 402U);
+    EXPECT_THROW(A::SnapshotLayout::typed(1, 2, 1, 10, 2, {3, 4, 1}), std::logic_error);
+
+    const auto layout = A::SnapshotLayout::typed(0, 2, 1, 10, 2, {1, 4, 1});
+    ASSERT_EQ(layout.values, 51U);
+    ASSERT_EQ(layout.allowances, 8U);
+    const auto emit = [](auto& sink, double solution_net) {
+        for (std::size_t event = 0; event < 10; ++event)
+        {
+            if (event >= 2 && event % 2 == 0)
+                sink.skip(8);
+            else
+            {
+                for (std::size_t field = 0; field < 7; ++field) sink.ordinary(0.);
+                sink.signed_net(0., 0.L);
+            }
+        }
+        sink.skip(1);
+        sink.signed_net(solution_net, .125L);
+        sink.ordinary(0.);
+        sink.signed_net(solution_net, .125L);
+    };
+    auto ref = A::SnapshotReference::capture(layout, [&](auto& sink) { emit(sink, 0.); });
+    A::SnapshotMaximum maximum;
+    ref = A::SnapshotReference::stage(std::move(ref), layout, [&](auto& sink) { emit(sink, 1.); }, maximum);
+    EXPECT_EQ(maximum.index, 81U);
+    EXPECT_EQ(maximum.residual, .75);
+    EXPECT_EQ(maximum.before.cancellation_allowance, .125L);
+    EXPECT_EQ(maximum.after.cancellation_allowance, .125L);
 }
 } // namespace
