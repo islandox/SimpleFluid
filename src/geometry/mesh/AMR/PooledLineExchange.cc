@@ -48,7 +48,8 @@ void subscriber(Writer& w, const PooledLineSubscriber& sub, const IncidencePools
 {
     w.word(sub.resident);
     w.word(sub.support_authority);
-    w.bytes(pools.supports.get(sub.support));
+    const auto support = pools.supports.get(sub.support);
+    w.bytes(support.bytes());
     w.word(sub.emission);
     w.word(sub.image);
     w.word(sub.edge);
@@ -77,7 +78,7 @@ std::size_t intern_point(std::span<const char> bytes, IncidencePools& pools, Bud
     budget.used -= input;
     return result;
 }
-PooledLineSubscriber subscriber(Reader& r, IncidencePools& pools, int ranks, Budget& budget, bool /*source*/)
+PooledLineSubscriber subscriber(Reader& r, IncidencePools& pools, int ranks, bool /*source*/)
 {
     PooledLineSubscriber sub;
     const auto resident = r.word(), owner = r.word();
@@ -88,7 +89,7 @@ PooledLineSubscriber subscriber(Reader& r, IncidencePools& pools, int ranks, Bud
     const auto support = r.bytes_view();
     if (support.empty() || authority(support, ranks) != sub.support_authority)
         throw std::invalid_argument("Invalid pooled line support.");
-    sub.support = intern_bytes(support, pools.supports, budget);
+    sub.support = pools.supports.intern_bytes(support);
     sub.emission = r.word();
     const auto image = r.word();
     sub.edge = r.word();
@@ -496,7 +497,10 @@ PooledLineCompletionRequest read_cached_request(Reader& reader, IncidencePools& 
         throw std::invalid_argument("Invalid cached native support participant or full key.");
     member.resident = int(resident);
     member.support_authority = int(support_authority);
-    member.support = find_cached_bytes(support, pools.supports, budget);
+    const auto support_slot = pools.supports.find_bytes(support);
+    if (!support_slot)
+        throw std::invalid_argument("Unknown full key in cached native line request.");
+    member.support = *support_slot;
     member.emission = reader.word();
     const auto image = reader.word();
     member.edge = reader.word();
@@ -798,7 +802,8 @@ PooledLineCompletion PooledLineCompletion::seal(std::size_t line, PooledLineSubs
     proof->kernel_layer_ = kernel_witness_layer;
     proof->cached_read_ = cached_read;
     body.copy(proof->line_, pools.lines.get(line));
-    body.copy(proof->support_, pools.supports.get(proof->original_.support));
+    const auto support = pools.supports.get(proof->original_.support);
+    body.copy(proof->support_, support.bytes());
     proof->keeper_ = keeper;
     proof->charge_ = std::exchange(body.bytes, 0);
     proof->budget_ = &budget;
@@ -819,11 +824,12 @@ void PooledLineCompletion::visit_borrowed_payload(
 }
 PooledLineBorrowedCompletion::PooledLineBorrowedCompletion(std::size_t line, const PooledLineSubscriber& original,
     std::span<const std::size_t> result, ContactHaloContext context, unsigned layer, const IncidencePools& pools)
-    : line_(line), original_(original), result_(result), context_(context), layer_(layer), pools_(pools)
+    : line_(line), original_(original), result_(result), context_(context), layer_(layer), pools_(pools),
+      support_(pools.supports.get(original.support))
 {
 }
 std::span<const char> PooledLineBorrowedCompletion::line_key() const { return pools_.lines.get(line_); }
-std::span<const char> PooledLineBorrowedCompletion::support_key() const { return pools_.supports.get(original_.support); }
+std::span<const char> PooledLineBorrowedCompletion::support_key() const { return support_.bytes(); }
 ContactSourcePoint PooledLineBorrowedCompletion::endpoint(unsigned i) const
 {
     if (i > 1)
@@ -1012,7 +1018,7 @@ void exchange_pooled_line_edits(PooledLineRegistry& registry, IncidencePools& po
                         throw std::invalid_argument("Foreign pooled line edit.");
                     PooledLineEdit item;
                     item.line = intern_bytes(line, pools.lines, budget);
-                    item.subscriber = subscriber(r, pools, comm->getSize(), budget, source_protocol);
+                    item.subscriber = subscriber(r, pools, comm->getSize(), source_protocol);
                     if (source_protocol)
                     {
                         item.subscriber.source_generation = incoming_stamps.value[packet_index].generation;
@@ -1237,7 +1243,7 @@ void exchange_pooled_line_edits(PooledLineRegistry& registry, IncidencePools& po
                         if (authority(line, comm->getSize()) != packet.peer)
                             throw std::invalid_argument("Foreign pooled line reply.");
                         const auto line_slot = intern_bytes(line, pools.lines, budget);
-                        auto sub = subscriber(r, pools, comm->getSize(), budget, source_protocol);
+                        auto sub = subscriber(r, pools, comm->getSize(), source_protocol);
                         if (source_protocol)
                         {
                             sub.source_generation = incoming_stamps.value[packet_index].generation;
@@ -1420,8 +1426,8 @@ void fetch_pooled_line_completions(PooledLineRegistry& registry, IncidencePools&
                     member.result.capacity())
                     throw std::invalid_argument("Invalid original cached native request.");
                 const auto& line = pools.lines.get(local_request.line);
-                const auto& support = pools.supports.get(member.support);
-                if (line.empty() || support.empty() || authority(support, ranks) != member.support_authority)
+                const auto support = pools.supports.get(member.support);
+                if (line.empty() || support.empty() || authority(support.bytes(), ranks) != member.support_authority)
                     throw std::invalid_argument("Invalid full cached native request keys.");
                 (void) pools.points.get(member.first);
                 (void) pools.points.get(member.last);

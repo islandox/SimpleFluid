@@ -119,10 +119,11 @@ struct Fixture
     unsigned witness_layer;
 
     explicit Fixture(bool empty = false, unsigned initial_layer = 0,
-        std::shared_ptr<D::Budget> caller_budget = std::make_shared<D::Budget>(D::Budget{budget_limit}))
+        std::shared_ptr<D::Budget> caller_budget = std::make_shared<D::Budget>(D::Budget{budget_limit}),
+        D::IdentityPoolStorage storage = D::IdentityPoolStorage::Flat)
         : budget(std::move(caller_budget)), arena(std::make_shared<D::CartesianAuthorityArena>(*budget, budget)),
           identities(std::make_unique<D::IdentityBudget>()),
-          pools(std::make_unique<D::IncidencePools>(*budget, *identities, budget)),
+          pools(std::make_unique<D::IncidencePools>(*budget, *identities, budget, storage)),
           registry(std::make_unique<D::PooledLineRegistry>(*budget, *pools)), witness_layer(initial_layer)
     {
         std::vector<D::PooledLineEdit> edits;
@@ -190,8 +191,11 @@ struct Fixture
     }
     D::PooledLineSubscriber literal_member(unsigned query)
     {
+        return literal_member(query, support_key(query));
+    }
+    D::PooledLineSubscriber literal_member(unsigned query, const AMR::AdaptiveBytes& support)
+    {
         D::PooledLineSubscriber member;
-        const auto support = support_key(query);
         member.support = pools->supports.intern(support);
         member.first = pools->points.intern(point(first_x(query)));
         member.last = pools->points.intern(point(last_x(query)));
@@ -242,7 +246,8 @@ struct Fixture
             {
                 const auto view = registry->query_result(*pools->lines.find(line_key()), ordinal);
                 const auto& member = view.subscriber;
-                writer.bytes(pools->supports.get(member.support));
+                const auto support = pools->supports.get(member.support);
+                writer.bytes(support.bytes());
                 for (const auto word : {std::uint64_t(member.resident), std::uint64_t(member.support_authority),
                          member.emission, std::uint64_t(member.image), member.edge, member.source_generation,
                          std::uint64_t(member.native_source), std::uint64_t(member.result_state),
@@ -680,6 +685,16 @@ struct BorrowedRun
     std::size_t consumed = 0;
     bool rejected = false, retained_at_failure = false;
 };
+AMR::AdaptiveBytes borrowed_support_key(unsigned query)
+{
+    D::Writer key;
+    key.word(0x5346434152543631ULL);
+    key.bytes(std::array<char, 1>{'d'});
+    // Region, axis, level, plane and the two transverse coordinates.
+    for (const auto value : std::array<std::uint64_t, 6>{0, 0, 0, query, 0, query == 16 ? 256u : 0u})
+        key.word(value);
+    return std::move(key.data);
+}
 std::vector<unsigned> expected_borrowed_order()
 {
     std::vector<unsigned> all;
@@ -697,14 +712,15 @@ std::vector<unsigned> expected_borrowed_order()
     return all;
 }
 BorrowedRun fresh_borrowed_exchange(bool use_consumer, D::PooledNativeLineFault fault = {}, bool throw_consumer = false,
-    bool late_throw = false)
+    bool late_throw = false, D::IdentityPoolStorage storage = D::IdentityPoolStorage::Flat, bool framed = false)
 {
+    const auto key_for = framed ? borrowed_support_key : support_key;
     BorrowedRun run;
     auto budget = std::make_shared<D::Budget>(D::Budget{budget_limit});
     D::PooledLineCompletionView retained;
     std::size_t retained_result_bytes = 0;
     {
-        Fixture fixture(true, 0, budget);
+        Fixture fixture(true, 0, budget, storage);
         auto& pools = *fixture.pools;
         std::vector<D::PooledLineEdit> edits;
         D::collective(*fixture.comm,
@@ -715,7 +731,10 @@ BorrowedRun fresh_borrowed_exchange(bool use_consumer, D::PooledNativeLineFault 
                     return;
                 for (unsigned query = 0; query <= 16; ++query)
                 {
-                    auto original = fixture.literal_member(query);
+                    auto original = fixture.literal_member(query, key_for(query));
+                    EXPECT_EQ(pools.supports.is_compact(original.support),
+                        framed && storage == D::IdentityPoolStorage::Persistent &&
+                            std::numeric_limits<std::size_t>::digits > 32 && query != 16);
                     // One long member appears between endpoint-only members in
                     // full support order. Integer points independently determine
                     // its 17 results and the two results of every other member.
@@ -742,7 +761,7 @@ BorrowedRun fresh_borrowed_exchange(bool use_consumer, D::PooledNativeLineFault 
             EXPECT_EQ(proof.kernel_witness_layer(), 0u);
             EXPECT_EQ(proof.point_pool_identity(), &pools.points);
             EXPECT_TRUE(std::ranges::equal(proof.line_key(), line_key()));
-            EXPECT_TRUE(std::ranges::equal(proof.support_key(), support_key(query)));
+            EXPECT_TRUE(std::ranges::equal(proof.support_key(), key_for(query)));
             const auto first = query == 8 ? 0 : query < 8 ? query : query - 1;
             const auto last = query == 8 ? 16 : query < 8 ? query + 1 : query;
             check_point(proof.endpoint(0), first);
@@ -842,9 +861,17 @@ TEST(CartesianCachedLineControls, AuthenticatedBorrowAvoidsReceiptsAndPreservesM
 {
     const auto normal = fresh_borrowed_exchange(false);
     const auto borrowed = fresh_borrowed_exchange(true);
+    const auto literal_frames = fresh_borrowed_exchange(true, {}, false, false, D::IdentityPoolStorage::Flat, true);
+    const auto compact = fresh_borrowed_exchange(true, {}, false, false, D::IdentityPoolStorage::Persistent, true);
     EXPECT_FALSE(normal.rejected);
     EXPECT_FALSE(borrowed.rejected);
+    EXPECT_FALSE(literal_frames.rejected);
+    EXPECT_FALSE(compact.rejected);
     EXPECT_EQ(normal.data, borrowed.data);
+    EXPECT_EQ(compact.data, literal_frames.data);
+    EXPECT_EQ(compact.attempted, literal_frames.attempted);
+    EXPECT_EQ(compact.sealed, literal_frames.sealed);
+    EXPECT_EQ(compact.consumed, literal_frames.consumed);
     EXPECT_EQ(borrowed.attempted, normal.sealed);
     if (Tpetra::getDefaultComm()->getRank() == 0)
     {

@@ -176,7 +176,7 @@ void fetch_dirty_support_groups(const PooledSupportRegistry& registry, const Own
                 while (next != dirty.end())
                 {
                     const auto slot = *next;
-                    const auto& support = registry.support_key(slot);
+                    const auto support = registry.support_key(slot);
                     const auto* members = registry.find(slot);
                     const auto count = members ? members->size() : 0;
                     std::size_t cost = sizeof(Group);
@@ -225,7 +225,7 @@ void fetch_dirty_support_groups(const PooledSupportRegistry& registry, const Own
                         Writer writer;
                         prepare(writer, packet_size, page_memory);
                         header(writer, context, page);
-                        writer.bytes(support);
+                        writer.bytes(support.bytes());
                         writer.bytes(key);
                         writer.word(member.revision);
                         writer.word(member.surface);
@@ -336,6 +336,7 @@ void fetch_dirty_support_groups(const PooledSupportRegistry& registry, const Own
                     IdentityBudget group_identities;
                     std::vector<RegistryMember> members;
                     std::vector<SupportOccurrence> occurrences;
+                    const auto support = registry.support_key(group.slot);
                     const auto* source = registry.find(group.slot);
                     if (group.count && (!source || source->size() != group.count))
                         throw std::invalid_argument("Support group changed during fetch.");
@@ -368,7 +369,7 @@ void fetch_dirty_support_groups(const PooledSupportRegistry& registry, const Own
                             throw std::invalid_argument("Support geometry decode lease exhausted.");
                         group_memory.add(cap);
                         auto occurrence = decode_support_surface(
-                            expected[group.first + i].payload, registry.support_key(group.slot), member.owner, cap);
+                            expected[group.first + i].payload, support.bytes(), member.owner, cap);
                         if (occurrence.cell != cell)
                             throw std::invalid_argument("Decoded support member changed.");
                         Budget measured{cap};
@@ -389,7 +390,7 @@ void fetch_dirty_support_groups(const PooledSupportRegistry& registry, const Own
                         group_memory.drop(cap - measured.used);
                         occurrences.push_back(std::move(occurrence));
                     }
-                    emit(registry.support_key(group.slot), members, occurrences);
+                    emit(support.bytes(), members, occurrences);
                 }
             });
         flush();

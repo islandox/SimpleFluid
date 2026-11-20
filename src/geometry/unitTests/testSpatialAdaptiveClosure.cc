@@ -381,7 +381,7 @@ TEST(SpatialAdaptiveClosure, CubicN16CanonicalCacheStorageObservation)
     check_slab(16, true);
 }
 
-TEST(SpatialAdaptiveClosure, CubicN32CanonicalCacheUnder96MiB)
+void check_canonical_n32(std::size_t byte_budget)
 {
     const auto comm = Tpetra::getDefaultComm();
     const int requested = std::getenv("SIMPLEFLUID_SPATIAL_CLOSURE_N32") != nullptr;
@@ -394,7 +394,17 @@ TEST(SpatialAdaptiveClosure, CubicN32CanonicalCacheUnder96MiB)
     if (comm->getSize() != 4)
         GTEST_SKIP() << "The original N32 storage oracle requires exactly four ranks.";
     // check_slab independently requires 1024, 2048, 2048, 1024 remote records.
-    check_slab(32, true, cap96);
+    check_slab(32, true, byte_budget);
+}
+
+TEST(SpatialAdaptiveClosure, CubicN32CanonicalCacheUnder96MiB)
+{
+    check_canonical_n32(cap96);
+}
+
+TEST(SpatialAdaptiveClosure, CubicN32CanonicalCacheUnder64MiB)
+{
+    check_canonical_n32(cap64);
 }
 
 TEST(SpatialAdaptiveClosure, IsolatedEdgeVertexAndTJunctionMatchIndependentMarksAndLegacy)

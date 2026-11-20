@@ -3,20 +3,22 @@
  */
 #pragma once
 #include "DistributedAdaptiveIncidence.hh"
+#include "IncidenceSupportKey.hh"
 #include "TileRecipeCodec.hh"
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 struct IncidenceDeliverySource
 {
-    std::span<const char> support, domain;
+    IncidenceSupportKey support;
+    std::span<const char> domain;
     std::span<const RegistryMember> members;
     std::span<const PrivateTileRecipe> recipes;
     std::uint64_t generation = 0;
 };
 struct IncidenceDeliveryExpected
 {
-    std::span<const char> support;
+    IncidenceSupportKey support;
     std::uint64_t minimum_generation = 0;
     std::span<const RegistryMember> local_members;
 };

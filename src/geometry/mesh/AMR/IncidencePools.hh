@@ -1,4 +1,5 @@
 #pragma once
+#include "CompactSupportDirectory.hh"
 #include "IdentityPool.hh"
 #include "IncidencePointDirectory.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveClosureRecords.hh"
@@ -43,7 +44,9 @@ struct IncidencePools
         }
     };
     IdentityPool<AdaptiveCellKey> cells;
-    IdentityPool<AdaptiveBytes> domains, supports, lines;
+    IdentityPool<AdaptiveBytes> domains;
+    CompactSupportDirectory supports;
+    IdentityPool<AdaptiveBytes> lines;
     IncidencePointDirectory<> points;
     IdentityPool<Plane> planes;
     IdentityPool<Normal> normals;
@@ -54,7 +57,7 @@ struct IncidencePools
     explicit IncidencePools(Budget& arena, IdentityBudget& ledger, std::shared_ptr<Budget> keeper = {},
         IdentityPoolStorage storage = IdentityPoolStorage::Flat)
         : cells(arena, keeper, {}, {}, storage), domains(arena, keeper, {}, {}, storage),
-          supports(arena, keeper, {}, {}, storage), lines(arena, keeper, {}, {}, storage),
+          supports(arena, keeper, storage), lines(arena, keeper, {}, {}, storage),
           points(arena, keeper, {}, {}, storage), planes(arena, keeper, {}, {}, storage),
           normals(arena, keeper, {}, {}, storage), images(arena, std::move(keeper), {}, {}, storage), budget(&arena),
           identities(&ledger)

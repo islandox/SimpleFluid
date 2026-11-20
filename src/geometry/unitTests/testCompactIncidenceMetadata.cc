@@ -4,6 +4,7 @@
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
+#include "geometry/mesh/AMR/CartesianSourceLineRanges.hh"
 #include "geometry/mesh/AMR/ContactPayloadCensus.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
 #include "geometry/mesh/AMR/IncidencePools.hh"
@@ -12,6 +13,7 @@
 #include "geometry/mesh/AMR/PooledTileCodec.hh"
 #include "geometry/mesh/AMR/SupportSurfaceCodec.hh"
 #include "geometry/mesh/AMR/TilePointContributions.hh"
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -118,6 +120,171 @@ std::vector<MemberValue> observe(const RegistryState& state)
 std::uint64_t generation(const RegistryState& state)
 {
     return state.registry.generation(*state.pools.supports.find(support));
+}
+
+// Independent literal of the Cartesian support wire grammar, including its framed binary domain.
+AMR::AdaptiveBytes support_packet(std::array<std::uint64_t, 5> fields,
+    const AMR::AdaptiveBytes& name = {'a', '\0', static_cast<char>(0x80)}, std::uint64_t region = 0x0102030405060708ULL)
+{
+    AMR::AdaptiveBytes result{'1', '6', 'T', 'R', 'A', 'C', 'F', 'S'};
+    const auto word = [&](std::uint64_t value)
+    {
+        for (unsigned shift = 0; shift < 64; shift += 8)
+            result.push_back(static_cast<char>((value >> shift) & 255));
+    };
+    word(name.size());
+    result.insert(result.end(), name.begin(), name.end());
+    word(region);
+    for (const auto value : fields)
+        word(value);
+    return result;
+}
+
+TEST(CompactIncidenceMetadata, CompactSupportDirectoryMatchesFullFramingMembershipAndOrder)
+{
+    auto arena = std::make_shared<D::Budget>(D::Budget{ample});
+    D::IdentityBudget identities;
+    D::IncidencePools pools(*arena, identities, arena, D::IdentityPoolStorage::Persistent);
+    auto& directory = pools.supports;
+    const auto first = support_packet({2, 3, 128, 255, 127});
+    const auto never_inserted = support_packet({2, 3, 129, 255, 127});
+    auto wrong_magic = first;
+    wrong_magic.front() = '0';
+    auto wrong_length = first;
+    wrong_length[8] = 2;
+    auto trailing = first;
+    trailing.push_back('!');
+    const std::vector<std::pair<AMR::AdaptiveBytes, bool>> cases{{{'x'}, false}, {first, true},
+        {support_packet({2, 3, 127, 255, 127}), true}, {support_packet({2, 3, 255, 255, 127}), true},
+        {support_packet({2, 3, 256, 255, 127}), false}, {support_packet({2, 3, 128, 256, 127}), false},
+        {support_packet({2, 3, 128, 255, 256}), false}, {support_packet({0, 0, 0, 0, 0}), true},
+        {support_packet({2, 31, 255, 255, 255}), true}, {support_packet({3, 3, 128, 255, 127}), false},
+        {support_packet({2, 32, 128, 255, 127}), false},
+        {support_packet({2, 3, 128, 255, 127}, {'a', '\0', static_cast<char>(0x81)}), false},
+        {support_packet({2, 3, 128, 255, 127}, {'a', '\0', static_cast<char>(0x80)}, 17), false}, {wrong_magic, false},
+        {wrong_length, false}, {trailing, false}};
+    std::vector<std::size_t> slots;
+    for (const auto& [wire, compact] : cases)
+    {
+        ASSERT_FALSE(directory.find(wire));
+        const auto slot = slots.size() % 2 == 0 ? directory.intern(wire) : directory.intern_bytes(wire);
+        EXPECT_EQ(directory.is_compact(slot), compact && std::numeric_limits<std::size_t>::digits > 32);
+        EXPECT_EQ(directory.find(wire), slot);
+        EXPECT_EQ(directory.find_bytes(std::span<const char>(wire)), slot);
+        EXPECT_EQ(directory.intern(AMR::AdaptiveBytes(wire)), slot);
+        const auto replay = directory.get(slot);
+        EXPECT_TRUE(std::ranges::equal(replay, wire));
+        EXPECT_EQ(std::find(slots.begin(), slots.end(), slot), slots.end());
+        slots.push_back(slot);
+    }
+    const auto before_used = arena->used, before_cumulative = arena->cumulative;
+    EXPECT_EQ(directory.size(), cases.size());
+    EXPECT_EQ(directory.intern_bytes(cases.front().first), slots.front());
+    EXPECT_EQ(directory.intern_bytes(first), slots[1]);
+    EXPECT_FALSE(directory.find(never_inserted));
+    // Borrow a real range-protocol view and replace only its plane word. This
+    // distinguishes a decodable coordinate from an actually interned support.
+    constexpr std::size_t plane_offset = 2 * 8 + 3 + 3 * 8;
+    EXPECT_EQ(directory.find_borrowed(D::CartesianSupportRangeKeyView{first, plane_offset, 127}), slots[2]);
+    EXPECT_FALSE(directory.find_borrowed(D::CartesianSupportRangeKeyView{first, plane_offset, 129}));
+    for (std::size_t i = 0; i < slots.size(); ++i)
+        for (std::size_t j = 0; j < slots.size(); ++j)
+        {
+            const auto a = directory.get(slots[i]), b = directory.get(slots[j]);
+            EXPECT_EQ(a == b, cases[i].first == cases[j].first);
+            EXPECT_EQ(a < b, cases[i].first < cases[j].first);
+        }
+    EXPECT_EQ(arena->used, before_used);
+    EXPECT_EQ(arena->cumulative, before_cumulative);
+}
+
+TEST(CompactIncidenceMetadata, CompactSupportDirectoryForkPreservesSlotsAndRejectsOneByteShort)
+{
+    auto source_arena = std::make_shared<D::Budget>(D::Budget{ample});
+    D::IdentityBudget original_ids;
+    auto source = std::make_unique<D::IncidencePools>(
+        *source_arena, original_ids, source_arena, D::IdentityPoolStorage::Persistent);
+    const auto old = support_packet({0, 1, 3, 4, 5});
+    const auto changed = support_packet({2, 31, 255, 250, 240});
+    const AMR::AdaptiveBytes literal{'f', 'o', 'r', 'k'};
+    const auto old_slot = source->supports.intern(old);
+    const auto literal_slot = source->supports.intern(literal);
+    if constexpr (std::numeric_limits<std::size_t>::digits <= 32)
+    {
+        EXPECT_FALSE(source->supports.is_compact(old_slot));
+        EXPECT_EQ(source->supports.find(old), old_slot);
+        return;
+    }
+    ASSERT_TRUE(source->supports.is_compact(old_slot));
+    const auto escaped = source->supports.get(old_slot);
+
+    const auto edit_candidate = [&](std::size_t cap, bool reject)
+    {
+        auto candidate_arena = std::make_shared<D::Budget>(D::Budget{cap});
+        D::IdentityBudget candidate_ids;
+        {
+            D::IncidencePools candidate(*source, *candidate_arena, candidate_ids, candidate_arena);
+            EXPECT_EQ(candidate.supports.find(literal), literal_slot);
+            EXPECT_EQ(candidate.supports.find(old), old_slot);
+            EXPECT_FALSE(candidate.supports.find(changed));
+            const auto used = candidate_arena->used, spent = candidate_arena->cumulative;
+            if (reject)
+            {
+                EXPECT_THROW((void) candidate.supports.intern(changed), std::invalid_argument);
+                EXPECT_FALSE(candidate.supports.find(changed));
+                EXPECT_EQ(candidate.supports.find(old), old_slot);
+                EXPECT_EQ(candidate_arena->used, used);
+                EXPECT_GE(candidate_arena->cumulative, spent);
+            }
+            else
+            {
+                const auto changed_slot = candidate.supports.intern(changed);
+                EXPECT_TRUE(candidate.supports.is_compact(changed_slot));
+                EXPECT_EQ(candidate.supports.find(changed), changed_slot);
+                EXPECT_TRUE(std::ranges::equal(candidate.supports.get(changed_slot), changed));
+                EXPECT_FALSE(source->supports.find(changed));
+                const auto overlap = candidate.supports.overlap_bytes();
+                const auto live = candidate_arena->used, cumulative = candidate_arena->cumulative;
+                EXPECT_GT(overlap, 0u);
+                candidate.finish_overlap();
+                EXPECT_EQ(candidate_arena->used + overlap, live);
+                EXPECT_EQ(candidate_arena->cumulative, cumulative);
+                EXPECT_EQ(candidate.supports.find(old), old_slot);
+            }
+        }
+        EXPECT_EQ(candidate_arena->used, 0u);
+        return candidate_arena->peak;
+    };
+    const auto peak = edit_candidate(ample, false);
+    ASSERT_GT(peak, 0u);
+    (void) edit_candidate(peak - 1, true);
+    EXPECT_EQ(source->supports.find(old), old_slot);
+    EXPECT_EQ(source->supports.find(literal), literal_slot);
+    EXPECT_FALSE(source->supports.find(changed));
+    EXPECT_EQ(edit_candidate(peak, false), peak);
+    auto survivor_arena = std::make_shared<D::Budget>(D::Budget{ample});
+    D::IdentityBudget survivor_ids;
+    {
+        D::IncidencePools survivor(*source, *survivor_arena, survivor_ids, survivor_arena);
+        source.reset();
+        survivor.finish_overlap();
+        EXPECT_EQ(survivor.supports.find(old), old_slot);
+        EXPECT_EQ(survivor.supports.find(literal), literal_slot);
+        EXPECT_TRUE(std::ranges::equal(survivor.supports.get(literal_slot), literal));
+        EXPECT_FALSE(survivor.supports.find(changed));
+    }
+    EXPECT_EQ(survivor_arena->used, 0u);
+    EXPECT_EQ(source_arena->used, 0u);
+    source_arena.reset();
+    EXPECT_TRUE(std::ranges::equal(escaped, old));
+
+    auto fresh_arena = std::make_shared<D::Budget>(D::Budget{ample});
+    D::IdentityBudget fresh_ids;
+    D::IncidencePools fresh(*fresh_arena, fresh_ids, fresh_arena, D::IdentityPoolStorage::Persistent);
+    EXPECT_FALSE(fresh.supports.find_bytes(escaped.bytes()));
+    const auto fresh_slot = fresh.supports.intern(AMR::AdaptiveBytes(escaped.begin(), escaped.end()));
+    EXPECT_EQ(fresh.supports.find_bytes(escaped.bytes()), fresh_slot);
+    EXPECT_TRUE(std::ranges::equal(fresh.supports.get(fresh_slot), old));
 }
 
 TEST(CompactIncidenceMetadata, SupportMembershipKeepsLiteralOrderAndGenerationAcrossInlineAndSpill)

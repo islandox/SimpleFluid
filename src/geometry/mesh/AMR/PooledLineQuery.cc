@@ -12,8 +12,8 @@ bool line_subscriber_before(const PooledLineSubscriber& a, const PooledLineSubsc
         return a.resident < b.resident;
     if (a.support_authority != b.support_authority)
         return a.support_authority < b.support_authority;
-    const auto& as = pools.supports.get(a.support);
-    const auto& bs = pools.supports.get(b.support);
+    const auto as = pools.supports.get(a.support);
+    const auto bs = pools.supports.get(b.support);
     if (as != bs)
         return as < bs;
     return std::tie(a.emission, a.image, a.edge) < std::tie(b.emission, b.image, b.edge);

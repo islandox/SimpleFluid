@@ -89,9 +89,9 @@ std::optional<ParsedSupport> parse_support(std::span<const char> key, const Cart
         return {};
     return ParsedSupport{reader.offset, normal, level};
 }
-std::uint64_t word(std::span<const char> bytes, std::size_t offset)
+std::uint64_t word(const IncidenceSupportKey& key, std::size_t offset)
 {
-    Reader reader{bytes, offset};
+    Reader reader{key.bytes(), offset};
     return reader.word();
 }
 bool key_equal(const CartesianSupportRangeKeyView& a, const CartesianSupportRangeKeyView& b)
@@ -692,7 +692,8 @@ std::shared_ptr<const CartesianSourceLineRangeRecipe> CartesianSourceLineRangeBu
     {
         if (!value.native_source || !value.source_generation || !value.has_result())
             return {};
-        const auto support = parse_support(pools.supports.get(value.support), *c.manifests);
+        const auto support_key = pools.supports.get(value.support);
+        const auto support = parse_support(support_key.bytes(), *c.manifests);
         const auto first = c.points->component_indices({value.first}), last = c.points->component_indices({value.last});
         if (!support || !first || !last || !c.points->find_components(*first) || !c.points->find_components(*last))
             return {};
@@ -731,7 +732,7 @@ std::shared_ptr<const CartesianSourceLineRangeRecipe> CartesianSourceLineRangeBu
     {
         if (consumed[begin])
             continue;
-        const auto& prototype = pools.supports.get(values[begin].support);
+        const auto prototype = pools.supports.get(values[begin].support);
         std::size_t best_field = 0;
         best.clear();
         // Exhaust every original integer key field. Both endpoint orientations
@@ -746,7 +747,7 @@ std::shared_ptr<const CartesianSourceLineRangeRecipe> CartesianSourceLineRangeBu
                     values[begin].result_state != values[i].result_state ||
                     values[begin].result_size() != values[i].result_size())
                     continue;
-                const auto& key = pools.supports.get(values[i].support);
+                const auto key = pools.supports.get(values[i].support);
                 if (key.size() != prototype.size())
                     continue;
                 bool same = true;

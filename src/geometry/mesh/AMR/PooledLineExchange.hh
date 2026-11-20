@@ -98,6 +98,7 @@ private:
     ContactHaloContext context_;
     unsigned layer_;
     const IncidencePools& pools_;
+    IncidenceSupportKey support_;
     friend void exchange_pooled_line_edits(PooledLineRegistry&, IncidencePools&, const NextPooledLineEdit&, unsigned,
         ContactHaloContext, Teuchos::RCP<const Teuchos::Comm<int>>, Budget&, std::size_t, const PooledLineReply&,
         const PooledLineBeforeSend&, bool, PooledNativeLineFault, const PooledLineDataObserve&,

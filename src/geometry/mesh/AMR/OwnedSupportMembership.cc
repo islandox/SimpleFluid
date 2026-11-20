@@ -756,6 +756,7 @@ void OwnedSupportMembership::visit_support_members(
         // The source visitor already filters the complete key. Its callback
         // must not escape a borrowed occurrence or normalize its geometry.
         CachedEnvironment environment(captured);
+        const auto support_key = pools_->supports.get(support);
         source->visit_surfaces(
             *budget_,
             [&](const auto& occurrence)
@@ -767,7 +768,7 @@ void OwnedSupportMembership::visit_support_members(
                 const Member member{support, occurrence.packet.size()};
                 environment.in_caller([&] { emit(*cell, occurrence.revision, occurrence.ordinal, member); });
             },
-            pools_->supports.get(support));
+            support_key.bytes());
     };
     if (inventory_)
         for (const auto& batch : inventory_->batches())
@@ -867,21 +868,24 @@ OwnedSupportMembership::Slot OwnedSupportMembership::require(const AdaptiveCellK
 }
 RegistryChange OwnedSupportMembership::change(Slot slot, std::size_t index, int rank, bool remove) const
 {
+    const auto change = [&](const Member& member, std::uint64_t revision)
+    {
+        const auto support = pools_->supports.get(member.support);
+        // The exchange cursor has already admitted maximum_change_capacity().
+        return RegistryChange{AdaptiveBytes(support.begin(), support.end()),
+            {pools_->cells.get(slot), revision, index, member.encoded_size, rank}, remove};
+    };
     if (!find_explicit(slot))
     {
         const auto members = generated_members(slot);
         if (index >= members.size())
             throw std::invalid_argument("Invalid procedural owner-local surface ordinal.");
-        const auto& member = members[index];
-        return {pools_->supports.get(member.support),
-            {pools_->cells.get(slot), leaf_revision(slot), index, member.encoded_size, rank}, remove};
+        return change(members[index], leaf_revision(slot));
     }
     const auto& cell = at(slot);
     if (index >= cell.members.size())
         throw std::invalid_argument("Invalid owner-local surface ordinal.");
-    const auto& member = cell.members[index];
-    return {pools_->supports.get(member.support),
-        {pools_->cells.get(slot), cell.revision, index, member.encoded_size, rank}, remove};
+    return change(cell.members[index], cell.revision);
 }
 const OwnedSupportMembership::SupportCells* OwnedSupportMembership::support_cells(Slot support) const
 {

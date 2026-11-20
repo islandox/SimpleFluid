@@ -8,6 +8,7 @@
 #include "geometry/PLIC/details/GeometryOwnerGraph.hh"
 #include "CartesianIncidenceSource.hh"
 #include "ContactHaloContext.hh"
+#include "IncidenceSupportKey.hh"
 #include "DistributedAdaptiveTypes.hh"
 #include <cstddef>
 #include <functional>
@@ -123,7 +124,7 @@ public:
     [[nodiscard]] CanonicalSubfaceIncident first() const;
     [[nodiscard]] std::optional<CanonicalSubfaceIncident> second() const;
     [[nodiscard]] int outward_sign() const noexcept { return side_ ? -1 : 1; }
-    [[nodiscard]] std::span<const char> support() const;
+    [[nodiscard]] IncidenceSupportKey support() const;
     [[nodiscard]] std::size_t identity_size() const;
     /** Append the immutable authority key to a buffer with sufficient admitted capacity. */
     void append_identity(AdaptiveBytes&) const;

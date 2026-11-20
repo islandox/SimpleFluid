@@ -124,7 +124,8 @@ auto canonical_subface_output(const AdaptiveSubfaceSnapshot& snapshot)
             std::optional<Incident> second;
             if (const auto value = view.second())
                 second = incident(*value);
-            const auto support = view.support(), domain = view.domain();
+            const auto support = view.support();
+            const auto domain = view.domain();
             std::vector<AdaptiveBytes> loop;
             for (std::size_t i = 0; i < view.point_count(); ++i)
                 loop.push_back(PLIC::canonical_key(view.point(i)));

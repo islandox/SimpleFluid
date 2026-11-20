@@ -188,6 +188,7 @@ struct SubfaceProvenancePage
     PageCharge charge;
     std::shared_ptr<CellView> keys;
     std::shared_ptr<BytesView> supports, domains;
+    std::optional<CompactSupportDirectory::Frame> support_frame;
     std::vector<AdaptiveCellKey> foreign_keys;
     std::vector<Member> members;
     std::vector<Group> groups;
@@ -196,8 +197,7 @@ struct SubfaceProvenancePage
     std::vector<IncidencePools::Image> shifts;
 
     SubfaceProvenancePage(IncidencePools& pools, std::shared_ptr<Budget> arena)
-        : charge(std::move(arena)), keys(pools.cells.page_view()), supports(pools.supports.page_view()),
-          domains(pools.domains.page_view())
+        : charge(std::move(arena)), keys(pools.cells.page_view()), domains(pools.domains.page_view())
     {
     }
     [[nodiscard]] std::size_t charged_bytes() const { return checked_sum(charge.bytes, control_bytes); }
@@ -218,16 +218,41 @@ struct SubfaceProvenancePage
     {
         return member.copied ? foreign_keys.at(member.key) : keys->get({member.key});
     }
+    static constexpr std::uint64_t compact_support_ref = std::uint64_t{1} << 63;
+    // Literal references are page-local. A packed reference instead addresses
+    // the page's immutable copy of the authenticated key frame.
+    std::uint64_t capture_support(CompactSupportDirectory& directory, std::size_t slot)
+    {
+        if (directory.is_compact(slot))
+        {
+            if (!support_frame)
+                support_frame = directory.frame();
+            return compact_support_ref | slot;
+        }
+        if (!supports)
+            supports = directory.literal_page_view();
+        const auto ref = supports->capture(directory.literal_pool(), directory.literal_slot(slot)).value;
+        if (ref >= compact_support_ref)
+            throw std::logic_error("Captured subface page exceeds its local support reference range.");
+        return ref;
+    }
+    [[nodiscard]] IncidenceSupportKey support_key(std::uint64_t ref) const
+    {
+        if (ref & compact_support_ref)
+            return support_frame.value().expand(ref ^ compact_support_ref);
+        return IncidenceSupportKey(std::span<const char>(supports->get({ref})));
+    }
     void freeze()
     {
         keys->freeze();
-        supports->freeze();
+        if (supports)
+            supports->freeze();
         domains->freeze();
     }
     [[nodiscard]] std::size_t exclusive_bytes() const
     {
         return checked_sum(charged_bytes(),
-            checked_sum(keys->metadata_bytes(), checked_sum(supports->metadata_bytes(), domains->metadata_bytes())));
+            checked_sum(keys->metadata_bytes(), checked_sum(supports ? supports->metadata_bytes() : 0, domains->metadata_bytes())));
     }
     void observe_shared_owners(IncidencePhysicalOwners& owners) const
     {
@@ -258,7 +283,8 @@ struct SubfaceProvenancePage
         for (const auto& boundary : boundaries)
             contact_payload_buffer(visit, this, ContactPayloadRole::SubfaceBoundaryBytes, boundary);
         keys->visit_borrowed_payload(visit);
-        supports->visit_borrowed_payload(visit);
+        if (supports)
+            supports->visit_borrowed_payload(visit);
         domains->visit_borrowed_payload(visit);
     }
 };
@@ -378,7 +404,7 @@ SubfaceProvenanceRef SubfaceProvenanceBuilder::append(const ReceivedTileRecipe& 
     if (!support || !domain)
         throw std::invalid_argument("Subface group is missing its pooled support or domain.");
     const auto group =
-        intern(page.groups, Group{page.supports->capture(state.pools.supports, *support).value,
+        intern(page.groups, Group{page.capture_support(state.pools.supports, *support),
                                 page.domains->capture(state.pools.domains, *domain).value, generation, boundary});
     // Capture the authority's physical key while the validated intrinsic face is available.
     PageCharge identity_scratch(state.charge.arena);
@@ -895,10 +921,10 @@ void CanonicalSubfaceView::append_identity(AdaptiveBytes& destination) const
             return true;
         });
 }
-std::span<const char> CanonicalSubfaceView::support() const
+IncidenceSupportKey CanonicalSubfaceView::support() const
 {
     const auto& record = piece(page_, slot_);
-    return record.provenance.page->supports->get({group(record).support});
+    return record.provenance.page->support_key(group(record).support);
 }
 std::span<const char> CanonicalSubfaceView::domain() const
 {
@@ -1146,10 +1172,10 @@ struct FaceRow
     }
     [[nodiscard]] const AdaptiveCellKey& key() const { return piece_record().provenance.page->key(member()); }
     [[nodiscard]] std::uint64_t surface() const { return member().surface; }
-    [[nodiscard]] std::span<const char> support() const
+    [[nodiscard]] IncidenceSupportKey support() const
     {
         const auto& record = piece_record();
-        return record.provenance.page->supports->get({group(record).support});
+        return record.provenance.page->support_key(group(record).support);
     }
     [[nodiscard]] std::uint64_t emission() const { return provenance(piece_record()).emission; }
 };

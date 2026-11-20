@@ -1,4 +1,5 @@
 #pragma once
+#include "CompactSupportDirectory.hh"
 #include "ContactGroupAllocation.hh"
 #include "ContactPayloadCensus.hh"
 #include "DeferredOwnerCharges.hh"
@@ -27,7 +28,7 @@ struct PooledSupportMember
 class PooledSupportRegistry
 {
 public:
-    using BytesPool = IdentityPool<AdaptiveBytes>;
+    using BytesPool = CompactSupportDirectory;
     using CellPool = IdentityPool<AdaptiveCellKey>;
     using Slot = std::size_t;
     using Members = SmallMembership<PooledSupportMember>;
@@ -42,7 +43,7 @@ public:
      * has independent shared ownership. */
     [[nodiscard]] const Members* find(Slot support) const;
     [[nodiscard]] std::vector<Slot> dirty() const;
-    [[nodiscard]] const AdaptiveBytes& support_key(Slot slot) const { return supports_->get(slot); }
+    [[nodiscard]] IncidenceSupportKey support_key(Slot slot) const { return supports_->get(slot); }
     [[nodiscard]] std::uint64_t generation(Slot support) const;
     [[nodiscard]] RegistryMember materialize(const PooledSupportMember&) const;
     [[nodiscard]] const AdaptiveCellKey& member_cell(const PooledSupportMember& member) const

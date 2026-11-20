@@ -360,6 +360,15 @@ if(TEST SpatialAdaptiveCanonicalN32_4procs)
     ENVIRONMENT "SIMPLEFLUID_SPATIAL_CLOSURE_N32=1;OMP_NUM_THREADS=1")
 endif()
 
+simplefluid_add_mpi_test(NAME SpatialAdaptiveCanonicalN32Strict64MiB_4procs
+  TARGET testSpatialAdaptiveClosure PROCS 4
+  ARGS "--gtest_filter=SpatialAdaptiveClosure.CubicN32CanonicalCacheUnder64MiB"
+  LABELS "mpi;amr;closure;spatial;resource" TIMEOUT 1800)
+if(TEST SpatialAdaptiveCanonicalN32Strict64MiB_4procs)
+  set_tests_properties(SpatialAdaptiveCanonicalN32Strict64MiB_4procs PROPERTIES
+    ENVIRONMENT "SIMPLEFLUID_SPATIAL_CLOSURE_N32=1;OMP_NUM_THREADS=1")
+endif()
+
 # Sparse owner authority and complete support partition regressions. The
 # support geometry fixture is rank-local; the owner fixture uses collectives.
 foreach(_incremental_ranks IN ITEMS 2 4)

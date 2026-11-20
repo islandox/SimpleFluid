@@ -1062,7 +1062,8 @@ std::shared_ptr<const CartesianSourceManifestSet> CartesianSourceManifestSet::ex
                             writer.word(cell.members.size());
                             for (const auto& member : cell.members)
                             {
-                                writer.bytes(admission.owned_->pools_->supports.get(member.support));
+                                const auto support = admission.owned_->pools_->supports.get(member.support);
+                                writer.bytes(support.bytes());
                                 writer.word(member.encoded_size);
                             }
                         });
