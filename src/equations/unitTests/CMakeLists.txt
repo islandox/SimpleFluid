@@ -120,6 +120,13 @@ simplefluid_add_mpi_test(
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(
+    NAME AssembledPressureProjection_2procs
+    TARGET testAssembledPressureProjection
+    PROCS 2
+    LABELS "mpi;pressure_projection"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
     NAME SolidHeatConduction_2procs
     TARGET testSolidHeatConductionMultiRank
     PROCS 2

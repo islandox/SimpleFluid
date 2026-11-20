@@ -51,6 +51,48 @@ through the solver API. See [solver phase timings](solver_timings.md) for
   See [the coupling design](architecture/multiphysics_solver_coupler.md) for
   field ownership and the compatibility API.
 
+## Corrected pressure projection
+
+`PressureProjectionMethod::Anderson` is the default. `FullOperator` applies
+the corrected operator `A-C` inside Krylov using a compact pressure matrix
+and a reconstructed face-flux correction. `AssembledFullOperator` instead
+stores that same operator as a distributed sparse matrix. The assembled mode
+requires least-squares pressure gradients and a nonsymmetric Krylov solver
+(GMRES or BiCGStab). Both corrected methods solve with `dt*(A-C)` and
+independently recompute the corrected residual before accepting pressure.
+Both methods skip Krylov when the integral RHS norm meets either the
+predictor-scaled tolerance or the absolute roundoff floor. The assembled method
+then also skips building `A-C`. The final check uses the same thresholds and
+reports the actual residual, even for a zero correction.
+Assembled ILUT factors the unscaled `A-C`. Reassembling its coefficients
+invalidates those factors even when the graph is unchanged. Other matrix-based
+preconditioners use unscaled compact `A`, as does ILUT with matrix-free
+`FullOperator`.
+
+With `AssembledFullOperator`, `MueLuSymmetric` uses compact `A` directly for
+Dirichlet pressure correction. For a zero-pressure gauge it uses a separate
+copy of the compact coefficients on the same graph and maps. The copy keeps
+the identity gauge row and zeros the off-diagonal gauge column entries,
+including on remote ranks, while preserving neighboring diagonals. The
+assembled solve and compact residual still use the original coefficients.
+Changes to compact coefficients or its graph invalidate the copy. RHS-only
+changes can reuse preconditioner setup when enabled.
+
+Assembly factors the operator into reconstruction and flux balance. The first
+factor maps each scalar pressure to itself and the three components of its
+homogeneous-increment gradient. The second combines the compact pressure row
+with the signed, owner-published face corrections. Sparse multiplication imports
+remote reconstruction rows, including pressure columns beyond the immediate
+cell halo. The pressure gauge row receives no nonorthogonal correction.
+
+Adjacent PISO corrections on the same trial geometry share the matrix: changes
+to the predictor, target or prescribed flux value update the RHS, not its graph.
+Motion and rollback rebuild the two temporary factors and refresh values in
+the final product graph. The equation retains the reconstruction map and
+face-import plan for its mesh and partition; a changed fixed-flux boundary
+mask can require a new product graph. The assembled stencil is wider than the compact stencil,
+so compare setup plus all solves on a geometry, not just time per matrix apply.
+
 ## Maintenance
 
 When a solver changes ordering, loop bounds, acceptance gates, field

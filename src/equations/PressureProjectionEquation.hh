@@ -43,7 +43,8 @@ template<TpetraTypePack Pack> class SIMPLEFLUID_SOLVERS_EXPORT FluidSolver;
 enum class PressureProjectionMethod
 {
     Anderson,
-    FullOperator
+    FullOperator,
+    AssembledFullOperator
 };
 
 namespace detail
@@ -124,7 +125,7 @@ public:
 
     void rebuild_matrix() const;
 
-    /** Refresh geometry; retain compatible graphs and exactly unchanged numeric setup. */
+    /** Refresh geometry, retaining compatible graphs; assembled ILUT is refactored on reassembly. */
     void refresh_geometry();
 
     /**
@@ -245,6 +246,15 @@ private:
     mutable face_flux_workspace_type d_face_flux_workspace;
     FVM::CellFluxBalanceCache<Pack, mesh_type> d_flux_balance_cache;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_pressure_matrix;
+    mutable Teuchos::RCP<typename Pack::matrix_type> d_symmetric_preconditioning_matrix;
+    Teuchos::RCP<typename Pack::matrix_type> d_assembled_matrix;
+    Teuchos::RCP<const map_type> d_pressure_channel_map;
+    Teuchos::RCP<const typename Pack::import_type> d_pressure_face_import;
+    std::size_t d_assembled_value_builds = 0;
+    std::size_t d_assembled_graph_builds = 0;
+    bool d_assembled_physical_gradient = false;
+    mutable bool d_assembled_values_stale = true;
+    mutable bool d_assembled_graph_stale = true;
     mutable Teuchos::RCP<typename Pack::vector_type> d_cached_rhs;
     Teuchos::RCP<typename Pack::vector_type> d_non_orthogonal_base_rhs;
     Teuchos::RCP<typename Pack::vector_type> d_non_orthogonal_residual;

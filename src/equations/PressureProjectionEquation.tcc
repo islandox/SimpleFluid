@@ -13,8 +13,11 @@
 #include "PressureProjectionEquation.hh"
 #include "PressureProjectionOperator.hh"
 #include "solvers/ScaledLinearOperator.hh"
+#include "AssembledPressureOperator.hh"
+#include "equations/CollectiveValidation.hh"
 #include "utils/CompensatedSum.hh"
 
+#include <Kokkos_Core.hpp>
 #include <Teuchos_CommHelpers.hpp>
 
 #include <array>
@@ -25,6 +28,51 @@
 
 namespace SimpleFluid
 {
+
+namespace
+{
+
+/** Apply symmetric elimination to a compact matrix whose gauge row is already identity. */
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+Teuchos::RCP<typename Pack::matrix_type> eliminate_pressure_gauge_column(const MeshType& mesh,
+    const Teuchos::RCP<typename Pack::matrix_type>& compact, typename Pack::global_ordinal_type gauge_gid,
+    bool copy_values)
+{
+    const auto row_map = compact->getRowMap();
+    const auto column_map = compact->getColMap();
+    const auto graph = compact->getCrsGraph();
+    auto matrix = compact;
+    collective_detail::collective_local_validation(mesh, "Pressure gauge elimination", [&]
+    {
+        if (copy_values)
+        {
+            matrix = Teuchos::rcp(new typename Pack::matrix_type(graph));
+            Kokkos::deep_copy(matrix->getLocalValuesHost(Tpetra::Access::OverwriteAll),
+                compact->getLocalValuesHost(Tpetra::Access::ReadOnly));
+        }
+        // The column map includes remote gauge neighbors. Zero only their
+        // couplings to the gauge, preserving the positive neighbor diagonals.
+        if (column_map->isNodeGlobalElement(gauge_gid))
+        {
+            const auto gauge_column = column_map->getLocalElement(gauge_gid);
+            const auto gauge_row = row_map->getLocalElement(gauge_gid);
+            const auto local_graph = graph->getLocalGraphHost();
+            const auto values = matrix->getLocalValuesHost(Tpetra::Access::ReadWrite);
+            for (size_t row = 0; row < row_map->getLocalNumElements(); ++row)
+            {
+                if (static_cast<typename Pack::local_ordinal_type>(row) == gauge_row) continue;
+                for (size_t entry = local_graph.row_map(row); entry < local_graph.row_map(row + 1); ++entry)
+                {
+                    if (local_graph.entries(entry) == gauge_column) values(entry) = typename Pack::scalar_type{};
+                }
+            }
+        }
+    });
+    if (copy_values) matrix->fillComplete(compact->getDomainMap(), compact->getRangeMap());
+    return matrix;
+}
+
+} // namespace
 
 /**
  * @brief Construct a PressureProjectionEquation on the given mesh.
@@ -61,7 +109,7 @@ PressureProjectionEquation<Pack, MeshType>::PressureProjectionEquation(SP<const 
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PressureProjectionEquation<Pack, MeshType>::set_linear_solver_options(LinearSolverOptions options)
 {
-    if (d_projection_method == PressureProjectionMethod::FullOperator && options.backend == LinearSolverBackend::Cg)
+    if (d_projection_method != PressureProjectionMethod::Anderson && options.backend == LinearSolverBackend::Cg)
         throw std::invalid_argument("FullOperator pressure projection requires a nonsymmetric Krylov backend.");
     if ((options.backend == LinearSolverBackend::Cg) != (d_linear_options.backend == LinearSolverBackend::Cg))
     {
@@ -88,9 +136,13 @@ void PressureProjectionEquation<Pack, MeshType>::validate_projection_policy(
     try
     {
         BelosLinearSolver<Pack>::validate_options(options);
-        if (method != PressureProjectionMethod::Anderson && method != PressureProjectionMethod::FullOperator)
+        if (method != PressureProjectionMethod::Anderson && method != PressureProjectionMethod::FullOperator &&
+            method != PressureProjectionMethod::AssembledFullOperator)
             throw std::invalid_argument("Unknown PressureProjectionMethod value.");
-        if (method == PressureProjectionMethod::FullOperator && options.backend == LinearSolverBackend::Cg)
+        if (method == PressureProjectionMethod::AssembledFullOperator &&
+            d_gradient_scheme != FVM::CellGradientScheme::LeastSquares)
+            throw std::invalid_argument("AssembledFullOperator requires the least-squares pressure gradient.");
+        if (method != PressureProjectionMethod::Anderson && options.backend == LinearSolverBackend::Cg)
             throw std::invalid_argument("FullOperator pressure projection requires a nonsymmetric Krylov backend.");
     }
     catch (...) { failure = std::current_exception(); }
@@ -122,6 +174,13 @@ void PressureProjectionEquation<Pack, MeshType>::set_projection_method(PressureP
 {
     validate_projection_policy(method, d_linear_options);
     d_projection_method = method;
+    if (method != PressureProjectionMethod::AssembledFullOperator)
+    {
+        d_symmetric_preconditioning_matrix = Teuchos::null;
+        d_assembled_matrix = Teuchos::null;
+        d_pressure_channel_map = Teuchos::null;
+        d_pressure_face_import = Teuchos::null;
+    }
 }
 
 /** @brief Refresh geometry-dependent state after a fixed-topology motion. */
@@ -407,6 +466,9 @@ void PressureProjectionEquation<Pack, MeshType>::rebuild_matrix() const
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PressureProjectionEquation<Pack, MeshType>::update_matrix(bool allow_graph_reuse) const
 {
+    d_assembled_values_stale = true;
+    if (!allow_graph_reuse || d_matrix_fixed_boundary_flux_names != d_fixed_boundary_flux_names)
+        d_assembled_graph_stale = true;
     const auto owned_map = require_owned_cell_map(d_mesh);
     int local_has_dirichlet = 0;
     for (const auto& [batch_id, boundary_batch] : d_mesh->boundary_batches())
@@ -448,39 +510,25 @@ void PressureProjectionEquation<Pack, MeshType>::update_matrix(bool allow_graph_
                 boundary_condition, d_linear_options.backend == LinearSolverBackend::Cg,
                 *d_cached_pressure_matrix, values_changed))
         {
-            if (values_changed) d_linear_solver.notify_operator_values_changed();
+            if (values_changed)
+            {
+                d_symmetric_preconditioning_matrix = Teuchos::null;
+                d_linear_solver.notify_operator_values_changed();
+            }
             d_matrix_values_stale = false;
             d_matrix_fixed_boundary_flux_names = d_fixed_boundary_flux_names;
             return;
         }
     }
-    d_cached_pressure_matrix = FVM::pressure_poisson_matrix<Pack>(*d_mesh, d_pressure_gauge_gid, boundary_condition);
+    auto matrix = FVM::pressure_poisson_matrix<Pack>(*d_mesh, d_pressure_gauge_gid, boundary_condition);
     if (d_linear_options.backend == LinearSolverBackend::Cg && d_pressure_gauge_gid)
     {
-        // The integrated face-diffusion coefficients form a symmetric,
-        // positive semidefinite operator even on nonuniform cells. The legacy
-        // row-only gauge breaks symmetry. Eliminating its column too retains
-        // the positive neighbor diagonals and yields the SPD gauge-reduced
-        // system. The prescribed gauge and its RHS are zero, so no RHS shift
-        // is necessary. Use the column map so remote gauge neighbors are also
-        // handled on distributed meshes.
-        const auto column_map = d_cached_pressure_matrix->getColMap();
-        d_cached_pressure_matrix->resumeFill();
-        if (column_map->isNodeGlobalElement(*d_pressure_gauge_gid))
-        {
-            const auto gauge_column = column_map->getLocalElement(*d_pressure_gauge_gid);
-            const scalar_type zero{};
-            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-            {
-                const auto row = static_cast<local_ordinal_type>(owned);
-                if (owned_map->getGlobalElement(row) != *d_pressure_gauge_gid)
-                {
-                    d_cached_pressure_matrix->replaceLocalValues(row, 1, &zero, &gauge_column);
-                }
-            }
-        }
-        d_cached_pressure_matrix->fillComplete();
+        // CG solves the symmetric gauge-reduced system directly. The gauge
+        // and its RHS are zero, so no RHS shift is necessary.
+        matrix = eliminate_pressure_gauge_column<Pack>(*d_mesh, matrix, *d_pressure_gauge_gid, /*copy_values=*/false);
     }
+    d_cached_pressure_matrix = std::move(matrix);
+    d_symmetric_preconditioning_matrix = Teuchos::null;
     d_matrix_values_stale = false;
     d_matrix_fixed_boundary_flux_names = d_fixed_boundary_flux_names;
 }
@@ -843,19 +891,14 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
     LinearSolveStatistics linear_statistics;
     int total_iterations = 0;
     bool correction_converged = false;
+    scalar_type defect_norm{};
     const auto base_norm = base_rhs.norm2();
     const auto correction_scale = std::max(base_norm, residual_scaling.rhs_norm_floor);
-    // Shared full-equation acceptance: the true full defect of the corrected
-    // system either meets the relative tolerance against the correction scale
-    // or sits at the absolute cold-start noise floor. Applied identically to
-    // the initial zero-correction early exit and the final full-defect
-    // verification of both projection methods, so an exactly accepted
-    // zero correction can never be rejected by the final check.
-    const auto accepts_full_equation = [&](scalar_type defect_norm)
+    const auto accepts_full_equation = [&](scalar_type norm)
     {
-        return std::isfinite(defect_norm) && std::isfinite(correction_scale)
-            && (defect_norm <= d_linear_options.tolerance * correction_scale
-                || defect_norm <= cold_start_rhs_floor);
+        return std::isfinite(norm) && std::isfinite(correction_scale)
+            && (norm <= d_linear_options.tolerance * correction_scale
+                || norm <= cold_start_rhs_floor);
     };
     // Accumulated pressure is reconstructed with the physical boundary map.
     // Use its homogeneous increment for both velocity and deferred correction.
@@ -919,34 +962,68 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
             }
         }
     };
-    if (d_projection_method == PressureProjectionMethod::FullOperator)
+    if (d_projection_method != PressureProjectionMethod::Anderson)
     {
-        field_type operator_pressure(d_mesh, "pressure_operator_input");
-        using full_operator_type = detail::PressureProjectionOperator<Pack>;
-        // The time step stays on the operator's left side: the full corrected
-        // equation is dt*(A - C) x = b with the integral RHS in m^3/s.
-        const auto full_operator = Teuchos::rcp(new full_operator_type(const_matrix,
-            [&](const typename Pack::vector_type& input, typename Pack::vector_type& correction)
-            {
-                operator_pressure.owned_data().update(scalar_type{1}, input, scalar_type{});
-                compute_non_orthogonal_correction(operator_pressure, correction);
-            }, time_step));
-        // Belos retains its latest operator. Clear solve-local captures on every
-        // exit while preserving the operator's owned matrix and stable maps.
-        struct CallbackLifetime
-        {
-            Teuchos::RCP<full_operator_type> full_operator;
-            ~CallbackLifetime() { full_operator->deactivate(); }
-        } callback_lifetime{full_operator};
-        // A zero correction can already meet the original predictor-scaled
-        // criterion on an adjacent corrector. Check it before starting Krylov
-        // with the shared full-equation acceptance; the true defect at the
-        // zero correction is exactly ||-b|| and is reported truthfully.
+        // For zero correction the full-equation defect is exactly the integral RHS.
+        // Skip Krylov only if that candidate passes the independent pressure check below.
         if (accepts_full_equation(base_norm))
             linear_statistics.converged = true;
+        else if (d_projection_method == PressureProjectionMethod::AssembledFullOperator)
+        {
+            const bool use_corrected_ilut = d_linear_options.preconditioner == LinearPreconditioner::ILUT;
+            const bool physical_gradient = accumulated_pressure != nullptr && !d_fixed_boundary_flux_names.empty();
+            if (d_assembled_matrix.is_null() || d_assembled_values_stale ||
+                physical_gradient != d_assembled_physical_gradient)
+            {
+                const bool new_graph = d_assembled_matrix.is_null() || d_assembled_graph_stale;
+                auto result = new_graph ? Teuchos::RCP<typename Pack::matrix_type>{} : d_assembled_matrix;
+                d_assembled_values_stale = true;
+                d_assembled_graph_stale = true;
+                if (use_corrected_ilut)
+                    d_linear_solver.notify_operator_values_changed();
+                detail::assemble_full_pressure_operator<Pack>(*d_mesh, *correction_topology, correction_metrics,
+                    d_pressure_correction_boundary_conditions, gradient_boundary_conditions,
+                    d_face_flux_workspace.gradient_cache(), d_pressure_gauge_gid, *const_matrix,
+                    d_pressure_channel_map, d_pressure_face_import, result);
+                d_assembled_matrix = std::move(result);
+                d_assembled_graph_builds += new_graph;
+                ++d_assembled_value_builds;
+                d_assembled_graph_stale = false;
+                d_assembled_values_stale = false;
+                d_assembled_physical_gradient = physical_gradient;
+            }
+            auto preconditioning_matrix = use_corrected_ilut ? d_assembled_matrix.getConst() : const_matrix;
+            if (d_linear_options.preconditioner == LinearPreconditioner::MueLuSymmetric && d_pressure_gauge_gid)
+            {
+                if (d_symmetric_preconditioning_matrix.is_null())
+                {
+                    d_symmetric_preconditioning_matrix = eliminate_pressure_gauge_column<Pack>(
+                        *d_mesh, d_cached_pressure_matrix, *d_pressure_gauge_gid, /*copy_values=*/true);
+                }
+                preconditioning_matrix = d_symmetric_preconditioning_matrix.getConst();
+            }
+            const auto scaled_operator = Teuchos::rcp(new detail::ScaledLinearOperator<Pack>(d_assembled_matrix, time_step));
+            linear_statistics = d_linear_solver.solve_from_zero_with_statistics(scaled_operator, base_rhs,
+                pressure_correction.owned_data(), d_linear_options, residual_scaling, preconditioning_matrix);
+        }
         else
+        {
+            field_type operator_pressure(d_mesh, "pressure_operator_input");
+            using full_operator_type = detail::PressureProjectionOperator<Pack>;
+            const auto full_operator = Teuchos::rcp(new full_operator_type(const_matrix,
+                [&](const typename Pack::vector_type& input, typename Pack::vector_type& correction)
+                {
+                    operator_pressure.owned_data().update(scalar_type{1}, input, scalar_type{});
+                    compute_non_orthogonal_correction(operator_pressure, correction);
+                }, time_step));
+            struct CallbackLifetime
+            {
+                Teuchos::RCP<full_operator_type> full_operator;
+                ~CallbackLifetime() { full_operator->deactivate(); }
+            } callback_lifetime{full_operator};
             linear_statistics = d_linear_solver.solve_from_zero_with_statistics(full_operator, base_rhs,
                 pressure_correction.owned_data(), d_linear_options, residual_scaling, const_matrix);
+        }
         total_iterations = linear_statistics.iterations;
         if (!linear_statistics.converged)
             throw std::runtime_error("PressureProjectionEquation full-operator solve did not converge.");
@@ -957,7 +1034,7 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
         const_matrix->apply(pressure_correction.owned_data(), rhs_change, Teuchos::NO_TRANS, time_step,
             scalar_type{});
         rhs_change.update(-scalar_type{1}, *d_cached_rhs, scalar_type{1});
-        const auto defect_norm = rhs_change.norm2();
+        defect_norm = rhs_change.norm2();
         correction_converged = accepts_full_equation(defect_norm);
     }
     else
@@ -1011,7 +1088,7 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
             const_matrix->apply(pressure_correction.owned_data(), rhs_change, Teuchos::NO_TRANS, time_step,
                 scalar_type{});
             rhs_change.update(-scalar_type{1}, *d_cached_rhs, scalar_type{1});
-            const auto defect_norm = rhs_change.norm2();
+            defect_norm = rhs_change.norm2();
             if (accepts_full_equation(defect_norm))
             {
                 correction_converged = true;
@@ -1050,7 +1127,16 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
         }
     }
     if (!correction_converged)
-        throw std::runtime_error("PressureProjectionEquation corrected pressure residual did not converge.");
+    {
+        std::ostringstream message;
+        message << std::setprecision(std::numeric_limits<scalar_type>::max_digits10)
+                << "PressureProjectionEquation corrected pressure residual did not converge: norm="
+                << defect_norm << ", limit=" << d_linear_options.tolerance * correction_scale
+                << ", rhs_norm=" << base_norm << ", scale=" << correction_scale
+                << ", roundoff_floor=" << cold_start_rhs_floor << ", Krylov iterations=" << total_iterations
+                << ", linear scaled residual=" << linear_statistics.achieved_tolerance;
+        throw std::runtime_error(message.str());
+    }
     linear_statistics.iterations = total_iterations;
     linear_statistics.rhs_norm = base_norm;
     linear_statistics.achieved_tolerance = correction_scale > scalar_type{}
