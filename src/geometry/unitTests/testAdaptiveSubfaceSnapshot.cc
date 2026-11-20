@@ -130,7 +130,7 @@ TEST(AdaptiveSubfaceSnapshot, AuthenticatedPiecesMatchLegacyAuthorityForEveryPro
                 snapshot->visit_borrowed_payload(
                     [&](const ContactPayloadAllocation& allocation)
                     {
-                        if (allocation.identity.role == ContactPayloadRole::SubfaceAuthorityKeyBytes &&
+                        if (allocation.identity.role == ContactPayloadRole(GeometryContactPayloadRole::SubfaceAuthorityKeyBytes) &&
                             buffers.insert(allocation.identity.address).second)
                             stored_bytes += allocation.payload_bytes;
                     });

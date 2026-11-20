@@ -998,12 +998,19 @@ struct IncidenceHistory
 IncidenceHistory incidence_history(const A::DistributedAdaptiveHierarchy& state)
 {
     const pipeline_trace::Pause pause;
-    using Role = D::ContactPayloadRole;
+    using Role = D::GeometryContactPayloadRole;
     IncidenceHistory history;
     Access::contact_cache(state).for_each_borrowed_contact_payload(
         [&](const auto& owner)
         {
-            switch (owner.identity.role)
+            switch (owner.identity.role.category())
+            {
+                case D::ContactPayloadCategory::Geometry:
+                    break;
+                default:
+                    return;
+            }
+            switch (static_cast<Role>(owner.identity.role.ordinal()))
             {
                 case Role::IncidenceLayerObject:
                     history.layers.insert(owner.identity.address);

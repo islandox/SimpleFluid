@@ -50,43 +50,6 @@ using Kind = ContactHaloMessageKind;
 constexpr std::size_t header_bytes = 13 * 8;
 constexpr std::size_t map_links = 4 * sizeof(void*);
 constexpr std::size_t controller_allowance_bytes = 128;
-/** Rebound only during allocate_shared's one arena allocation. The seed is
- * copied into Budget after allocate() admits the exact object/control block.
- * The stored seed pointer is never dereferenced during shared-owner teardown. */
-template<class T> struct HaloArenaAllocator
-{
-    using value_type = T;
-    Budget* seed;
-    explicit HaloArenaAllocator(Budget& initial) noexcept : seed(&initial) {}
-    template<class U> HaloArenaAllocator(const HaloArenaAllocator<U>& other) noexcept : seed(other.seed) {}
-    [[nodiscard]] T* allocate(std::size_t count)
-    {
-        const auto bytes = cartesian_detail::product(count, sizeof(T));
-        seed->add(bytes);
-        seed->owner_bytes = cartesian_detail::add(seed->owner_bytes, bytes);
-        try
-        {
-            return std::allocator<T>{}.allocate(count);
-        }
-        catch (...)
-        {
-            seed->used -= bytes;
-            seed->owner_bytes -= bytes;
-            throw;
-        }
-    }
-    void deallocate(T* allocation, std::size_t count) noexcept
-    {
-        // Budget has already died here: neither seed nor its counters may be read.
-        std::allocator<T>{}.deallocate(allocation, count);
-    }
-    template<class U> bool operator==(const HaloArenaAllocator<U>& other) const noexcept { return seed == other.seed; }
-};
-std::shared_ptr<Budget> make_halo_arena(std::size_t limit)
-{
-    Budget seed{limit};
-    return std::allocate_shared<Budget>(HaloArenaAllocator<Budget>(seed), seed);
-}
 std::shared_ptr<std::size_t> make_external_lease_counter(const std::shared_ptr<Budget>& arena, std::size_t& owner_bytes)
 {
     // The rebound allocator pins the arena until this counter's last shared or
@@ -3975,7 +3938,7 @@ std::unique_ptr<DistributedAdaptiveContactHalo> DistributedAdaptiveContactHalo::
                     try
                     {
                         candidate->impl_.reset(new (impl_storage) Impl(source.kernel, source.comm, source.options,
-                            context, std::move(copied_sender), source.arena, true));
+                            context, std::move(copied_sender), 0, source.arena, true));
                         impl_storage = nullptr;
                     }
                     catch (...)

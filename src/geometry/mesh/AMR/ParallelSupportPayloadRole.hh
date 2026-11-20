@@ -53,6 +53,8 @@ enum class ParallelSupportPayloadRole : std::uint8_t
     HaloResidencyCounterObject,
     HaloControllerObject,
     HaloBudgetObject,
-    HaloExternalLeaseCounter
+    HaloExternalLeaseCounter,
+    /** Sentinel for diagnostics; never constructed as a census identity. */
+    Count
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

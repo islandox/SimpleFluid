@@ -939,7 +939,7 @@ void CanonicalSubfaceView::append_identity(AdaptiveBytes& destination) const
 IncidenceSupportKey CanonicalSubfaceView::support() const
 {
     if (generated_)
-        return generated_->support();
+        return IncidenceSupportKey(generated_->support());
     const auto& record = piece(page_, slot_);
     return record.provenance.page->support_key(group(record).support);
 }

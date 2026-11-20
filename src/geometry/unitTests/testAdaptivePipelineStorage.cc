@@ -96,7 +96,7 @@ struct ObserverScope
 struct GenerationObservation
 {
     std::set<const void*> owners, leaf_pages;
-    std::array<std::size_t, static_cast<unsigned>(D::ContactPayloadRole::Count)> role_bytes{}, role_entries{};
+    std::array<std::size_t, D::contact_payload_role_count()> role_bytes{}, role_entries{};
 };
 GenerationObservation observe_generation(const State& state)
 {
@@ -114,7 +114,7 @@ GenerationObservation observe_generation(const State& state)
         {
             if (payloads.emplace(value.identity.address, value.identity.role).second)
             {
-                const auto role = static_cast<unsigned>(value.identity.role);
+                const auto role = D::contact_payload_role_index(value.identity.role);
                 result.role_bytes[role] += value.payload_bytes;
                 ++result.role_entries[role];
             }
@@ -341,7 +341,8 @@ Measurement run(F::Provider provider, std::size_t components)
             // Generic providers retain ordinary Layer history. SavedLayer is
             // specific to the trusted Cartesian incidence-source protocol.
             result.history_count =
-                source_observation.role_entries[static_cast<unsigned>(D::ContactPayloadRole::IncidenceLayerObject)];
+                source_observation.role_entries[D::contact_payload_role_index(
+                    D::ContactPayloadRole(D::GeometryContactPayloadRole::IncidenceLayerObject))];
             result.saved_history_count = D::contact_cache(*source).statistics().retained_saved_layers;
         }
         EXPECT_TRUE(comm->getRank() >= 2 || result.family_count > 0);
@@ -669,11 +670,11 @@ TEST(AdaptivePipelineStorage, WholePipelineBaselineReportsExistingWork)
             // Role payloads are a diagnostic census, not the allocation union.
             for (std::size_t role = 0; role != measured.role_bytes.size(); ++role)
             {
-                record_property(prefix + "_payload_role_" +
-                                    D::contact_payload_role_name(static_cast<D::ContactPayloadRole>(role)) + "_bytes",
+                const auto role_name =
+                    D::contact_payload_role_name(D::contact_payload_role_at(static_cast<unsigned>(role)));
+                record_property(prefix + "_payload_role_" + role_name + "_bytes",
                     std::to_string(measured.role_bytes[role]));
-                record_property(prefix + "_payload_role_" +
-                                    D::contact_payload_role_name(static_cast<D::ContactPayloadRole>(role)) + "_entries",
+                record_property(prefix + "_payload_role_" + role_name + "_entries",
                     std::to_string(measured.role_entries[role]));
             }
         };

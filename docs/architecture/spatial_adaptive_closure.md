@@ -598,6 +598,11 @@ before allocation. The procedural snapshot retains no regular incidence rows,
 fans or tile bodies. Existing persistent directories, Product elections and
 geometry-demand ownership retain their authorities.
 
+A procedural contact halo never funds AMR-side contact source coverage: hierarchy
+construction skips the canonical incidence funding refresh while
+`uses_cartesian_contact()` holds, leaving the detached snapshots' own
+publication authorities in charge.
+
 This integration does not establish bounded incremental work. Capability proof,
 owner resolution and successful updates still perform full owned scans, and an
 ordered complete-piece visit uses admitted operation-local sorting scratch. Keep

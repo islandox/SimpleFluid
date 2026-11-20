@@ -40,6 +40,8 @@ enum class BasicContactPayloadRole : std::uint8_t
     DeferredOwnerChargesObject,
     DeferredOwnerChargeNodes,
     IdentityPersistentRoot,
-    IdentityPersistentIndex
+    IdentityPersistentIndex,
+    /** Sentinel for diagnostics; never constructed as a census identity. */
+    Count
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

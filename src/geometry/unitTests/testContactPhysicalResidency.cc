@@ -193,7 +193,7 @@ TEST(ContactPhysicalResidency, PlainRingIndexAndTypedOwnerRetireIndependently)
     {
         if (row.owner == ring.get())
             body_bytes += row.payload_bytes;
-        else if (row.identity.role == D::ContactPayloadRole::CartesianControlCreditObject)
+        else if (row.identity.role == D::ContactPayloadRole(D::GeometryContactPayloadRole::CartesianControlCreditObject))
             control = row.owner;
     });
     ASSERT_NE(control, nullptr);

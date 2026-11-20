@@ -166,6 +166,8 @@ enum class GeometryContactPayloadRole : std::uint8_t
     RankCoverPage,
     RankCoverDomain,
     CartesianSubfaceSourceObject,
-    SubfaceAuthorityKeyBytes
+    SubfaceAuthorityKeyBytes,
+    /** Sentinel for diagnostics; never constructed as a census identity. */
+    Count
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

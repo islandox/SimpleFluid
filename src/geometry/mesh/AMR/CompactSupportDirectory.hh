@@ -150,7 +150,7 @@ public:
     template<class Visit> void visit_borrowed_payload(Visit&& visit) const
     {
         literal_.visit_borrowed_payload(visit);
-        presence_.visit_borrowed_payload(visit, ContactPayloadRole::IdentityPersistentIndex);
+        presence_.visit_borrowed_payload(visit, BasicContactPayloadRole::IdentityPersistentIndex);
     }
 
 private:

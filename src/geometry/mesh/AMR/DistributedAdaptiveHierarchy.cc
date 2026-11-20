@@ -1690,6 +1690,11 @@ void refresh_native_source(DistributedAdaptiveHierarchy::Data& state, Distribute
     bool copy_publication_cache = false, std::initializer_list<ClosureScratch*> transient_memory = {})
 {
     if (!state.native_source_enabled) return;
+    // The procedural Cartesian contact path owns its detached contact state
+    // without a canonical incidence session or funding control credits, so
+    // AMR-side contact source funding cannot describe it. Hierarchy-backed
+    // procedural snapshots keep their own publication authorities instead.
+    if (halo.uses_cartesian_contact()) return;
     if (!state.contact_halo || state.contact_halo.get() != &halo || !state.layout() ||
         !state.bootstrap_family_admission)
         throw std::invalid_argument("Native source publication lacks its final detached source floors.");
@@ -1776,7 +1781,12 @@ void refresh_native_source(DistributedAdaptiveHierarchy::Data& state, Distribute
         body_group(AdaptiveLeafBodyRole::Leaf, state.leaf_body_admission()),
         body_group(AdaptiveLeafBodyRole::Family, state.bootstrap_family_admission), {}, {}};
     halo.bind_external_retained_bytes(caller_live());
-    auto contact = halo.source_coverage(admission);
+    // The procedural Cartesian contact path owns its detached contact state and
+    // never builds a canonical incidence session, so it cannot fund AMR-side
+    // contact coverage. Leave those coverage slots and owners empty there.
+    NativeContactSourceCoverage contact;
+    if (!halo.uses_cartesian_contact())
+        contact = halo.source_coverage(admission);
     for (std::size_t slot = 0; slot < contact.coverage.size(); ++slot)
         groups[slot + 2] = std::move(contact.coverage[slot]);
     auto coverage = NativeSourceOwnerStore::composite_coverage(cache.source_store.coverage(),
