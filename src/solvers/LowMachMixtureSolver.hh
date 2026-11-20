@@ -89,12 +89,12 @@ public:
         QbmmModelOptions qbmm_model;
         std::vector<std::shared_ptr<const QbmmNodeSlipLaw>>
             qbmm_node_slip_laws; ///< Kinetic-only, EOS-indexed and nonnull precisely for bound families.
-        /** Q8b physical provider identities in EOS phase order, including phases with no current stock.
+        /** Forced explicit-family physical provider identities in EOS phase order, including phases with no current stock.
          * A built-in ideal gas supplies its intrinsic data. Declare the immutable evaluator for any other EOS,
          * including a liquid property evaluator, and for a built-in ideal gas's optional transport law.
          */
         std::vector<std::optional<ThermalLawIdentity>> qbmm_eos_law_identities;
-        std::optional<ThermalLawIdentity> qbmm_mixture_viscosity_identity; ///< Required for a supplied Q8b closure.
+        std::optional<ThermalLawIdentity> qbmm_mixture_viscosity_identity; ///< Binds supplied viscosity in v9.
     };
     struct QbmmKineticClosure
     {
@@ -590,17 +590,22 @@ public:
     enum : std::uint64_t
     {
         balanced_kinetic_pressure_revision = 1,
-        forced_kinetic_thermal_revision = 1
+        forced_kinetic_thermal_revision = 1,
+        balanced_linear_pressure_revision = 1,
+        forced_linear_thermal_revision = 1
     };
     struct QbmmReport
     {
         QbmmReportProvenance provenance;
         std::optional<Vector> body_acceleration_m_per_s2;
         std::optional<std::uint64_t> balanced_kinetic_pressure_policy, forced_kinetic_thermal_policy;
+        std::optional<std::uint64_t> balanced_linear_pressure_policy, forced_linear_thermal_policy;
         std::optional<ExternalImpulseParts> external_impulses_kg_m_per_s;
         std::optional<Vector> pressure_impulse_kg_m_per_s;
         double kinetic_cfl_limit = 0;
         int kinetic_substep_limit = 0;
+        double linear_cfl_limit = 0;
+        int linear_substep_limit = 0;
         std::vector<SpeciesId> species_ids;                    ///< Native catalog order for moles and concentrations.
         std::vector<QbmmCellReport> cells;                     ///< Locally owned cells in mesh order.
         std::vector<std::optional<QbmmFamilyReport>> families; ///< Collective diagnostics in EOS order.
@@ -631,7 +636,7 @@ public:
         std::optional<std::uint64_t> qbmm_controller_signature;
         std::optional<std::array<double, 3>> count_only_body_acceleration;
         bool qbmm_legacy_default_only = false;
-        bool kinetic_force_provenance_recorded = false;
+        bool explicit_family_force_recorded = false;
     };
     class ControllerLease
     {

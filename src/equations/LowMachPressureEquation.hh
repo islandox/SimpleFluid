@@ -81,7 +81,7 @@ public:
         const FaceField& predictor_carrier_flux, FaceField& corrected_carrier_flux, ScalarField& mechanical_pressure,
         VectorField& velocity, const LinearSolverOptions& linear = {}, double continuity_tolerance = 1e-10);
 
-    /** Fixed closed kinetic material projection with the directly transported
+    /** Fixed closed explicit-family material projection with the directly transported
      * owner-oriented material rate W0 at the reference carrier flux phi0.
      * Applies W(phi)=W0+theta*(phi-phi0) to predicted and corrected carrier rates.
      * The nonnegative mobility and zero-mobility EOS anchoring gates are the
@@ -98,6 +98,7 @@ public:
     /** Fixed anchored material projection with an explicit cell-gradient policy.
      * Interior reconstruction changes the cell velocity correction at body-forced walls.
      * Both policies use the same anchored flux law, wall rates, mobilities and pressure gauge.
+     * Forced kinetic Euler and shared-carrier SSPRK2 use Interior with this anchored projection.
      */
     Result project_kinetic_material_with_eos(const ScalarField& density, double time_step,
         std::span<const double> integrated_material_volume_target, std::span<const double> volume_susceptibility,

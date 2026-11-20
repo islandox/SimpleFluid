@@ -47,8 +47,8 @@ using GO = Solver::Pack::global_ordinal_type;
 using ScalarField = Solver::Traits::scalar_cell_type;
 using VectorField = Solver::Traits::vector_cell_type;
 using FaceField = Solver::Traits::scalar_face_type;
-std::uint64_t restart_kinetic_physical_fingerprint(
-    const Solver::Options& options, std::span<const std::shared_ptr<const MixtureThermodynamics>> eos);
+std::uint64_t restart_forced_physical_fingerprint(const Solver::Options& options,
+    std::span<const std::shared_ptr<const MixtureThermodynamics>> eos, QbmmModelOptions::FamilyTransport transport);
 
 void check(bool valid, const char* message)
 {
@@ -527,7 +527,7 @@ struct SIMPLEFLUID_SOLVERS_LOCAL PlanarWallInterval
     double old_surface = 0, new_surface = 0, time_step = 0;
 };
 
-struct SIMPLEFLUID_SOLVERS_LOCAL ForcedKineticInterval
+struct SIMPLEFLUID_SOLVERS_LOCAL ForcedFamilyInterval
 {
     double old_time = 0, time_step = 0;
     Solver::Vector local_body{}, local_other{}, local_external{};
@@ -580,7 +580,7 @@ struct LowMachMixtureSolver::QbmmPublication
     std::shared_ptr<const QbmmIntervalReport> interval;
     std::optional<QbmmBalances> balances;
     std::optional<PlanarWallInterval> planar_wall_interval;
-    std::optional<ForcedKineticInterval> forced_kinetic_interval;
+    std::optional<ForcedFamilyInterval> forced_family_interval;
     std::shared_ptr<const ReactingMixtureCoupler::Diagnostics> controller_diagnostics;
 };
 
@@ -597,18 +597,27 @@ struct LowMachMixtureSolver::Implementation
     PlanarMotion::Authority active_controller_motion; ///< With a controller stamp, empty denotes fixed geometry.
     std::optional<std::array<double, 3>> active_body_acceleration, accepted_count_only_body_acceleration;
     bool count_only_force_provenance_recorded = false;
-    bool kinetic_force_provenance_recorded = false;
+    bool explicit_family_force_recorded = false;
+    mutable bool forced_linear_geometry_validated = false;
     bool needs_restart_controller = false;
     bool qbmm_legacy_default_only = false, active_legacy_compatible = true;
     bool initialized = false, controller_active = false;
-    bool has_forced_kinetic_provenance() const noexcept
+    bool has_forced_family_provenance() const noexcept
     {
-        return kinetic_force_provenance_recorded && diagnostics.body_acceleration_m_per_s2.has_value();
+        return explicit_family_force_recorded && diagnostics.body_acceleration_m_per_s2.has_value();
     }
     std::optional<std::uint64_t> checkpoint_controller() const noexcept
     {
-        return active_qbmm_controller && !has_forced_kinetic_provenance() ? active_qbmm_controller
-                                                                          : accepted_qbmm_controller;
+        return active_qbmm_controller && !has_forced_family_provenance() ? active_qbmm_controller
+                                                                         : accepted_qbmm_controller;
+    }
+    void validate_forced_linear_geometry() const
+    {
+        if (forced_linear_geometry_validated || !uses_qbmm_linear_transport(options.qbmm_model))
+            return;
+        if (const auto* layered = std::get_if<Mesh::SemiStructuredPtr>(&mesh->variant()))
+            qbmm_linear_detail::validate_cylindrical_base(**layered);
+        forced_linear_geometry_validated = true;
     }
     void validate_planar_controller_authority(const PlanarMotion& motion) const
     {
@@ -628,7 +637,7 @@ struct LowMachMixtureSolver::Implementation
         accepted_qbmm_controller.reset();
         accepted_count_only_body_acceleration.reset();
         count_only_force_provenance_recorded = false;
-        kinetic_force_provenance_recorded = false;
+        explicit_family_force_recorded = false;
         needs_restart_controller = false;
         qbmm_legacy_default_only = false;
     }
@@ -827,7 +836,11 @@ struct LowMachMixtureSolver::Implementation
                 {
                     std::uint64_t physical_fingerprint = 0;
                     collective_detail::collective_local_validation(*mesh, "Forced kinetic physical law declarations",
-                        [&] { physical_fingerprint = restart_kinetic_physical_fingerprint(options, eos); });
+                        [&]
+                        {
+                            physical_fingerprint =
+                                restart_forced_physical_fingerprint(options, eos, options.qbmm_model.family_transport);
+                        });
                     collective_detail::require_uniform_value(
                         *mesh, physical_fingerprint, "Forced kinetic physical provider binding");
                 }
@@ -1776,11 +1789,11 @@ LowMachMixtureSolver::Checkpoint LowMachMixtureSolver::checkpoint_state() const
                                                  ? d->accepted_count_only_body_acceleration
                                                  : d->active_body_acceleration;
     saved.qbmm_legacy_default_only = d->qbmm_legacy_default_only;
-    saved.kinetic_force_provenance_recorded = d->kinetic_force_provenance_recorded;
-    if (!saved.kinetic_force_provenance_recorded && d->active_qbmm_controller &&
-        uses_qbmm_kinetic_transport(d->options.qbmm_model))
+    saved.explicit_family_force_recorded = d->explicit_family_force_recorded;
+    if (!saved.explicit_family_force_recorded && d->active_qbmm_controller &&
+        uses_qbmm_explicit_transport(d->options.qbmm_model))
     {
-        saved.kinetic_force_provenance_recorded = true;
+        saved.explicit_family_force_recorded = true;
         saved.diagnostics.body_acceleration_m_per_s2 = acceleration_vector(d->active_body_acceleration);
     }
     saved.face_flux.resize(d->mesh->num_owned_faces());
@@ -1808,14 +1821,13 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, const ControllerLeas
                 "QBMM checkpoint belongs to a different coupled source configuration.");
             check(!saved.qbmm_legacy_default_only || !d->controller_active || d->active_legacy_compatible,
                 "Legacy QBMM checkpoint requires default force and constitutive-law configuration.");
-            const auto force = saved.kinetic_force_provenance_recorded
-                                   ? saved.diagnostics.body_acceleration_m_per_s2
-                                   : acceleration_vector(d->active_body_acceleration);
+            const auto force = saved.explicit_family_force_recorded ? saved.diagnostics.body_acceleration_m_per_s2
+                                                                    : acceleration_vector(d->active_body_acceleration);
             qbmm_detail::validate_capability(
-                d->options, *d->mesh, false, force, saved.kinetic_force_provenance_recorded || d->controller_active);
-            check(!d->controller_active || !saved.kinetic_force_provenance_recorded ||
+                d->options, *d->mesh, false, force, saved.explicit_family_force_recorded || d->controller_active);
+            check(!d->controller_active || !saved.explicit_family_force_recorded ||
                       force == acceleration_vector(d->active_body_acceleration),
-                "Kinetic QBMM checkpoint belongs to a different body acceleration configuration.");
+                "Explicit QBMM checkpoint belongs to a different body acceleration configuration.");
             qbmm_detail::validate_state(d->options, saved.state);
             for (const auto& cell : saved.state.cells)
                 qbmm_native_law_detail::validate_kinetic_closure(d->options, cell);
@@ -1849,7 +1861,7 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, const ControllerLeas
     d->accepted_qbmm_controller = saved.qbmm_controller_signature;
     d->accepted_count_only_body_acceleration = saved.count_only_body_acceleration;
     d->count_only_force_provenance_recorded = d->options.qbmm_families.empty();
-    d->kinetic_force_provenance_recorded = saved.kinetic_force_provenance_recorded;
+    d->explicit_family_force_recorded = saved.explicit_family_force_recorded;
     d->needs_restart_controller = saved.qbmm_controller_signature.has_value();
     d->qbmm_legacy_default_only = saved.qbmm_legacy_default_only;
 }
@@ -1892,6 +1904,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
     const bool linear = uses_qbmm_linear_transport(d->options.qbmm_model);
     const bool explicit_family = kinetic || linear;
     const auto force = provider ? provider->body_acceleration : std::nullopt;
+    const bool forced_explicit_family = explicit_family && force.has_value();
     require_controller(controller);
     collective_detail::require_uniform_value(mesh, dt, "Low-Mach mixture timestep");
     collective_detail::require_uniform_value(mesh, int(ale != nullptr), "Low-Mach ALE transport selection");
@@ -1903,12 +1916,12 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
         [&]
         {
             qbmm_detail::validate_capability(d->options, mesh, ale != nullptr, force);
-            check(!kinetic || !force || (coherent_qbmm && d->active_qbmm_controller),
-                "Kinetic QBMM body acceleration requires the matching reacting controller.");
+            check(!forced_explicit_family || (coherent_qbmm && d->active_qbmm_controller),
+                "Explicit QBMM body acceleration requires the matching reacting controller.");
             check(!coherent_qbmm || acceleration_components(force) == d->active_body_acceleration,
                 "QBMM source provider body acceleration differs from its reacting controller.");
-            check(!d->kinetic_force_provenance_recorded || force == d->diagnostics.body_acceleration_m_per_s2,
-                "Kinetic QBMM preview requires the accepted body acceleration configuration.");
+            check(!d->explicit_family_force_recorded || force == d->diagnostics.body_acceleration_m_per_s2,
+                "Explicit QBMM preview requires the accepted body acceleration configuration.");
             check(!coherent_qbmm || (has_qbmm && controller && controller->reacting_source_authority && provider),
                 "Coherent QBMM sources require the reacting controller and an immutable source provider.");
             check(!has_qbmm || !provider || coherent_qbmm,
@@ -1917,7 +1930,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 "Accepted moving QBMM state requires a planar preview with live motion authority.");
             check(!(has_qbmm || ale) || d->preview_sequence != std::numeric_limits<std::uint64_t>::max(),
                 "Low-Mach preview identity exhausted.");
-            check(!(d->needs_restart_controller || d->has_forced_kinetic_provenance()) ||
+            check(!(d->needs_restart_controller || d->has_forced_family_provenance()) ||
                       (coherent_qbmm && d->active_qbmm_controller &&
                           d->active_qbmm_controller == d->accepted_qbmm_controller),
                 "Accepted QBMM provenance requires its matching reacting controller before advancement.");
@@ -2107,9 +2120,14 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             }
             if (explicit_family)
             {
-                const auto transport = linear ? qbmm_linear_detail::transport : qbmm_kinetic_detail::transport;
-                auto transported = transport(d->mesh, d->options, accepted, thermodynamic_guess, trial, d->trial_flux,
-                    old_volumes, dt, static_cast<size_t>(iteration));
+                using qbmm_linear_detail::TraceLimiter;
+                const auto corrector = static_cast<size_t>(iteration);
+                auto transported =
+                    linear ? qbmm_linear_detail::transport(d->mesh, d->options, accepted, thermodynamic_guess, trial,
+                                 d->trial_flux, old_volumes, dt, corrector,
+                                 forced_explicit_family ? TraceLimiter::AllIncident : TraceLimiter::Outgoing)
+                           : qbmm_kinetic_detail::transport(d->mesh, d->options, accepted, thermodynamic_guess, trial,
+                                 d->trial_flux, old_volumes, dt, corrector);
                 qbmm_face_flux = std::move(transported.owned_flux);
                 explicit_faces = std::move(transported.integrated_faces);
                 adv_volumes = std::move(transported.advected_material_volumes);
@@ -2903,8 +2921,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                 try
                                 {
                                     thermal[c] = recover_enthalpy(trial.cells[c], adv_volumes[c], candidate, d->options,
-                                        kinetic && force.has_value(),
-                                        thermal_batch ? &thermal_batch->cells[c] : nullptr, advected_energy[c]);
+                                        forced_explicit_family, thermal_batch ? &thermal_batch->cells[c] : nullptr,
+                                        advected_energy[c]);
                                 }
                                 catch (const CaloricRangeError&)
                                 {
@@ -2935,7 +2953,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             try
                             {
                                 thermal[c] = recover_enthalpy(trial.cells[c], adv_volumes[c], p0, d->options,
-                                    kinetic && force.has_value(), thermal_batch ? &thermal_batch->cells[c] : nullptr,
+                                    forced_explicit_family, thermal_batch ? &thermal_batch->cells[c] : nullptr,
                                     advected_energy[c]);
                                 local_volume += thermal[c].volume;
                                 local_derivative += thermal[c].derivative;
@@ -3248,10 +3266,10 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             pressure_operand_magnitude = d->sum(local_pressure_operands);
             result.empty_phase_energy_roundoff = d->sum(local_roundoff);
             result.conditioned_raw_energy_roundoff_bound = d->sum(local_raw_roundoff);
-            const bool body_forced = force && (kinetic || force->x != 0 || force->y != 0 || force->z != 0);
+            const bool body_forced = force && (explicit_family || force->x != 0 || force->y != 0 || force->z != 0);
             // The fixed anchored path reconstructs the common hydrostatic residual at cells and faces.
             // Implicit-family body forcing retains its established pressure predictor.
-            const bool reconstruct_residual = body_forced && explicit_family;
+            const bool reconstruct_residual = forced_explicit_family;
             using CellPressureGradient = LowMachPressureEquation::CellPressureGradient;
             const auto cell_gradient =
                 body_forced ? CellPressureGradient::Interior : CellPressureGradient::HomogeneousNeumann;
@@ -3508,15 +3526,15 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 result.maximum_source_residual =
                     std::max(result.maximum_source_residual, result.maximum_conditioned_thermal_residual);
             }
-            thermodynamic_guess = trial;
-            if (result.maximum_occupancy_error <= d->options.volume_relative_tolerance &&
+            const bool physical_convergence =
+                result.maximum_occupancy_error <= d->options.volume_relative_tolerance &&
                 flux_change <= d->options.volume_relative_tolerance &&
                 result.maximum_continuity_residual <=
                     d->options.continuity_tolerance * std::max(1.0, projected.continuity_scale) &&
                 result.maximum_thermal_residual <= 1 && result.maximum_conditioned_thermal_residual <= 1 &&
                 (!provider || (iteration >= 1 && result.maximum_source_residual <= 1 &&
-                                  result.maximum_transport_residual <= 1 && result.maximum_thermal_residual <= 1 &&
-                                  result.maximum_event_residual <= 1 && result.maximum_shape_source_residual <= 1)))
+                                  result.maximum_transport_residual <= 1 && result.maximum_shape_source_residual <= 1));
+            if (physical_convergence && (!provider || result.maximum_event_residual <= 1))
             {
                 collective_detail::collective_local_validation(mesh, "Accepted low-Mach uniform pressure",
                     [&]
@@ -3555,8 +3573,52 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         << result.maximum_occupancy_error << ", normalized flux change=" << flux_change;
                 throw std::runtime_error(message.str());
             }
+            // A late Fourier reversal can couple to the pressure and face-rate iterates. Relax their next
+            // private inputs together with the contact-temperature correction. Recompute every physical
+            // packet and every unrelaxed residual from the accepted predecessor on the next evaluation.
+            constexpr double relaxed_step = .25;
+            const bool relax_coupling = linear && forced_explicit_family && physical_convergence &&
+                                         gross_residual_evaluations.back().winner &&
+                                         gross_residual_evaluations.back().winner->fourier_stage.has_value();
+            // This candidate was rejected. Exchange the two private buffers so the prior guess stays
+            // available during interpolation without allocating another state before the Fourier collectives.
+            std::swap(thermodynamic_guess, trial);
             fourier_thermal_detail::correct(mesh, dt, d->options.thermal_mode, fourier_thermal_stages,
-                thermodynamic_guess);
+                thermodynamic_guess, relax_coupling ? relaxed_step : 1.);
+            if (relax_coupling)
+            {
+                collective_detail::collective_local_validation(mesh, "Relaxed forced linear corrector inputs",
+                    [&]
+                    {
+                        auto& next = thermodynamic_guess;
+                        next.thermodynamic_pressure =
+                            std::lerp(trial.thermodynamic_pressure, next.thermodynamic_pressure, relaxed_step);
+                        for (size_t c = 0; c < nc; ++c)
+                        {
+                            auto& cell = next.cells[c];
+                            const auto& previous = trial.cells[c];
+                            cell.mechanical_pressure =
+                                std::lerp(previous.mechanical_pressure, cell.mechanical_pressure, relaxed_step);
+                            d->mechanical_pressure.set_owned_value(static_cast<LO>(c), cell.mechanical_pressure);
+                            for (size_t axis = 0; axis < 3; ++axis)
+                                cell.velocity.component(axis) = std::lerp(previous.velocity.component(axis),
+                                    cell.velocity.component(axis), relaxed_step);
+                            for (size_t a = 0; a < np; ++a)
+                            {
+                                auto& pressure = cell.phases[a].absolute_pressure;
+                                pressure = std::lerp(previous.phases[a].absolute_pressure, pressure, relaxed_step);
+                            }
+                        }
+                        for (size_t f = 0; f < previous_flux.size(); ++f)
+                        {
+                            const auto face = static_cast<LO>(f);
+                            d->trial_flux.set_owned_value(face,
+                                std::lerp(previous_flux[f], d->trial_flux.owned_value(face), relaxed_step));
+                        }
+                    });
+                d->mechanical_pressure.sync_ghosts();
+                d->trial_flux.sync_ghosts();
+            }
         }
         double old_mass = 0, new_mass = 0, external_mass = 0;
         detail::CompensatedSum<long double> old_energy, new_energy, external_energy;
@@ -3647,7 +3709,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     if (!sources.empty())
                         for (size_t axis = 0; axis < external_momentum.size(); ++axis)
                         {
-                            if (!kinetic || !split_impulse)
+                            if (!forced_explicit_family)
                                 external_momentum[axis].add_product(sources[c].momentum.component(axis), 1.);
                             if (split_impulse)
                             {
@@ -3781,7 +3843,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             {
                 for (size_t axis = 0; axis < 3; ++axis)
                 {
-                    if (kinetic && split_impulse)
+                    if (forced_explicit_family)
                     {
                         external_momentum[axis].add_weighted(body_momentum[axis], 1.);
                         external_momentum[axis].add_weighted(other_momentum[axis], 1.);
@@ -3899,23 +3961,25 @@ LowMachMixtureSolver::ControllerLease LowMachMixtureSolver::acquire_controller_f
         [&]
         {
             qbmm_detail::validate_capability(d->options, *d->mesh, motion != nullptr, body_acceleration);
+            if (body_acceleration)
+                d->validate_forced_linear_geometry();
             if (!d->options.qbmm_families.empty() && !signature.empty())
             {
                 RestartHash hash;
                 hash.string(signature);
-                if (body_acceleration && uses_qbmm_kinetic_transport(d->options.qbmm_model))
-                    hash.word(restart_kinetic_physical_fingerprint(d->options, d->eos));
+                if (body_acceleration && uses_qbmm_explicit_transport(d->options.qbmm_model))
+                    hash.word(restart_forced_physical_fingerprint(
+                        d->options, d->eos, d->options.qbmm_model.family_transport));
                 binding = hash.value;
             }
-            check(
-                !d->kinetic_force_provenance_recorded || body_acceleration == d->diagnostics.body_acceleration_m_per_s2,
-                "Kinetic QBMM requires the accepted body acceleration configuration.");
+            check(!d->explicit_family_force_recorded || body_acceleration == d->diagnostics.body_acceleration_m_per_s2,
+                "Explicit QBMM requires the accepted body acceleration configuration.");
             check(!motion || motion->mesh_ptr().get() == d->mesh.get(),
                 "Planar controller requires its exact mutable solver mesh.");
             check(signature.empty() || !d->accepted_planar_motion ||
                       (motion && d->accepted_planar_motion == motion->d_authority),
                 "An accepted moving QBMM state requires its live planar controller authority.");
-            const bool requires_matching_controller = d->needs_restart_controller || d->has_forced_kinetic_provenance();
+            const bool requires_matching_controller = d->needs_restart_controller || d->has_forced_family_provenance();
             check(!requires_matching_controller || (binding && binding == d->accepted_qbmm_controller),
                 "Accepted QBMM provenance requires matching reaction, population and transfer provider metadata.");
             check(!d->qbmm_legacy_default_only || legacy_compatible,
@@ -4014,7 +4078,7 @@ void LowMachMixtureSolver::commit_fixed(
     }
     d->publish_fixed(
         std::move(candidate), std::move(statistics), trial.face_flux, d->trial_nonce + 1, std::move(publication));
-    d->kinetic_force_provenance_recorded = uses_qbmm_kinetic_transport(d->options.qbmm_model);
+    d->explicit_family_force_recorded = uses_qbmm_explicit_transport(d->options.qbmm_model);
     if (d->options.qbmm_families.empty())
     {
         d->accepted_count_only_body_acceleration =

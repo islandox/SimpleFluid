@@ -91,10 +91,10 @@ struct Problem
             value.qbmm_shape[0]->H3, thermal.moles[0], thermal.moles[1], thermal.internal_energy, volumes[cell][0]};
     }
 
-    Kernel::TransportResult advance(double dt)
+    Kernel::TransportResult advance(double dt, Kernel::TraceLimiter limiter = Kernel::TraceLimiter::Outgoing)
     {
         auto candidate = state;
-        auto result = Kernel::transport(grid, options, state, state, candidate, flux, volumes, dt, 0);
+        auto result = Kernel::transport(grid, options, state, state, candidate, flux, volumes, dt, 0, limiter);
         state = std::move(candidate);
         volumes = result.advected_material_volumes;
         for (auto& cell : state.cells)
@@ -643,6 +643,77 @@ TEST(LowMachQbmmLinearTransportTest, CombinedOutgoingTracesShareTheDonorLimiter)
             expected = {7. + average[0], 1. + average[1]};
         check_stock(op.get(cell), stock_from_weights(expected), 2e-13);
     }
+}
+
+TEST(LowMachQbmmLinearTransportTest, ForcedCommonTraceFactorKeepsItsConstraintsAcrossASideFlowReversal)
+{
+    constexpr auto fixed = Kernel::TraceLimiter::AllIncident;
+    constexpr auto outgoing = Kernel::TraceLimiter::Outgoing;
+    constexpr LO center = 4, east = 5, north = 7, south = 1;
+    constexpr double main_rate = 1. / 8., tiny_rate = 1. / (1u << 28);
+    const auto replay = [&](Kernel::TraceLimiter limiter, double side_rate)
+    {
+        Problem op(mesh({0., 1., 2., 3.}, {0., 1., 2., 3.}));
+        record_ownership(*op.grid, 9);
+        for (size_t row = 0; row < op.state.cells.size(); ++row)
+        {
+            const auto cell = static_cast<LO>(row);
+            const auto id = op.grid->cell_geometry_global_id(cell);
+            op.set(cell, stock_from_weights({id == north ? 7. : id == east ? 3. : 1., 1.}));
+        }
+        for (const auto face : op.flux.owned_face_ids())
+        {
+            if (!op.grid->is_interior_face(face))
+                continue;
+            const auto owner = op.grid->cell_geometry_global_id(op.grid->owner_cell(face));
+            const auto neighbor = op.grid->cell_geometry_global_id(op.grid->neighbor_cell(face));
+            if (owner != center && neighbor != center)
+                continue;
+            const auto other = owner == center ? neighbor : owner;
+            if (other == east || other == south)
+                op.flux.set_owned_value(face, (owner == center ? 1. : -1.) * (other == east ? main_rate : side_rate));
+        }
+        op.flux.sync_ghosts();
+
+        // The south trace's first atom has weight 1-1.5*lambda in stage one.
+        // Both stages admit lambda=1/2 there. The east-only legacy donor admits lambda=1.
+        const double lambda = limiter == fixed || side_rate > 0. ? .5 : 1.;
+        const auto stage1_east = Weights{main_rate * (1. + lambda / 2.), main_rate};
+        const auto stage1_south = Weights{side_rate * (side_rate > 0. ? .25 : 1.), side_rate};
+        Weights average{};
+        for (size_t atom = 0; atom < average.size(); ++atom)
+        {
+            const double east_stock = (atom == 0 ? 3. : 1.) + stage1_east[atom];
+            const double center_stock = 1. - stage1_east[atom] - stage1_south[atom];
+            const double stage2_east = main_rate * (center_stock + lambda * (east_stock - 1.) / 4.);
+            average[atom] = (stage1_east[atom] + stage2_east) * .5;
+        }
+
+        const auto result = op.advance(1., limiter);
+        EXPECT_EQ(result.substeps, 1);
+        EXPECT_DOUBLE_EQ(result.maximum_cfl, main_rate + std::max(0., side_rate));
+        Stock local_main{};
+        for (const auto face : op.flux.owned_face_ids())
+        {
+            const double rate = op.flux.owned_value(face);
+            if (std::abs(rate) != main_rate)
+                continue;
+            local_main = rates(result.owned_flux.at(0).at(op.flux.owned_row(face)));
+            for (auto& amount : local_main)
+                amount = std::copysign(1., rate) * amount;
+        }
+        Stock main{};
+        Teuchos::reduceAll(*op.grid->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, int(main.size()),
+            local_main.data(), main.data());
+        check_stock(main, stock_from_weights(average), 2e-13);
+        return main[h3];
+    };
+
+    const double fixed_outward = replay(fixed, tiny_rate);
+    const double fixed_inward = replay(fixed, -tiny_rate);
+    EXPECT_NEAR(fixed_outward - fixed_inward, -69. / 64. * tiny_rate, 2e-13);
+    EXPECT_EQ(replay(outgoing, tiny_rate), fixed_outward);
+    EXPECT_GT(replay(outgoing, -tiny_rate) - fixed_inward, .01);
 }
 
 TEST(LowMachQbmmLinearTransportTest, SignedEnergyRemainderLimitsTheWholeBlockInBothStages)

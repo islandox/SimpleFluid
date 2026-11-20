@@ -111,7 +111,6 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_capability(const Flow::Options& o
         validate_finite_force(*force);
     require(!moving || (!kinetic && !linear && !force),
         "Planar ALE requires implicit transport and absent body acceleration.");
-    require(!linear || !force, "Realizable linear QBMM requires absent body acceleration.");
     std::optional<Flow::Vector> declared_force;
     for (const auto& law : options.qbmm_node_slip_laws)
         if (law && law->required_body_acceleration_m_per_s2)

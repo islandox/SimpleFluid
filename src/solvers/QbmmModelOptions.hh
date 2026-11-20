@@ -8,8 +8,9 @@ namespace SimpleFluid::Reacting
 {
 /** The implicit integrator admits shared carrier and supplied phase slip on fixed meshes and supported planar ALE.
  * KineticEuler admits fixed closed Cartesian meshes with node-dependent slip and optional body acceleration.
- * RealizableLinearSSPRK2 admits fixed orthogonal meshes with shared carrier and absent body acceleration.
- * Unsupported models reject solver construction collectively, including on ranks without cells.
+ * RealizableLinearSSPRK2 requires fixed closed orthogonal meshes with shared carrier. A supplied acceleration
+ * requires Cartesian, native cylindrical, or a polygonal disk/annulus extrusion. The solver checks this additional
+ * condition collectively when the controller or restart provides the acceleration, including on empty owners.
  * Native phase temperatures, prescribed drift and mesh motion have their own
  * configuration or state checks.
  */

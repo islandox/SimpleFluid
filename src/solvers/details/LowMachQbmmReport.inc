@@ -385,16 +385,16 @@ std::shared_ptr<const LowMachMixtureSolver::QbmmPublication> LowMachMixtureSolve
     publication->balances = trial.qbmm_balances;
     publication->history = QbmmReceiptHistory::Available;
     publication->interval = qbmm_interval(trial);
-    if (uses_qbmm_kinetic_transport(d->options.qbmm_model) && trial.statistics.body_acceleration_m_per_s2)
+    if (uses_qbmm_explicit_transport(d->options.qbmm_model) && trial.statistics.body_acceleration_m_per_s2)
     {
         check(controller_diagnostics && controller_diagnostics->saved && d->active_qbmm_controller,
-            "Forced kinetic QBMM publication requires diagnostics from the active reacting controller.");
+            "Forced explicit QBMM publication requires diagnostics from the active reacting controller.");
         const auto& prepared = *controller_diagnostics->saved;
         check(prepared.correctors == trial.statistics.correctors &&
                   prepared.reaction_extents.size() == controller_diagnostics->reaction_count,
-            "Forced kinetic QBMM controller diagnostics differ from the accepted interval.");
+            "Forced explicit QBMM controller diagnostics differ from the accepted interval.");
         publication->controller_diagnostics = std::make_shared<const ReactingMixtureCoupler::Diagnostics>(prepared);
-        auto& interval = publication->forced_kinetic_interval.emplace();
+        auto& interval = publication->forced_family_interval.emplace();
         interval.old_time = trial.transport.accepted_time;
         interval.time_step = trial.transport.time_step;
         std::array<FaceSum, 3> body, other;
@@ -631,6 +631,16 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                 {
                     report.balanced_kinetic_pressure_policy = balanced_kinetic_pressure_revision;
                     report.forced_kinetic_thermal_policy = forced_kinetic_thermal_revision;
+                }
+            }
+            if (uses_qbmm_linear_transport(d->options.qbmm_model))
+            {
+                report.linear_cfl_limit = d->options.qbmm_model.linear_cfl;
+                report.linear_substep_limit = d->options.qbmm_model.maximum_linear_substeps;
+                if (report.body_acceleration_m_per_s2)
+                {
+                    report.balanced_linear_pressure_policy = balanced_linear_pressure_revision;
+                    report.forced_linear_thermal_policy = forced_linear_thermal_revision;
                 }
             }
             if (diagnostics.correctors > 0)

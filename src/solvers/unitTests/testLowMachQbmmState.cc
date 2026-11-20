@@ -1417,6 +1417,7 @@ TEST(LowMachQbmmStateTest, RealizableLinearRequiresFixedSharedCarrierAndUniformC
     EXPECT_FALSE(motion.has_active_trial());
     int calls = 0;
     auto forced = restart_controller_options(f, calls);
+    // A forced controller requires an identity for the fixture's opaque liquid EOS.
     forced.body_acceleration = Flow::Vector{};
     EXPECT_THROW((void) R::ReactingMixtureCoupler(flow, std::move(forced)), std::exception);
     EXPECT_EQ(calls, 0);
@@ -1435,6 +1436,74 @@ TEST(LowMachQbmmStateTest, RealizableLinearRequiresFixedSharedCarrierAndUniformC
             Arr<Arr<unsigned>>{{0, 1, 4, 5}, {1, 2, 3, 4}}, ArrReal{0, 1}),
         distribution);
     EXPECT_THROW((void) Flow(skew, f.eos, f.options), std::exception);
+}
+
+TEST(LowMachQbmmStateTest, ForcedLinearRequiresAClosedPolygonalDiskOrAnnulusBase)
+{
+    using Semi = Flow::Mesh::SemiStructured;
+    Fixture f;
+    f.options.qbmm_model.family_transport = R::QbmmModelOptions::FamilyTransport::RealizableLinearSSPRK2;
+    f.options.qbmm_eos_law_identities = {
+        R::ThermalLawIdentity{"polygon fixture liquid", 1, f.catalog->fingerprint()}, std::nullopt, std::nullopt};
+    const Flow::Mesh::DistributionOptions distribution{.allow_empty_partitions = true};
+    const auto square_base = [&](const std::vector<std::array<unsigned, 2>>& squares)
+    {
+        constexpr unsigned width = 6, height = 4;
+        Arr<Semi::Vec3> nodes;
+        Arr<Arr<unsigned>> cells;
+        for (unsigned y = 0; y < height; ++y)
+            for (unsigned x = 0; x < width; ++x)
+                nodes.push_back({static_cast<double>(x), static_cast<double>(y), 0.});
+        for (const auto& [x, y] : squares)
+        {
+            const unsigned corner = y * width + x;
+            cells.push_back({corner, corner + 1, corner + width + 1, corner + width});
+        }
+        return std::make_shared<Flow::Mesh>(std::make_shared<Semi>(nodes, cells, ArrReal{0., 1.}), distribution);
+    };
+    std::vector<std::array<unsigned, 2>> two_holes;
+    for (unsigned y = 0; y < 3; ++y)
+        for (unsigned x = 0; x < 5; ++x)
+            if (!(y == 1 && (x == 1 || x == 3)))
+                two_holes.push_back({x, y});
+    for (const auto& base :
+        {square_base({{0, 0}, {1, 0}, {0, 1}}), square_base(two_holes), square_base({{0, 0}, {2, 0}})})
+    {
+        f.mesh = base;
+        auto flow = f.solver();
+        flow->initialize(f.initial());
+        const auto unforced = flow->preview(.01);
+        const auto previous = flow->serialize_qbmm_restart();
+        int calls = 0;
+        for (const auto force : {Flow::Vector{}, Flow::Vector{0., 0., -1.}})
+        {
+            auto options = restart_controller_options(f, calls);
+            options.body_acceleration = force;
+            EXPECT_THROW((void) R::ReactingMixtureCoupler(flow, std::move(options)), std::exception);
+            EXPECT_EQ(flow->serialize_qbmm_restart(), previous);
+        }
+        EXPECT_EQ(calls, 0);
+        EXPECT_NO_THROW(flow->commit(unforced));
+    }
+
+    // Irregular angular spacing, translated and rotated in the XY plane, with a split straight facet.
+    Arr<Semi::Vec3> points;
+    for (const double theta : {.23, .9, 2., 3.1, 4.2, 5.2})
+        points.push_back({8. + std::cos(theta), -5. + std::sin(theta), 0.});
+    points.push_back(points[1] * .75 + points[2] * .25);
+    points.push_back(points[1] * .25 + points[2] * .75);
+    f.mesh = std::make_shared<Flow::Mesh>(
+        std::make_shared<Semi>(points, Arr<Arr<unsigned>>{{0, 1, 6, 7, 2, 3, 4, 5}}, ArrReal{0., 1.}), distribution);
+    auto flow = f.solver();
+    flow->initialize(f.initial());
+    int calls = 0;
+    auto options = restart_controller_options(f, calls);
+    options.body_acceleration = Flow::Vector{};
+    EXPECT_NO_THROW({
+        R::ReactingMixtureCoupler controller(flow, std::move(options));
+        EXPECT_EQ(flow->qbmm_report().body_acceleration_m_per_s2, Flow::Vector{});
+        EXPECT_TRUE(flow->qbmm_report().balanced_linear_pressure_policy.has_value());
+    });
 }
 
 TEST(LowMachQbmmStateTest, MaterialSlotsCannotConvertTheFamilyToOrFromAnUnresolvedGasPool)

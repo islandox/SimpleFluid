@@ -26,7 +26,7 @@ struct Row
 };
 
 SIMPLEFLUID_SOLVERS_LOCAL inline void correct_block(const Flow::Mesh& mesh, double dt, std::span<const Stage> stages,
-    std::optional<std::size_t> phase, Flow::State& guess)
+    std::optional<std::size_t> phase, Flow::State& guess, double maximum_step)
 {
     const auto map = mesh.owned_cell_map();
     const auto comm = map->getComm();
@@ -159,7 +159,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void correct_block(const Flow::Mesh& mesh, doub
         return;
 
     std::vector<double> increments;
-    double local_step = 1, step = 1;
+    double local_step = maximum_step, step = maximum_step;
     collective_detail::collective_local_validation(mesh, "Fourier thermal guess EOS bounds",
         [&]
         {
@@ -181,7 +181,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void correct_block(const Flow::Mesh& mesh, doub
             }
         });
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_step, &step);
-    if (step < 1)
+    if (step < maximum_step)
         step = std::nextafter(step, 0.);
     if (step == 0)
         return;
@@ -206,18 +206,18 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void correct_block(const Flow::Mesh& mesh, doub
 }
 
 SIMPLEFLUID_SOLVERS_LOCAL inline void correct(
-    const Flow::Mesh& mesh, double dt, PhaseThermalMode mode, std::span<const Stage> stages, Flow::State& guess)
+    const Flow::Mesh& mesh, double dt, PhaseThermalMode mode, std::span<const Stage> stages, Flow::State& guess, double maximum_step = 1.)
 {
     if (stages.empty())
         return;
     if (mode == PhaseThermalMode::Equilibrium)
-        return correct_block(mesh, dt, stages, std::nullopt, guess);
+        return correct_block(mesh, dt, stages, std::nullopt, guess, maximum_step);
     for (auto stage = stages.begin(); stage != stages.end(); ++stage)
     {
         const auto phase = (*stage)->physical_phase;
         if (std::none_of(
                 stages.begin(), stage, [=](const auto& previous) { return previous->physical_phase == phase; }))
-            correct_block(mesh, dt, stages, phase, guess);
+            correct_block(mesh, dt, stages, phase, guess, maximum_step);
     }
 }
 } // namespace SimpleFluid::Reacting::fourier_thermal_detail

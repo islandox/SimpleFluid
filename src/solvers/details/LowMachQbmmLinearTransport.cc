@@ -10,6 +10,7 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace SimpleFluid::Reacting::qbmm_linear_detail
 {
@@ -18,6 +19,125 @@ namespace
 using namespace qbmm_explicit_detail;
 using Block = std::vector<double>;
 using Vec3 = Mesh::Vec3;
+
+constexpr auto invalid_base_index = Mesh::SemiStructured::Topology::invalid_ordinal;
+
+double xy_cross(const Vec3& a, const Vec3& b)
+{
+    return std::fma(a.x, b.y, -a.y * b.x);
+}
+
+double xy_length(const Vec3& a)
+{
+    return std::hypot(a.x, a.y);
+}
+
+struct CircularBoundary
+{
+    std::vector<Vec3> corners;
+    Vec3 center;
+    double scale, coordinate_roundoff;
+    int orientation;
+};
+
+CircularBoundary circular_boundary(const std::vector<Vec3>& points)
+{
+    const auto& origin = points.front();
+    double scale = 0., magnitude = 0.;
+    for (const auto& point : points)
+    {
+        scale = std::max(scale, xy_length(point - origin));
+        magnitude = std::max({magnitude, std::abs(point.x), std::abs(point.y)});
+    }
+    require(scale > 0. && std::isfinite(scale), "Forced linear QBMM requires a finite polygonal wall.");
+    // Compare local shapes in units of their diameter. Input rounding also depends on the absolute
+    // coordinate magnitude when a small vessel is translated far from the origin.
+    const double coordinate_roundoff = 16 * std::numeric_limits<double>::epsilon() * std::max(magnitude, scale);
+    const double roundoff = coordinate_roundoff / scale;
+    std::vector<Vec3> local;
+    local.reserve(points.size());
+    for (const auto& point : points)
+        local.push_back((point - origin) / scale);
+    std::vector<size_t> corners;
+    for (size_t i = 0; i < local.size(); ++i)
+    {
+        const auto before = local[i] - local[(i + local.size() - 1) % local.size()];
+        const auto after = local[(i + 1) % local.size()] - local[i];
+        if (before.dot(after) <= 0. ||
+            std::abs(xy_cross(before, after)) > roundoff * (xy_length(before) + xy_length(after)))
+            corners.push_back(i);
+    }
+    require(corners.size() >= 3, "Forced linear QBMM requires at least three distinct circular wall corners.");
+
+    // Use long chords for the circumcenter so clustered angular samples do not determine the fit.
+    const auto& first = local[corners.front()];
+    const auto longest = *std::ranges::max_element(corners, {},
+        [&](size_t i)
+        {
+            const auto offset = local[i] - first;
+            return offset.dot(offset);
+        });
+    const auto u = local[longest] - first;
+    const auto widest =
+        *std::ranges::max_element(corners, {}, [&](size_t i) { return std::abs(xy_cross(u, local[i] - first)); });
+    const auto v = local[widest] - first;
+    const double determinant = xy_cross(u, v);
+    require(std::abs(determinant) > 4 * roundoff, "Forced linear QBMM wall curvature is unresolved.");
+    const double u2 = u.dot(u), v2 = v.dot(v);
+    const auto center = first + Vec3{u2 * v.y - v2 * u.y, v2 * u.x - u2 * v.x, 0.} / (2 * determinant);
+    const double radius = xy_length(first - center);
+    const double radial_roundoff = 8 * roundoff;
+    const int orientation = xy_cross(first - center, local[corners[1]] - center) > 0. ? 1 : -1;
+    CircularBoundary ring{{}, origin + center * scale, scale, radial_roundoff * scale, orientation};
+    ring.corners.reserve(corners.size());
+    size_t positive_axis_crossings = 0;
+    for (size_t k = 0; k < corners.size(); ++k)
+    {
+        const size_t i = corners[k], j = corners[(k + 1) % corners.size()];
+        const auto a = local[i] - center, b = local[j] - center;
+        require(std::abs(xy_length(a) - radius) <= radial_roundoff && orientation * xy_cross(a, b) > 0.,
+            "Forced linear QBMM walls must follow ordered circular facets about their center.");
+        positive_axis_crossings += orientation > 0 ? a.y <= 0. && b.y > 0. : a.y > 0. && b.y <= 0.;
+        ring.corners.push_back(points[i]);
+        // Check all omitted subdivisions against the complete chord, including their order.
+        const auto chord = local[j] - local[i];
+        const double length = xy_length(chord);
+        const auto tangent = chord / length;
+        double preceding = 0.;
+        for (size_t s = (i + 1) % points.size(); s != j; s = (s + 1) % points.size())
+        {
+            const auto offset = local[s] - local[i];
+            const double along = tangent.dot(offset);
+            require(along > preceding && along < length && std::abs(xy_cross(tangent, offset)) <= roundoff,
+                "Forced linear QBMM wall subdivisions must follow their circular facet in order.");
+            preceding = along;
+        }
+    }
+    require(positive_axis_crossings == 1, "Forced linear QBMM requires simple circular wall cycles.");
+    return ring;
+}
+
+void validate_annular_boundaries(const CircularBoundary& outer, const CircularBoundary& inner)
+{
+    require(xy_length(outer.center - inner.center) <= outer.coordinate_roundoff + inner.coordinate_roundoff,
+        "Forced linear QBMM annular walls must be concentric.");
+    const auto angle = [&](const Vec3& point)
+    {
+        const auto offset = point - outer.center;
+        return std::atan2(offset.y, offset.x);
+    };
+    // In a convex outer cycle, only the edge crossed by the ray from the center can exclude the point.
+    auto corners = outer.corners;
+    std::ranges::rotate(corners, std::ranges::min_element(corners, {}, angle));
+    for (const auto& point : inner.corners)
+    {
+        const auto next = std::ranges::upper_bound(corners, angle(point), {}, angle);
+        const auto& b = next == corners.end() ? corners.front() : *next;
+        const auto& a = next == corners.begin() ? corners.back() : *(next - 1);
+        require(xy_cross((b - a) / outer.scale, (point - a) / outer.scale) > 0.,
+            "Forced linear QBMM annular inner walls must lie strictly inside the outer wall.");
+    }
+}
 
 struct FaceStencil
 {
@@ -47,7 +167,8 @@ struct Sample
     double distance;
 };
 
-std::vector<CellStencil> cell_stencils(const Mesh& mesh, const Flow::Traits::scalar_face_type& flux)
+std::vector<CellStencil> cell_stencils(
+    const Mesh& mesh, const Flow::Traits::scalar_face_type& flux, TraceLimiter limiter)
 {
     std::vector<CellStencil> stencils(mesh.num_owned_cells());
     for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
@@ -104,10 +225,11 @@ std::vector<CellStencil> cell_stencils(const Mesh& mesh, const Flow::Traits::sca
             const size_t side = mesh.owner_cell(face) == cell ? 0 : 1;
             const double outward = side == 0 ? phi : -phi;
             require(std::isfinite(outward), "Nonfinite QBMM linear overlap carrier flux.");
-            if (outward < 0)
+            if (outward < 0 && limiter == TraceLimiter::Outgoing)
                 continue;
             auto& wanted = stencil.traces.emplace_back(FaceStencil{face, side, outward, {}});
-            stencil.outgoing_rate.add_product(outward, 1.);
+            if (outward > 0.)
+                stencil.outgoing_rate.add_product(outward, 1.);
             const auto offset = mesh.face_centroid(face) - center;
             const auto length = std::hypot(offset.x, offset.y, offset.z);
             require(std::isfinite(length), "Invalid QBMM linear cell-to-face displacement.");
@@ -130,9 +252,9 @@ std::vector<CellStencil> cell_stencils(const Mesh& mesh, const Flow::Traits::sca
                 resolved &= std::abs(defect.rounded(length)) <= 4096 * eps;
             }
             require(
-                resolved || outward == 0, "QBMM linear one-ring geometry cannot reproduce this outgoing face offset.");
+                resolved || outward <= 0, "QBMM linear one-ring geometry cannot reproduce this outgoing face offset.");
             if (!resolved)
-                wanted.weights.clear(); // A zero-rate tie may use its cell-center trace.
+                wanted.weights.clear(); // A non-transporting side may use its cell-center trace.
         }
     }
     return stencils;
@@ -341,7 +463,7 @@ bool preserves_singleton(const Block& center, const std::vector<FaceSum>& slope)
 }
 
 std::vector<Block> limit_traces(const QbmmPopulationSchema& family, const CellStencil& stencil, const Block& center,
-    const std::vector<Block>& neighbors, double h)
+    const std::vector<Block>& neighbors, double h, TraceLimiter limiter)
 {
     EnergyBounds energy;
     energy.include(family, center);
@@ -386,17 +508,21 @@ std::vector<Block> limit_traces(const QbmmPopulationSchema& family, const CellSt
         check_realizable(family, trace, "face trace");
         energy.check(family, trace);
     };
-    const auto certify_outgoing = [&](double factor)
+    const auto certify_donor = [&](double factor)
     {
         std::vector<FaceSum> retained(center.size());
         for (size_t q = 0; q < center.size(); ++q)
             retained[q].add_product(center[q], 1.);
         for (size_t f = 0; f < traces.size(); ++f)
         {
-            if (stencil.traces[f].outward == 0)
+            const auto outward = stencil.traces[f].outward;
+            // The forced corrector certifies every potential donor trace with the same factor.
+            // A vanishing rate can change direction without changing the set of trace constraints.
+            if (outward > 0. || limiter == TraceLimiter::AllIncident)
+                reconstruct(f, factor);
+            if (outward <= 0.)
                 continue;
-            reconstruct(f, factor);
-            const auto transfer = withdrawal(family, traces[f], h, stencil.traces[f].outward, stencil.volume);
+            const auto transfer = withdrawal(family, traces[f], h, outward, stencil.volume);
             for (size_t q = 0; q < center.size(); ++q)
                 retained[q].add_product(-transfer[q], 1.);
         }
@@ -435,17 +561,18 @@ std::vector<Block> limit_traces(const QbmmPopulationSchema& family, const CellSt
     double initial = center[H0] != 0 ? 1. : 0.;
     if (invert_qbmm_moments({center[H0], center[H1], center[H2], center[H3]}).active_atoms == 1)
         for (size_t f = 0; f < traces.size(); ++f)
-            if (stencil.traces[f].outward > 0 && !preserves_singleton(center, slopes[f]))
+            if ((stencil.traces[f].outward > 0 || limiter == TraceLimiter::AllIncident) &&
+                !preserves_singleton(center, slopes[f]))
                 initial = 0.;
-    const double factor = limit(certify_outgoing, initial);
-    for (size_t f = 0; f < traces.size(); ++f)
-        if (stencil.traces[f].outward == 0)
-        {
-            // Zero-flow pressure linearization uses the two reconstructed
-            // one-sided traces. A tied face reserves no stock and can reduce
-            // its own slope without restricting the active outgoing traces.
-            limit([&](double tie_factor) { reconstruct(f, tie_factor); }, factor);
-        }
+    const double factor = limit(certify_donor, initial);
+    if (limiter == TraceLimiter::Outgoing)
+        for (size_t f = 0; f < traces.size(); ++f)
+            if (stencil.traces[f].outward == 0)
+            {
+                // The unforced policy permits its two tied pressure traces to
+                // reduce their own slopes independently of the donor's outgoing traces.
+                limit([&](double tie_factor) { reconstruct(f, tie_factor); }, factor);
+            }
     return traces;
 }
 
@@ -479,7 +606,7 @@ struct TraceColumns
 template<class Stocks, class Traces>
 void stage_traces(const Flow::Options& options, const Flow::State& guess, const std::vector<size_t>& phases,
     const std::vector<CellStencil>& stencils, const TraceColumns& columns, const Stocks& stocks, const Traces& traces,
-    double h)
+    double h, TraceLimiter limiter)
 {
     for (size_t c = 0; c < stencils.size(); ++c)
     {
@@ -496,10 +623,12 @@ void stage_traces(const Flow::Options& options, const Flow::State& guess, const 
             neighbors.reserve(stencil.neighbors.size());
             for (const auto& neighbor : stencil.neighbors)
                 neighbors.push_back(read_block(stocks, neighbor.cell, a * columns.block, columns.block));
-            const auto limited = limit_traces(family, stencil, center, neighbors, h);
+            const auto limited = limit_traces(family, stencil, center, neighbors, h, limiter);
             for (size_t f = 0; f < stencil.traces.size(); ++f)
             {
                 const auto& face = stencil.traces[f];
+                if (face.outward < 0.)
+                    continue;
                 const auto first = (a * sides + face.side) * columns.width();
                 const auto& trace = limited[f];
                 auto thermal = donor.phases[phase];
@@ -733,9 +862,63 @@ void complete_substep(const Flow::Options& options, const Flow::State& start, Fl
 }
 } // namespace
 
+void validate_cylindrical_base(const Flow::Mesh::SemiStructured& mesh)
+{
+    const auto& topology = mesh.topology();
+    std::vector<bool> visited(mesh.xy_cell_nodes().size());
+    std::vector<unsigned> connected{0};
+    visited[0] = true;
+    for (size_t row = 0; row < connected.size(); ++row)
+        for (const auto face : topology.cell_side_faces(connected[row]))
+        {
+            const auto& side = topology.side_face(face);
+            const auto other = side.owner == connected[row] ? side.neighbor : side.owner;
+            if (other != invalid_base_index && !visited[other])
+            {
+                visited[other] = true;
+                connected.push_back(other);
+            }
+        }
+    require(connected.size() == visited.size(), "Forced linear QBMM requires an edge-connected polygonal base.");
+
+    std::vector<unsigned> next(mesh.xy_nodes().size(), invalid_base_index), previous = next;
+    for (const auto& side : topology.side_faces())
+        if (side.neighbor == invalid_base_index)
+        {
+            const auto [a, b] = side.nodes;
+            require(next[a] == invalid_base_index && previous[b] == invalid_base_index,
+                "Forced linear QBMM requires disjoint polygonal wall cycles.");
+            next[a] = b;
+            previous[b] = a;
+        }
+    std::optional<CircularBoundary> outer, inner;
+    for (size_t i = 0; i < next.size(); ++i)
+    {
+        if (next[i] == invalid_base_index)
+            continue;
+        std::vector<Vec3> points;
+        auto node = static_cast<unsigned>(i);
+        do
+        {
+            require(next[node] != invalid_base_index, "Forced linear QBMM requires closed polygonal wall cycles.");
+            const auto& point = mesh.xy_nodes()[node];
+            points.push_back({point.x, point.y, 0.});
+            node = std::exchange(next[node], invalid_base_index);
+        } while (node != i);
+        auto ring = circular_boundary(points);
+        auto& slot = ring.orientation > 0 ? outer : inner;
+        require(!slot, "Forced linear QBMM accepts one polygonal outer wall and at most one inner wall.");
+        slot = std::move(ring);
+    }
+    require(outer.has_value(), "Forced linear QBMM requires a polygonal outer wall.");
+    if (inner)
+        validate_annular_boundaries(*outer, *inner);
+}
+
 TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options& options, const Flow::State& accepted,
     const Flow::State& thermodynamic_guess, Flow::State& candidate, const Flow::Traits::scalar_face_type& carrier_flux,
-    const std::vector<std::vector<double>>& accepted_material_volumes, double dt, size_t corrector)
+    const std::vector<std::vector<double>>& accepted_material_volumes, double dt, size_t corrector,
+    TraceLimiter limiter)
 {
     const auto& mesh = *grid;
     const auto owned_cells = mesh.owned_cell_map(), overlap_cells = mesh.overlap_cell_map();
@@ -769,7 +952,7 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
                     columns.block = FirstSpecies + options.qbmm_families[p]->catalog().species().size();
                 }
             require(!phases.empty(), "QBMM linear mode has no bound phase.");
-            stencils = cell_stencils(mesh, carrier_flux);
+            stencils = cell_stencils(mesh, carrier_flux, limiter);
             result.owned_flux.resize(np);
             result.integrated_faces.resize(nf);
             result.advected_material_volumes = accepted_material_volumes;
@@ -797,6 +980,7 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
     // These maps and exchange buffers are private to one corrector and its
     // fixed family/catalog order. Each stage overwrites them before use.
     collective_detail::require_uniform_value(mesh, corrector, "QBMM linear corrector index");
+    collective_detail::require_uniform_value(mesh, static_cast<int>(limiter), "QBMM linear trace limiter");
     collective_detail::require_uniform_value(mesh, dt, "QBMM linear requested interval");
     collective_detail::require_uniform_value(mesh, cap, "QBMM linear CFL cap");
     collective_detail::require_uniform_value(mesh, max_substeps, "QBMM linear substep cap");
@@ -877,7 +1061,7 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
                     try
                     {
                         stage_traces(options, thermodynamic_guess, phases, stencils, columns, stocks->read(),
-                            donor_traces->getLocalViewHost(Tpetra::Access::ReadWrite), h);
+                            donor_traces->getLocalViewHost(Tpetra::Access::ReadWrite), h, limiter);
                     }
                     catch (const std::exception& error)
                     {

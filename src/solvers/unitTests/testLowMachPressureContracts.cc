@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <memory>
+#include <numbers>
 #include <vector>
 
 namespace
@@ -314,6 +315,75 @@ TEST(LowMachPressureContractsTest, KineticProjectionCorrectsTheReferenceDifferen
             EXPECT_NEAR(u.x, 0., 1e-12);
             EXPECT_NEAR(u.y, 0., 1e-12);
         }
+    }
+}
+
+TEST(LowMachPressureContractsTest, DrivenAnnularProjectionUsesPhysicalAreasAndInteriorCellGradients)
+{
+    // Manufacture a pressure correction linear in Cartesian coordinates. Its flux through
+    // each interior sector face follows from the physical scalar area and midpoint normal.
+    using Cylinder = Mesh::Cylindrical;
+    constexpr double dt = .25, density = 2., fraction = .625;
+    const Vector gradient{.75, -.5, .25};
+    const S::ArrReal radius{1., 1.5, 2.5}, height{0., .5, 1.5};
+    for (const unsigned sectors : {3u, 8u})
+    {
+        const double angle = std::numbers::pi / 4;
+        S::ArrReal azimuth;
+        for (unsigned j = 0; j <= sectors; ++j)
+            azimuth.push_back(j * angle);
+        const auto native = std::make_shared<Cylinder>(S::Vec3D<S::ArrReal>{radius, azimuth, height});
+        const auto mesh = std::make_shared<Mesh>(native);
+        Pressure equation(mesh);
+        Pressure::ScalarField rho(mesh, density, "density"), pressure(mesh, 0., "mechanical");
+        Pressure::VectorField velocity(mesh, Vector{}, "velocity");
+        Pressure::FaceField theta(mesh, fraction, "theta"), zero(mesh, 0., "anchor"), flux(mesh, 0., "carrier");
+        const auto physical_flux = [&](LO face)
+        {
+            if (mesh->is_geometry_exterior_face(face))
+                return 0.;
+            const auto id = native->face_id(mesh->face_geometry_global_id(face));
+            const double r = radius[id.i], a = azimuth[id.j];
+            Vector area;
+            if (id.orientation == Cylinder::R_FACE)
+            {
+                const double magnitude = r * angle * (height[id.k + 1] - height[id.k]);
+                area = Vector{std::cos(a + angle / 2), std::sin(a + angle / 2), 0.} * magnitude;
+            }
+            else if (id.orientation == Cylinder::THETA_FACE)
+                area = Vector{-std::sin(a), std::cos(a), 0.} *
+                       ((radius[id.i + 1] - r) * (height[id.k + 1] - height[id.k]));
+            else
+                area = Vector{0., 0., .5 * (radius[id.i + 1] * radius[id.i + 1] - r * r) * angle};
+            EXPECT_LT((mesh->face_area_vector(face) - area).norm(), 1e-14);
+            return -dt / density * gradient.dot(area);
+        };
+
+        std::vector<double> target(mesh->num_owned_cells()), chi(target.size(), 0.);
+        for (size_t c = 0; c < target.size(); ++c)
+        {
+            const auto cell = static_cast<LO>(c);
+            for (const auto face : mesh->faces(cell))
+                target[c] += (mesh->owner_cell(face) == cell ? fraction : -fraction) * physical_flux(face);
+        }
+        S::LinearSolverOptions controls;
+        controls.preconditioner = S::LinearPreconditioner::None;
+        controls.tolerance = 1e-13;
+        const auto result = equation.project_kinetic_material_with_eos(rho, dt, target, chi, theta, zero, zero, zero,
+            flux, pressure, velocity, controls, 1e-12, Pressure::CellPressureGradient::Interior);
+        EXPECT_TRUE(result.linear.converged);
+        EXPECT_LE(result.maximum_continuity_residual, 1e-12);
+        for (const auto face : flux.owned_face_ids())
+        {
+            EXPECT_NEAR(flux.owned_value(face), physical_flux(face), 2e-12);
+            if (mesh->is_geometry_exterior_face(face))
+                continue;
+            const auto left = mesh->owner_cell(face), right = mesh->neighbor_cell(face);
+            const auto displacement = mesh->cell_centroid(right) - mesh->cell_centroid(left);
+            EXPECT_NEAR(pressure.local_value(right) - pressure.local_value(left), gradient.dot(displacement), 2e-12);
+        }
+        for (size_t c = 0; c < target.size(); ++c)
+            EXPECT_LT((velocity.owned_value(static_cast<LO>(c)) + gradient * (dt / density)).norm(), 2e-12);
     }
 }
 
