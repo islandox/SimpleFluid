@@ -266,6 +266,27 @@ TEST_F(AdaptiveIdentityPool, ForksAppendPrivatelyAndSurviveSourceAndSourceBudget
     EXPECT_EQ(Identity::live, values.size() + 2); // Only test inputs remain.
 }
 
+TEST_F(AdaptiveIdentityPool, BorrowedSourceCreditRetiresWhileKeptForkSharesPage)
+{
+    D::Budget source_budget{ample};
+    source_budget.add(103);
+    const auto candidate_budget = std::make_shared<D::Budget>(D::Budget{ample});
+    auto source = std::make_unique<Pool>(source_budget);
+    const Identity input({37, 11, 5});
+    ASSERT_EQ(source->intern(input), 0u);
+    const auto* shared_value = &source->get(0);
+    {
+        Pool candidate(*source, *candidate_budget, candidate_budget);
+        source.reset();
+        EXPECT_EQ(source_budget.used, 103u);
+        EXPECT_EQ(&candidate.get(0), shared_value);
+        EXPECT_EQ(candidate.get(0), input);
+        EXPECT_EQ(candidate.retained_bytes(), candidate_budget->used);
+    }
+    EXPECT_EQ(source_budget.used, 103u);
+    EXPECT_EQ(candidate_budget->used, 0u);
+}
+
 TEST_F(AdaptiveIdentityPool, ExactObservedPeakAdmitsAndOneByteLessRejects)
 {
     const auto values = inputs(33);

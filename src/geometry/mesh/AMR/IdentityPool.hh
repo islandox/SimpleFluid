@@ -137,7 +137,9 @@ private:
         const auto* receipt = std::get_deleter<DeleteCredit>(credit);
         if (!receipt || !receipt->control || receipt->control->budget != credit->budget)
             throw std::invalid_argument("Identity page lacks its actual charged control keeper.");
-        return std::shared_ptr<Page>(new Page, DeletePage{receipt->control});
+        // Flat forks admit shared bodies in their own arenas. A page can outlive
+        // its borrowed source Budget, so only a keeper can finance its final deletion.
+        return std::shared_ptr<Page>(new Page, DeletePage{credit->keeper ? receipt->control : nullptr});
     }
     static NativeContactOwnerFunding credit_funding(
         const std::shared_ptr<const PageCredit>& credit, std::size_t extent)
