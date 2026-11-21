@@ -228,8 +228,11 @@ void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack,
                     velocity_values(owner_lid, 0), velocity_values(owner_lid, 1), velocity_values(owner_lid, 2)};
                 const vec_type neighbor_velocity{velocity_values(neighbor_lid, 0), velocity_values(neighbor_lid, 1),
                     velocity_values(neighbor_lid, 2)};
+                // Affine difference form: the two weights sum to exactly
+                // one, so constant velocity and gradient fields reproduce
+                // themselves bit-exactly.
                 const auto face_velocity =
-                    owner_velocity * metrics.owner_weight + neighbor_velocity * metrics.neighbor_weight;
+                    owner_velocity + (neighbor_velocity - owner_velocity) * metrics.neighbor_weight;
                 // Preserve the normal-then-area order of the standalone kernel.
                 flux_values(face_lid, 0) = face_velocity.dot(metrics.normal) * metrics.area;
                 if (decompose)
@@ -247,7 +250,7 @@ void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack,
                 const vec_type neighbor_gradient{gradient_values(neighbor_lid, 0), gradient_values(neighbor_lid, 1),
                     gradient_values(neighbor_lid, 2)};
                 const auto interpolated_gradient =
-                    owner_gradient * metrics.owner_weight + neighbor_gradient * metrics.neighbor_weight;
+                    owner_gradient + (neighbor_gradient - owner_gradient) * metrics.neighbor_weight;
                 const auto interpolated_gradient_flux = interpolated_gradient.dot(metrics.center_delta) *
                                                         metrics.center_projection / metrics.distance_squared;
                 if (decompose)

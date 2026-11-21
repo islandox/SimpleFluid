@@ -16,7 +16,6 @@
 #include "equations/BoundaryConditions.hh"
 #include "FVM/FaceCoefficientInterpolation.hh"
 #include "geometry/MeshUtils.hh"
-#include "utils/CompensatedSum.hh"
 
 #include <algorithm>
 #include <array>
@@ -30,91 +29,6 @@
 
 namespace SimpleFluid::FVM::detail
 {
-
-/**
- * @brief Absorb residual rounding so gradient stencil weights sum to zero.
- *
- * Least-squares stencils are built from +basis/-basis pairs accumulated in
- * different orders, so their exact component sums drift to a few ulps of the
- * largest weight. Absorbing the compensated residual into the
- * largest-magnitude weight restores exact zero-order consistency: a
- * constant field then reproduces a bit-exact zero gradient through the
- * affine evaluation path.
- *
- * @tparam Entries Container of stencil entries with a public coefficient.
- * @param entries Mutable stencil entries for one cell.
- */
-template<class Entries>
-void enforce_zero_order_gradient_consistency(Entries& entries)
-{
-    enforce_gradient_weight_consistency(entries, {{}});
-}
-
-/**
- * @brief Absorb residual rounding so affine gradient weights reproduce a
- *        constant field bit-exactly.
- *
- * Affine stencils carry boundary samples: prescribed Dirichlet (and Robin)
- * values enter through the constant term while their basis sums are folded
- * into the cell's own weight. Exact zero-order consistency therefore
- * requires sum_i g_i == target, where target is the negated compensated
- * sum of the boundary basis contributions - zero for pure interior
- * stencils. The residual (sum - target) is absorbed into the
- * largest-magnitude weight.
- */
-template<class Entries>
-void enforce_gradient_weight_consistency(Entries& entries,
-    const std::array<long double, 3>& target)
-{
-    if (entries.size() < 2)
-    {
-        return;
-    }
-    const auto read = [](const auto& coefficient, size_t k) -> long double
-    {
-        switch (k)
-        {
-            case 0: return static_cast<long double>(coefficient.x);
-            case 1: return static_cast<long double>(coefficient.y);
-            default: return static_cast<long double>(coefficient.z);
-        }
-    };
-    const auto absorb = [](auto& coefficient, size_t k, real_t residual) -> auto&
-    {
-        switch (k)
-        {
-            case 0: return coefficient.x -= residual;
-            case 1: return coefficient.y -= residual;
-            default: return coefficient.z -= residual;
-        }
-    };
-    for (int attempt = 0; attempt < 3; ++attempt)
-    {
-        std::array<SimpleFluid::detail::CompensatedSum<long double>, 3> sum{};
-        std::array<size_t, 3> largest{};
-        for (size_t index = 0; index < entries.size(); ++index)
-        {
-            for (size_t k = 0; k < 3; ++k)
-            {
-                const auto value = read(entries[index].coefficient, k);
-                sum[k] += value;
-                if (std::abs(value) > std::abs(read(entries[largest[k]].coefficient, k)))
-                {
-                    largest[k] = index;
-                }
-            }
-        }
-        bool residual = false;
-        for (size_t k = 0; k < 3; ++k)
-        {
-            const auto value = sum[k].value() - target[k];
-            if (value == 0.0L) continue;
-            residual = true;
-            absorb(entries[largest[k]].coefficient, k, static_cast<real_t>(value));
-        }
-        if (!residual) break;
-    }
-}
 
 /**
  * @brief Return a mutable reference to a component of a 3-D vector.
@@ -847,6 +761,22 @@ using LeastSquaresGradientStencil =
     std::vector<LeastSquaresGradientStencilEntry<MeshType>>;
 
 /**
+ * @brief Unfolded Dirichlet-like boundary term of a scalar affine gradient.
+ *
+ * The evaluation acts on differences relative to the owning cell's value:
+ * `basis * (value - p_P)`, so a constant field with matching prescribed
+ * boundary values contributes exactly zero.
+ *
+ * @tparam MeshType Mesh interface type.
+ */
+template<class MeshType>
+struct AffineBoundaryTerm
+{
+    typename MeshType::Vec3 basis{};
+    real_t value{};
+};
+
+/**
  * @brief Cell coefficients plus the boundary-data constant of a gradient.
  * @tparam MeshType Mesh interface type.
  */
@@ -854,7 +784,23 @@ template<class MeshType>
 struct AffineLeastSquaresGradientStencil
 {
     LeastSquaresGradientStencil<MeshType> entries;
+    std::vector<AffineBoundaryTerm<MeshType>> boundary_terms;
     typename MeshType::Vec3 constant{};
+};
+
+/**
+ * @brief Unfolded Dirichlet-like boundary term of a vector affine gradient.
+ *
+ * A single basis direction acts per component on the difference between the
+ * component's prescribed value and the owning cell's component value.
+ *
+ * @tparam MeshType Mesh interface type.
+ */
+template<class MeshType>
+struct VectorAffineBoundaryTerm
+{
+    typename MeshType::Vec3 basis{};
+    std::array<real_t, 3> value{};
 };
 
 /**
@@ -865,6 +811,7 @@ template<class MeshType>
 struct VectorAffineLeastSquaresGradientStencil
 {
     LeastSquaresGradientStencil<MeshType> entries;
+    std::vector<VectorAffineBoundaryTerm<MeshType>> boundary_terms;
     std::array<typename MeshType::Vec3, 3> constants{};
 };
 
@@ -1107,7 +1054,6 @@ least_squares_gradient_stencils(const MeshType& mesh, const MeshTraversePlan<Mes
         {
             stencils[owned].push_back({entry_lid, coefficient});
         }
-        enforce_zero_order_gradient_consistency(stencils[owned]);
     });
 
     return stencils;
@@ -1376,30 +1322,6 @@ boundary_aware_gradient_geometry(
     return boundary_aware_gradient_geometry(mesh, boundary_locations, plan);
 }
 
-/** @brief Add or accumulate an entry in a materialized gradient stencil. */
-template<class MeshType>
-void add_materialized_gradient_coefficient(
-    LeastSquaresGradientStencil<MeshType>& entries,
-    typename MeshType::local_ordinal_type cell_lid,
-    const typename MeshType::Vec3& coefficient)
-{
-    const auto iter = std::find_if(
-        entries.begin(), entries.end(),
-        [cell_lid](const auto& entry)
-        {
-            return entry.cell_lid == cell_lid;
-        });
-    if (iter == entries.end())
-    {
-        entries.push_back({cell_lid, coefficient});
-        return;
-    }
-    iter->coefficient = {
-        iter->coefficient.x + coefficient.x,
-        iter->coefficient.y + coefficient.y,
-        iter->coefficient.z + coefficient.z};
-}
-
 /** @brief Default observer for optional prescribed-gradient response capture. */
 struct IgnoreNeumannGradientSample
 {
@@ -1419,7 +1341,6 @@ materialize_scalar_affine_gradient_stencils(
     BoundaryObserver observe_neumann = {})
 {
     using local_ordinal_type = typename MeshType::local_ordinal_type;
-    using vec_type = typename MeshType::Vec3;
 
     std::vector<AffineLeastSquaresGradientStencil<MeshType>> stencils(
         geometry.size());
@@ -1429,35 +1350,30 @@ materialize_scalar_affine_gradient_stencils(
         const auto& cell_geometry = geometry[owned];
         auto& stencil = stencils[owned];
         stencil.entries = cell_geometry.interior_entries;
-        vec_type cell_coefficient{};
-        std::array<SimpleFluid::detail::CompensatedSum<long double>, 3> affine_target{};
-        bool has_dirichlet_sample = false;
 
         for (const auto& sample : cell_geometry.boundary_samples)
         {
             const auto condition = boundary_condition(
                 sample.location.batch_id,
                 sample.location.in_batch_id);
-            real_t boundary_increment{};
             if (condition.type == BoundaryConditionType::Dirichlet)
             {
-                has_dirichlet_sample = true;
-                cell_coefficient.x -= sample.basis.x;
-                cell_coefficient.y -= sample.basis.y;
-                cell_coefficient.z -= sample.basis.z;
-                affine_target[0] += -sample.basis.x;
-                affine_target[1] += -sample.basis.y;
-                affine_target[2] += -sample.basis.z;
-                boundary_increment = static_cast<real_t>(boundary_value(
+                // Dirichlet-like terms act on differences relative to the
+                // owning cell's value, so constant fields with matching
+                // prescribed values contribute exactly zero.
+                stencil.boundary_terms.push_back({sample.basis, static_cast<real_t>(boundary_value(
                     sample.location.batch_id,
-                    sample.location.in_batch_id));
+                    sample.location.in_batch_id))});
             }
             else if (condition.type == BoundaryConditionType::Neumann)
             {
                 observe_neumann(cell_lid, sample.location, sample.basis, sample.normal_distance);
-                boundary_increment =
+                const auto boundary_increment =
                     static_cast<real_t>(condition.value)
                     * sample.normal_distance;
+                stencil.constant.x += sample.basis.x * boundary_increment;
+                stencil.constant.y += sample.basis.y * boundary_increment;
+                stencil.constant.z += sample.basis.z * boundary_increment;
             }
             else
             {
@@ -1465,22 +1381,7 @@ materialize_scalar_affine_gradient_stencils(
                     "Affine scalar gradients support only Dirichlet and "
                     "Neumann boundary conditions.");
             }
-            stencil.constant.x += sample.basis.x * boundary_increment;
-            stencil.constant.y += sample.basis.y * boundary_increment;
-            stencil.constant.z += sample.basis.z * boundary_increment;
         }
-
-        if (has_dirichlet_sample)
-        {
-            add_materialized_gradient_coefficient<MeshType>(
-                stencil.entries, cell_lid, cell_coefficient);
-        }
-        // The affine evaluation multiplies stored weights by cell values, so
-        // exact zero-order consistency must hold on the materialized entries;
-        // prescribed Dirichlet values enter through the constant term, so
-        // the required entry sum is the negated Dirichlet basis sum.
-        enforce_gradient_weight_consistency(stencil.entries,
-            {{affine_target[0].value(), affine_target[1].value(), affine_target[2].value()}});
     }
     return stencils;
 }
@@ -1492,48 +1393,29 @@ materialize_vector_affine_gradient_stencils(
     const std::vector<BoundaryAwareGradientCellGeometry<MeshType>>& geometry,
     BoundaryValueProvider boundary_value)
 {
-    using local_ordinal_type = typename MeshType::local_ordinal_type;
     using vec_type = typename MeshType::Vec3;
 
     std::vector<VectorAffineLeastSquaresGradientStencil<MeshType>> stencils(
         geometry.size());
     for (size_t owned = 0; owned < geometry.size(); ++owned)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto& cell_geometry = geometry[owned];
         auto& stencil = stencils[owned];
         stencil.entries = cell_geometry.interior_entries;
-        vec_type cell_coefficient{};
-        std::array<SimpleFluid::detail::CompensatedSum<long double>, 3> affine_target{};
         for (const auto& sample : cell_geometry.boundary_samples)
         {
-            cell_coefficient.x -= sample.basis.x;
-            cell_coefficient.y -= sample.basis.y;
-            cell_coefficient.z -= sample.basis.z;
-            affine_target[0] += -sample.basis.x;
-            affine_target[1] += -sample.basis.y;
-            affine_target[2] += -sample.basis.z;
             const auto value = static_cast<vec_type>(boundary_value(
                 sample.location.batch_id,
                 sample.location.in_batch_id));
+            std::array<real_t, 3> components{};
             for (size_t component_id = 0; component_id < 3; ++component_id)
             {
-                const auto value_component = value.component(component_id);
-                stencil.constants[component_id].x +=
-                    sample.basis.x * value_component;
-                stencil.constants[component_id].y +=
-                    sample.basis.y * value_component;
-                stencil.constants[component_id].z +=
-                    sample.basis.z * value_component;
+                components[component_id] = value.component(component_id);
             }
+            // Every vector boundary sample acts like a per-component
+            // Dirichlet term on differences relative to the owning cell.
+            stencil.boundary_terms.push_back({sample.basis, components});
         }
-        if (!cell_geometry.boundary_samples.empty())
-        {
-            add_materialized_gradient_coefficient<MeshType>(
-                stencil.entries, cell_lid, cell_coefficient);
-        }
-        enforce_gradient_weight_consistency(stencil.entries,
-            {{affine_target[0].value(), affine_target[1].value(), affine_target[2].value()}});
     }
     return stencils;
 }
@@ -1542,9 +1424,11 @@ materialize_vector_affine_gradient_stencils(
  * @brief Build scalar least-squares gradient stencils including boundary data.
  *
  * The returned affine representation exactly matches the boundary-aware
- * `cell_gradient`: cell-dependent terms are stored in `entries`, while
- * prescribed Dirichlet values and Neumann increments are stored in
- * `constant` for transfer to an implicit transport RHS.
+ * `cell_gradient`: cell-dependent terms are stored in `entries` and act on
+ * differences relative to the owning cell's value, while unfolded
+ * Dirichlet-like boundary terms are stored in `boundary_terms` and Neumann
+ * increments are stored in `constant` for transfer to an implicit transport
+ * RHS.
  */
 template<class MeshType,
          class BoundaryConditionProvider,
@@ -1633,7 +1517,6 @@ scalar_affine_gradient_stencils(
         normal[2][0] = normal[0][2];
         normal[2][1] = normal[1][2];
         std::unordered_map<local_ordinal_type, vec_type> coefficients;
-        std::array<SimpleFluid::detail::CompensatedSum<long double>, 3> boundary_target{};
         auto& stencil = stencils[owned];
 
         faces.apply(access, [&](const auto& face)
@@ -1667,27 +1550,23 @@ scalar_affine_gradient_stencils(
                 }
                 auto local_normal = normal;
                 const auto basis = solve_3x3(local_normal, direction);
-                real_t boundary_increment{};
                 if (condition.type == BoundaryConditionType::Dirichlet)
                 {
-                    add_gradient_coefficient<MeshType>(
-                        coefficients, cell_lid,
-                        {-basis.x, -basis.y, -basis.z});
-                    boundary_target[0] += -basis.x;
-                    boundary_target[1] += -basis.y;
-                    boundary_target[2] += -basis.z;
-                    boundary_increment = static_cast<real_t>(boundary_value(
-                        location.batch_id, location.in_batch_id));
+                    // Dirichlet-like terms act on differences relative to
+                    // the owning cell's value, so constant fields with
+                    // matching prescribed values contribute exactly zero.
+                    stencil.boundary_terms.push_back({basis, static_cast<real_t>(boundary_value(
+                        location.batch_id, location.in_batch_id))});
                 }
                 else if (condition.type == BoundaryConditionType::Robin)
                 {
-                    const auto weight = robin_weight;
-                    add_gradient_coefficient<MeshType>(
-                        coefficients, cell_lid, {-weight * basis.x, -weight * basis.y, -weight * basis.z});
-                    boundary_target[0] += -weight * basis.x;
-                    boundary_target[1] += -weight * basis.y;
-                    boundary_target[2] += -weight * basis.z;
-                    boundary_increment = weight * condition.value;
+                    // Robin mirrors the legacy fold: the entry carried
+                    // -weight * basis against p_P while the constant carried
+                    // basis * (weight * value), i.e. one shared weight times
+                    // basis * (value - p_P).
+                    stencil.boundary_terms.push_back(
+                        {vec_type{robin_weight * basis.x, robin_weight * basis.y, robin_weight * basis.z},
+                            static_cast<real_t>(condition.value)});
                 }
                 else
                 {
@@ -1695,11 +1574,12 @@ scalar_affine_gradient_stencils(
                     const auto normal_distance = static_cast<typename MeshType::scalar_type>(
                         normal_direction.dot(access.face_normal_outward(face.id(), cell_lid)));
                     observe_neumann(cell_lid, location, basis, normal_distance);
-                    boundary_increment = condition.value * static_cast<real_t>(normal_distance);
+                    const auto boundary_increment =
+                        condition.value * static_cast<real_t>(normal_distance);
+                    stencil.constant.x += basis.x * boundary_increment;
+                    stencil.constant.y += basis.y * boundary_increment;
+                    stencil.constant.z += basis.z * boundary_increment;
                 }
-                stencil.constant.x += basis.x * boundary_increment;
-                stencil.constant.y += basis.y * boundary_increment;
-                stencil.constant.z += basis.z * boundary_increment;
             }
         });
 
@@ -1708,11 +1588,6 @@ scalar_affine_gradient_stencils(
         {
             stencil.entries.push_back({entry_lid, coefficient});
         }
-        // Mirror the cached materialization's consistency contract so fresh
-        // and cached assemblies stay bit-identical: the entry sum must match
-        // the negated prescribed-value basis contributions.
-        enforce_gradient_weight_consistency(stencil.entries,
-            {{boundary_target[0].value(), boundary_target[1].value(), boundary_target[2].value()}});
     });
     return stencils;
 }
@@ -1785,7 +1660,6 @@ vector_affine_gradient_stencils(
         normal[2][0] = normal[0][2];
         normal[2][1] = normal[1][2];
         std::unordered_map<local_ordinal_type, vec_type> coefficients;
-        std::array<SimpleFluid::detail::CompensatedSum<long double>, 3> boundary_target{};
         auto& stencil = stencils[owned];
 
         faces.apply(access, [&](const auto& face)
@@ -1811,24 +1685,16 @@ vector_affine_gradient_stencils(
                 direction = access.face_centroid(face.id()) - access.cell_centroid(cell_lid);
                 auto local_normal = normal;
                 const auto basis = solve_3x3(local_normal, direction);
-                add_gradient_coefficient<MeshType>(
-                    coefficients, cell_lid,
-                    {-basis.x, -basis.y, -basis.z});
-                boundary_target[0] += -basis.x;
-                boundary_target[1] += -basis.y;
-                boundary_target[2] += -basis.z;
                 const auto value = static_cast<vec_type>(boundary_value(
                     location.batch_id, location.in_batch_id));
+                std::array<real_t, 3> components{};
                 for (size_t component_id = 0; component_id < 3; ++component_id)
                 {
-                    const auto component_value = value.component(component_id);
-                    stencil.constants[component_id].x +=
-                        basis.x * component_value;
-                    stencil.constants[component_id].y +=
-                        basis.y * component_value;
-                    stencil.constants[component_id].z +=
-                        basis.z * component_value;
+                    components[component_id] = value.component(component_id);
                 }
+                // Every vector boundary sample acts like a per-component
+                // Dirichlet term on differences relative to the owning cell.
+                stencil.boundary_terms.push_back({basis, components});
             }
         });
 
@@ -1837,8 +1703,6 @@ vector_affine_gradient_stencils(
         {
             stencil.entries.push_back({entry_lid, coefficient});
         }
-        enforce_gradient_weight_consistency(stencil.entries,
-            {{boundary_target[0].value(), boundary_target[1].value(), boundary_target[2].value()}});
     });
     return stencils;
 }

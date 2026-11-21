@@ -14,6 +14,7 @@
 #include "FVM/Operators.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "solvers/DICPreconditioner.hh"
+#include "solvers/ScaledLinearOperator.hh"
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_OrdinalTraits.hpp>
@@ -857,6 +858,49 @@ TEST(BelosLinearSolverTest, AccurateStoredCrsResidualPreservesCancellationAndOri
         b[0] = static_cast<double>(column + 1);
     }
     EXPECT_DOUBLE_EQ(Access::accurate_relative_residual(solver, matrix, rhs, solution), 0.0);
+
+    // Wrapping the same cancellation-sensitive CRS matrix in a scaled
+    // operator must keep the compensated residual path active: the plain
+    // matrix dynamic cast would silently disable it otherwise.
+    for (const double crs_scale : {1.0, 1.0e-3})
+    {
+        SCOPED_TRACE(crs_scale);
+        const auto scaled = Teuchos::rcp(
+            new SimpleFluid::detail::ScaledLinearOperator<Pack>(matrix, crs_scale));
+        Pack::multi_vector_type scaled_rhs(map, 2, true), scaled_solution(map, 2, true);
+        for (std::size_t column = 0; column < 2; ++column)
+        {
+            const double column_scale = static_cast<double>(column + 1);
+            auto x = scaled_solution.getDataNonConst(column);
+            auto b = scaled_rhs.getDataNonConst(column);
+            std::fill(x.begin(), x.end(), column_scale);
+            std::fill(b.begin(), b.end(), crs_scale * column_scale);
+        }
+        EXPECT_DOUBLE_EQ(Access::accurate_relative_residual(
+            solver, scaled, scaled_rhs, scaled_solution), 0.0);
+
+        for (std::size_t column = 0; column < 2; ++column)
+        {
+            auto b = scaled_rhs.getDataNonConst(column);
+            b[0] = 2.0 * crs_scale * static_cast<double>(column + 1);
+        }
+        // Residual and RHS norms both scale with crs_scale, so the
+        // RHS-relative residual keeps the existing accuracy criterion.
+        double scaled_maximum_rhs_norm = 0.0;
+        const double scaled_expected_rhs_norm =
+            2.0 * crs_scale * std::sqrt(6.0 * map->getComm()->getSize());
+        EXPECT_NEAR(Access::accurate_relative_residual(
+            solver, scaled, scaled_rhs, scaled_solution, {},
+            &scaled_maximum_rhs_norm), 1.0 / std::sqrt(6.0), 2.0e-15);
+        EXPECT_NEAR(scaled_maximum_rhs_norm, scaled_expected_rhs_norm,
+            2.0e-14 * std::max(crs_scale, 1.0));
+
+        SimpleFluid::LinearResidualScaling scaled_scaling;
+        scaled_scaling.rhs_norm_floor = 2.0 * scaled_expected_rhs_norm;
+        EXPECT_NEAR(Access::accurate_relative_residual(
+            solver, scaled, scaled_rhs, scaled_solution, scaled_scaling),
+            0.5 / std::sqrt(6.0), 2.0e-15);
+    }
 }
 
 TEST(BelosLinearSolverTest, AccurateStoredCrsResidualImportsAndRefreshesRemoteColumnValues)
@@ -2157,4 +2201,77 @@ TEST(BelosLinearSolverTest, SymmetricSmoothedAmgSupportsEmptyRanks)
     ASSERT_TRUE(stats.converged);
     EXPECT_LE(stats.achieved_tolerance, options.tolerance);
     EXPECT_NEAR(solution.norm2(), .5, 1e-12);
+}
+
+/**
+ * @brief Absolute acceptance requires every RHS column to pass; a passing
+ *        column must not mask a failing one.
+ */
+TEST(BelosLinearSolverTest, MixedColumnAbsoluteAcceptanceRequiresEveryColumn)
+{
+    // Each rank owns an independent three-row block. Column 0 has a zero
+    // RHS and remains exactly converged, while column 1 has a large RHS
+    // that one GMRES iteration cannot solve, so its true residual stays
+    // well above the absolute tolerance.
+    const auto matrix = block_matrix<3>({{
+        {{4.0, -0.5, 0.0}}, {{-1.5, 5.0, -0.5}}, {{0.0, -1.5, 6.0}}}});
+    const auto map = matrix->getRowMap();
+    Pack::multi_vector_type rhs(map, 2, true);
+    Pack::multi_vector_type solution(map, 2, true);
+    for (size_t row = 0; row < map->getLocalNumElements(); ++row)
+    {
+        const auto lid = static_cast<Pack::local_ordinal_type>(row);
+        rhs.replaceLocalValue(lid, 0, 0.0);
+        rhs.replaceLocalValue(lid, 1, 1.0e3);
+    }
+
+    SimpleFluid::LinearSolverOptions options;
+    options.backend = SimpleFluid::LinearSolverBackend::Gmres;
+    options.tolerance = 1.0e-12;
+    options.absolute_tolerance = 1.0e-12;
+    options.max_iterations = 1;
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    const auto statistics =
+        solver.solve_from_zero_with_statistics(matrix, rhs, solution, options);
+
+    // The exactly-converged column 0 must not mask the failing column 1.
+    // The rank-zero failure report includes both columns' RHS and true
+    // residual norms.
+    EXPECT_FALSE(statistics.converged);
+    EXPECT_GT(statistics.achieved_tolerance, options.tolerance);
+}
+
+/** @brief A nonfinite RHS column never takes the zero-guess shortcut. */
+TEST(BelosLinearSolverTest, NonfiniteRhsNeverTakesZeroShortcutWithAbsoluteTolerance)
+{
+    const auto invalid_global_size =
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto map = Teuchos::rcp(new Pack::map_type(
+        invalid_global_size, 3, 0, Tpetra::getDefaultComm()));
+    auto matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
+    for (const double poison : {
+             std::numeric_limits<double>::quiet_NaN(),
+             std::numeric_limits<double>::infinity()})
+    {
+        SCOPED_TRACE(poison);
+        Pack::multi_vector_type rhs(map, 2, true);
+        Pack::multi_vector_type solution(map, 2, true);
+        {
+            auto values = rhs.getDataNonConst(1);
+            std::fill(values.begin(), values.end(), poison);
+        }
+        solution.putScalar(std::numeric_limits<double>::quiet_NaN());
+
+        SimpleFluid::LinearSolverOptions options;
+        options.absolute_tolerance = 1.0;
+        options.max_iterations = 8;
+        SimpleFluid::BelosLinearSolver<Pack> solver;
+        // std::max(0.0, NaN) returns 0.0, so the old shortcut wrongly
+        // reported convergence for a NaN RHS without entering Krylov. The
+        // solve must now run bounded Krylov work and fail closed.
+        const auto statistics = solver.solve_from_zero_with_statistics(
+            matrix, rhs, solution, options);
+
+        EXPECT_FALSE(statistics.converged);
+    }
 }

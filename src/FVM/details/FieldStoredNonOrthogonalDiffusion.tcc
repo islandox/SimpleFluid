@@ -63,8 +63,8 @@ void evaluate_stored_diffusion_gradients(const ScalarCellFieldStored<Pack, MeshT
         auto output = gradients.owned_write_view();
         for (size_t owned = 0; owned < stencils.size(); ++owned)
         {
-            const auto gradient = apply_stored_scalar_gradient<vec_type>(stencils[owned], values);
             const auto row = static_cast<local_ordinal_type>(owned);
+            const auto gradient = apply_stored_scalar_gradient<vec_type>(stencils[owned], values, row);
             output(row, 0) = gradient.x;
             output(row, 1) = gradient.y;
             output(row, 2) = gradient.z;

@@ -880,7 +880,10 @@ TEST(PressureProjectionMultiRankTest, NonAffineCorrectionMatchesFluxAndFullPress
                 const auto neighbor = mesh->opposite_or_periodic_neighbor_cell(face, owner);
                 d = mesh->cell_center_vector(face, owner);
                 const auto weights = FVM::detail::stored_interior_face_linear_weights(*mesh, face, owner, neighbor);
-                interpolated = gradient.local_value(owner)*weights.first + gradient.local_value(neighbor)*weights.second;
+                // Difference-form interpolation, mirroring the production
+                // non-orthogonal correction evaluation.
+                interpolated = gradient.local_value(owner)
+                    + (gradient.local_value(neighbor) - gradient.local_value(owner))*weights.second;
                 jump = correction.local_value(neighbor) - correction.local_value(owner);
             }
             else if (mesh->is_boundary_face(face) && locations.at(local).active)

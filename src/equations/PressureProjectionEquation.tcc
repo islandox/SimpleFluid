@@ -12,6 +12,7 @@
 #include "geometry/MeshConcepts.hh"
 #include "PressureProjectionEquation.hh"
 #include "PressureProjectionOperator.hh"
+#include "solvers/ScaledLinearOperator.hh"
 #include "utils/CompensatedSum.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -107,8 +108,10 @@ void PressureProjectionEquation<Pack, MeshType>::validate_projection_policy(
         static_cast<double>(options.preconditioner), options.reuse_preconditioner ? 1.0 : 0.0,
         static_cast<double>(method), options.absolute_tolerance};
     std::array<double, 8> minimum{}, maximum{};
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 7, local.data(), minimum.data());
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 7, local.data(), maximum.data());
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, static_cast<int>(local.size()), local.data(),
+        minimum.data());
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, static_cast<int>(local.size()), local.data(),
+        maximum.data());
     if (minimum != maximum)
         throw std::invalid_argument("Pressure-projection policy must agree on every mesh rank.");
 }
@@ -842,6 +845,18 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
     bool correction_converged = false;
     const auto base_norm = base_rhs.norm2();
     const auto correction_scale = std::max(base_norm, residual_scaling.rhs_norm_floor);
+    // Shared full-equation acceptance: the true full defect of the corrected
+    // system either meets the relative tolerance against the correction scale
+    // or sits at the absolute cold-start noise floor. Applied identically to
+    // the initial zero-correction early exit and the final full-defect
+    // verification of both projection methods, so an exactly accepted
+    // zero correction can never be rejected by the final check.
+    const auto accepts_full_equation = [&](scalar_type defect_norm)
+    {
+        return std::isfinite(defect_norm) && std::isfinite(correction_scale)
+            && (defect_norm <= d_linear_options.tolerance * correction_scale
+                || defect_norm <= cold_start_rhs_floor);
+    };
     // Accumulated pressure is reconstructed with the physical boundary map.
     // Use its homogeneous increment for both velocity and deferred correction.
     // The matrix map still handles prescribed correction fluxes separately.
@@ -866,8 +881,10 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
             {
                 values(face.face, 0) = scalar_type{};
                 if (!face.owned_owner || metrics.distance_squared <= scalar_type{}) return;
-                const auto interpolated = gradient(face.owner) * metrics.owner_weight +
-                                          gradient(face.neighbor) * metrics.neighbor_weight;
+                // Difference-form interpolation: a constant field (equal
+                // gradients on both sides) is reproduced bit-exactly.
+                const auto interpolated = gradient(face.owner)
+                    + (gradient(face.neighbor) - gradient(face.owner)) * metrics.neighbor_weight;
                 const auto alpha = metrics.center_projection / metrics.distance_squared;
                 values(face.face, 0) = interpolated.dot(metrics.area_vector - metrics.center_delta * alpha);
             });
@@ -922,12 +939,10 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
             ~CallbackLifetime() { full_operator->deactivate(); }
         } callback_lifetime{full_operator};
         // A zero correction can already meet the original predictor-scaled
-        // criterion on an adjacent corrector. Check it before starting Krylov.
-        // The absolute cold-start floor also accepts a pure-noise RHS.
-        const bool zero_correction_converged = std::isfinite(base_norm) && std::isfinite(correction_scale) &&
-            (base_norm <= d_linear_options.tolerance * correction_scale ||
-                base_norm <= cold_start_rhs_floor);
-        if (zero_correction_converged)
+        // criterion on an adjacent corrector. Check it before starting Krylov
+        // with the shared full-equation acceptance; the true defect at the
+        // zero correction is exactly ||-b|| and is reported truthfully.
+        if (accepts_full_equation(base_norm))
             linear_statistics.converged = true;
         else
             linear_statistics = d_linear_solver.solve_from_zero_with_statistics(full_operator, base_rhs,
@@ -943,8 +958,7 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
             scalar_type{});
         rhs_change.update(-scalar_type{1}, *d_cached_rhs, scalar_type{1});
         const auto defect_norm = rhs_change.norm2();
-        correction_converged = defect_norm <= d_linear_options.tolerance * correction_scale ||
-                               defect_norm == scalar_type{};
+        correction_converged = accepts_full_equation(defect_norm);
     }
     else
     {
@@ -963,11 +977,20 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
         const auto scaled_operator = Teuchos::rcp(new detail::ScaledLinearOperator<Pack>(const_matrix, time_step));
         if (std::isfinite(base_norm) && base_norm <= cold_start_rhs_floor)
         {
-            // Cold-start short-circuit: the integral RHS is pure machine
-            // noise. Accept the exact zero correction; the gradient
-            // evaluation below still refreshes the stored pressure gradient
-            // of the zero field, and the accumulated pressure is preserved.
+            // Cold-start short-circuit at the absolute noise floor: the
+            // integral RHS is pure machine noise. Accept the zero correction;
+            // the gradient evaluation still refreshes the stored pressure
+            // gradient of the zero field, and the accumulated pressure is
+            // preserved. The reported residual is the true full defect
+            // ||-b||, never a fabricated exact zero. The relative criterion
+            // deliberately stays OUT of this initial exit: an adjacent
+            // corrector's reused-predictor RHS sits at the previous step's
+            // tolerance by construction, and shortcutting it would break the
+            // bit-exact reused-predictor/reconstruction contract; the
+            // corrector loop's first full-defect check handles the relative
+            // criterion instead.
             compute_non_orthogonal_correction(pressure_correction, rhs_change);
+            rhs_change.update(-scalar_type{1}, base_rhs, scalar_type{});
             correction_converged = true;
             linear_statistics.converged = true;
             linear_statistics.rhs_norm = base_norm;
@@ -989,7 +1012,7 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
                 scalar_type{});
             rhs_change.update(-scalar_type{1}, *d_cached_rhs, scalar_type{1});
             const auto defect_norm = rhs_change.norm2();
-            if (defect_norm <= d_linear_options.tolerance * correction_scale || defect_norm == scalar_type{})
+            if (accepts_full_equation(defect_norm))
             {
                 correction_converged = true;
                 break;

@@ -6,6 +6,7 @@
 
 #include "solvers/BelosLinearSolver.hh"
 #include "solvers/DICPreconditioner.hh"
+#include "solvers/ScaledLinearOperator.hh"
 
 #include <BelosBiCGStabSolMgr.hpp>
 #include <BelosPseudoBlockCGSolMgr.hpp>
@@ -53,6 +54,33 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_impl(
 {
     validate_options(options);
     validate_residual_scaling(residual_scaling);
+    // Combined per-column acceptance: every RHS column must independently
+    // satisfy the absolute bound or the RHS-relative criterion, and any
+    // nonfinite column norm rejects the solve. std::max never propagates
+    // NaN, so finiteness is checked explicitly before each comparison.
+    const auto columns_accept_combined =
+        [&options, &residual_scaling](
+            const Teuchos::ArrayView<const magnitude_type> rhs_norms,
+            const Teuchos::ArrayView<const magnitude_type> residual_norms)
+    {
+        bool converged = true;
+        for (std::size_t column = 0; column < rhs_norms.size(); ++column)
+        {
+            if (!std::isfinite(rhs_norms[column])
+                || !std::isfinite(residual_norms[column]))
+            {
+                return false;
+            }
+            const auto bound = std::max(
+                static_cast<magnitude_type>(options.absolute_tolerance),
+                static_cast<magnitude_type>(options.tolerance)
+                    * std::max(rhs_norms[column],
+                        static_cast<magnitude_type>(
+                            residual_scaling.rhs_norm_floor)));
+            converged = converged && residual_norms[column] <= bound;
+        }
+        return converged;
+    };
     if (options.backend == LinearSolverBackend::BiCGStab
         && rhs.getNumVectors() > 1)
     {
@@ -95,10 +123,20 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_impl(
         {
             Teuchos::Array<magnitude_type> zero_rhs_norms(rhs.getNumVectors());
             rhs.norm2(zero_rhs_norms());
+            // Never rely on std::max to propagate NaN: a nonfinite RHS
+            // column must keep the solve out of the zero shortcut.
             magnitude_type zero_rhs_norm{};
+            bool zero_rhs_finite = true;
             for (std::size_t column = 0; column < rhs.getNumVectors(); ++column)
+            {
+                if (!std::isfinite(zero_rhs_norms[column]))
+                {
+                    zero_rhs_finite = false;
+                    break;
+                }
                 zero_rhs_norm = std::max(zero_rhs_norm, zero_rhs_norms[column]);
-            if (std::isfinite(zero_rhs_norm) && zero_rhs_norm <= options.absolute_tolerance)
+            }
+            if (zero_rhs_finite && zero_rhs_norm <= options.absolute_tolerance)
                 return {true, 0, scalar_type{}, static_cast<real_t>(zero_rhs_norm)};
         }
     }
@@ -185,6 +223,22 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_impl(
     // true residual for the original RHS; break paths leave it stale.
     bool residual_workspace_current = true;
 
+    // Pre-refinement check: with a positive absolute tolerance, a true
+    // residual that already satisfies the combined criterion skips the
+    // refinement loop entirely. The workspace still holds the true
+    // residual just computed by checked_residual; the final acceptance
+    // below reconfirms the same per-column criterion.
+    bool absolute_precheck_converged = false;
+    if (options.absolute_tolerance > magnitude_type{})
+    {
+        Teuchos::Array<magnitude_type> precheck_rhs_norms(rhs.getNumVectors());
+        Teuchos::Array<magnitude_type> precheck_residual_norms(rhs.getNumVectors());
+        rhs.norm2(precheck_rhs_norms());
+        residual_workspace(rhs).norm2(precheck_residual_norms());
+        absolute_precheck_converged = columns_accept_combined(
+            precheck_rhs_norms(), precheck_residual_norms());
+    }
+
     // Recurrence residuals can pass while b - A*x is still just above the
     // requested tolerance. GMRES may instead report loss of accuracy (LOA)
     // and stop early with the same small residual gap. CG/BiCGStab restart
@@ -202,6 +256,7 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_impl(
     size_t refinement_count = 1;
     for (int refinement = 0;
             refinement < maximum_refinements
+                && !absolute_precheck_converged
                 && (return_status == Belos::Converged
                     || (options.backend == LinearSolverBackend::Gmres
                         && d_solver->isLOADetected()))
@@ -286,24 +341,21 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_impl(
     // Combined stopping test: a positive absolute tolerance also accepts a
     // true residual at or below it, independent of the RHS norm. This is
     // the cold-start exit for compatibility-projected systems whose RHS is
-    // pure roundoff noise.
+    // pure roundoff noise. Every column must satisfy the per-column
+    // criterion; one passing column can no longer mask a failing or
+    // nonfinite one.
     if (!converged && options.absolute_tolerance > magnitude_type{})
     {
         if (!residual_workspace_current)
         {
             (void)true_relative_residual(matrix, rhs, solution, residual_scaling, nullptr);
         }
+        Teuchos::Array<magnitude_type> absolute_rhs_norms(rhs.getNumVectors());
         Teuchos::Array<magnitude_type> absolute_norms(rhs.getNumVectors());
+        rhs.norm2(absolute_rhs_norms());
         residual_workspace(rhs).norm2(absolute_norms());
-        for (std::size_t column = 0; column < rhs.getNumVectors(); ++column)
-        {
-            if (std::isfinite(absolute_norms[column])
-                && absolute_norms[column] <= options.absolute_tolerance)
-            {
-                converged = true;
-                break;
-            }
-        }
+        converged = columns_accept_combined(
+            absolute_rhs_norms(), absolute_norms());
     }
     // Belos::Errors is zero and denotes diagnostics that are always printed.
     if (!converged)
@@ -763,7 +815,17 @@ bool BelosLinearSolver<Pack>::accurate_crs_residual(const Teuchos::RCP<const ope
     if constexpr (!std::is_floating_point_v<scalar_type>) return false;
     else
     {
-        const auto crs = Teuchos::rcp_dynamic_cast<const matrix_type>(matrix);
+        // A scaled CRS wrapper defeats the plain matrix dynamic cast, so
+        // unwrap it explicitly: the compensated row loop then runs on the
+        // wrapped matrix with the scale applied once per term, matching
+        // Tpetra's alpha*(A*x) convention.
+        const auto scaled = Teuchos::rcp_dynamic_cast<
+            const detail::ScaledLinearOperator<Pack>>(matrix, false);
+        const auto crs = scaled.is_null()
+            ? Teuchos::rcp_dynamic_cast<const matrix_type>(matrix)
+            : scaled->scaled_crs_matrix();
+        const scalar_type crs_scale = scaled.is_null()
+            ? scalar_type{1} : scaled->crs_scale();
         const auto comm = rhs.getMap()->getComm();
         int local_supported = !crs.is_null() && crs->isFillComplete();
         int supported = 0;
@@ -800,8 +862,9 @@ bool BelosLinearSolver<Pack>::accurate_crs_residual(const Teuchos::RCP<const ope
                 long double sum = b_values[row], correction = 0;
                 for (auto entry = local.graph.row_map(row); entry < local.graph.row_map(row + 1); ++entry)
                 {
-                    const auto term = -static_cast<long double>(local.values(entry))
-                        * static_cast<long double>(x_values[local.graph.entries(entry)]);
+                    const auto term = -static_cast<long double>(crs_scale)
+                        * (static_cast<long double>(local.values(entry))
+                            * static_cast<long double>(x_values[local.graph.entries(entry)]));
                     const auto next = sum + term;
                     correction += std::abs(sum) >= std::abs(term)
                         ? (sum - next) + term : (term - next) + sum;

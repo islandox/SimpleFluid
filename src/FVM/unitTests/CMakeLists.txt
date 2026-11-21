@@ -252,6 +252,6 @@ foreach(_closure_procs IN ITEMS 2 4)
         TARGET testPressurePoissonClosure
         PROCS ${_closure_procs}
         ARGS "--gtest_filter=PressurePoissonClosureTest.MultiRank*"
-        LABELS "mpi;pressure_closure;multi_region;empty_rank"
+        LABELS "mpi;pressure_closure;multi_region"
         TIMEOUT 120)
 endforeach()

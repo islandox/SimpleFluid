@@ -22,10 +22,11 @@ void stored_scalar_cell_gradient(
     auto gradient_values = gradients.owned_write_view();
     for (size_t owned = 0; owned < stencils.size(); ++owned)
     {
-        const auto gradient = apply_stored_scalar_gradient<vec_type>(stencils[owned], local_values);
-        gradient_values(static_cast<local_ordinal_type>(owned), 0) = gradient.x;
-        gradient_values(static_cast<local_ordinal_type>(owned), 1) = gradient.y;
-        gradient_values(static_cast<local_ordinal_type>(owned), 2) = gradient.z;
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto gradient = apply_stored_scalar_gradient<vec_type>(stencils[owned], local_values, cell_lid);
+        gradient_values(cell_lid, 0) = gradient.x;
+        gradient_values(cell_lid, 1) = gradient.y;
+        gradient_values(cell_lid, 2) = gradient.z;
     }
 }
 
@@ -70,21 +71,30 @@ void stored_vector_cell_gradient(
     auto gradient_values = gradients.owned_write_view();
     for (size_t owned = 0; owned < stencils.size(); ++owned)
     {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const vec_type value_p{
+            local_values(cell_lid, 0), local_values(cell_lid, 1), local_values(cell_lid, 2)};
         tensor_type gradient{};
         for (const auto& entry : stencils[owned])
         {
-            const auto value = vec_type{
-                local_values(entry.cell_lid, 0), local_values(entry.cell_lid, 1), local_values(entry.cell_lid, 2)};
+            // The self entry carries the negated interior basis sums; its
+            // difference is identically zero, so skipping it reproduces a
+            // bit-exact zero gradient for constant fields.
+            if (entry.cell_lid == cell_lid)
+                continue;
+            const vec_type delta = vec_type{
+                local_values(entry.cell_lid, 0), local_values(entry.cell_lid, 1), local_values(entry.cell_lid, 2)} -
+                value_p;
             for (size_t component = 0; component < 3; ++component)
             {
-                gradient[component] = gradient[component] + entry.coefficient * value.component(component);
+                gradient[component] = gradient[component] + entry.coefficient * delta.component(component);
             }
         }
         for (size_t component = 0; component < 3; ++component)
         {
-            gradient_values(static_cast<local_ordinal_type>(owned), component * 3 + 0) = gradient[component].x;
-            gradient_values(static_cast<local_ordinal_type>(owned), component * 3 + 1) = gradient[component].y;
-            gradient_values(static_cast<local_ordinal_type>(owned), component * 3 + 2) = gradient[component].z;
+            gradient_values(cell_lid, component * 3 + 0) = gradient[component].x;
+            gradient_values(cell_lid, component * 3 + 1) = gradient[component].y;
+            gradient_values(cell_lid, component * 3 + 2) = gradient[component].z;
         }
     }
 }

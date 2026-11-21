@@ -20,6 +20,80 @@
 
 namespace SimpleFluid::Meshes
 {
+namespace composite_local_detail
+{
+/** @brief A region-local displacement split into its cell-scale and frame parts.
+ *
+ * The two parts are kept separate so the caller applies the axial transform to
+ * each exactly as the previous per-site arithmetic did.
+ */
+struct LocalFrameDisplacement
+{
+    MeshUtils::Vec3 cells{};
+    MeshUtils::Vec3 frames{};
+};
+
+/**
+ * @brief Same-region cell-center displacement, oriented away from @p cell.
+ *
+ * Shared by the resolved-face and public composite query paths so the
+ * capability checks for optional region-local provider members are
+ * instantiated once, together, inside this template - never inside a
+ * std::visit lambda body over the region variant.
+ */
+template<class Geometry>
+std::optional<MeshUtils::Vec3> same_region_cell_displacement(const Geometry& geometry,
+    uint64_t face, uint64_t cell, uint64_t other)
+{
+    if constexpr (requires { geometry.cell_center_vector(face, cell); })
+        return geometry.cell_center_vector(face, cell);
+    else if constexpr (requires { geometry.local_reference(); geometry.cell_centroid_local(cell); })
+        return geometry.cell_centroid_local(other) - geometry.cell_centroid_local(cell);
+    return std::nullopt;
+}
+
+/** @brief Same-region face-to-cell displacement in the provider's local frame. */
+template<class Geometry>
+std::optional<MeshUtils::Vec3> same_region_face_displacement(const Geometry& geometry,
+    uint64_t face, uint64_t cell)
+{
+    if constexpr (requires { geometry.face_centroid_local(face); geometry.cell_centroid_local(cell); })
+        return geometry.face_centroid_local(face) - geometry.cell_centroid_local(cell);
+    return std::nullopt;
+}
+
+/**
+ * @brief Cross-region cell-center displacement in the two providers' frames.
+ *
+ * The cell-scale difference and the constant region-frame offset are returned
+ * separately; the caller adds their transformed forms exactly as before.
+ */
+template<class CellGeometry, class OtherGeometry>
+std::optional<LocalFrameDisplacement> cross_region_cell_displacement(const CellGeometry& cell_geometry,
+    const OtherGeometry& other_geometry, uint64_t cell, uint64_t other)
+{
+    if constexpr (requires { cell_geometry.local_reference(); cell_geometry.cell_centroid_local(cell); }
+        && requires { other_geometry.local_reference(); other_geometry.cell_centroid_local(other); })
+        return LocalFrameDisplacement{other_geometry.cell_centroid_local(other)
+                - cell_geometry.cell_centroid_local(cell),
+            other_geometry.local_reference() - cell_geometry.local_reference()};
+    return std::nullopt;
+}
+
+/** @brief Cross-region face-to-cell displacement in the two providers' frames. */
+template<class FaceGeometry, class CellGeometry>
+std::optional<LocalFrameDisplacement> cross_region_face_displacement(const FaceGeometry& face_geometry,
+    const CellGeometry& cell_geometry, uint64_t face, uint64_t cell)
+{
+    if constexpr (requires { face_geometry.face_centroid_local(face); face_geometry.local_reference(); }
+        && requires { cell_geometry.cell_centroid_local(cell); cell_geometry.local_reference(); })
+        return LocalFrameDisplacement{face_geometry.face_centroid_local(face)
+                - cell_geometry.cell_centroid_local(cell),
+            face_geometry.local_reference() - cell_geometry.local_reference()};
+    return std::nullopt;
+}
+} // namespace composite_local_detail
+
 /** @brief A standalone native face ordinal qualified by topology-region ordinal. */
 struct RegionFace
 {
@@ -472,9 +546,8 @@ private:
         resolved.area_vector = transformed_area_vector(geometry.face_area_vector(face));
         resolved.centroid = transformed_point(geometry.face_centroid(face));
         resolved.owner_centroid = transformed_point(geometry.cell_centroid(owner));
-        if constexpr (requires { geometry.face_centroid_local(face); geometry.cell_centroid_local(owner); })
-            resolved.owner_to_face = transformed_displacement(geometry.face_centroid_local(face)
-                - geometry.cell_centroid_local(owner));
+        if (const auto local = composite_local_detail::same_region_face_displacement(geometry, face, owner))
+            resolved.owner_to_face = transformed_displacement(*local);
         else
             resolved.owner_to_face = resolved.centroid - resolved.owner_centroid;
         Vec3 shift{};
@@ -483,16 +556,13 @@ private:
             resolved.neighbor = d_cells[r] + adjacent;
             resolved.neighbor_centroid = transformed_point(geometry.cell_centroid(adjacent));
             // Same-region interior: analytic or region-local displacements keep full cell-scale
-            // precision; the reverse direction is the exact component-wise negation.
-            if constexpr (requires { geometry.cell_center_vector(face, owner); })
+            // precision; the reverse direction is the exact component-wise negation. Capability
+            // selection lives in the shared composite_local_detail helpers, never in a visit
+            // lambda body, so every region provider type instantiates cleanly.
+            if (const auto local = composite_local_detail::same_region_cell_displacement(
+                    geometry, face, owner, adjacent))
             {
-                resolved.owner_to_neighbor = transformed_displacement(geometry.cell_center_vector(face, owner));
-                resolved.neighbor_to_owner = resolved.owner_to_neighbor * -1.0;
-            }
-            else if constexpr (requires { geometry.local_reference(); geometry.cell_centroid_local(owner); })
-            {
-                resolved.owner_to_neighbor = transformed_displacement(geometry.cell_centroid_local(adjacent)
-                    - geometry.cell_centroid_local(owner));
+                resolved.owner_to_neighbor = transformed_displacement(*local);
                 resolved.neighbor_to_owner = resolved.owner_to_neighbor * -1.0;
             }
             else
@@ -500,9 +570,9 @@ private:
                 resolved.owner_to_neighbor = resolved.neighbor_centroid - resolved.owner_centroid + shift * -1.0;
                 resolved.neighbor_to_owner = resolved.owner_centroid - resolved.neighbor_centroid + shift * 1.0;
             }
-            if constexpr (requires { geometry.face_centroid_local(face); geometry.cell_centroid_local(adjacent); })
-                resolved.neighbor_to_face = transformed_displacement(geometry.face_centroid_local(face)
-                    - geometry.cell_centroid_local(adjacent));
+            if (const auto local = composite_local_detail::same_region_face_displacement(geometry, face,
+                    adjacent))
+                resolved.neighbor_to_face = transformed_displacement(*local);
             else
                 resolved.neighbor_to_face = resolved.centroid + shift - resolved.neighbor_centroid;
             return resolved;
@@ -515,23 +585,22 @@ private:
                 const auto cell = neighbor_region.topology().owner_cell(other->face);
                 resolved.neighbor = d_cells[other->region] + cell;
                 resolved.neighbor_centroid = transformed_point(neighbor_region.geometry().cell_centroid(cell));
-                if constexpr (requires { geometry.local_reference(); geometry.cell_centroid_local(owner);
-                    geometry.face_centroid_local(face); }
-                    && requires { neighbor_region.geometry().local_reference();
-                        neighbor_region.geometry().cell_centroid_local(cell); })
+                if (const auto local = composite_local_detail::cross_region_cell_displacement(
+                        geometry, neighbor_region.geometry(), owner, cell))
                 {
                     // Cross-image displacement in region-local frames: cell-scale differences plus
                     // the constant frame offset, with the periodic shift applied exactly as before.
-                    const auto& neighbor_geometry = neighbor_region.geometry();
-                    resolved.owner_to_neighbor = transformed_displacement(
-                        neighbor_geometry.cell_centroid_local(cell) - geometry.cell_centroid_local(owner))
-                        + transformed_displacement(neighbor_geometry.local_reference() - geometry.local_reference())
-                        + shift * -1.0;
+                    resolved.owner_to_neighbor = transformed_displacement(local->cells)
+                        + transformed_displacement(local->frames) + shift * -1.0;
                     resolved.neighbor_to_owner = resolved.owner_to_neighbor * -1.0;
-                    resolved.neighbor_to_face = transformed_displacement(geometry.face_centroid_local(face)
-                        - neighbor_geometry.cell_centroid_local(cell))
-                        + transformed_displacement(geometry.local_reference() - neighbor_geometry.local_reference())
-                        + shift;
+                    resolved.neighbor_to_face = [&]
+                    {
+                        if (const auto face_local = composite_local_detail::cross_region_face_displacement(
+                                geometry, neighbor_region.geometry(), face, cell))
+                            return transformed_displacement(face_local->cells)
+                                + transformed_displacement(face_local->frames) + shift;
+                        return resolved.centroid + shift - resolved.neighbor_centroid;
+                    }();
                 }
                 else
                 {

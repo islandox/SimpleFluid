@@ -845,8 +845,10 @@ FullOperatorMetrics full_operator_metrics(const SP<const Handle>& mesh, const st
             const auto neighbor = mesh->opposite_or_periodic_neighbor_cell(face_lid, owner);
             const auto weights =
                 FVM::detail::stored_interior_face_linear_weights(*mesh, face_lid, owner, neighbor);
-            const auto interpolated = gradients.local_value(owner) * weights.first
-                                     + gradients.local_value(neighbor) * weights.second;
+            // Difference-form interpolation, mirroring the production
+            // correction evaluation (constant gradients reproduce exactly).
+            const auto interpolated = gradients.local_value(owner)
+                + (gradients.local_value(neighbor) - gradients.local_value(owner)) * weights.second;
             const auto coefficient =
                 FVM::detail::interior_pressure_coefficient(*mesh, face_lid, owner, neighbor);
             const auto center_delta = mesh->cell_center_vector(face_lid, owner);
@@ -1271,6 +1273,289 @@ TEST(PressurePoissonClosureTest, MeanProjectionGuardIsInvariantToCellCount)
         std::cout << "METRIC guard_gap_net " << std::setprecision(17) << 4.0 * floor
                   << " post_sum " << subtle.first << "\n";
         EXPECT_NEAR(std::abs(subtle.first), 4.0 * floor, 1e-24);
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Full-equation acceptance: compatible counterexample, both methods.
+// ---------------------------------------------------------------------------
+
+TEST(PressurePoissonClosureTest, BothMethodsAcceptCompatibleCounterexampleWithTruthfulDefect)
+{
+    // Predictor balances [., +1, +1, -1, -1, .] are injected through the fixed
+    // boundary fluxes of the upper layer; targets add a uniform 2^-50 to the
+    // balances. The integral RHS is then a pure 2^-50 vector: far below the
+    // flux-scale noise floor, so both methods take the zero-correction early
+    // exit and must report the true full defect ||-b||, never a fabricated
+    // exact zero.
+    const real delta = std::pow(2.0, -50.0);
+    const auto mesh_data = build_coarse_fine_mesh({0.0, 0.0, 0.0});
+    const SP<const Handle> mesh = std::make_shared<const Handle>(mesh_data.mesh);
+
+    // Fixed top-face fluxes: 0 on the coarse top, +1 on the lower fine row,
+    // -1 on the upper fine row.
+    const auto top_flux = [&](int, size_t, Pack::local_ordinal_type face_lid)
+    {
+        const auto centroid = mesh->face_centroid(face_lid);
+        if (centroid.x < 0.3) return 0.0;
+        return centroid.y < 0.15 ? 1.0 : -1.0;
+    };
+    // Matching per-cell balance sign from the same geometric rule. The
+    // upper fine layer (cell centers at z = 0.225) carries the fixed fluxes;
+    // the coarse cell (z = 0.15) and the lower fine layer (z = 0.075) do not.
+    const auto balance_of_cell = [&](size_t cell)
+    {
+        const auto centroid = mesh->cell_centroid(static_cast<Pack::local_ordinal_type>(cell));
+        if (centroid.z < 0.2) return 0.0;
+        return centroid.y < 0.15 ? 1.0 : -1.0;
+    };
+
+    // The 2^-50 perturbation rides only one canceling pair: the integral
+    // RHS then sums to exactly zero, so the pure-Neumann mean projection is
+    // a no-op and the base RHS keeps the perturbation.
+    std::vector<real> rates(mesh->num_owned_cells());
+    for (size_t cell = 0; cell < rates.size(); ++cell)
+    {
+        rates[cell] = balance_of_cell(cell);
+        if (cell == 5) rates[cell] += delta;
+        if (cell == 7) rates[cell] -= delta;
+    }
+
+    const auto run = [&](PressureProjectionMethod method)
+    {
+        CellField<Pack> pressure(mesh, "pressure");
+        CellField<Pack> correction(mesh, "correction");
+        VectorCellField<Pack> velocity(mesh, "velocity");
+        for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+        {
+            pressure.set_owned_value(cell, 0.0);
+            correction.set_owned_value(cell, 0.0);
+            velocity.set_owned_value(cell, {0.0, 0.0, 0.0});
+        }
+        pressure.sync_ghosts();
+
+        BoundaryConditionMap pressure_conditions;
+        pressure_conditions["coarse/zmax"] = {BoundaryConditionType::Dirichlet, 0.0};
+        pressure_conditions["fine/zmax"] = {BoundaryConditionType::Dirichlet, 0.0};
+        const BoundaryConditionSet boundary_conditions;
+        const auto cache = FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundary_conditions);
+        LinearSolverOptions options;
+        options.tolerance = 1.0e-10;
+        PressureProjectionEquation<Pack> equation(mesh, options, pressure_conditions);
+        equation.set_fixed_boundary_flux_provider({"coarse/zmax", "fine/zmax"}, top_flux, 1);
+        equation.set_projection_method(method);
+        const VolumeContinuityTarget<Pack> target(mesh, rates, 1);
+        const auto outcome = equation.project(pressure, correction, 1.0e-3, 1000.0, cache, velocity,
+            target);
+        return outcome;
+    };
+
+    for (const auto method : {PressureProjectionMethod::Anderson, PressureProjectionMethod::FullOperator})
+    {
+        const auto result = run(method);
+        // Both methods accept the compatible counterexample identically.
+        EXPECT_TRUE(result.linear_solve.converged);
+        EXPECT_EQ(result.linear_solve.iterations, 0);
+        // Truthful statistics: the full defect at the zero correction is
+        // exactly ||-b|| = sqrt(2)*delta; the achieved ratio is 1, never 0.
+        const auto expected_defect = std::sqrt(2.0) * delta;
+        EXPECT_NEAR(result.linear_solve.rhs_norm, expected_defect, expected_defect);
+        EXPECT_GT(result.linear_solve.rhs_norm, 0.5 * expected_defect);
+        EXPECT_NEAR(result.linear_solve.achieved_tolerance, 1.0, 1.0e-9);
+        EXPECT_GT(result.linear_solve.achieved_tolerance, 0.5);
+        std::cout << "METRIC counterexample_defect_" << (method == PressureProjectionMethod::FullOperator
+                                                            ? "full_operator"
+                                                            : "anderson")
+                  << " " << std::setprecision(17) << result.linear_solve.rhs_norm << "\n";
+    }
+}
+
+TEST(PressurePoissonClosureTest, SmallTimeStepCorrectionVectorAndContinuityAccuracy)
+{
+    const auto mesh_data = build_coarse_fine_mesh({0.0, 0.0, 0.0});
+    const SP<const Handle> mesh = std::make_shared<const Handle>(mesh_data.mesh);
+    std::vector<real> rates(mesh->num_owned_cells());
+    for (size_t cell = 0; cell < rates.size(); ++cell)
+        rates[cell] = cell + 1 < rates.size() ? (cell % 2 == 0 ? 1.0 : -1.0) * 1.0e-7 : 0.0;
+
+    const auto project_with = [&](real time_step, std::vector<real>& corrections,
+        typename PressureProjectionEquation<Pack>::ProjectionResult& result)
+    {
+        CellField<Pack> pressure(mesh, "pressure");
+        CellField<Pack> correction(mesh, "correction");
+        VectorCellField<Pack> velocity(mesh, "velocity");
+        for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+        {
+            pressure.set_owned_value(cell, 0.0);
+            correction.set_owned_value(cell, 0.0);
+            velocity.set_owned_value(cell, {0.0, 0.0, 0.0});
+        }
+        pressure.sync_ghosts();
+        const BoundaryConditionSet boundary_conditions;
+        const auto cache = FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundary_conditions);
+        LinearSolverOptions options;
+        options.tolerance = 1.0e-10;
+        PressureProjectionEquation<Pack> equation(mesh, options);
+        const VolumeContinuityTarget<Pack> target(mesh, rates, 1);
+        result = equation.project(pressure, correction, time_step, 1000.0, cache, velocity, target);
+        corrections.clear();
+        for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+            corrections.push_back(correction.local_value(static_cast<Pack::local_ordinal_type>(cell)));
+    };
+
+    typename PressureProjectionEquation<Pack>::ProjectionResult coarse_result{};
+    typename PressureProjectionEquation<Pack>::ProjectionResult fine_result{};
+    std::vector<real> coarse;
+    std::vector<real> fine;
+    project_with(1.0e-3, coarse, coarse_result);
+    project_with(1.0e-5, fine, fine_result);
+    ASSERT_EQ(coarse.size(), fine.size());
+    ASSERT_FALSE(coarse.empty());
+
+    // dt sits on the left side: the normalized correction scales as 1/dt.
+    // Solver accuracy bounds the per-cell relative error by roughly
+    // kappa * rtol ~ 1e-8; assert two guard digits above that. The pure-
+    // Neumann gauge row (the smallest owned cell id) pins its correction to
+    // zero by construction and is checked separately.
+    const auto gauge = mesh->owned_cell_map()->getMinAllGlobalIndex();
+    real worst_ratio = 0.0;
+    for (size_t cell = 0; cell < coarse.size(); ++cell)
+    {
+        const auto row_gid = mesh->owned_cell_map()->getGlobalElement(
+            static_cast<Pack::local_ordinal_type>(cell));
+        if (row_gid == gauge)
+        {
+            EXPECT_EQ(coarse[cell], 0.0);
+            EXPECT_EQ(fine[cell], 0.0);
+            continue;
+        }
+        ASSERT_NE(coarse[cell], 0.0);
+        const auto ratio = fine[cell] / coarse[cell];
+        EXPECT_NEAR(ratio, 100.0, 100.0 * 1.0e-6);
+        worst_ratio = std::max(worst_ratio, std::abs(ratio - 100.0));
+        const auto scaled_error = std::abs(fine[cell] - 100.0 * coarse[cell])
+            / std::abs(100.0 * coarse[cell]);
+        EXPECT_LE(scaled_error, 1.0e-6);
+    }
+    std::cout << "METRIC small_dt_worst_ratio_deviation " << std::setprecision(17) << worst_ratio
+              << "\n";
+
+    // Final integrated continuity defect: the full-equation acceptance bounds
+    // it by rtol * correction scale (the base RHS norm); one guard digit.
+    const auto bound = 10.0 * 1.0e-10 * coarse_result.linear_solve.rhs_norm;
+    std::cout << "METRIC small_dt_continuity_coarse " << std::setprecision(17)
+              << coarse_result.continuity_residuals.maximum << " bound " << bound << "\n";
+    std::cout << "METRIC small_dt_continuity_fine " << std::setprecision(17)
+              << fine_result.continuity_residuals.maximum << "\n";
+    EXPECT_LE(coarse_result.continuity_residuals.maximum, bound);
+    EXPECT_LE(fine_result.continuity_residuals.maximum, bound);
+}
+
+TEST(PressurePoissonClosureTest, MultiRankDifferingAbsoluteToleranceIsRejected)
+{
+    const auto comm = Teuchos::DefaultComm<int>::getComm();
+    if (comm->getSize() != 2)
+    {
+        GTEST_SKIP() << "This gate requires exactly two MPI ranks.";
+    }
+    const auto mesh_data = build_coarse_fine_mesh({0.0, 0.0, 0.0});
+    const SP<const Handle> mesh = std::make_shared<const Handle>(mesh_data.mesh);
+
+    CellField<Pack> pressure(mesh, "pressure");
+    CellField<Pack> correction(mesh, "correction");
+    VectorCellField<Pack> velocity(mesh, "velocity");
+    for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+    {
+        pressure.set_owned_value(cell, 0.0);
+        correction.set_owned_value(cell, 0.0);
+        velocity.set_owned_value(cell, {0.0, 0.0, 0.0});
+    }
+    pressure.sync_ghosts();
+    const BoundaryConditionSet boundary_conditions;
+    const auto cache = FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundary_conditions);
+    LinearSolverOptions options;
+    options.tolerance = 1.0e-10;
+    // Rank-dependent absolute tolerance: policy validation must reject the
+    // mismatch collectively on every rank before any solver collective.
+    options.absolute_tolerance = comm->getRank() == 0 ? 0.0 : 1.0e-12;
+    PressureProjectionEquation<Pack> equation(mesh, options);
+    const VolumeContinuityTarget<Pack> target(mesh, std::vector<real>(mesh->num_owned_cells(), 0.0), 1);
+    EXPECT_THROW(static_cast<void>(equation.project(pressure, correction, 1.0e-3, 1000.0, cache, velocity,
+        target)), std::invalid_argument);
+}
+
+
+// ---------------------------------------------------------------------------
+// Difference-form exactness: constant fields through gradient and
+// interpolation paths (finding 5).
+// ---------------------------------------------------------------------------
+
+TEST(PressurePoissonClosureTest, ConstantFieldGradientAndInterpolationAreExact)
+{
+    // The quad-prism strip gives interior cells a full six-neighbor stencil;
+    // a constant 1e5 field must yield bit-exact zero gradients through both
+    // the fresh and cached stored scalar-gradient paths, and the two-point
+    // face interpolation must reproduce the constant bit-exactly.
+    const auto mesh_data = build_high_ratio_mesh({0.0, 0.0, 0.0});
+    const SP<const Handle> mesh = std::make_shared<const Handle>(mesh_data.mesh);
+    const real background = 1.0e5;
+
+    ScalarCellFieldStored<Pack> field(mesh, "constant_field");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        field.set_owned_value(owned, background);
+    field.sync_ghosts();
+
+    // Fresh stored scalar-gradient path (interior difference form).
+    VectorCellFieldStored<Pack> fresh(mesh, "constant_fresh_gradient");
+    FVM::cell_gradient(field, fresh);
+    fresh.sync_ghosts();
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto value = fresh.local_value(static_cast<Pack::local_ordinal_type>(owned));
+        EXPECT_EQ(value.x, 0.0);
+        EXPECT_EQ(value.y, 0.0);
+        EXPECT_EQ(value.z, 0.0);
+    }
+
+    // Cached boundary-aware path with all-Neumann conditions.
+    BoundaryConditionMap conditions;
+    for (const auto& [batch_id, batch] : mesh->boundary_batches())
+    {
+        static_cast<void>(batch);
+        conditions[mesh->boundary_batch_name(batch_id)] = {BoundaryConditionType::Neumann, 0.0};
+    }
+    VectorCellFieldStored<Pack> cached(mesh, "constant_cached_gradient");
+    FVM::CellGradientCache<Pack, Handle> cache(mesh);
+    FVM::cell_gradient(field, conditions, cached, cache);
+    cached.sync_ghosts();
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto value = cached.local_value(static_cast<Pack::local_ordinal_type>(owned));
+        EXPECT_EQ(value.x, 0.0);
+        EXPECT_EQ(value.y, 0.0);
+        EXPECT_EQ(value.z, 0.0);
+    }
+
+    // Two-point face interpolation: a constant vector field reproduces the
+    // constant on every interior face bit-exactly (difference form).
+    VectorCellFieldStored<Pack> velocity(mesh, "constant_velocity");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        velocity.set_owned_value(owned, {background, background, background});
+    velocity.sync_ghosts();
+    const BoundaryConditionSet boundary_conditions;
+    const auto velocity_cache = FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundary_conditions);
+    VectorFaceFieldStored<Pack> face_velocity(VectorFaceFieldDescriptor<Pack>("constant_face_velocity"), mesh);
+    FVM::face_velocities(velocity, velocity_cache, face_velocity);
+    face_velocity.sync_ghosts();
+    for (size_t owned = 0; owned < mesh->num_owned_faces(); ++owned)
+    {
+        const auto face_lid = static_cast<Pack::local_ordinal_type>(owned);
+        if (!mesh->is_owned_face(face_lid) || !mesh->is_interior_face(face_lid)) continue;
+        const auto value = face_velocity.local_value(face_lid);
+        EXPECT_EQ(value.x, background);
+        EXPECT_EQ(value.y, background);
+        EXPECT_EQ(value.z, background);
     }
 }
 

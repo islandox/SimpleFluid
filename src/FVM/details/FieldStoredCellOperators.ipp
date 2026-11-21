@@ -22,14 +22,26 @@ void stored_scalar_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& fi
     auto gradient_values = gradients.owned_write_view();
     for (size_t owned = 0; owned < stencils.size(); ++owned)
     {
+        // Difference form relative to the owning cell's value: interior
+        // entries skip their self term and unfolded Dirichlet-like boundary
+        // terms act on prescribed-value differences, so a constant field
+        // with matching boundary values reproduces a bit-exact zero.
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto value_p = local_values(cell_lid, 0);
         auto gradient = stencils[owned].constant;
         for (const auto& entry : stencils[owned].entries)
         {
-            gradient = gradient + entry.coefficient * local_values(entry.cell_lid, 0);
+            if (entry.cell_lid == cell_lid)
+                continue;
+            gradient = gradient + entry.coefficient * (local_values(entry.cell_lid, 0) - value_p);
         }
-        gradient_values(static_cast<local_ordinal_type>(owned), 0) = gradient.x;
-        gradient_values(static_cast<local_ordinal_type>(owned), 1) = gradient.y;
-        gradient_values(static_cast<local_ordinal_type>(owned), 2) = gradient.z;
+        for (const auto& term : stencils[owned].boundary_terms)
+        {
+            gradient = gradient + term.basis * (term.value - value_p);
+        }
+        gradient_values(cell_lid, 0) = gradient.x;
+        gradient_values(cell_lid, 1) = gradient.y;
+        gradient_values(cell_lid, 2) = gradient.z;
     }
 }
 
@@ -99,21 +111,38 @@ void stored_vector_cell_gradient(const VectorCellFieldStored<Pack, MeshType>& fi
     auto gradient_values = gradients.owned_write_view();
     for (size_t owned = 0; owned < stencils.size(); ++owned)
     {
+        // Difference form relative to the owning cell's components; the
+        // boundary terms share one basis and act per component.
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const vec_type value_p{
+            local_values(cell_lid, 0), local_values(cell_lid, 1), local_values(cell_lid, 2)};
         tensor_type gradient = stencils[owned].constants;
         for (const auto& entry : stencils[owned].entries)
         {
-            const auto value = vec_type{
-                local_values(entry.cell_lid, 0), local_values(entry.cell_lid, 1), local_values(entry.cell_lid, 2)};
+            if (entry.cell_lid == cell_lid)
+                continue;
+            const vec_type delta = vec_type{
+                local_values(entry.cell_lid, 0), local_values(entry.cell_lid, 1), local_values(entry.cell_lid, 2)} -
+                value_p;
             for (size_t component = 0; component < 3; ++component)
             {
-                gradient[component] = gradient[component] + entry.coefficient * value.component(component);
+                gradient[component] = gradient[component] + entry.coefficient * delta.component(component);
+            }
+        }
+        for (const auto& term : stencils[owned].boundary_terms)
+        {
+            const vec_type delta = vec_type{
+                term.value[0] - value_p.x, term.value[1] - value_p.y, term.value[2] - value_p.z};
+            for (size_t component = 0; component < 3; ++component)
+            {
+                gradient[component] = gradient[component] + term.basis * delta.component(component);
             }
         }
         for (size_t component = 0; component < 3; ++component)
         {
-            gradient_values(static_cast<local_ordinal_type>(owned), component * 3 + 0) = gradient[component].x;
-            gradient_values(static_cast<local_ordinal_type>(owned), component * 3 + 1) = gradient[component].y;
-            gradient_values(static_cast<local_ordinal_type>(owned), component * 3 + 2) = gradient[component].z;
+            gradient_values(cell_lid, component * 3 + 0) = gradient[component].x;
+            gradient_values(cell_lid, component * 3 + 1) = gradient[component].y;
+            gradient_values(cell_lid, component * 3 + 2) = gradient[component].z;
         }
     }
 }

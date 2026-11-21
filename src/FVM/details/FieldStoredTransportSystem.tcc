@@ -290,6 +290,10 @@ void evaluate_stored_vector_gradients(const VectorCellFieldStored<Pack, MeshType
         {
             const auto cell_lid = static_cast<local_ordinal_type>(owned);
             const auto& stencil = stencils[owned];
+            // Difference form relative to the owning cell's components:
+            // interior entries skip their self term and unfolded
+            // Dirichlet-like boundary terms act on prescribed-value
+            // differences, so constant fields reproduce a bit-exact zero.
             tensor_type gradient{};
             if constexpr (requires { stencil.constants; })
             {
@@ -309,12 +313,31 @@ void evaluate_stored_vector_gradients(const VectorCellFieldStored<Pack, MeshType
             }();
             for (const auto& entry : entries)
             {
+                if (entry.cell_lid == cell_lid)
+                {
+                    continue;
+                }
                 for (size_t component = 0; component < 3; ++component)
                 {
-                    const auto component_value = field_data(entry.cell_lid, component);
-                    gradient[component].x += entry.coefficient.x * component_value;
-                    gradient[component].y += entry.coefficient.y * component_value;
-                    gradient[component].z += entry.coefficient.z * component_value;
+                    const auto component_delta =
+                        field_data(entry.cell_lid, component) - field_data(cell_lid, component);
+                    gradient[component].x += entry.coefficient.x * component_delta;
+                    gradient[component].y += entry.coefficient.y * component_delta;
+                    gradient[component].z += entry.coefficient.z * component_delta;
+                }
+            }
+            if constexpr (requires { stencil.boundary_terms; })
+            {
+                for (const auto& term : stencil.boundary_terms)
+                {
+                    for (size_t component = 0; component < 3; ++component)
+                    {
+                        const auto component_delta = static_cast<typename Pack::scalar_type>(term.value[component]) -
+                                                    field_data(cell_lid, component);
+                        gradient[component].x += term.basis.x * component_delta;
+                        gradient[component].y += term.basis.y * component_delta;
+                        gradient[component].z += term.basis.z * component_delta;
+                    }
                 }
             }
             for (size_t row = 0; row < 3; ++row)
@@ -346,7 +369,8 @@ void evaluate_stored_scalar_gradients(const ScalarCellFieldStored<Pack, MeshType
         for (size_t owned = 0; owned < stencils.size(); ++owned)
         {
             const auto cell_lid = static_cast<local_ordinal_type>(owned);
-            const auto gradient = apply_stored_scalar_gradient<typename MeshType::Vec3>(stencils[owned], field_data);
+            const auto gradient =
+                apply_stored_scalar_gradient<typename MeshType::Vec3>(stencils[owned], field_data, cell_lid);
             for (size_t component = 0; component < 3; ++component)
             {
                 gradient_data(cell_lid, component) = gradient.component(component);
@@ -723,6 +747,15 @@ SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_corrected_scalar(ScalarT
                 for (const auto& entry : stencil.entries)
                 {
                     add_matrix_entry(row_values, entry.cell_lid, scale * entry.coefficient.dot(tangential_area));
+                }
+                // Unfolded Dirichlet-like boundary terms act on differences
+                // relative to the owning cell's value: the owning column
+                // carries the negated term basis and the prescribed values
+                // move to the right-hand side.
+                for (const auto& term : stencil.boundary_terms)
+                {
+                    add_matrix_entry(row_values, gradient_cell_lid, -(scale * term.basis.dot(tangential_area)));
+                    rhs_value -= scale * term.basis.dot(tangential_area) * term.value;
                 }
             };
 
@@ -1385,6 +1418,13 @@ SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_scalar_coefficients(
                     for (const auto& entry : stencil.entries)
                     {
                         add_matrix_entry(row_values, entry.cell_lid, scale * entry.coefficient.dot(tangential_area));
+                    }
+                    // Unfolded Dirichlet-like boundary terms act on
+                    // differences relative to the owning cell's value.
+                    for (const auto& term : stencil.boundary_terms)
+                    {
+                        add_matrix_entry(row_values, gradient_cell_lid, -(scale * term.basis.dot(tangential_area)));
+                        rhs_value -= scale * term.basis.dot(tangential_area) * term.value;
                     }
                 };
 
@@ -2482,6 +2522,19 @@ SIMPLEFLUID_LOCAL VectorTransportSystem<Pack> assemble_stored_momentum(MomentumT
                     for (const auto& entry : stencil.entries)
                     {
                         add_matrix_entry(row_values, entry.cell_lid, scale * entry.coefficient.dot(tangential_area));
+                    }
+                    // Unfolded Dirichlet-like boundary terms act on
+                    // differences relative to the owning cell's components:
+                    // one shared basis column for the owning cell and
+                    // per-component prescribed values on the right-hand side.
+                    for (const auto& term : stencil.boundary_terms)
+                    {
+                        const auto basis_area = scale * term.basis.dot(tangential_area);
+                        add_matrix_entry(row_values, gradient_cell_lid, -basis_area);
+                        for (size_t component = 0; component < components; ++component)
+                        {
+                            rhs->sumIntoLocalValue(cell_lid, component, -basis_area * term.value[component]);
+                        }
                     }
                 };
 

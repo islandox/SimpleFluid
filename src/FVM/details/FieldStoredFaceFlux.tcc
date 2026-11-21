@@ -40,10 +40,13 @@ void assemble_stored_face_velocities(const VectorCellFieldStored<Pack, MeshType>
         {
             const auto neighbor_id = mesh.opposite_or_periodic_neighbor_cell(face_id, owner_id);
             const auto neighbor_lid = packed_cell_local_id(mesh, neighbor_id);
-            const auto [owner_weight, neighbor_weight] =
-                stored_interior_face_linear_weights(mesh, face_lid, owner_lid, neighbor_lid);
+            const auto neighbor_weight =
+                stored_interior_face_linear_weights(mesh, face_lid, owner_lid, neighbor_lid).second;
+            // Affine difference form: the weights already sum to exactly
+            // one, so a constant field reproduces itself bit-exactly.
+            const auto& owner_value = velocity.local_value(owner_lid);
             face_velocity.set_owned_value(face_lid,
-                velocity.local_value(owner_lid) * owner_weight + velocity.local_value(neighbor_lid) * neighbor_weight);
+                owner_value + (velocity.local_value(neighbor_lid) - owner_value) * neighbor_weight);
             continue;
         }
         if (boundary_cache == nullptr || !mesh.is_boundary_face(face_id))
@@ -125,10 +128,12 @@ void assemble_stored_normal_face_fluxes(const VectorCellFieldStored<Pack, MeshTy
         {
             const auto neighbor_id = mesh.opposite_or_periodic_neighbor_cell(face_id, owner_id);
             const auto neighbor_lid = packed_cell_local_id(mesh, neighbor_id);
-            const auto [owner_weight, neighbor_weight] =
-                stored_interior_face_linear_weights(mesh, face_lid, owner_lid, neighbor_lid);
-            value =
-                velocity.local_value(owner_lid) * owner_weight + velocity.local_value(neighbor_lid) * neighbor_weight;
+            const auto neighbor_weight =
+                stored_interior_face_linear_weights(mesh, face_lid, owner_lid, neighbor_lid).second;
+            // Affine difference form: constant fields reproduce themselves
+            // bit-exactly because the two weights sum to exactly one.
+            const auto& owner_value = velocity.local_value(owner_lid);
+            value = owner_value + (velocity.local_value(neighbor_lid) - owner_value) * neighbor_weight;
         }
         else
         {

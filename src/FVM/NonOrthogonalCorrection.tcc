@@ -40,13 +40,26 @@ void evaluate_scalar_affine_gradients(const CellField<Pack>& field,
     for (size_t owned = 0; owned < stencils.size(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto value_p = field_values(cell_lid, 0);
+        // Difference form relative to the owning cell's value: interior
+        // entries skip their self term and unfolded Dirichlet-like boundary
+        // terms act on prescribed-value differences, so constant fields
+        // reproduce a bit-exact zero gradient.
         auto gradient = stencils[owned].constant;
         for (const auto& entry : stencils[owned].entries)
         {
+            if (entry.cell_lid == cell_lid)
+                continue;
             const auto value = field_values(entry.cell_lid, 0);
-            gradient.x += entry.coefficient.x * value;
-            gradient.y += entry.coefficient.y * value;
-            gradient.z += entry.coefficient.z * value;
+            gradient.x += entry.coefficient.x * (value - value_p);
+            gradient.y += entry.coefficient.y * (value - value_p);
+            gradient.z += entry.coefficient.z * (value - value_p);
+        }
+        for (const auto& term : stencils[owned].boundary_terms)
+        {
+            gradient.x += term.basis.x * (term.value - value_p);
+            gradient.y += term.basis.y * (term.value - value_p);
+            gradient.z += term.basis.z * (term.value - value_p);
         }
         gradient_values(cell_lid, 0) = gradient.x;
         gradient_values(cell_lid, 1) = gradient.y;
@@ -70,13 +83,24 @@ void evaluate_vector_affine_gradients(const VectorCellField<Pack>& field,
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         for (size_t component = 0; component < VectorCellField<Pack>::num_components; ++component)
         {
+            // Difference form relative to the owning cell's component; the
+            // boundary terms share one basis and act per component.
+            const auto value_p = field_values(cell_lid, component);
             auto gradient = stencils[owned].constants[component];
             for (const auto& entry : stencils[owned].entries)
             {
+                if (entry.cell_lid == cell_lid)
+                    continue;
                 const auto value = field_values(entry.cell_lid, component);
-                gradient.x += entry.coefficient.x * value;
-                gradient.y += entry.coefficient.y * value;
-                gradient.z += entry.coefficient.z * value;
+                gradient.x += entry.coefficient.x * (value - value_p);
+                gradient.y += entry.coefficient.y * (value - value_p);
+                gradient.z += entry.coefficient.z * (value - value_p);
+            }
+            for (const auto& term : stencils[owned].boundary_terms)
+            {
+                gradient.x += term.basis.x * (term.value[component] - value_p);
+                gradient.y += term.basis.y * (term.value[component] - value_p);
+                gradient.z += term.basis.z * (term.value[component] - value_p);
             }
             gradient_values(cell_lid, component * 3) = gradient.x;
             gradient_values(cell_lid, component * 3 + 1) = gradient.y;
@@ -104,14 +128,19 @@ void evaluate_vector_interior_gradients(const VectorCellField<Pack>& field,
         {
             gradient_values(cell_lid, component) = scalar_type{};
         }
+        // Difference form relative to the owning cell's components: the
+        // self entry's difference is identically zero and is skipped, so
+        // constant fields reproduce a bit-exact zero gradient.
         for (const auto& entry : stencils[owned])
         {
+            if (entry.cell_lid == cell_lid)
+                continue;
             for (size_t component = 0; component < VectorCellField<Pack>::num_components; ++component)
             {
-                const auto component_value = field_values(entry.cell_lid, component);
-                gradient_values(cell_lid, component * 3) += entry.coefficient.x * component_value;
-                gradient_values(cell_lid, component * 3 + 1) += entry.coefficient.y * component_value;
-                gradient_values(cell_lid, component * 3 + 2) += entry.coefficient.z * component_value;
+                const auto delta = field_values(entry.cell_lid, component) - field_values(cell_lid, component);
+                gradient_values(cell_lid, component * 3) += entry.coefficient.x * delta;
+                gradient_values(cell_lid, component * 3 + 1) += entry.coefficient.y * delta;
+                gradient_values(cell_lid, component * 3 + 2) += entry.coefficient.z * delta;
             }
         }
     }

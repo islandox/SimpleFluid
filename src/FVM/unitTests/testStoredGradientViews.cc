@@ -96,9 +96,16 @@ void point_scalar_gradient(const Scalar& field, Vector& output, const Cache& cac
             const auto stencils = FVM::detail::scalar_affine_gradient_stencils(mesh, bc, bv);
             for (size_t c = 0; c < stencils.size(); ++c)
             {
+                // Difference form relative to the owning cell's value; the
+                // self entry and Dirichlet-like boundary terms reproduce a
+                // bit-exact zero gradient for constant fields.
+                const auto center = field.local_value(c);
                 auto gradient = stencils[c].constant;
                 for (const auto& entry : stencils[c].entries)
-                    gradient = gradient + entry.coefficient * field.local_value(entry.cell_lid);
+                    if (entry.cell_lid != static_cast<decltype(entry.cell_lid)>(c))
+                        gradient = gradient + entry.coefficient * (field.local_value(entry.cell_lid) - center);
+                for (const auto& term : stencils[c].boundary_terms)
+                    gradient = gradient + term.basis * (term.value - center);
                 output.set_owned_value(c, gradient);
             }
         }
@@ -107,9 +114,11 @@ void point_scalar_gradient(const Scalar& field, Vector& output, const Cache& cac
             const auto stencils = FVM::detail::least_squares_gradient_stencils(mesh);
             for (size_t c = 0; c < stencils.size(); ++c)
             {
+                const auto center = field.local_value(c);
                 Vec gradient{};
                 for (const auto& entry : stencils[c])
-                    gradient = gradient + entry.coefficient * field.local_value(entry.cell_lid);
+                    if (entry.cell_lid != static_cast<decltype(entry.cell_lid)>(c))
+                        gradient = gradient + entry.coefficient * (field.local_value(entry.cell_lid) - center);
                 output.set_owned_value(c, gradient);
             }
         }
