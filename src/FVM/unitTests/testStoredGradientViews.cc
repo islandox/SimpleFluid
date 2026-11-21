@@ -371,9 +371,13 @@ TEST(StoredGradientViewsTest, VectorLeastSquaresMatchesComponentReadsWithStaleOv
                 for (size_t c = 0; c < mesh->num_owned_cells(); ++c)
                 {
                     const auto value = actual.value(c)[component], reference = expected.value(c);
-                    EXPECT_EQ(value.x, reference.x);
-                    EXPECT_EQ(value.y, reference.y);
-                    EXPECT_EQ(value.z, reference.z);
+                    // The vector and component-scalar evaluations run
+                    // separately compiled code sequences; allow a few ULPs of
+                    // contraction or vectorization divergence instead of
+                    // demanding bit-identity between them.
+                    EXPECT_DOUBLE_EQ(value.x, reference.x);
+                    EXPECT_DOUBLE_EQ(value.y, reference.y);
+                    EXPECT_DOUBLE_EQ(value.z, reference.z);
                 }
             }
         }

@@ -5,6 +5,7 @@
 #pragma once
 
 #include "dataclass/TpetraTypes.hh"
+#include "utils/export_helper.hh"
 
 #include <Teuchos_RCP.hpp>
 
@@ -25,7 +26,7 @@ namespace SimpleFluid::detail
  * keep using the unscaled matrix object.
  */
 template<TpetraTypePack Pack>
-class ScaledLinearOperator final : public Pack::operator_type
+class SIMPLEFLUID_SOLVERS_EXPORT ScaledLinearOperator final : public Pack::operator_type
 {
 public:
     using scalar_type = typename Pack::scalar_type;
@@ -39,6 +40,10 @@ public:
         if (d_matrix.is_null() || !std::isfinite(d_scale) || d_scale <= scalar_type{})
             throw std::invalid_argument("ScaledLinearOperator requires a matrix and a positive finite scale.");
     }
+
+    // Out-of-line key function: SimpleFluidSolvers owns the vtable and type
+    // information so cross-DSO dynamic casts cannot compare two private copies.
+    ~ScaledLinearOperator() override;
 
     Teuchos::RCP<const map_type> getDomainMap() const override { return d_matrix->getDomainMap(); }
     Teuchos::RCP<const map_type> getRangeMap() const override { return d_matrix->getRangeMap(); }
@@ -63,5 +68,11 @@ private:
     Teuchos::RCP<const matrix_type> d_matrix;
     scalar_type d_scale;
 };
+
+// Compiled into SimpleFluidSolvers for the default pack so every consumer
+// references that DSO's vtable and type information instead of emitting a
+// private copy. A non-default pack must include "solvers/ScaledLinearOperator.tcc"
+// in the translation unit that instantiates it.
+extern template class ScaledLinearOperator<DefaultTpetraTypes>;
 
 } // namespace SimpleFluid::detail

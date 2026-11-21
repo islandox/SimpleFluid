@@ -867,6 +867,12 @@ TEST(BelosLinearSolverTest, AccurateStoredCrsResidualPreservesCancellationAndOri
         SCOPED_TRACE(crs_scale);
         const auto scaled = Teuchos::rcp(
             new SimpleFluid::detail::ScaledLinearOperator<Pack>(matrix, crs_scale));
+        // The executable must observe SimpleFluidSolvers' type information:
+        // a locally emitted private copy would make this cast and the solver's
+        // internal unwrapping disagree under hidden-visibility LTO.
+        const Teuchos::RCP<const Pack::operator_type> scaled_as_operator = scaled;
+        ASSERT_FALSE(Teuchos::rcp_dynamic_cast<
+            const SimpleFluid::detail::ScaledLinearOperator<Pack>>(scaled_as_operator, false).is_null());
         Pack::multi_vector_type scaled_rhs(map, 2, true), scaled_solution(map, 2, true);
         for (std::size_t column = 0; column < 2; ++column)
         {

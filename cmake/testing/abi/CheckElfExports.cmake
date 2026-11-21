@@ -296,10 +296,18 @@ endforeach()
 # Its private helpers remain subject to the detail-namespace prohibition.
 list(FILTER simplefluid_forbidden_api_symbols EXCLUDE REGEX
     "^SimpleFluid::detail::DICPreconditioner<.*>[ ]*::(DICPreconditioner|~DICPreconditioner|apply|getDomainMap|getRangeMap)[(]")
+# ScaledLinearOperator crosses the executable/DSO boundary through a
+# header-visible wrapper, so its explicit DSO instantiation exports the key
+# function, vtable and type information that consumers reference.
+list(FILTER simplefluid_forbidden_api_symbols EXCLUDE REGEX
+    "^SimpleFluid::detail::ScaledLinearOperator<.*>[ ]*::(ScaledLinearOperator|~ScaledLinearOperator|apply|getDomainMap|getRangeMap|hasTransposeApply|scaled_crs_matrix|crs_scale)[(]")
 
 set(simplefluid_required_api_patterns
     "^SimpleFluid::detail::DICPreconditioner<.*>[ ]*::DICPreconditioner[(]"
     "^SimpleFluid::detail::DICPreconditioner<.*>[ ]*::apply[(]"
+    # Cross-DSO unwrapping compares the vtable/typeinfo owned by this DSO.
+    "^typeinfo for SimpleFluid::detail::ScaledLinearOperator<"
+    "^vtable for SimpleFluid::detail::ScaledLinearOperator<"
     "^SimpleFluid::BubbleGasPhysics::advance_microbubble_substep[(]"
     "^SimpleFluid::BubbleGasPhysics::advance_upper_bubble_population[(]"
     "^SimpleFluid::BoilingSourceModel<.*>[ ]*::update[(]"
