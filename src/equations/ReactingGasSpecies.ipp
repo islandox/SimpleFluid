@@ -1782,6 +1782,7 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                 mutable_population_number(d_options.population_ids[p]).owned_write_view()(owned, 0) =
                     candidateNumbers[owned][p].number / volumes[owned];
         reconstruct_species_derived(temperature);
+        d_last_statistics.void_volume = global_integral(d_alpha_g);
         for (std::size_t owned = 0; owned < volumes.size(); ++owned)
         {
             const auto cell = static_cast<local_ordinal_type>(owned);

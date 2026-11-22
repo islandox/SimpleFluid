@@ -458,4 +458,31 @@ TEST(BoussinesqSpeciesFreeSurfaceTest, HistoryCSVUsesCatalogAndPopulationColumns
     }
 }
 
+TEST(BoussinesqSpeciesFreeSurfaceTest, ConstantPressureStepPreservesLastStatisticsVoidVolume)
+{
+    Fixture f;
+    f.configure_surface(f.surface_options(false));
+    const double initial_void = f.gas->global_submerged_bubble_volume();
+    ASSERT_GT(initial_void, 0.0);
+    EXPECT_NEAR(f.gas->last_statistics().void_volume, initial_void, 1.0e-12);
+
+    const double pressure_before = f.gas->absolute_pressure_offset();
+    f.coupling->step();
+    const auto after = f.coupling->free_surface_diagnostics();
+    EXPECT_DOUBLE_EQ(after.headspace.pressure, pressure_before);
+    EXPECT_DOUBLE_EQ(f.gas->absolute_pressure_offset(), pressure_before);
+    const double actual_void = f.gas->global_submerged_bubble_volume();
+    EXPECT_GT(actual_void, 0.0);
+    EXPECT_NEAR(after.submerged_bubble_volume, actual_void, 1.0e-12);
+    EXPECT_NEAR(f.gas->last_statistics().void_volume, actual_void, 1.0e-12);
+
+    // Direct species advancement must also keep last_statistics().void_volume populated
+    // without waiting for an external pressure-offset mutation.
+    f.gas->advance(0.002, 0.001, f.solver->temperature(), f.solver->pressure(), f.solver->velocity(),
+        f.solver->pressure_corrected_face_fluxes(), f.solver->material_properties(), nullptr);
+    const double after_advance_void = f.gas->global_submerged_bubble_volume();
+    EXPECT_GT(after_advance_void, 0.0);
+    EXPECT_NEAR(f.gas->last_statistics().void_volume, after_advance_void, 1.0e-12);
+}
+
 } // namespace

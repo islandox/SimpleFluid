@@ -3874,6 +3874,26 @@ TEST(BoussinesqSpeciesPlanarALETest, FollowsTransportedLiquidAndExactEOSFacePack
     if (configured.mesh->owned_cell_map()->getComm()->getSize() == 4)
         EXPECT_EQ(empty, 2);
 }
+
+TEST(BoussinesqSpeciesPlanarALETest, ConstantPressureStepPreservesLastStatisticsVoidVolume)
+{
+    auto configured = TypedSpeciesSurface::make(0, true);
+    auto& coupling = *configured.coupling;
+    auto& gas = *coupling.find_reacting_gas_model();
+    const double pressure_before = gas.absolute_pressure_offset();
+    const double initial_void = gas.global_submerged_bubble_volume();
+    ASSERT_GT(initial_void, 0.0);
+    EXPECT_NEAR(gas.last_statistics().void_volume, initial_void, 1.0e-12);
+
+    coupling.step();
+    const auto surface = coupling.free_surface_diagnostics();
+    EXPECT_DOUBLE_EQ(surface.headspace.pressure, pressure_before);
+    EXPECT_DOUBLE_EQ(gas.absolute_pressure_offset(), pressure_before);
+    const double actual_void = gas.global_submerged_bubble_volume();
+    EXPECT_GT(actual_void, 0.0);
+    EXPECT_NEAR(surface.submerged_bubble_volume, actual_void, 1.0e-12);
+    EXPECT_NEAR(gas.last_statistics().void_volume, actual_void, 1.0e-12);
+}
 TEST(BoussinesqSpeciesPlanarALETest, MixedPopulationEscapeAndIntervalReplayCommitEverySpeciesOnce)
 {
     auto configured = TypedSpeciesSurface::make(0, true);
