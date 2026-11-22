@@ -172,14 +172,7 @@ void PlanarALEBoundary<Pack>::validate(const VesselVolumeMap& volume_map)
 {
     const auto communicator = d_mesh->owned_cell_map()->getComm();
     const auto axis = static_cast<size_t>(d_axis);
-    int local_named_batch = d_batch_id >= 0 ? 1 : 0;
-    int global_named_batch = 0;
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM, 1, &local_named_batch, &global_named_batch);
-    if (global_named_batch == 0)
-    {
-        throw std::invalid_argument(
-            "Planar ALE top boundary '" + d_boundary_name + "' does not exist on the mesh.");
-    }
+    const long long local_named_batch = d_batch_id >= 0 ? 1 : 0;
 
     int local_invalid = 0;
     scalar_type local_area{};
@@ -218,17 +211,25 @@ void PlanarALEBoundary<Pack>::validate(const VesselVolumeMap& volume_map)
     {
         local_mesh_volume += static_cast<scalar_type>(d_mesh->cell_volume(static_cast<local_ordinal_type>(owned)));
     }
+    const std::array<long long, 2> local_counts{local_named_batch, local_owned_faces};
+    std::array<long long, 2> global_counts{};
     std::array<scalar_type, 2> local_sums{local_area, local_mesh_volume};
     std::array<scalar_type, 2> global_sums{};
-    scalar_type global_min_elevation{};
-    scalar_type global_max_elevation{};
-    long long global_owned_faces = 0;
+    const std::array<scalar_type, 2> local_extrema{-local_min_elevation, local_max_elevation};
+    std::array<scalar_type, 2> global_extrema{};
     int any_invalid = 0;
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM, 2, local_counts.data(), global_counts.data());
+    if (global_counts[0] == 0)
+    {
+        throw std::invalid_argument(
+            "Planar ALE top boundary '" + d_boundary_name + "' does not exist on the mesh.");
+    }
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM, 2, local_sums.data(), global_sums.data());
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM, 1, &local_owned_faces, &global_owned_faces);
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, 1, &local_min_elevation, &global_min_elevation);
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_max_elevation, &global_max_elevation);
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 2, local_extrema.data(), global_extrema.data());
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_invalid, &any_invalid);
+    const long long global_owned_faces = global_counts[1];
+    const scalar_type global_min_elevation = -global_extrema[0];
+    const scalar_type global_max_elevation = global_extrema[1];
     if (any_invalid != 0 || global_owned_faces == 0 || !(global_sums[0] > scalar_type{}))
     {
         throw std::invalid_argument(
@@ -280,19 +281,15 @@ void PlanarALEBoundary<Pack>::validate(const VesselVolumeMap& volume_map)
         throw std::invalid_argument(
             "PlanarALEBoundary vessel map must be valid at the moving surface on every rank.");
     }
-    const std::array<scalar_type, 5> local_map{
-        bottom_elevation, top_elevation, total_usable_volume, mapped_pool_volume, mapped_area};
-    std::array<scalar_type, 5> minimum_map{};
-    std::array<scalar_type, 5> maximum_map{};
+    const std::array<scalar_type, 6> local_map{bottom_elevation, top_elevation, total_usable_volume,
+        mapped_pool_volume, mapped_area, static_cast<scalar_type>(range_policy)};
+    std::array<scalar_type, 6> minimum_map{};
+    std::array<scalar_type, 6> maximum_map{};
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, static_cast<int>(local_map.size()), local_map.data(),
         minimum_map.data());
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_map.size()), local_map.data(),
         maximum_map.data());
-    int minimum_range_policy = 0;
-    int maximum_range_policy = 0;
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, 1, &range_policy, &minimum_range_policy);
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &range_policy, &maximum_range_policy);
-    if (minimum_map != maximum_map || minimum_range_policy != maximum_range_policy)
+    if (minimum_map != maximum_map)
     {
         throw std::invalid_argument(
             "PlanarALEBoundary vessel-map values and range policy must match exactly on every rank.");

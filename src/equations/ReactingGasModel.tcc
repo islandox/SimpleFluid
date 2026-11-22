@@ -203,6 +203,7 @@ void ReactingGasModel<Pack, MeshType>::initialize_state(scalar_type time, const 
             initialize_species(states, numbers);
         }
         reconstruct_species_derived(temperature);
+        d_last_statistics.void_volume = global_integral(d_alpha_g);
         sync_all_fields();
         return;
     }

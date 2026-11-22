@@ -58,41 +58,61 @@ auto VolumeContinuityModel<Pack, MeshType>::preview(const Inputs& inputs, std::u
 
     // Empty ranks have no span entries with which to express optional presence.
     // Only ranks with applicable rows select the mode; empty ranks are neutral.
-    const auto optional_span_present = [&](bool present, size_t rows, const char* selection)
+    const auto communicator = d_mesh->owned_cell_map()->getComm();
+    const bool local_has_carrier_fraction = !inputs.carrier_material_fraction.empty();
+    const bool local_has_previous_target = !inputs.previous_target.empty();
+    const std::array<int, 4> local_modes{
+        d_mesh->num_local_cells() != 0 && local_has_carrier_fraction ? 1 : 0,
+        d_mesh->num_local_cells() != 0 && !local_has_carrier_fraction ? 1 : 0,
+        d_mesh->num_owned_cells() != 0 && local_has_previous_target ? 1 : 0,
+        d_mesh->num_owned_cells() != 0 && !local_has_previous_target ? 1 : 0};
+    std::array<int, 4> global_modes{};
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_modes.size()),
+        local_modes.data(), global_modes.data());
+    const std::array<unsigned long long, 3> local_ull{
+        static_cast<unsigned long long>(inputs.carrier_material_volume_flux != nullptr),
+        static_cast<unsigned long long>(inputs.bubble_slip_volume_flux != nullptr),
+        static_cast<unsigned long long>(generation)};
+    std::array<unsigned long long, 3> min_ull{}, max_ull{};
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, static_cast<int>(local_ull.size()),
+        local_ull.data(), min_ull.data());
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_ull.size()),
+        local_ull.data(), max_ull.data());
+    const std::array<scalar_type, 7> local_uniform_scalars{inputs.old_pool_volume, inputs.new_pool_volume,
+        inputs.bubble_escape_volume_rate, inputs.other_outflow_volume_rate, inputs.mesh_volume_correction_rate,
+        d_volume_absolute_tolerance, d_relative_tolerance};
+    std::array<scalar_type, 7> min_uniform_scalars{}, max_uniform_scalars{};
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, static_cast<int>(local_uniform_scalars.size()),
+        local_uniform_scalars.data(), min_uniform_scalars.data());
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_uniform_scalars.size()),
+        local_uniform_scalars.data(), max_uniform_scalars.data());
+    if (global_modes[0] != 0 && global_modes[1] != 0)
+        throw std::invalid_argument(
+            "VolumeContinuityModel carrier-material-fraction selection must agree on ranks with applicable cell rows.");
+    const bool has_carrier_material_fraction = global_modes[0] != 0;
+    if (min_ull[0] != max_ull[0])
+        throw std::invalid_argument("VolumeContinuityModel exact carrier-flux selection must agree on every rank.");
+    if (min_ull[1] != max_ull[1])
+        throw std::invalid_argument("VolumeContinuityModel bubble-slip-flux selection must agree on every rank.");
+    if (global_modes[2] != 0 && global_modes[3] != 0)
+        throw std::invalid_argument(
+            "VolumeContinuityModel previous-target selection must agree on ranks with applicable cell rows.");
+    const bool has_previous_target = global_modes[2] != 0;
+    constexpr std::array<const char*, 7> uniform_scalar_names{
+        "VolumeContinuityModel old pool volume",
+        "VolumeContinuityModel new pool volume",
+        "VolumeContinuityModel bubble escape volume rate",
+        "VolumeContinuityModel other outflow volume rate",
+        "VolumeContinuityModel mesh-volume correction rate",
+        "VolumeContinuityModel absolute volume-closure tolerance",
+        "VolumeContinuityModel relative closure tolerance"};
+    for (size_t i = 0; i < uniform_scalar_names.size(); ++i)
     {
-        const int local_modes[]{rows != 0 && present ? 1 : 0, rows != 0 && !present ? 1 : 0};
-        int global_modes[2]{};
-        Teuchos::reduceAll(
-            *d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 2, local_modes, global_modes);
-        if (global_modes[0] != 0 && global_modes[1] != 0)
-            throw std::invalid_argument(std::string(selection) + " must agree on ranks with applicable cell rows.");
-        return global_modes[0] != 0;
-    };
-    const bool has_carrier_material_fraction = optional_span_present(!inputs.carrier_material_fraction.empty(),
-        d_mesh->num_local_cells(), "VolumeContinuityModel carrier-material-fraction selection");
-    collective_detail::require_uniform_value(*d_mesh,
-        static_cast<int>(inputs.carrier_material_volume_flux != nullptr),
-        "VolumeContinuityModel exact carrier-flux selection");
-    collective_detail::require_uniform_value(*d_mesh, static_cast<int>(inputs.bubble_slip_volume_flux != nullptr),
-        "VolumeContinuityModel bubble-slip-flux selection");
-    const bool has_previous_target = optional_span_present(!inputs.previous_target.empty(),
-        d_mesh->num_owned_cells(), "VolumeContinuityModel previous-target selection");
-    collective_detail::require_uniform_value(
-        *d_mesh, inputs.old_pool_volume, "VolumeContinuityModel old pool volume");
-    collective_detail::require_uniform_value(
-        *d_mesh, inputs.new_pool_volume, "VolumeContinuityModel new pool volume");
-    collective_detail::require_uniform_value(
-        *d_mesh, inputs.bubble_escape_volume_rate, "VolumeContinuityModel bubble escape volume rate");
-    collective_detail::require_uniform_value(
-        *d_mesh, inputs.other_outflow_volume_rate, "VolumeContinuityModel other outflow volume rate");
-    collective_detail::require_uniform_value(
-        *d_mesh, inputs.mesh_volume_correction_rate, "VolumeContinuityModel mesh-volume correction rate");
-    collective_detail::require_uniform_value(
-        *d_mesh, d_volume_absolute_tolerance, "VolumeContinuityModel absolute volume-closure tolerance");
-    collective_detail::require_uniform_value(
-        *d_mesh, d_relative_tolerance, "VolumeContinuityModel relative closure tolerance");
-    collective_detail::require_uniform_value(
-        *d_mesh, static_cast<unsigned long long>(generation), "VolumeContinuityModel target generation");
+        if (min_uniform_scalars[i] != max_uniform_scalars[i])
+            throw std::invalid_argument(std::string(uniform_scalar_names[i]) + " must agree on every rank.");
+    }
+    if (min_ull[2] != max_ull[2])
+        throw std::invalid_argument("VolumeContinuityModel target generation must agree on every rank.");
     const auto old_volumes = inputs.ale.old_cell_volumes();
     const auto new_volumes = inputs.ale.new_cell_volumes();
     const auto time_step = static_cast<scalar_type>(inputs.ale.time_step());
@@ -332,19 +352,15 @@ void VolumeContinuityModel<Pack, MeshType>::restore(const StateSnapshot& snapsho
                                     "storage.");
     }
 
-    const auto saved_generation = static_cast<unsigned long long>(snapshot.d_generation);
-    const auto saved_nonce = static_cast<unsigned long long>(snapshot.d_trial_nonce);
-    unsigned long long minimum_generation = 0;
-    unsigned long long maximum_generation = 0;
-    unsigned long long minimum_nonce = 0;
-    unsigned long long maximum_nonce = 0;
-    Teuchos::reduceAll(
-        *d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &saved_generation, &minimum_generation);
-    Teuchos::reduceAll(
-        *d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &saved_generation, &maximum_generation);
-    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &saved_nonce, &minimum_nonce);
-    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &saved_nonce, &maximum_nonce);
-    if (minimum_generation != maximum_generation || minimum_nonce != maximum_nonce)
+    const std::array<unsigned long long, 2> saved_counters{
+        static_cast<unsigned long long>(snapshot.d_generation),
+        static_cast<unsigned long long>(snapshot.d_trial_nonce)};
+    std::array<unsigned long long, 2> minimum_counters{}, maximum_counters{};
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN,
+        static_cast<int>(saved_counters.size()), saved_counters.data(), minimum_counters.data());
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+        static_cast<int>(saved_counters.size()), saved_counters.data(), maximum_counters.data());
+    if (minimum_counters != maximum_counters)
     {
         throw std::invalid_argument("VolumeContinuityModel snapshot generation must agree on "
                                     "every rank.");

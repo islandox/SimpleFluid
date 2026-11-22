@@ -545,16 +545,26 @@ void PlanarALEMeshMotion<Pack>::validate_collective_trial(real_t surface_elevati
         }
     }
 
-    int any_invalid = 0;
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_invalid, &any_invalid);
-    const auto surface_matches = planar_ale_detail::collectively_equal(*communicator, surface_elevation);
-    const auto time_step_matches = planar_ale_detail::collectively_equal(*communicator, time_step);
-    const auto epoch_value = static_cast<unsigned long long>(current_epoch);
-    const auto epoch_matches = planar_ale_detail::collectively_equal(*communicator, epoch_value);
-    const int active_value = d_trial_active ? 1 : 0;
-    const auto active_matches = planar_ale_detail::collectively_equal(*communicator, active_value);
+    const std::array<real_t, 2> local_scalars{surface_elevation, time_step};
+    std::array<real_t, 2> minimum_scalars{}, maximum_scalars{};
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, static_cast<int>(local_scalars.size()),
+        local_scalars.data(), minimum_scalars.data());
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_scalars.size()),
+        local_scalars.data(), maximum_scalars.data());
+    const std::array<unsigned long long, 3> local_ull{static_cast<unsigned long long>(current_epoch),
+        static_cast<unsigned long long>(d_trial_active ? 1 : 0), static_cast<unsigned long long>(local_invalid ? 1 : 0)};
+    std::array<unsigned long long, 3> minimum_ull{}, maximum_ull{};
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, static_cast<int>(local_ull.size()), local_ull.data(),
+        minimum_ull.data());
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_ull.size()), local_ull.data(),
+        maximum_ull.data());
+    const bool any_invalid = maximum_ull[2] != 0;
+    const bool surface_matches = minimum_scalars[0] == maximum_scalars[0];
+    const bool time_step_matches = minimum_scalars[1] == maximum_scalars[1];
+    const bool epoch_matches = minimum_ull[0] == maximum_ull[0];
+    const bool active_matches = minimum_ull[1] == maximum_ull[1];
 
-    if (any_invalid != 0)
+    if (any_invalid)
     {
         throw std::invalid_argument("PlanarALEMeshMotion trial requires an idle, unchanged geometry, "
                                     "a finite positive time step, a finite non-inverting target, and "
@@ -578,21 +588,26 @@ void PlanarALEMeshMotion<Pack>::validate_collective_transaction(TransactionActio
             try { mesh.require_geometry_writable(); }
             catch (const std::logic_error&) { execution_held = 1; }
     });
-    const int active = d_trial_active ? 1 : 0;
-    const auto active_matches = planar_ale_detail::collectively_equal(*communicator, active);
-    const auto epoch = static_cast<unsigned long long>(d_mesh->geometry_epoch());
-    const auto epoch_matches = planar_ale_detail::collectively_equal(*communicator, epoch);
-    const auto action_value = static_cast<int>(action);
-    const auto action_matches = planar_ale_detail::collectively_equal(*communicator, action_value);
     const auto current_geometry = geometry_edge_coordinates();
     const int local_invalid = execution_held || !d_trial_active || !geometry_motion_owned() ||
                                       d_mesh->geometry_epoch() != d_expected_geometry_epoch ||
                                       current_geometry != d_trial_geometry_edges
                                   ? 1
                                   : 0;
-    int any_invalid = 0;
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_invalid, &any_invalid);
-    if (!active_matches || !epoch_matches || !action_matches || any_invalid != 0)
+    const std::array<unsigned long long, 4> local_ull{static_cast<unsigned long long>(d_trial_active ? 1 : 0),
+        static_cast<unsigned long long>(d_mesh->geometry_epoch()),
+        static_cast<unsigned long long>(static_cast<int>(action)),
+        static_cast<unsigned long long>(local_invalid)};
+    std::array<unsigned long long, 4> minimum_ull{}, maximum_ull{};
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, static_cast<int>(local_ull.size()), local_ull.data(),
+        minimum_ull.data());
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_ull.size()), local_ull.data(),
+        maximum_ull.data());
+    const bool active_matches = minimum_ull[0] == maximum_ull[0];
+    const bool epoch_matches = minimum_ull[1] == maximum_ull[1];
+    const bool action_matches = minimum_ull[2] == maximum_ull[2];
+    const bool any_invalid = maximum_ull[3] != 0;
+    if (!active_matches || !epoch_matches || !action_matches || any_invalid)
     {
         throw std::logic_error("PlanarALEMeshMotion action, transaction state, geometry, and "
                                "geometry epoch must match an active trial on every rank.");
@@ -650,16 +665,19 @@ void PlanarALEMeshMotion<Pack>::compute_trial_state(
     }
 
     const auto communicator = d_mesh->owned_cell_map()->getComm();
-    int any_invalid = 0;
-    int any_tolerance_failure = 0;
-    real_t global_maximum_absolute_residual = {};
-    real_t global_maximum_normalized_residual = {};
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_invalid, &any_invalid);
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_tolerance_failure, &any_tolerance_failure);
-    Teuchos::reduceAll(
-        *communicator, Teuchos::REDUCE_MAX, 1, &local_maximum_absolute_residual, &global_maximum_absolute_residual);
-    Teuchos::reduceAll(
-        *communicator, Teuchos::REDUCE_MAX, 1, &local_maximum_normalized_residual, &global_maximum_normalized_residual);
+    const std::array<int, 2> local_flags{local_invalid, local_tolerance_failure};
+    std::array<int, 2> global_flags{};
+    const std::array<real_t, 2> local_residuals{
+        local_maximum_absolute_residual, local_maximum_normalized_residual};
+    std::array<real_t, 2> global_residuals{};
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_flags.size()),
+        local_flags.data(), global_flags.data());
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_residuals.size()),
+        local_residuals.data(), global_residuals.data());
+    const int any_invalid = global_flags[0];
+    const int any_tolerance_failure = global_flags[1];
+    const real_t global_maximum_absolute_residual = global_residuals[0];
+    const real_t global_maximum_normalized_residual = global_residuals[1];
     if (any_invalid != 0)
     {
         throw std::runtime_error("PlanarALEMeshMotion produced non-finite swept-volume or GCL data.");

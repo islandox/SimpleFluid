@@ -40,6 +40,45 @@ namespace SimpleFluid::FVM
 namespace detail
 {
 
+template<class MapPtr> bool ale_local_map_matches(const MapPtr& first, const MapPtr& second)
+{
+    if (first.get() == second.get())
+        return true;
+    if constexpr (requires {
+                      first->getGlobalNumElements();
+                      first->getIndexBase();
+                      first->locallySameAs(*second);
+                  })
+    {
+        if (first->getComm()->getSize() != second->getComm()->getSize() ||
+            first->getGlobalNumElements() != second->getGlobalNumElements() ||
+            first->getIndexBase() != second->getIndexBase())
+        {
+            return false;
+        }
+        if constexpr (requires {
+                          first->haveGlobalConstants();
+                          first->getMinAllGlobalIndex();
+                          first->getMaxAllGlobalIndex();
+                          first->isDistributed();
+                      })
+        {
+            if (first->haveGlobalConstants() && second->haveGlobalConstants() &&
+                (first->getMinAllGlobalIndex() != second->getMinAllGlobalIndex() ||
+                 first->getMaxAllGlobalIndex() != second->getMaxAllGlobalIndex() ||
+                 first->isDistributed() != second->isDistributed()))
+            {
+                return false;
+            }
+        }
+        return first->locallySameAs(*second);
+    }
+    else
+    {
+        return first->isSameAs(*second);
+    }
+}
+
 /** @brief Return the identity of the concrete geometry behind a mesh view. */
 template<class MeshType> const void* ale_geometry_identity(const MeshType& mesh) noexcept
 {
@@ -191,72 +230,82 @@ ALEControlVolumeState ALEControlVolumeState::bind_to_motion(const MeshType& mesh
     const auto communicator = mesh.owned_cell_map()->getComm();
     const auto& motion_mesh_ptr = motion.mesh_ptr();
     const auto mesh_identity = detail::ale_geometry_identity(mesh);
-    const std::array<int, 2> local_binding_error{motion_mesh_ptr ? 0 : 1,
-        motion_mesh_ptr && detail::ale_geometry_identity(*motion_mesh_ptr) != mesh_identity ? 1 : 0};
-    std::array<int, 2> global_binding_error{};
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_binding_error.size()),
-        local_binding_error.data(), global_binding_error.data());
-    if (global_binding_error[0] != 0)
+    std::array<int, 6> local_errors{};
+    local_errors[0] = motion_mesh_ptr ? 0 : 1;
+    local_errors[1] =
+        motion_mesh_ptr && detail::ale_geometry_identity(*motion_mesh_ptr) != mesh_identity ? 1 : 0;
+    if (motion_mesh_ptr)
+    {
+        const auto& motion_mesh = *motion_mesh_ptr;
+        const bool same_mesh_object =
+            std::same_as<std::remove_cvref_t<MeshType>, std::remove_cvref_t<decltype(motion_mesh)>> &&
+            static_cast<const void*>(std::addressof(mesh)) == static_cast<const void*>(std::addressof(motion_mesh));
+        local_errors[2] = same_mesh_object
+                              ? 0
+                              : (mesh.num_owned_cells() != motion_mesh.num_owned_cells() ||
+                                        mesh.num_local_cells() != motion_mesh.num_local_cells() ||
+                                        mesh.num_owned_faces() != motion_mesh.num_owned_faces() ||
+                                        mesh.num_faces() != motion_mesh.num_faces()
+                                    ? 1
+                                    : 0);
+        local_errors[3] = (!mesh.owned_cell_map() || !motion_mesh.owned_cell_map() || !mesh.overlap_cell_map() ||
+                              !motion_mesh.overlap_cell_map() || !mesh.owned_face_map() ||
+                              !motion_mesh.owned_face_map() || !mesh.overlap_face_map() ||
+                              !motion_mesh.overlap_face_map())
+                              ? 1
+                              : 0;
+        if (local_errors[3] == 0)
+        {
+            local_errors[4] =
+                (!detail::ale_local_map_matches(mesh.owned_cell_map(), motion_mesh.owned_cell_map()) ||
+                    !detail::ale_local_map_matches(mesh.overlap_cell_map(), motion_mesh.overlap_cell_map()) ||
+                    !detail::ale_local_map_matches(mesh.owned_face_map(), motion_mesh.owned_face_map()) ||
+                    !detail::ale_local_map_matches(mesh.overlap_face_map(), motion_mesh.overlap_face_map()))
+                    ? 1
+                    : 0;
+        }
+        if (!same_mesh_object && local_errors[2] == 0)
+        {
+            int order_error = 0;
+            for (size_t local = 0; local < mesh.num_local_cells(); ++local)
+            {
+                const auto lid = static_cast<typename MeshType::local_ordinal_type>(local);
+                order_error = order_error || mesh.cell_global_id(lid) != motion_mesh.cell_global_id(lid);
+            }
+            for (size_t local = 0; local < mesh.num_faces(); ++local)
+            {
+                const auto lid = static_cast<typename MeshType::local_ordinal_type>(local);
+                order_error = order_error || mesh.face_global_id(lid) != motion_mesh.face_global_id(lid);
+            }
+            local_errors[5] = order_error;
+        }
+    }
+    std::array<int, 6> global_errors{};
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_errors.size()),
+        local_errors.data(), global_errors.data());
+    if (global_errors[0] != 0)
     {
         throw std::invalid_argument("ALE control-volume state requires a motion model with a live mesh.");
     }
-    if (global_binding_error[1] != 0)
+    if (global_errors[1] != 0)
     {
         throw std::invalid_argument(
             "ALE control-volume state requires the motion model and fields to share one concrete geometry.");
     }
-
-    const auto& motion_mesh = *motion_mesh_ptr;
-    int local_layout_error = mesh.num_owned_cells() != motion_mesh.num_owned_cells() ||
-                                     mesh.num_local_cells() != motion_mesh.num_local_cells() ||
-                                     mesh.num_owned_faces() != motion_mesh.num_owned_faces() ||
-                                     mesh.num_faces() != motion_mesh.num_faces()
-                                 ? 1
-                                 : 0;
-    int global_layout_error = 0;
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_layout_error, &global_layout_error);
-    if (global_layout_error != 0)
+    if (global_errors[2] != 0)
     {
         throw std::invalid_argument(
             "ALE control-volume state requires matching owned and local cell/face counts on every rank.");
     }
-
-    const std::array<int, 8> local_map_presence_error{mesh.owned_cell_map() ? 0 : 1,
-        motion_mesh.owned_cell_map() ? 0 : 1, mesh.overlap_cell_map() ? 0 : 1, motion_mesh.overlap_cell_map() ? 0 : 1,
-        mesh.owned_face_map() ? 0 : 1, motion_mesh.owned_face_map() ? 0 : 1, mesh.overlap_face_map() ? 0 : 1,
-        motion_mesh.overlap_face_map() ? 0 : 1};
-    std::array<int, 8> global_map_presence_error{};
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_map_presence_error.size()),
-        local_map_presence_error.data(), global_map_presence_error.data());
-    if (std::any_of(
-            global_map_presence_error.begin(), global_map_presence_error.end(), [](int error) { return error != 0; }))
+    if (global_errors[3] != 0)
     {
         throw std::invalid_argument("ALE control-volume state requires complete owned/overlap cell and face maps.");
     }
-
-    local_layout_error = !mesh.owned_cell_map()->isSameAs(*motion_mesh.owned_cell_map()) ||
-                         !mesh.overlap_cell_map()->isSameAs(*motion_mesh.overlap_cell_map()) ||
-                         !mesh.owned_face_map()->isSameAs(*motion_mesh.owned_face_map()) ||
-                         !mesh.overlap_face_map()->isSameAs(*motion_mesh.overlap_face_map());
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_layout_error, &global_layout_error);
-    if (global_layout_error != 0)
+    if (global_errors[4] != 0)
     {
         throw std::invalid_argument("ALE control-volume state requires matching owned/overlap cell and face maps.");
     }
-
-    local_layout_error = 0;
-    for (size_t local = 0; local < mesh.num_local_cells(); ++local)
-    {
-        const auto lid = static_cast<typename MeshType::local_ordinal_type>(local);
-        local_layout_error = local_layout_error || mesh.cell_global_id(lid) != motion_mesh.cell_global_id(lid);
-    }
-    for (size_t local = 0; local < mesh.num_faces(); ++local)
-    {
-        const auto lid = static_cast<typename MeshType::local_ordinal_type>(local);
-        local_layout_error = local_layout_error || mesh.face_global_id(lid) != motion_mesh.face_global_id(lid);
-    }
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_layout_error, &global_layout_error);
-    if (global_layout_error != 0)
+    if (global_errors[5] != 0)
     {
         throw std::invalid_argument("ALE control-volume state requires identical mesh-local global-ID order.");
     }

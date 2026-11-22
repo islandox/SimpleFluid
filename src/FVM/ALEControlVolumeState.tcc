@@ -139,11 +139,8 @@ void ALEControlVolumeState::validate(const MeshType& mesh) const
 
     std::array<int, 3> local_validation{local_non_finite, local_traversal_error, local_gcl_failure};
     std::array<int, 3> global_validation{};
-    real_t global_maximum_gcl_residual{};
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_validation.size()),
         local_validation.data(), global_validation.data());
-    Teuchos::reduceAll(
-        *communicator, Teuchos::REDUCE_MAX, 1, &local_maximum_gcl_residual, &global_maximum_gcl_residual);
     if (global_validation[0] != 0)
     {
         throw std::invalid_argument("ALE control-volume state contains invalid volume, mesh-flux, or GCL data.");
@@ -154,6 +151,9 @@ void ALEControlVolumeState::validate(const MeshType& mesh) const
     }
     if (global_validation[2] != 0)
     {
+        real_t global_maximum_gcl_residual{};
+        Teuchos::reduceAll(
+            *communicator, Teuchos::REDUCE_MAX, 1, &local_maximum_gcl_residual, &global_maximum_gcl_residual);
         throw std::invalid_argument(
             "ALE control-volume state violates the cellwise geometric conservation law; maximum residual is " +
             std::to_string(global_maximum_gcl_residual) + " m^3/s.");

@@ -116,11 +116,20 @@ auto LiquidMassInventory<Pack, MeshType>::previewSpeciesMass(const field_type& m
     const field_type& pure_density, scalar_type global_mass_change, scalar_type global_boundary_outflow,
     const FVM::ALEControlVolumeState* ale) -> PhaseChangePreview
 {
-    collective_detail::require_uniform_value(
-        *d_mesh, static_cast<int>(d_initialized), "Liquid follower initialized state");
-    collective_detail::require_uniform_value(*d_mesh, static_cast<int>(d_species_bound), "Liquid follower ownership");
-    collective_detail::require_uniform_value(
-        *d_mesh, static_cast<int>(ale != nullptr), "Liquid follower ALE selection");
+    const auto communicator = d_mesh->owned_cell_map()->getComm();
+    const std::array<int, 3> local_flags{
+        static_cast<int>(d_initialized), static_cast<int>(d_species_bound), static_cast<int>(ale != nullptr)};
+    std::array<int, 3> minimum_flags{}, maximum_flags{};
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, static_cast<int>(local_flags.size()),
+        local_flags.data(), minimum_flags.data());
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_flags.size()),
+        local_flags.data(), maximum_flags.data());
+    if (minimum_flags[0] != maximum_flags[0])
+        throw std::invalid_argument("Liquid follower initialized state must agree on every rank.");
+    if (minimum_flags[1] != maximum_flags[1])
+        throw std::invalid_argument("Liquid follower ownership must agree on every rank.");
+    if (minimum_flags[2] != maximum_flags[2])
+        throw std::invalid_argument("Liquid follower ALE selection must agree on every rank.");
     collective_detail::collective_local_validation(*d_mesh, "Liquid species follower inputs",
         [&]
         {
@@ -133,8 +142,16 @@ auto LiquidMassInventory<Pack, MeshType>::previewSpeciesMass(const field_type& m
                 global_boundary_outflow < 0.0)
                 throw std::invalid_argument("Species liquid follower budgets/fields are invalid.");
         });
-    requireReplicated(global_mass_change, "species mass change");
-    requireReplicated(global_boundary_outflow, "species physical outflow");
+    const std::array<scalar_type, 2> local_budgets{global_mass_change, global_boundary_outflow};
+    std::array<scalar_type, 2> minimum_budgets{}, maximum_budgets{};
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, static_cast<int>(local_budgets.size()),
+        local_budgets.data(), minimum_budgets.data());
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_budgets.size()),
+        local_budgets.data(), maximum_budgets.data());
+    if (minimum_budgets[0] != maximum_budgets[0])
+        throw std::invalid_argument("LiquidMassInventory species mass change must match on every rank.");
+    if (minimum_budgets[1] != maximum_budgets[1])
+        throw std::invalid_argument("LiquidMassInventory species physical outflow must match on every rank.");
     if (ale)
         ale->validate(*d_mesh);
     const auto count = d_mesh->num_owned_cells();
@@ -625,14 +642,6 @@ auto LiquidMassInventory<Pack, MeshType>::refresh_cellwise_density_impl(const Ph
     // Validate before updating density: arbitrary stale previews are never
     // revived, even though a successful density refresh invalidates this one.
     static_cast<void>(trialCellMassInventory(preview));
-    const auto comm = d_mesh->owned_cell_map()->getComm();
-    const std::array<int, 3> local{
-        preview.d_geometry_epoch != mesh_geometry_epoch(*d_mesh), preview.d_ale.has_value(), !preview.d_ale.has_value()};
-    std::array<int, 3> global{};
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 3, local.data(), global.data());
-    if (global[0] || (global[1] && global[2]))
-        throw std::logic_error("Cellwise density refresh requires unchanged geometry and a consistent ALE preview.");
-    if (preview.d_ale) preview.d_ale->validate(*d_mesh);
     if (preview.d_from_species)
     {
         std::vector<scalar_type> densities(d_mesh->num_owned_cells());
@@ -715,8 +724,6 @@ auto LiquidMassInventory<Pack, MeshType>::refresh_cellwise_density_impl(const Ph
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void LiquidMassInventory<Pack, MeshType>::commitPhaseChange(const PhaseChangePreview& preview)
 {
-    collective_detail::require_uniform_value(
-        *d_mesh, static_cast<int>(preview.d_ale.has_value()), "Liquid inventory commit ALE selection");
     const auto cellwise_mode = d_options.mode == LiquidVolumeMode::CellMassInventory;
     const int local_invalid = preview.d_owner != this || preview.d_generation != d_phase_change_generation ||
                                       preview.d_cellwise != cellwise_mode || preview.d_from_species != d_species_bound ||
@@ -725,9 +732,16 @@ void LiquidMassInventory<Pack, MeshType>::commitPhaseChange(const PhaseChangePre
                                       (cellwise_mode && preview.d_trial_nonce != d_cellwise_trial_nonce)
                                   ? 1
                                   : 0;
-    int any_invalid = 0;
-    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_invalid, &any_invalid);
-    if (any_invalid != 0)
+    const std::array<int, 3> local_flags{
+        preview.d_ale.has_value() ? 1 : 0, preview.d_ale.has_value() ? 0 : 1, local_invalid};
+    std::array<int, 3> global_flags{};
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+        static_cast<int>(local_flags.size()), local_flags.data(), global_flags.data());
+    if (global_flags[0] != 0 && global_flags[1] != 0)
+    {
+        throw std::invalid_argument("Liquid inventory commit ALE selection must agree on every rank.");
+    }
+    if (global_flags[2] != 0)
     {
         throw std::logic_error(
             "LiquidMassInventory phase-change preview is stale, foreign, or inconsistent across ranks.");
@@ -763,16 +777,23 @@ void LiquidMassInventory<Pack, MeshType>::commitPhaseChange(const PhaseChangePre
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto LiquidMassInventory<Pack, MeshType>::trialCellMassInventory(const PhaseChangePreview& preview) const -> const field_type&
 {
-    collective_detail::require_uniform_value(
-        *d_mesh, static_cast<int>(preview.d_ale.has_value()), "Liquid inventory trial ALE selection");
     const auto cellwise_mode = d_options.mode == LiquidVolumeMode::CellMassInventory;
     const int local_invalid = !d_initialized || preview.d_owner != this ||
                               preview.d_generation != d_phase_change_generation || !preview.d_cellwise ||
                               !cellwise_mode || preview.d_trial_nonce != d_cellwise_trial_nonce ||
-        preview.d_from_species != d_species_bound || preview.d_geometry_epoch != mesh_geometry_epoch(*d_mesh);
-    int any_invalid = 0;
-    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_invalid, &any_invalid);
-    if (any_invalid != 0)
+        preview.d_from_species != d_species_bound || preview.d_geometry_epoch != mesh_geometry_epoch(*d_mesh)
+            ? 1
+            : 0;
+    const std::array<int, 3> local_flags{
+        preview.d_ale.has_value() ? 1 : 0, preview.d_ale.has_value() ? 0 : 1, local_invalid};
+    std::array<int, 3> global_flags{};
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+        static_cast<int>(local_flags.size()), local_flags.data(), global_flags.data());
+    if (global_flags[0] != 0 && global_flags[1] != 0)
+    {
+        throw std::invalid_argument("Liquid inventory trial ALE selection must agree on every rank.");
+    }
+    if (global_flags[2] != 0)
     {
         throw std::logic_error("LiquidMassInventory trial field preview is stale, foreign, non-cellwise, or "
                                "inconsistent across ranks.");

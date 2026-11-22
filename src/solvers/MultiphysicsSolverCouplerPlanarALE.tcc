@@ -380,18 +380,21 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
         projected_flux_snapshot.restore(d_solver.projected_face_fluxes());
         relative_flux_snapshot.restore(*coupler.d_mesh_relative_face_flux);
         bubble_slip_flux_snapshot.restore(*coupler.d_bubble_slip_volume_flux);
-        mesh_volume_rate_snapshot.restore(*coupler.d_mesh_volume_rate);
         temperature_snapshot.restore(d_solver.temperature());
         if (coupler.d_thermal_participant && accepted_thermal)
             coupler.d_thermal_participant->restore_state(
                 refresh_metrics || !substep_thermal ? *accepted_thermal : *substep_thermal);
         if (coupler.d_thermal_participant)
             d_solver.temperature_equation().set_boundary_heat_flux_snapshot(accepted_thermal_flux);
-        clear_level_snapshot.restore(*coupler.d_clear_level);
-        pool_level_snapshot.restore(*coupler.d_pool_level);
-        headspace_pressure_snapshot.restore(*coupler.d_headspace_pressure);
-        occupancy_snapshot.restore(*coupler.d_pool_occupancy);
-        continuity_residual_snapshot.restore(*coupler.d_continuity_residual);
+        if (refresh_metrics)
+        {
+            mesh_volume_rate_snapshot.restore(*coupler.d_mesh_volume_rate);
+            clear_level_snapshot.restore(*coupler.d_clear_level);
+            pool_level_snapshot.restore(*coupler.d_pool_level);
+            headspace_pressure_snapshot.restore(*coupler.d_headspace_pressure);
+            occupancy_snapshot.restore(*coupler.d_pool_occupancy);
+            continuity_residual_snapshot.restore(*coupler.d_continuity_residual);
+        }
         if (prescribed_heat_snapshot)
             coupler.d_prescribed_heat_source->restore(*prescribed_heat_snapshot);
         d_solver.stored_material_properties().restore(material_snapshot);
@@ -675,17 +678,20 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
                 coupler.make_free_surface_update(d_solver.d_time + time_step, false, &accounting)));
             // A successfully closed surface preview authorizes pressure publication
             // inside this rollback-owned geometry/physics trial, without a new event.
-            const auto receipt = coupler.d_reacting_gas_model->species_event_receipt();
-            coupler.d_reacting_gas_model->set_absolute_pressure_offset(
-                coupler.surface_pressure_offset(trial.surface_preview->headspacePressure()));
-            if (receipt != coupler.d_reacting_gas_model->species_event_receipt())
-                throw std::logic_error("Pressure publication changed the source receipt.");
-            // The thermal-density refresh consumed the original preview nonce.
-            // Pressure refresh must extend the current immutable preview, not revive its stale predecessor.
-            trial.liquid_preview.emplace(coupler.d_liquid_mass_inventory->refreshCellwiseDensity(
-                *trial.liquid_preview, [this](local_ordinal_type cell)
-                { return coupler.d_reacting_gas_model->pure_liquid_density().value(cell); }));
-            accounting.liquid = trial.liquid_preview->diagnostics();
+            const auto next_offset = coupler.surface_pressure_offset(trial.surface_preview->headspacePressure());
+            if (next_offset != coupler.d_reacting_gas_model->absolute_pressure_offset())
+            {
+                const auto receipt = coupler.d_reacting_gas_model->species_event_receipt();
+                coupler.d_reacting_gas_model->set_absolute_pressure_offset(next_offset);
+                if (receipt != coupler.d_reacting_gas_model->species_event_receipt())
+                    throw std::logic_error("Pressure publication changed the source receipt.");
+                // The thermal-density refresh consumed the original preview nonce.
+                // Pressure refresh must extend the current immutable preview, not revive its stale predecessor.
+                trial.liquid_preview.emplace(coupler.d_liquid_mass_inventory->refreshCellwiseDensity(
+                    *trial.liquid_preview, [this](local_ordinal_type cell)
+                    { return coupler.d_reacting_gas_model->pure_liquid_density().value(cell); }));
+                accounting.liquid = trial.liquid_preview->diagnostics();
+            }
             trial.gas_inventory_residual = {};
             for (const auto& history : coupler.d_reacting_gas_model->species_histories())
                 trial.gas_inventory_residual =
@@ -855,15 +861,16 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
         }
     }
 
-    /** @brief Publish cellwise continuity and reduce its physical residual. */
-    continuity_residual_type evaluate_continuity(const TrialState& trial)
+    /** @brief Publish cellwise continuity and reduce its physical residual and target scale. */
+    std::pair<continuity_residual_type, scalar_type> evaluate_continuity(const TrialState& trial)
     {
         scalar_type local_final_l2_squared{};
         scalar_type local_final_normalization_squared{};
         scalar_type local_final_maximum{};
+        scalar_type local_target_scale{};
         {
             // Keep one checked geometry view for the whole local traversal.
-            // Release it before ghost synchronization and collective reduction.
+            // Release it before collective reduction.
             const auto execution = acquire_mesh_execution(*d_solver.d_mesh);
             for (size_t owned = 0; owned < d_solver.d_mesh->num_owned_cells(); ++owned)
             {
@@ -875,22 +882,26 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
                 local_final_l2_squared += residual * residual;
                 local_final_normalization_squared += std::max(balance * balance, target * target);
                 local_final_maximum = std::max(local_final_maximum, std::abs(residual));
+                local_target_scale = std::max(local_target_scale,
+                    std::max(std::abs(target_guess[owned]), std::abs(target)));
             }
         }
-        coupler.d_continuity_residual->sync_ghosts();
         const std::array<scalar_type, 2> local_continuity_squared{
             local_final_l2_squared, local_final_normalization_squared};
         std::array<scalar_type, 2> global_continuity_squared{};
-        scalar_type global_final_maximum{};
+        const std::array<scalar_type, 2> local_maxima{local_final_maximum, local_target_scale};
+        std::array<scalar_type, 2> global_maxima{};
         Teuchos::reduceAll(*d_solver.d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
             static_cast<int>(local_continuity_squared.size()), local_continuity_squared.data(),
             global_continuity_squared.data());
-        Teuchos::reduceAll(*d_solver.d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_final_maximum,
-            &global_final_maximum);
+        Teuchos::reduceAll(*d_solver.d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+            static_cast<int>(local_maxima.size()), local_maxima.data(), global_maxima.data());
         const auto final_l2 = std::sqrt(global_continuity_squared[0]);
         const auto final_normalization = std::sqrt(global_continuity_squared[1]);
-        return continuity_residual_type{final_l2, global_final_maximum,
-            final_normalization > scalar_type{} ? final_l2 / final_normalization : final_l2, final_normalization};
+        return {continuity_residual_type{final_l2, global_maxima[0],
+                    final_normalization > scalar_type{} ? final_l2 / final_normalization : final_l2,
+                    final_normalization},
+            global_maxima[1]};
     }
 
     /** @brief Validate and reduce the external thermal convergence residual. */
@@ -926,22 +937,13 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
         trial.level_tolerance =
             static_cast<scalar_type>(coupler.d_free_surface_options.ale.level_absolute_tolerance) +
             static_cast<scalar_type>(coupler.d_free_surface_options.ale.level_relative_tolerance) * level_scale;
-        scalar_type local_target_scale{};
-        for (size_t owned = 0; owned < target_guess.size(); ++owned)
-        {
-            local_target_scale = std::max(local_target_scale,
-                std::max(std::abs(target_guess[owned]),
-                    std::abs(trial.volume_trial->target().integrated_rate(static_cast<local_ordinal_type>(owned)))));
-        }
         scalar_type target_scale{};
-        Teuchos::reduceAll(
-            *d_solver.d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_target_scale, &target_scale);
+        std::tie(trial.final_continuity, target_scale) = evaluate_continuity(trial);
         trial.target_tolerance =
             static_cast<scalar_type>(coupler.d_free_surface_options.coupling.volume_absolute_tolerance) / time_step +
             static_cast<scalar_type>(coupler.d_free_surface_options.coupling.volume_relative_tolerance) *
                 std::max(scalar_type{1}, target_scale);
         last_target_tolerance = trial.target_tolerance;
-        trial.final_continuity = evaluate_continuity(trial);
         const auto continuity_tolerance = trial.target_tolerance;
         trial.pool_volume_mismatch = coupler.d_ale_boundary->diagnostics().global_mesh_volume -
                                      static_cast<scalar_type>(trial.surface_preview->diagnostics().pool_volume);
@@ -1089,6 +1091,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
             d_solver.d_last_step_statistics.add(*trial.liquid_preview->transportStatistics());
         }
         coupler.d_volume_continuity_model->commit(*trial.volume_trial);
+        coupler.d_continuity_residual->sync_ghosts();
         d_solver.d_last_volume_continuity_residuals = trial.final_continuity;
         d_solver.pressure_velocity_residuals().continuity = trial.final_continuity.l2;
 

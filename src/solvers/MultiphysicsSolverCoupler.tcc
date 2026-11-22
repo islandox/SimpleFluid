@@ -2384,16 +2384,23 @@ auto MultiphysicsSolverCoupler<Pack>::make_free_surface_update(
     }
 
     FreeSurfaceUpdate update;
+    const bool use_mean_pressure_shift =
+        d_free_surface_options.mode == FreeSurfaceMode::PlanarALE &&
+        d_reacting_gas_model && d_reacting_gas_model->enabled() &&
+        d_reacting_gas_model->options().pressure_mode == ReactingPressureMode::Reconstructed;
+    const scalar_type mean_pressure_shift =
+        use_mean_pressure_shift ? volume_weighted_mean_pressure() : scalar_type{};
     const auto liquid_volume = preview ? preview->liquid.liquid_volume : d_liquid_mass_inventory->liquidVolume();
     if (species_surface_enabled())
-        update.liquid_volume_at_pressure = [this](real_t pressure)
+        update.liquid_volume_at_pressure = [this, mean_pressure_shift](real_t pressure)
         {
-            return static_cast<real_t>(d_reacting_gas_model->evaluate_liquid_volume(surface_pressure_offset(pressure)));
+            return static_cast<real_t>(d_reacting_gas_model->evaluate_liquid_volume(
+                static_cast<scalar_type>(pressure) + mean_pressure_shift));
         };
     else
         update.liquid_volume_at_pressure = [liquid_volume](real_t) { return static_cast<real_t>(liquid_volume); };
     update.liquid_volume_deficit = preview ? static_cast<real_t>(preview->liquid_volume_deficit) : real_t{};
-    update.bubble_volume_at_pressure = [this](real_t pressure)
+    update.bubble_volume_at_pressure = [this, mean_pressure_shift](real_t pressure)
     {
         if (d_reacting_gas_model && d_reacting_gas_model->enabled() &&
             d_reacting_gas_model->supplies_void_fraction())
@@ -2405,12 +2412,7 @@ auto MultiphysicsSolverCoupler<Pack>::make_free_surface_update(
                 throw std::logic_error("Planar free-surface bubble closure requires constant or "
                                        "reconstructed reacting pressure.");
             }
-            auto pressure_offset = static_cast<scalar_type>(pressure);
-            if (d_free_surface_options.mode == FreeSurfaceMode::PlanarALE &&
-                pressure_mode == ReactingPressureMode::Reconstructed)
-            {
-                pressure_offset += volume_weighted_mean_pressure();
-            }
+            const auto pressure_offset = static_cast<scalar_type>(pressure) + mean_pressure_shift;
             return static_cast<real_t>(d_reacting_gas_model->evaluate_submerged_bubble_volume(pressure_offset));
         }
         if (d_boiling_source_model && d_boiling_source_model->enabled())
@@ -2429,9 +2431,8 @@ auto MultiphysicsSolverCoupler<Pack>::make_free_surface_update(
             const auto typed = initializing ? prepare_species_surface_preview(time, scalar_type{}, true) : *preview;
             update.gas = *typed.species_gas;
             update.minimum_valid_absolute_pressure = d_reacting_gas_model->minimum_valid_absolute_pressure_offset();
-            if (d_free_surface_options.mode == FreeSurfaceMode::PlanarALE &&
-                d_reacting_gas_model->options().pressure_mode == ReactingPressureMode::Reconstructed)
-                update.minimum_valid_absolute_pressure -= volume_weighted_mean_pressure();
+            if (use_mean_pressure_shift)
+                update.minimum_valid_absolute_pressure -= mean_pressure_shift;
             update.headspace_temperature = headspace_temperature(time);
             update.time = time;
             update.time_step = initializing ? real_t{} : d_solver->time_step();
@@ -2557,12 +2558,15 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::advance_spec
         d_free_surface_model->previewUpdate(make_free_surface_update(d_solver->d_time + time_step, false, &accounting));
     // Only a physically accepted closure may change the retained pressure.
     const auto offset = surface_pressure_offset(surface.headspacePressure());
-    d_reacting_gas_model->set_absolute_pressure_offset(offset);
-    // Mass is unchanged by pressure publication; report the accepted EOS density,
-    // not the lagged pressure used for the source/transport substep.
-    mass = d_liquid_mass_inventory->previewSpeciesMass(d_reacting_gas_model->liquid_mass_density(),
-        d_reacting_gas_model->pure_liquid_density(), accounting.species_liquid_source,
-        accounting.species_liquid_outflow);
+    if (offset != d_reacting_gas_model->absolute_pressure_offset())
+    {
+        d_reacting_gas_model->set_absolute_pressure_offset(offset);
+        // Mass is unchanged by pressure publication; report the accepted EOS density,
+        // not the lagged pressure used for the source/transport substep.
+        mass = d_liquid_mass_inventory->previewSpeciesMass(d_reacting_gas_model->liquid_mass_density(),
+            d_reacting_gas_model->pure_liquid_density(), accounting.species_liquid_source,
+            accounting.species_liquid_outflow);
+    }
     d_free_surface_model->commitUpdate(surface);
     d_liquid_mass_inventory->commitPhaseChange(mass);
     d_species_surface_accounting = std::move(*accounting.species);
