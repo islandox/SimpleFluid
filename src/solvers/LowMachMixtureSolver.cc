@@ -358,6 +358,10 @@ struct LowMachMixtureSolver::Implementation
             });
         collective_detail::require_uniform_value(
             *mesh, static_cast<int>(options.use_multi_rhs_transport), "Low-Mach multi-RHS transport selection");
+        collective_detail::require_uniform_value(
+            *mesh, options.linear.max_batch_width, "Low-Mach linear max batch width");
+        collective_detail::require_uniform_value(
+            *mesh, static_cast<int>(options.linear.multi_rhs_policy), "Low-Mach linear multi-RHS policy");
         collective_detail::require_uniform_value(*mesh, options.minimum_pressure, "Low-Mach minimum pressure");
         collective_detail::require_uniform_value(*mesh, options.maximum_pressure, "Low-Mach maximum pressure");
         collective_detail::require_uniform_value(*mesh, options.maximum_correctors, "Low-Mach maximum correctors");

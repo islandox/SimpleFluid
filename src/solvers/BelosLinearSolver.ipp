@@ -46,6 +46,14 @@ void BelosLinearSolver<Pack>::validate_options(const LinearSolverOptions& option
     }
     static_cast<void>(to_string(options.backend));
     static_cast<void>(to_string(options.preconditioner));
+    static_cast<void>(to_string(options.multi_rhs_policy));
+    if (options.multi_rhs_policy == MultiRhsExecutionPolicy::BatchedKrylov
+        && options.max_batch_width == 1)
+    {
+        throw std::invalid_argument(
+            "BelosLinearSolver requires max_batch_width != 1 when "
+            "BatchedKrylov multi-RHS policy is requested.");
+    }
     if (options.backend == LinearSolverBackend::Cg
         && (options.preconditioner == LinearPreconditioner::ILU0
             || options.preconditioner == LinearPreconditioner::ILUT

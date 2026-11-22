@@ -350,7 +350,8 @@ TEST(LowMachMultiRhsTransportTest, CarrierOperatorGroupingCountBatchProofAndBiCG
     EXPECT_GE(gmres_diag.halo_exchange_seconds, 0.0);
     EXPECT_GE(gmres_diag.consistency_repair_seconds, 0.0);
 
-    // BiCGStab must report ColumnSerial honestly while giving identical physical results.
+    // BiCGStab now executes genuinely batched by default AND retains ColumnSerial
+    // fallback/reference parity with GMRES and scalar transport.
     auto bicg_opts = opts;
     bicg_opts.linear.backend = LinearSolverBackend::BiCGStab;
     bicg_opts.linear.preconditioner = LinearPreconditioner::None;
@@ -362,11 +363,31 @@ TEST(LowMachMultiRhsTransportTest, CarrierOperatorGroupingCountBatchProofAndBiCG
     EXPECT_EQ(bicg_diag.operator_groups, 5U);
     EXPECT_EQ(bicg_diag.matrix_assemblies, 5U);
     EXPECT_EQ(bicg_diag.preconditioner_builds, 0U);
-    EXPECT_EQ(bicg_diag.execution_mode, MultiRhsExecutionMode::ColumnSerial);
-    EXPECT_EQ(bicg_diag.column_serial_solves, 5U);
-    EXPECT_EQ(bicg_diag.batched_krylov_solves, 0U);
-    EXPECT_LE(bicg_diag.max_batch_width, 1U);
+    EXPECT_EQ(bicg_diag.execution_mode, MultiRhsExecutionMode::BatchedKrylov);
+    EXPECT_EQ(bicg_diag.batched_krylov_solves, 5U);
+    EXPECT_EQ(bicg_diag.column_serial_solves, 0U);
+    EXPECT_EQ(bicg_diag.max_batch_width, 5U);
+    EXPECT_LT(bicg_diag.operator_apply_calls, bicg_diag.operator_column_applies);
     expect_state_and_snapshot_near(gmres_trial, bicg_trial, 1e-10);
+
+    auto bicg_serial_opts = bicg_opts;
+    bicg_serial_opts.linear.multi_rhs_policy = MultiRhsExecutionPolicy::ColumnSerial;
+    Flow bicg_serial_solver(mesh, {liquid, gas, gas, gas, gas}, bicg_serial_opts);
+    bicg_serial_solver.initialize(init);
+    const auto bicg_serial_trial = bicg_serial_solver.preview(0.05, no_sources);
+    const auto& bicg_serial_diag = bicg_serial_trial.diagnostics().transport_multi_rhs;
+    EXPECT_EQ(bicg_serial_diag.execution_mode, MultiRhsExecutionMode::ColumnSerial);
+    EXPECT_EQ(bicg_serial_diag.column_serial_solves, 5U);
+    EXPECT_EQ(bicg_serial_diag.batched_krylov_solves, 0U);
+    EXPECT_LE(bicg_serial_diag.max_batch_width, 1U);
+    expect_state_and_snapshot_near(bicg_trial, bicg_serial_trial, 1e-10);
+
+    auto scalar_opts = bicg_opts;
+    scalar_opts.use_multi_rhs_transport = false;
+    Flow scalar_solver(mesh, {liquid, gas, gas, gas, gas}, scalar_opts);
+    scalar_solver.initialize(init);
+    const auto scalar_trial = scalar_solver.preview(0.05, no_sources);
+    expect_state_and_snapshot_near(bicg_trial, scalar_trial, 1e-10);
 }
 
 TEST(LowMachMultiRhsTransportTest, MaxBatchWidthAndSpeciesPermutationInvariance)
@@ -760,6 +781,13 @@ TEST(LowMachMultiRhsTransportTest, MpiEmptyOwnerCrossPartitionAleAndRollback)
         replayed_solver.initialize(init);
         const auto replayed_trial = replayed_solver.preview(0.05);
         expect_state_and_snapshot_near(ref_trial, replayed_trial, 1e-13);
+
+        if (Tpetra::getDefaultComm()->getSize() > 1)
+        {
+            auto disagree = good;
+            disagree.linear.max_batch_width = Tpetra::getDefaultComm()->getRank() == 0 ? 0 : 2;
+            EXPECT_THROW((void) Flow(mesh, {liquid, gas}, disagree), std::invalid_argument);
+        }
     }
 }
 

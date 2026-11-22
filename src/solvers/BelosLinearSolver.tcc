@@ -184,6 +184,892 @@ private:
     Belos::StatusType d_status = Belos::Undefined;
 };
 
+template<TpetraTypePack Pack>
+struct BatchedPassResult
+{
+    std::vector<int> column_iterations;
+    std::vector<bool> column_converged;
+    std::vector<bool> column_broken_down;
+    int batch_iterations = 0;
+};
+
+template<TpetraTypePack Pack>
+void add_scaled_column(
+    typename Pack::multi_vector_type& dst,
+    std::size_t dst_col,
+    const typename Pack::multi_vector_type& src,
+    std::size_t src_col,
+    typename Teuchos::ScalarTraits<typename Pack::scalar_type>::magnitudeType scale)
+{
+    using scalar_type = typename Pack::scalar_type;
+    const auto dst_vals = dst.getDataNonConst(dst_col);
+    const auto src_vals = src.getData(src_col);
+    const auto factor = static_cast<scalar_type>(scale);
+    for (std::size_t row = 0; row < dst_vals.size(); ++row)
+    {
+        dst_vals[row] += factor * src_vals[row];
+    }
+}
+
+template<TpetraTypePack Pack>
+void copy_column(
+    typename Pack::multi_vector_type& dst,
+    std::size_t dst_col,
+    const typename Pack::multi_vector_type& src,
+    std::size_t src_col)
+{
+    const auto src_vals = src.getData(src_col);
+    auto dst_vals = dst.getDataNonConst(dst_col);
+    std::copy(src_vals.begin(), src_vals.end(), dst_vals.begin());
+}
+
+template<TpetraTypePack Pack>
+Teuchos::RCP<typename Pack::multi_vector_type> contiguous_active_view(
+    const Teuchos::RCP<typename Pack::multi_vector_type>& storage,
+    std::size_t active_count)
+{
+    if (active_count == storage->getNumVectors())
+    {
+        return storage;
+    }
+    return storage->subViewNonConst(
+        Teuchos::Range1D(0, static_cast<int>(active_count) - 1));
+}
+
+template<TpetraTypePack Pack>
+BatchedPassResult<Pack> run_batched_pcg_pass(
+    const Teuchos::RCP<const typename Pack::operator_type>& op,
+    const Teuchos::RCP<const typename Pack::operator_type>& preconditioner,
+    const typename Pack::multi_vector_type& pass_r0,
+    typename Pack::multi_vector_type& pass_sol,
+    const std::vector<typename Teuchos::ScalarTraits<typename Pack::scalar_type>::magnitudeType>& bounds,
+    int max_iters)
+{
+    using scalar_type = typename Pack::scalar_type;
+    using multi_vector_type = typename Pack::multi_vector_type;
+    using traits = Teuchos::ScalarTraits<scalar_type>;
+    using magnitude_type = typename traits::magnitudeType;
+
+    const std::size_t width = pass_r0.getNumVectors();
+    BatchedPassResult<Pack> out;
+    out.column_iterations.assign(width, 0);
+    out.column_converged.assign(width, false);
+    out.column_broken_down.assign(width, false);
+
+    if (width == 0 || max_iters <= 0)
+    {
+        return out;
+    }
+
+    const magnitude_type sfmin = std::numeric_limits<magnitude_type>::min();
+    Teuchos::Array<magnitude_type> r0_norms(width);
+    pass_r0.norm2(r0_norms());
+
+    std::vector<std::size_t> active_orig;
+    std::vector<magnitude_type> active_scale;
+    std::vector<magnitude_type> active_bound;
+    active_orig.reserve(width);
+    active_scale.reserve(width);
+    active_bound.reserve(width);
+
+    for (std::size_t col = 0; col < width; ++col)
+    {
+        if (!std::isfinite(r0_norms[col]))
+        {
+            out.column_broken_down[col] = true;
+            continue;
+        }
+        if (r0_norms[col] <= bounds[col])
+        {
+            out.column_converged[col] = true;
+            continue;
+        }
+        int exp = 0;
+        if constexpr (std::is_floating_point_v<magnitude_type>)
+        {
+            (void)std::frexp(r0_norms[col], &exp);
+        }
+        const magnitude_type scale = (std::abs(exp) > 30)
+            ? std::ldexp(magnitude_type{1}, exp)
+            : magnitude_type{1};
+        active_orig.push_back(col);
+        active_scale.push_back(scale);
+        active_bound.push_back(bounds[col] / scale);
+    }
+
+    std::size_t active_count = active_orig.size();
+    if (active_count == 0)
+    {
+        return out;
+    }
+
+    const auto map = pass_r0.getMap();
+    const std::size_t local_len = pass_r0.getLocalLength();
+    const bool has_prec = !preconditioner.is_null();
+
+    auto x_work = Teuchos::rcp(new multi_vector_type(map, active_count, true));
+    auto r_work = Teuchos::rcp(new multi_vector_type(map, active_count, false));
+    auto p_work = Teuchos::rcp(new multi_vector_type(map, active_count, false));
+    auto ap_work = Teuchos::rcp(new multi_vector_type(map, active_count, false));
+    Teuchos::RCP<multi_vector_type> z_work = has_prec
+        ? Teuchos::rcp(new multi_vector_type(map, active_count, false))
+        : r_work;
+
+    for (std::size_t a = 0; a < active_count; ++a)
+    {
+        const auto src = pass_r0.getData(active_orig[a]);
+        auto dst = r_work->getDataNonConst(a);
+        const auto inv_scale = scalar_type{1} / static_cast<scalar_type>(active_scale[a]);
+        for (std::size_t row = 0; row < local_len; ++row)
+        {
+            dst[row] = inv_scale * src[row];
+        }
+    }
+
+    std::vector<scalar_type> rz_old(active_count, scalar_type{});
+
+    auto compact = [&](const std::vector<bool>& keep)
+    {
+        std::size_t dst = 0;
+        for (std::size_t src = 0; src < active_count; ++src)
+        {
+            if (!keep[src])
+            {
+                continue;
+            }
+            if (dst != src)
+            {
+                copy_column<Pack>(*x_work, dst, *x_work, src);
+                copy_column<Pack>(*r_work, dst, *r_work, src);
+                copy_column<Pack>(*p_work, dst, *p_work, src);
+                active_orig[dst] = active_orig[src];
+                active_scale[dst] = active_scale[src];
+                active_bound[dst] = active_bound[src];
+                rz_old[dst] = rz_old[src];
+            }
+            ++dst;
+        }
+        active_count = dst;
+    };
+
+    // Initial preconditioned residual z_0 = M^{-1} r_0, p_0 = z_0.
+    {
+        auto r_act = contiguous_active_view<Pack>(r_work, active_count);
+        if (has_prec)
+        {
+            auto z_act = contiguous_active_view<Pack>(z_work, active_count);
+            preconditioner->apply(*r_act, *z_act);
+            p_work->assign(*z_act);
+            r_act->dot(*z_act, Teuchos::arrayView(rz_old.data(), active_count));
+        }
+        else
+        {
+            p_work->assign(*r_act);
+            r_act->dot(*r_act, Teuchos::arrayView(rz_old.data(), active_count));
+        }
+
+        std::vector<bool> keep(active_count, true);
+        bool any_retired = false;
+        for (std::size_t a = 0; a < active_count; ++a)
+        {
+            const auto rz_real = traits::real(rz_old[a]);
+            if (!std::isfinite(traits::magnitude(rz_old[a])) || rz_real <= sfmin)
+            {
+                out.column_broken_down[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+            }
+        }
+        if (any_retired)
+        {
+            compact(keep);
+        }
+    }
+
+    int iter = 0;
+    std::vector<scalar_type> pAp;
+    std::vector<scalar_type> rz_new;
+    Teuchos::Array<magnitude_type> r_norms;
+    std::vector<scalar_type> alpha_vec;
+
+    while (active_count > 0 && iter < max_iters)
+    {
+        ++iter;
+        auto p_act = contiguous_active_view<Pack>(p_work, active_count);
+        auto ap_act = contiguous_active_view<Pack>(ap_work, active_count);
+        op->apply(*p_act, *ap_act);
+
+        pAp.resize(active_count);
+        p_act->dot(*ap_act, Teuchos::arrayView(pAp.data(), active_count));
+
+        alpha_vec.resize(active_count);
+        std::vector<bool> keep(active_count, true);
+        bool any_retired = false;
+        for (std::size_t a = 0; a < active_count; ++a)
+        {
+            const auto pAp_real = traits::real(pAp[a]);
+            if (!std::isfinite(traits::magnitude(pAp[a])) || pAp_real <= sfmin)
+            {
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                out.column_broken_down[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+                continue;
+            }
+            const scalar_type alpha = rz_old[a] / pAp[a];
+            if (!std::isfinite(traits::magnitude(alpha)))
+            {
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                out.column_broken_down[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+                continue;
+            }
+            alpha_vec[a] = alpha;
+        }
+        if (any_retired)
+        {
+            // Keep alpha_vec aligned with compacted columns when partial breakdown occurs.
+            std::size_t dst = 0;
+            for (std::size_t src = 0; src < active_count; ++src)
+            {
+                if (!keep[src])
+                {
+                    continue;
+                }
+                if (dst != src)
+                {
+                    copy_column<Pack>(*x_work, dst, *x_work, src);
+                    copy_column<Pack>(*r_work, dst, *r_work, src);
+                    copy_column<Pack>(*p_work, dst, *p_work, src);
+                    copy_column<Pack>(*ap_work, dst, *ap_work, src);
+                    active_orig[dst] = active_orig[src];
+                    active_scale[dst] = active_scale[src];
+                    active_bound[dst] = active_bound[src];
+                    rz_old[dst] = rz_old[src];
+                    alpha_vec[dst] = alpha_vec[src];
+                }
+                ++dst;
+            }
+            active_count = dst;
+            if (active_count == 0)
+            {
+                break;
+            }
+        }
+
+        for (std::size_t a = 0; a < active_count; ++a)
+        {
+            const scalar_type alpha = alpha_vec[a];
+            auto x_vals = x_work->getDataNonConst(a);
+            const auto p_vals = p_work->getData(a);
+            auto r_vals = r_work->getDataNonConst(a);
+            const auto ap_vals = ap_work->getData(a);
+            for (std::size_t row = 0; row < local_len; ++row)
+            {
+                x_vals[row] += alpha * p_vals[row];
+                r_vals[row] -= alpha * ap_vals[row];
+            }
+        }
+
+        // Check residual norms immediately before preconditioning and <r, z>
+        // so exact/converged columns and the final iteration do no wasted work.
+        auto r_act = contiguous_active_view<Pack>(r_work, active_count);
+        r_norms.resize(active_count);
+        r_act->norm2(r_norms());
+
+        keep.assign(active_count, true);
+        any_retired = false;
+        for (std::size_t a = 0; a < active_count; ++a)
+        {
+            if (!std::isfinite(r_norms[a]))
+            {
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                out.column_broken_down[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+            }
+            else if (r_norms[a] <= active_bound[a])
+            {
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                out.column_converged[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+            }
+        }
+        if (any_retired)
+        {
+            compact(keep);
+            if (active_count == 0)
+            {
+                break;
+            }
+        }
+
+        if (iter >= max_iters)
+        {
+            for (std::size_t a = 0; a < active_count; ++a)
+            {
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+            }
+            active_count = 0;
+            break;
+        }
+
+        auto r_next = contiguous_active_view<Pack>(r_work, active_count);
+        rz_new.resize(active_count);
+        if (has_prec)
+        {
+            auto z_act = contiguous_active_view<Pack>(z_work, active_count);
+            preconditioner->apply(*r_next, *z_act);
+            r_next->dot(*z_act, Teuchos::arrayView(rz_new.data(), active_count));
+        }
+        else
+        {
+            r_next->dot(*r_next, Teuchos::arrayView(rz_new.data(), active_count));
+        }
+
+        keep.assign(active_count, true);
+        any_retired = false;
+        for (std::size_t a = 0; a < active_count; ++a)
+        {
+            const auto rz_real = traits::real(rz_new[a]);
+            if (!std::isfinite(traits::magnitude(rz_new[a])) || rz_real < magnitude_type{})
+            {
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                out.column_broken_down[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+                continue;
+            }
+            if (rz_real <= sfmin)
+            {
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                out.column_broken_down[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+                continue;
+            }
+            const scalar_type beta = rz_new[a] / rz_old[a];
+            if (!std::isfinite(traits::magnitude(beta)))
+            {
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                out.column_broken_down[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+                continue;
+            }
+            const auto z_vals = z_work->getData(a);
+            auto p_vals = p_work->getDataNonConst(a);
+            for (std::size_t row = 0; row < local_len; ++row)
+            {
+                p_vals[row] = z_vals[row] + beta * p_vals[row];
+            }
+            rz_old[a] = rz_new[a];
+        }
+        if (any_retired)
+        {
+            compact(keep);
+        }
+    }
+
+    out.batch_iterations = iter;
+    return out;
+}
+
+template<TpetraTypePack Pack>
+BatchedPassResult<Pack> run_batched_bicgstab_pass(
+    const Teuchos::RCP<const typename Pack::operator_type>& op,
+    const Teuchos::RCP<const typename Pack::operator_type>& preconditioner,
+    const typename Pack::multi_vector_type& pass_r0,
+    typename Pack::multi_vector_type& pass_sol,
+    const std::vector<typename Teuchos::ScalarTraits<typename Pack::scalar_type>::magnitudeType>& bounds,
+    int max_iters)
+{
+    using scalar_type = typename Pack::scalar_type;
+    using multi_vector_type = typename Pack::multi_vector_type;
+    using traits = Teuchos::ScalarTraits<scalar_type>;
+    using magnitude_type = typename traits::magnitudeType;
+
+    const std::size_t width = pass_r0.getNumVectors();
+    BatchedPassResult<Pack> out;
+    out.column_iterations.assign(width, 0);
+    out.column_converged.assign(width, false);
+    out.column_broken_down.assign(width, false);
+
+    if (width == 0 || max_iters <= 0)
+    {
+        return out;
+    }
+
+    const magnitude_type sfmin = std::numeric_limits<magnitude_type>::min();
+    const magnitude_type eps = std::numeric_limits<magnitude_type>::epsilon();
+    Teuchos::Array<magnitude_type> r0_norms(width);
+    pass_r0.norm2(r0_norms());
+
+    std::vector<std::size_t> active_orig;
+    std::vector<magnitude_type> active_scale;
+    std::vector<magnitude_type> active_bound;
+    std::vector<magnitude_type> r_norms_cur;
+    active_orig.reserve(width);
+    active_scale.reserve(width);
+    active_bound.reserve(width);
+    r_norms_cur.reserve(width);
+
+    for (std::size_t col = 0; col < width; ++col)
+    {
+        if (!std::isfinite(r0_norms[col]))
+        {
+            out.column_broken_down[col] = true;
+            continue;
+        }
+        if (r0_norms[col] <= bounds[col])
+        {
+            out.column_converged[col] = true;
+            continue;
+        }
+        int exp = 0;
+        if constexpr (std::is_floating_point_v<magnitude_type>)
+        {
+            (void)std::frexp(r0_norms[col], &exp);
+        }
+        const magnitude_type scale = (std::abs(exp) > 30)
+            ? std::ldexp(magnitude_type{1}, exp)
+            : magnitude_type{1};
+        active_orig.push_back(col);
+        active_scale.push_back(scale);
+        active_bound.push_back(bounds[col] / scale);
+        r_norms_cur.push_back(r0_norms[col] / scale);
+    }
+
+    std::size_t active_count = active_orig.size();
+    if (active_count == 0)
+    {
+        return out;
+    }
+
+    const auto map = pass_r0.getMap();
+    const std::size_t local_len = pass_r0.getLocalLength();
+    const bool has_prec = !preconditioner.is_null();
+
+    auto x_work = Teuchos::rcp(new multi_vector_type(map, active_count, true));
+    auto r_work = Teuchos::rcp(new multi_vector_type(map, active_count, false));
+    auto rhat_work = Teuchos::rcp(new multi_vector_type(map, active_count, false));
+    auto p_work = Teuchos::rcp(new multi_vector_type(map, active_count, true));
+    auto v_work = Teuchos::rcp(new multi_vector_type(map, active_count, true));
+    auto s_work = Teuchos::rcp(new multi_vector_type(map, active_count, false));
+    auto t_work = Teuchos::rcp(new multi_vector_type(map, active_count, false));
+    Teuchos::RCP<multi_vector_type> y_work = has_prec
+        ? Teuchos::rcp(new multi_vector_type(map, active_count, false))
+        : p_work;
+    Teuchos::RCP<multi_vector_type> z_work = has_prec
+        ? Teuchos::rcp(new multi_vector_type(map, active_count, false))
+        : s_work;
+
+    for (std::size_t a = 0; a < active_count; ++a)
+    {
+        const auto src = pass_r0.getData(active_orig[a]);
+        auto r_dst = r_work->getDataNonConst(a);
+        auto rhat_dst = rhat_work->getDataNonConst(a);
+        const scalar_type inv_scale = scalar_type{1} / static_cast<scalar_type>(active_scale[a]);
+        const scalar_type inv_rhat = scalar_type{1} / static_cast<scalar_type>(r_norms_cur[a]);
+        for (std::size_t row = 0; row < local_len; ++row)
+        {
+            const scalar_type r_scaled = inv_scale * src[row];
+            r_dst[row] = r_scaled;
+            rhat_dst[row] = inv_rhat * r_scaled;
+        }
+    }
+
+    std::vector<scalar_type> rho_old(active_count, scalar_type{1});
+    std::vector<scalar_type> alpha_vec(active_count, scalar_type{1});
+    std::vector<scalar_type> omega_vec(active_count, scalar_type{1});
+
+    auto compact_full = [&](
+        const std::vector<bool>& keep,
+        std::vector<scalar_type>* extra1 = nullptr,
+        std::vector<scalar_type>* extra2 = nullptr,
+        bool carry_y = false,
+        bool carry_s = false)
+    {
+        std::size_t dst = 0;
+        for (std::size_t src = 0; src < active_count; ++src)
+        {
+            if (!keep[src])
+            {
+                continue;
+            }
+            if (dst != src)
+            {
+                copy_column<Pack>(*x_work, dst, *x_work, src);
+                copy_column<Pack>(*r_work, dst, *r_work, src);
+                copy_column<Pack>(*rhat_work, dst, *rhat_work, src);
+                copy_column<Pack>(*p_work, dst, *p_work, src);
+                copy_column<Pack>(*v_work, dst, *v_work, src);
+                if (carry_y && has_prec)
+                {
+                    copy_column<Pack>(*y_work, dst, *y_work, src);
+                }
+                if (carry_s)
+                {
+                    copy_column<Pack>(*s_work, dst, *s_work, src);
+                }
+                active_orig[dst] = active_orig[src];
+                active_scale[dst] = active_scale[src];
+                active_bound[dst] = active_bound[src];
+                r_norms_cur[dst] = r_norms_cur[src];
+                rho_old[dst] = rho_old[src];
+                alpha_vec[dst] = alpha_vec[src];
+                omega_vec[dst] = omega_vec[src];
+                if (extra1 != nullptr)
+                {
+                    (*extra1)[dst] = (*extra1)[src];
+                }
+                if (extra2 != nullptr)
+                {
+                    (*extra2)[dst] = (*extra2)[src];
+                }
+            }
+            ++dst;
+        }
+        active_count = dst;
+    };
+
+    int iter = 0;
+    std::vector<scalar_type> rho_new;
+    std::vector<scalar_type> beta_vec;
+    std::vector<scalar_type> rhatV;
+    std::vector<scalar_type> tT;
+    std::vector<scalar_type> tS;
+    Teuchos::Array<magnitude_type> v_norms;
+    Teuchos::Array<magnitude_type> s_norms;
+    Teuchos::Array<magnitude_type> next_r_norms;
+    std::vector<bool> omega_stagnated;
+
+    while (active_count > 0 && iter < max_iters)
+    {
+        ++iter;
+        auto r_act = contiguous_active_view<Pack>(r_work, active_count);
+        auto rhat_act = contiguous_active_view<Pack>(rhat_work, active_count);
+
+        rho_new.resize(active_count);
+        r_act->dot(*rhat_act, Teuchos::arrayView(rho_new.data(), active_count));
+
+        beta_vec.resize(active_count);
+        std::vector<bool> keep(active_count, true);
+        bool any_retired = false;
+        for (std::size_t a = 0; a < active_count; ++a)
+        {
+            const auto rho_mag = traits::magnitude(rho_new[a]);
+            const auto rho_floor = std::max(sfmin, eps * eps * r_norms_cur[a]);
+            if (!std::isfinite(rho_mag) || rho_mag <= rho_floor
+                || !std::isfinite(traits::magnitude(rho_old[a]))
+                || traits::magnitude(rho_old[a]) <= sfmin
+                || !std::isfinite(traits::magnitude(omega_vec[a]))
+                || traits::magnitude(omega_vec[a]) <= sfmin)
+            {
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                out.column_broken_down[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+                continue;
+            }
+            const scalar_type beta = (rho_new[a] / rho_old[a]) * (alpha_vec[a] / omega_vec[a]);
+            if (!std::isfinite(traits::magnitude(beta)))
+            {
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                out.column_broken_down[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+                continue;
+            }
+            beta_vec[a] = beta;
+        }
+        if (any_retired)
+        {
+            compact_full(keep, &rho_new, &beta_vec, false, false);
+            if (active_count == 0)
+            {
+                break;
+            }
+        }
+
+        for (std::size_t a = 0; a < active_count; ++a)
+        {
+            const scalar_type beta = beta_vec[a];
+            const scalar_type omega = omega_vec[a];
+            const auto r_vals = r_work->getData(a);
+            auto p_vals = p_work->getDataNonConst(a);
+            const auto v_vals = v_work->getData(a);
+            for (std::size_t row = 0; row < local_len; ++row)
+            {
+                p_vals[row] = r_vals[row] + beta * (p_vals[row] - omega * v_vals[row]);
+            }
+        }
+
+        auto p_act = contiguous_active_view<Pack>(p_work, active_count);
+        auto v_act = contiguous_active_view<Pack>(v_work, active_count);
+        if (has_prec)
+        {
+            auto y_act = contiguous_active_view<Pack>(y_work, active_count);
+            preconditioner->apply(*p_act, *y_act);
+            op->apply(*y_act, *v_act);
+        }
+        else
+        {
+            op->apply(*p_act, *v_act);
+        }
+
+        auto rhat_after_p = contiguous_active_view<Pack>(rhat_work, active_count);
+        rhatV.resize(active_count);
+        v_norms.resize(active_count);
+        v_act->dot(*rhat_after_p, Teuchos::arrayView(rhatV.data(), active_count));
+        v_act->norm2(v_norms());
+
+        keep.assign(active_count, true);
+        any_retired = false;
+        for (std::size_t a = 0; a < active_count; ++a)
+        {
+            const auto rv_mag = traits::magnitude(rhatV[a]);
+            const auto rv_floor = std::max(sfmin, eps * eps * v_norms[a]);
+            if (!std::isfinite(rv_mag) || !std::isfinite(v_norms[a]) || rv_mag <= rv_floor)
+            {
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                out.column_broken_down[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+                continue;
+            }
+            const scalar_type alpha = rho_new[a] / rhatV[a];
+            if (!std::isfinite(traits::magnitude(alpha)))
+            {
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                out.column_broken_down[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+                continue;
+            }
+            alpha_vec[a] = alpha;
+        }
+        if (any_retired)
+        {
+            compact_full(keep, &rho_new, nullptr, true, false);
+            if (active_count == 0)
+            {
+                break;
+            }
+        }
+
+        for (std::size_t a = 0; a < active_count; ++a)
+        {
+            const scalar_type alpha = alpha_vec[a];
+            const auto r_vals = r_work->getData(a);
+            const auto v_vals = v_work->getData(a);
+            auto s_vals = s_work->getDataNonConst(a);
+            for (std::size_t row = 0; row < local_len; ++row)
+            {
+                s_vals[row] = r_vals[row] - alpha * v_vals[row];
+            }
+        }
+
+        // Half-step convergence check before applying preconditioner / A to s.
+        auto s_act = contiguous_active_view<Pack>(s_work, active_count);
+        s_norms.resize(active_count);
+        s_act->norm2(s_norms());
+
+        keep.assign(active_count, true);
+        any_retired = false;
+        for (std::size_t a = 0; a < active_count; ++a)
+        {
+            if (!std::isfinite(s_norms[a]))
+            {
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                out.column_broken_down[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+            }
+            else if (s_norms[a] <= active_bound[a])
+            {
+                const scalar_type alpha = alpha_vec[a];
+                auto x_vals = x_work->getDataNonConst(a);
+                const auto y_vals = y_work->getData(a);
+                for (std::size_t row = 0; row < local_len; ++row)
+                {
+                    x_vals[row] += alpha * y_vals[row];
+                }
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                out.column_converged[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+            }
+        }
+        if (any_retired)
+        {
+            std::size_t dst = 0;
+            for (std::size_t src = 0; src < active_count; ++src)
+            {
+                if (keep[src])
+                {
+                    s_norms[dst++] = s_norms[src];
+                }
+            }
+            compact_full(keep, &rho_new, nullptr, true, true);
+            if (active_count == 0)
+            {
+                break;
+            }
+        }
+
+        auto s_surv = contiguous_active_view<Pack>(s_work, active_count);
+        auto t_act = contiguous_active_view<Pack>(t_work, active_count);
+        if (has_prec)
+        {
+            auto z_act = contiguous_active_view<Pack>(z_work, active_count);
+            preconditioner->apply(*s_surv, *z_act);
+            op->apply(*z_act, *t_act);
+        }
+        else
+        {
+            op->apply(*s_surv, *t_act);
+        }
+
+        tT.resize(active_count);
+        tS.resize(active_count);
+        t_act->dot(*t_act, Teuchos::arrayView(tT.data(), active_count));
+        s_surv->dot(*t_act, Teuchos::arrayView(tS.data(), active_count));
+
+        keep.assign(active_count, true);
+        any_retired = false;
+        next_r_norms.resize(active_count);
+        omega_stagnated.assign(active_count, false);
+        for (std::size_t a = 0; a < active_count; ++a)
+        {
+            const auto tT_mag = traits::magnitude(tT[a]);
+            const auto tS_mag = traits::magnitude(tS[a]);
+            // (t,t) is the omega denominator, not an absolute scale: a tiny but
+            // well-resolved t is valid for a correspondingly tiny operator.
+            // Only underflow or non-finite values are true breakdowns; relative
+            // stagnation is handled below via tS_floor/omega checks.
+            if (!std::isfinite(tT_mag) || !std::isfinite(tS_mag) || tT_mag <= sfmin)
+            {
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                out.column_broken_down[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+                continue;
+            }
+            const scalar_type omega = tS[a] / tT[a];
+            const auto omega_mag = traits::magnitude(omega);
+            if (!std::isfinite(omega_mag))
+            {
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                out.column_broken_down[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+                continue;
+            }
+            const auto tS_floor = std::max(sfmin, eps * eps * s_norms[a] * std::sqrt(tT_mag));
+            omega_stagnated[a] = (omega_mag <= sfmin) || (tS_mag <= tS_floor);
+            omega_vec[a] = omega;
+            const scalar_type alpha = alpha_vec[a];
+            auto x_vals = x_work->getDataNonConst(a);
+            const auto y_vals = y_work->getData(a);
+            const auto z_vals = z_work->getData(a);
+            const auto s_vals = s_work->getData(a);
+            const auto t_vals = t_work->getData(a);
+            auto r_vals = r_work->getDataNonConst(a);
+            for (std::size_t row = 0; row < local_len; ++row)
+            {
+                x_vals[row] += alpha * y_vals[row] + omega * z_vals[row];
+                r_vals[row] = s_vals[row] - omega * t_vals[row];
+            }
+            rho_old[a] = rho_new[a];
+        }
+        if (any_retired)
+        {
+            std::size_t dst = 0;
+            for (std::size_t src = 0; src < active_count; ++src)
+            {
+                if (keep[src])
+                {
+                    omega_stagnated[dst++] = omega_stagnated[src];
+                }
+            }
+            compact_full(keep, nullptr, nullptr, false, false);
+            if (active_count == 0)
+            {
+                break;
+            }
+        }
+
+        auto r_end = contiguous_active_view<Pack>(r_work, active_count);
+        next_r_norms.resize(active_count);
+        r_end->norm2(next_r_norms());
+
+        keep.assign(active_count, true);
+        any_retired = false;
+        for (std::size_t a = 0; a < active_count; ++a)
+        {
+            r_norms_cur[a] = next_r_norms[a];
+            if (!std::isfinite(next_r_norms[a]))
+            {
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                out.column_broken_down[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+            }
+            else if (next_r_norms[a] <= active_bound[a])
+            {
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                out.column_converged[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+            }
+            else if (omega_stagnated[a])
+            {
+                // Stagnation (omega ~ 0 relative to column scale): solution was updated cleanly, cannot divide next beta by omega.
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                out.column_broken_down[active_orig[a]] = true;
+                keep[a] = false;
+                any_retired = true;
+            }
+            else if (iter >= max_iters)
+            {
+                add_scaled_column<Pack>(pass_sol, active_orig[a], *x_work, a, active_scale[a]);
+                out.column_iterations[active_orig[a]] = iter;
+                keep[a] = false;
+                any_retired = true;
+            }
+        }
+        if (any_retired)
+        {
+            compact_full(keep, nullptr, nullptr, false, false);
+        }
+    }
+
+    out.batch_iterations = iter;
+    return out;
+}
+
 } // namespace
 
 /**
@@ -286,9 +1172,11 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_multi_rhs_impl(
 
     const auto comm = rhs.getMap()->getComm();
     const int has_mask = options.active_columns.empty() ? 0 : 1;
-    std::vector<int> local_mask_state(num_cols + 2, 0);
+    std::vector<int> local_mask_state(num_cols + 4, 0);
     local_mask_state[0] = has_mask;
     local_mask_state[1] = static_cast<int>(options.active_columns.size());
+    local_mask_state[2] = options.solver.max_batch_width;
+    local_mask_state[3] = static_cast<int>(options.solver.multi_rhs_policy);
     if (has_mask != 0)
     {
         if (options.active_columns.size() != num_cols)
@@ -299,7 +1187,7 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_multi_rhs_impl(
         {
             for (std::size_t c = 0; c < num_cols; ++c)
             {
-                local_mask_state[2 + c] = options.active_columns[c] ? 1 : 0;
+                local_mask_state[4 + c] = options.active_columns[c] ? 1 : 0;
             }
         }
     }
@@ -314,7 +1202,8 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_multi_rhs_impl(
         if (max_state[0] == 2 || min_state != max_state)
         {
             throw std::invalid_argument(
-                "BelosLinearSolver requires every rank to supply the exact same active_columns mask.");
+                "BelosLinearSolver requires every rank to supply the exact same "
+                "active_columns mask, max_batch_width, and multi_rhs_policy.");
         }
     }
     else if (local_mask_state[0] == 2)
@@ -351,24 +1240,19 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_multi_rhs_impl(
     {
         LinearSolveStatistics skipped;
         skipped.converged = true;
-        const bool serial_backend =
-            options.solver.backend == LinearSolverBackend::BiCGStab
-            || options.solver.backend == LinearSolverBackend::Cg;
-        skipped.execution_mode =
-            (serial_backend && num_cols > 1)
-                ? MultiRhsExecutionMode::ColumnSerial
-                : MultiRhsExecutionMode::SingleRhs;
+        const bool forced_serial =
+            num_cols > 1
+            && (options.solver.multi_rhs_policy == MultiRhsExecutionPolicy::ColumnSerial
+                || options.solver.max_batch_width == 1);
+        skipped.execution_mode = forced_serial
+            ? MultiRhsExecutionMode::ColumnSerial
+            : MultiRhsExecutionMode::SingleRhs;
         skipped.column_statistics = std::move(all_column_stats);
         return skipped;
     }
 
-    // PseudoBlockCG exposes no per-iteration status hook in the installed
-    // Trilinos manager. Solve its columns independently so the public per-column
-    // iteration counts and repair budgets remain exact and scalar-equivalent.
-    // This is an explicit interim limitation: CG reports ColumnSerial.
     if (num_cols > 1
-        && (options.solver.backend == LinearSolverBackend::BiCGStab
-            || options.solver.backend == LinearSolverBackend::Cg))
+        && options.solver.multi_rhs_policy == MultiRhsExecutionPolicy::ColumnSerial)
     {
         return solve_column_serial(
             matrix, rhs, solution, options.solver, options.default_residual_scaling,
@@ -381,11 +1265,35 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_multi_rhs_impl(
         ? std::min(active_count, static_cast<std::size_t>(options.solver.max_batch_width))
         : active_count;
 
+    const bool use_native_batched =
+        num_cols > 1
+        && (options.solver.backend == LinearSolverBackend::Cg
+            || options.solver.backend == LinearSolverBackend::BiCGStab)
+        && options.solver.max_batch_width != 1;
+
+    auto dispatch_contiguous_chunk = [&](
+        const multi_vector_type& chunk_rhs,
+        multi_vector_type& chunk_sol,
+        const LinearSolverOptions& chunk_opts,
+        const std::vector<ColumnResidualPolicy>& chunk_pols)
+    {
+        if (use_native_batched)
+        {
+            return solve_batched_native_impl(
+                matrix, chunk_rhs, chunk_sol, chunk_opts,
+                options.default_residual_scaling, chunk_pols,
+                zero_initial_guess, preconditioning_matrix);
+        }
+        return solve_contiguous_batch(
+            matrix, chunk_rhs, chunk_sol, chunk_opts,
+            options.default_residual_scaling, chunk_pols,
+            zero_initial_guess, preconditioning_matrix);
+    };
+
     if (active_count == num_cols && chunk_width == num_cols)
     {
-        auto stats = solve_contiguous_batch(
-            matrix, rhs, solution, options.solver, options.default_residual_scaling,
-            options.column_policies, zero_initial_guess, preconditioning_matrix);
+        auto stats = dispatch_contiguous_chunk(
+            rhs, solution, options.solver, options.column_policies);
         if (num_cols == 1)
         {
             stats.execution_mode = MultiRhsExecutionMode::SingleRhs;
@@ -442,10 +1350,8 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_multi_rhs_impl(
         }
         combined.timings.pack_unpack_seconds += elapsed_seconds(pack_start);
 
-        const auto chunk_stats = solve_contiguous_batch(
-            matrix, *rhs_chunk, *sol_chunk, chunk_options,
-            options.default_residual_scaling, chunk_policies,
-            zero_initial_guess, preconditioning_matrix);
+        const auto chunk_stats = dispatch_contiguous_chunk(
+            *rhs_chunk, *sol_chunk, chunk_options, chunk_policies);
 
         const auto unpack_start = std::chrono::steady_clock::now();
         for (std::size_t local_col = 0; local_col < this_width; ++local_col)
@@ -1254,6 +2160,512 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_contiguous_batch(
     return result;
 }
 
+template <TpetraTypePack Pack>
+LinearSolveStatistics BelosLinearSolver<Pack>::solve_batched_native_impl(
+        const Teuchos::RCP<const operator_type>& matrix,
+        const multi_vector_type& rhs,
+        multi_vector_type& solution,
+        const LinearSolverOptions& options,
+        LinearResidualScaling residual_scaling,
+        const std::vector<ColumnResidualPolicy>& column_policies,
+        bool zero_initial_guess,
+        const Teuchos::RCP<const matrix_type>& preconditioning_matrix)
+{
+    const std::size_t batch_cols = rhs.getNumVectors();
+    auto effective_tol = [&](std::size_t col) -> real_t
+    {
+        return (!column_policies.empty() && column_policies[col].tolerance.has_value())
+            ? *column_policies[col].tolerance
+            : options.tolerance;
+    };
+    auto effective_abs_tol = [&](std::size_t col) -> magnitude_type
+    {
+        return static_cast<magnitude_type>(
+            (!column_policies.empty() && column_policies[col].absolute_tolerance.has_value())
+                ? *column_policies[col].absolute_tolerance
+                : options.absolute_tolerance);
+    };
+    auto effective_floor = [&](std::size_t col) -> magnitude_type
+    {
+        return static_cast<magnitude_type>(
+            (!column_policies.empty() && column_policies[col].rhs_norm_floor.has_value())
+                ? *column_policies[col].rhs_norm_floor
+                : residual_scaling.rhs_norm_floor);
+    };
+
+    real_t manager_tolerance = options.tolerance;
+    for (std::size_t col = 0; col < batch_cols; ++col)
+    {
+        manager_tolerance = std::min(manager_tolerance, effective_tol(col));
+    }
+
+    auto counting_op = Teuchos::rcp(new CountingLinearOperator<Pack>(matrix));
+    auto counting_op_base = Teuchos::rcp_implicit_cast<const operator_type>(counting_op);
+    LinearSolveTimings timings;
+
+    if (zero_initial_guess)
+    {
+        solution.putScalar(scalar_type{});
+        residual_workspace(rhs).update(scalar_type{1}, rhs, scalar_type{});
+        bool all_have_abs_tol = true;
+        for (std::size_t col = 0; col < batch_cols; ++col)
+        {
+            if (effective_abs_tol(col) <= magnitude_type{})
+            {
+                all_have_abs_tol = false;
+                break;
+            }
+        }
+        if (all_have_abs_tol)
+        {
+            const auto check_start = std::chrono::steady_clock::now();
+            Teuchos::Array<magnitude_type> zero_rhs_norms(batch_cols);
+            rhs.norm2(zero_rhs_norms());
+            magnitude_type zero_rhs_norm{};
+            bool all_zero_accepted = true;
+            for (std::size_t column = 0; column < batch_cols; ++column)
+            {
+                if (!std::isfinite(zero_rhs_norms[column])
+                    || zero_rhs_norms[column] > effective_abs_tol(column))
+                {
+                    all_zero_accepted = false;
+                    break;
+                }
+                zero_rhs_norm = std::max(zero_rhs_norm, zero_rhs_norms[column]);
+            }
+            timings.residual_check_seconds += elapsed_seconds(check_start);
+            if (all_zero_accepted)
+            {
+                LinearSolveStatistics short_circuit;
+                short_circuit.converged = true;
+                short_circuit.iterations = 0;
+                short_circuit.achieved_tolerance = real_t{};
+                short_circuit.rhs_norm = static_cast<real_t>(zero_rhs_norm);
+                short_circuit.timings = timings;
+                short_circuit.column_statistics.reserve(batch_cols);
+                for (std::size_t col = 0; col < batch_cols; ++col)
+                {
+                    short_circuit.column_statistics.push_back(ColumnLinearSolveStatistics{
+                        true,
+                        true,
+                        real_t{},
+                        static_cast<real_t>(zero_rhs_norms[col]),
+                        static_cast<real_t>(zero_rhs_norms[col]),
+                        0});
+                }
+                return short_circuit;
+            }
+        }
+    }
+    else
+    {
+        const auto prep_start = std::chrono::steady_clock::now();
+        prepare_initial_guess(counting_op_base, rhs, solution);
+        timings.residual_check_seconds += elapsed_seconds(prep_start);
+    }
+
+    const std::size_t setup_before = d_preconditioner_setup_count;
+    {
+        const auto prec_start = std::chrono::steady_clock::now();
+        configure_preconditioner(matrix, options, preconditioning_matrix);
+        timings.preconditioner_setup_seconds += elapsed_seconds(prec_start);
+    }
+    const auto active_prec = options.preconditioner == LinearPreconditioner::None
+        ? Teuchos::RCP<const operator_type>{}
+        : d_preconditioner;
+
+    auto run_pass = [&](
+        const multi_vector_type& pass_r0,
+        multi_vector_type& pass_sol,
+        const std::vector<magnitude_type>& bounds,
+        int max_iters) -> BatchedPassResult<Pack>
+    {
+        if (options.backend == LinearSolverBackend::Cg)
+        {
+            return run_batched_pcg_pass<Pack>(
+                counting_op_base, active_prec, pass_r0, pass_sol, bounds, max_iters);
+        }
+        return run_batched_bicgstab_pass<Pack>(
+            counting_op_base, active_prec, pass_r0, pass_sol, bounds, max_iters);
+    };
+
+    std::vector<magnitude_type> initial_bounds(batch_cols);
+    {
+        Teuchos::Array<magnitude_type> initial_rhs_norms(batch_cols);
+        rhs.norm2(initial_rhs_norms());
+        for (std::size_t col = 0; col < batch_cols; ++col)
+        {
+            const auto denom = std::max(initial_rhs_norms[col], effective_floor(col));
+            initial_bounds[col] = std::max(
+                effective_abs_tol(col),
+                static_cast<magnitude_type>(effective_tol(col)) * denom);
+        }
+    }
+
+    std::size_t hook_pass_index = 0;
+    const auto solve_start = std::chrono::steady_clock::now();
+    const auto pass0 = run_pass(
+        residual_workspace(rhs), solution, initial_bounds, options.max_iterations);
+    timings.solve_seconds += elapsed_seconds(solve_start);
+    if (d_batched_post_solve_hook)
+    {
+        d_batched_post_solve_hook(solution, hook_pass_index++);
+    }
+
+    int iterations = pass0.batch_iterations;
+    std::vector<int> column_iterations = pass0.column_iterations;
+    std::vector<bool> column_retry_eligible(batch_cols, false);
+    for (std::size_t col = 0; col < batch_cols; ++col)
+    {
+        column_retry_eligible[col] = pass0.column_converged[col] && !pass0.column_broken_down[col];
+    }
+
+    real_t rhs_norm{};
+    const auto evaluate_column_norms = [&](
+        Teuchos::Array<magnitude_type>& b_norms,
+        Teuchos::Array<magnitude_type>& r_norms,
+        real_t* out_max_rhs,
+        real_t* out_max_rel,
+        real_t* out_unaccepted_ratio,
+        bool* out_unaccepted_within_gap,
+        bool* out_any_column_within_gap,
+        bool* out_all_accepted)
+    {
+        rhs.norm2(b_norms());
+        residual_workspace(rhs).norm2(r_norms());
+        magnitude_type max_b{};
+        magnitude_type max_rel{};
+        magnitude_type worst_ratio{};
+        bool all_accepted = true;
+        bool within_gap = true;
+        bool any_column_within_gap = false;
+        bool any_nonfinite = false;
+        for (std::size_t col = 0; col < batch_cols; ++col)
+        {
+            if (!std::isfinite(b_norms[col]) || !std::isfinite(r_norms[col]))
+            {
+                any_nonfinite = true;
+                all_accepted = false;
+                within_gap = false;
+                continue;
+            }
+            max_b = std::max(max_b, b_norms[col]);
+            const auto denom = std::max(b_norms[col], effective_floor(col));
+            const auto rel = denom > magnitude_type{} ? r_norms[col] / denom : r_norms[col];
+            if (!std::isfinite(rel))
+            {
+                any_nonfinite = true;
+                all_accepted = false;
+                within_gap = false;
+                continue;
+            }
+            max_rel = std::max(max_rel, rel);
+            const auto bound = std::max(
+                effective_abs_tol(col),
+                static_cast<magnitude_type>(effective_tol(col)) * denom);
+            if (r_norms[col] > bound)
+            {
+                all_accepted = false;
+                const auto col_tol = static_cast<magnitude_type>(effective_tol(col));
+                worst_ratio = std::max(worst_ratio, rel / col_tol);
+                const auto col_gap = magnitude_type{2} * col_tol;
+                if (rel > col_gap)
+                {
+                    within_gap = false;
+                }
+                else
+                {
+                    any_column_within_gap = true;
+                }
+            }
+        }
+        *out_max_rhs = any_nonfinite ? std::numeric_limits<real_t>::infinity() : static_cast<real_t>(max_b);
+        *out_max_rel = any_nonfinite ? std::numeric_limits<real_t>::infinity() : static_cast<real_t>(max_rel);
+        *out_unaccepted_ratio = any_nonfinite ? std::numeric_limits<real_t>::infinity() : static_cast<real_t>(worst_ratio);
+        *out_unaccepted_within_gap = !any_nonfinite && within_gap;
+        *out_any_column_within_gap = any_column_within_gap;
+        *out_all_accepted = !any_nonfinite && all_accepted;
+    };
+
+    Teuchos::Array<magnitude_type> precheck_rhs_norms(batch_cols);
+    Teuchos::Array<magnitude_type> precheck_residual_norms(batch_cols);
+    real_t unaccepted_ratio{};
+    bool unaccepted_within_gap = false;
+    bool any_column_within_gap = false;
+    bool per_column_accepted = false;
+    bool accurate_residual = false;
+
+    const auto checked_residual = [&] {
+        const auto check_start = std::chrono::steady_clock::now();
+        real_t max_rel{};
+        if (accurate_residual && accurate_crs_residual(matrix, rhs, solution))
+        {
+            evaluate_column_norms(
+                precheck_rhs_norms, precheck_residual_norms,
+                &rhs_norm, &max_rel, &unaccepted_ratio,
+                &unaccepted_within_gap, &any_column_within_gap,
+                &per_column_accepted);
+            timings.residual_check_seconds += elapsed_seconds(check_start);
+            return max_rel;
+        }
+        (void)true_relative_residual(
+            counting_op_base, rhs, solution, residual_scaling, &rhs_norm);
+        evaluate_column_norms(
+            precheck_rhs_norms, precheck_residual_norms,
+            &rhs_norm, &max_rel, &unaccepted_ratio,
+            &unaccepted_within_gap, &any_column_within_gap,
+            &per_column_accepted);
+        if (!per_column_accepted && any_column_within_gap
+            && unaccepted_ratio > real_t{1}
+            && accurate_crs_residual(matrix, rhs, solution))
+        {
+            accurate_residual = true;
+            const auto standard = max_rel;
+            evaluate_column_norms(
+                precheck_rhs_norms, precheck_residual_norms,
+                &rhs_norm, &max_rel, &unaccepted_ratio,
+                &unaccepted_within_gap, &any_column_within_gap,
+                &per_column_accepted);
+            if (!d_reported_accurate_residual)
+            {
+                if (rhs.getMap()->getComm()->getRank() == 0 && (options.verbosity & Belos::Warnings))
+                {
+                    std::ostringstream message;
+                    message.precision(std::numeric_limits<real_t>::max_digits10);
+                    message << "BelosLinearSolver CRS residual precision check: standard=" << standard
+                            << " compensated=" << max_rel << " tolerance=" << manager_tolerance << '\n';
+                    std::cerr << message.str();
+                }
+                d_reported_accurate_residual = true;
+            }
+            timings.residual_check_seconds += elapsed_seconds(check_start);
+            return max_rel;
+        }
+        timings.residual_check_seconds += elapsed_seconds(check_start);
+        return max_rel;
+    };
+
+    auto achieved_tolerance = checked_residual();
+    const int maximum_refinements = 2;
+    std::vector<int> column_refinements(batch_cols, 0);
+
+    auto column_needs_refinement = [&](std::size_t col)
+    {
+        const auto bound = std::max(
+            effective_abs_tol(col),
+            static_cast<magnitude_type>(effective_tol(col))
+                * std::max(precheck_rhs_norms[col], effective_floor(col)));
+        return !std::isfinite(precheck_rhs_norms[col])
+            || !std::isfinite(precheck_residual_norms[col])
+            || precheck_residual_norms[col] > bound;
+    };
+    const auto remaining_budget = [&](std::size_t col) -> int
+    {
+        return std::max(0, options.max_iterations - column_iterations[col]);
+    };
+
+    for (int refinement = 0;
+            refinement < maximum_refinements
+                && !per_column_accepted;
+            ++refinement)
+    {
+        std::vector<int> pending;
+        for (std::size_t col = 0; col < batch_cols; ++col)
+        {
+            const auto denom = std::max(precheck_rhs_norms[col], effective_floor(col));
+            const auto relative = denom > magnitude_type{}
+                ? precheck_residual_norms[col] / denom
+                : precheck_residual_norms[col];
+            const auto col_tol = static_cast<magnitude_type>(effective_tol(col));
+            const bool recoverable_gap =
+                std::isfinite(precheck_rhs_norms[col])
+                && std::isfinite(precheck_residual_norms[col])
+                && std::isfinite(relative)
+                && relative <= magnitude_type{2} * col_tol;
+            if (column_retry_eligible[col] && column_needs_refinement(col)
+                && remaining_budget(col) > 0 && recoverable_gap)
+            {
+                pending.push_back(static_cast<int>(col));
+            }
+        }
+        if (pending.empty())
+        {
+            break;
+        }
+
+        std::vector<real_t> column_correction_tolerance(batch_cols, real_t{});
+        for (const int col : pending)
+        {
+            const auto denom = std::max(precheck_rhs_norms[col], effective_floor(col));
+            const auto relative = denom > magnitude_type{}
+                ? precheck_residual_norms[col] / denom
+                : precheck_residual_norms[col];
+            const auto ratio = relative / static_cast<magnitude_type>(effective_tol(col));
+            column_correction_tolerance[col] = std::min(
+                real_t{0.1}, real_t{0.5} / std::max(static_cast<real_t>(ratio), real_t{1}));
+        }
+
+        std::stable_sort(pending.begin(), pending.end(),
+            [&](int left, int right)
+            {
+                const int left_budget = remaining_budget(static_cast<std::size_t>(left));
+                const int right_budget = remaining_budget(static_cast<std::size_t>(right));
+                if (left_budget != right_budget)
+                {
+                    return left_budget < right_budget;
+                }
+                if (column_correction_tolerance[left] != column_correction_tolerance[right])
+                {
+                    return column_correction_tolerance[left] < column_correction_tolerance[right];
+                }
+                return left < right;
+            });
+        std::vector<std::vector<int>> groups;
+        for (const int col : pending)
+        {
+            const bool same_budget = !groups.empty()
+                && remaining_budget(static_cast<std::size_t>(groups.back().front()))
+                    == remaining_budget(static_cast<std::size_t>(col));
+            const bool same_tolerance = !groups.empty()
+                && column_correction_tolerance[groups.back().front()]
+                    == column_correction_tolerance[col];
+            if (same_budget && same_tolerance)
+            {
+                groups.back().push_back(col);
+            }
+            else
+            {
+                groups.push_back({col});
+            }
+        }
+
+        int pass_iterations = 0;
+        for (const auto& group : groups)
+        {
+            const std::size_t width = group.size();
+            const int group_budget = remaining_budget(static_cast<std::size_t>(group.front()));
+            if (group_budget <= 0 || width == 0)
+            {
+                continue;
+            }
+            const real_t group_tolerance = column_correction_tolerance[group.front()];
+            const auto pack_start = std::chrono::steady_clock::now();
+            auto defect = Teuchos::rcp(new multi_vector_type(rhs.getMap(), width, false));
+            auto correction = Teuchos::rcp(new multi_vector_type(solution.getMap(), width, true));
+            for (std::size_t local = 0; local < width; ++local)
+            {
+                copy_column<Pack>(*defect, local, residual_workspace(rhs), static_cast<std::size_t>(group[local]));
+            }
+            Teuchos::Array<magnitude_type> defect_norms(width);
+            defect->norm2(defect_norms());
+            std::vector<magnitude_type> group_bounds(width);
+            for (std::size_t local = 0; local < width; ++local)
+            {
+                group_bounds[local] =
+                    static_cast<magnitude_type>(group_tolerance) * defect_norms[local];
+            }
+            timings.pack_unpack_seconds += elapsed_seconds(pack_start);
+
+            const auto ref_solve_start = std::chrono::steady_clock::now();
+            const auto group_pass = run_pass(*defect, *correction, group_bounds, group_budget);
+            timings.solve_seconds += elapsed_seconds(ref_solve_start);
+            if (d_batched_post_solve_hook)
+            {
+                d_batched_post_solve_hook(*correction, hook_pass_index++);
+            }
+
+            pass_iterations += group_pass.batch_iterations;
+            const auto unpack_start = std::chrono::steady_clock::now();
+            for (std::size_t local = 0; local < width; ++local)
+            {
+                const int orig = group[local];
+                ++column_refinements[orig];
+                column_iterations[orig] += group_pass.column_iterations[local];
+                column_retry_eligible[orig] =
+                    group_pass.column_converged[local] && !group_pass.column_broken_down[local];
+                add_scaled_column<Pack>(solution, static_cast<std::size_t>(orig), *correction, local, magnitude_type{1});
+            }
+            timings.pack_unpack_seconds += elapsed_seconds(unpack_start);
+        }
+
+        iterations += pass_iterations;
+        achieved_tolerance = checked_residual();
+    }
+
+    std::vector<ColumnLinearSolveStatistics> col_stats(batch_cols);
+    bool converged = true;
+    real_t max_col_achieved{};
+    real_t max_col_rhs{};
+    for (std::size_t col = 0; col < batch_cols; ++col)
+    {
+        const auto b_norm = precheck_rhs_norms[col];
+        const auto r_norm = precheck_residual_norms[col];
+        const bool finite = std::isfinite(b_norm) && std::isfinite(r_norm);
+        const auto denom = std::max(b_norm, effective_floor(col));
+        const auto col_achieved = !finite
+            ? std::numeric_limits<real_t>::infinity()
+            : static_cast<real_t>(denom > magnitude_type{} ? r_norm / denom : r_norm);
+        const auto bound = std::max(
+            effective_abs_tol(col),
+            static_cast<magnitude_type>(effective_tol(col)) * denom);
+        const bool col_conv = finite && std::isfinite(col_achieved) && r_norm <= bound;
+        converged = converged && col_conv;
+        if (!std::isfinite(col_achieved))
+        {
+            max_col_achieved = std::numeric_limits<real_t>::infinity();
+        }
+        else if (std::isfinite(max_col_achieved))
+        {
+            max_col_achieved = std::max(max_col_achieved, col_achieved);
+        }
+        if (finite)
+        {
+            max_col_rhs = std::max(max_col_rhs, static_cast<real_t>(b_norm));
+        }
+        else
+        {
+            max_col_rhs = std::numeric_limits<real_t>::infinity();
+        }
+        col_stats[col] = ColumnLinearSolveStatistics{
+            col_conv,
+            false,
+            col_achieved,
+            static_cast<real_t>(r_norm),
+            static_cast<real_t>(b_norm),
+            column_refinements[col],
+            column_iterations[col]};
+    }
+    achieved_tolerance = column_policies.empty() ? achieved_tolerance : max_col_achieved;
+    if (!std::isfinite(max_col_achieved))
+    {
+        achieved_tolerance = std::numeric_limits<real_t>::infinity();
+    }
+    rhs_norm = std::isfinite(max_col_rhs) ? max_col_rhs : rhs_norm;
+
+    if (!converged)
+    {
+        report_failed_solve(
+            rhs, options, residual_scaling, Belos::Unconverged, iterations);
+    }
+    LinearSolveStatistics result;
+    result.converged = converged;
+    result.iterations = iterations;
+    result.achieved_tolerance = achieved_tolerance;
+    result.rhs_norm = rhs_norm;
+    result.execution_mode = batch_cols > 1
+        ? MultiRhsExecutionMode::BatchedKrylov
+        : MultiRhsExecutionMode::SingleRhs;
+    result.batch_krylov_iterations = batch_cols > 1 ? iterations : 0;
+    result.column_serial_iterations = 0;
+    result.preconditioner_builds = d_preconditioner_setup_count - setup_before;
+    result.operator_apply_calls = counting_op->calls();
+    result.operator_column_applies = counting_op->column_applies();
+    result.max_batch_width = counting_op->max_batch_width();
+    result.timings = timings;
+    result.column_statistics = std::move(col_stats);
+    return result;
+}
+
 /**
     * @brief Solve active columns in independent owned storage.
     *
@@ -1407,7 +2819,10 @@ void BelosLinearSolver<Pack>::configure_preconditioner(
         && *d_preconditioner_kind == options.preconditioner;
     if (can_reuse)
     {
-        d_problem->setRightPrec(d_preconditioner);
+        if (!d_problem.is_null())
+        {
+            d_problem->setRightPrec(d_preconditioner);
+        }
         return;
     }
 
@@ -1541,7 +2956,10 @@ void BelosLinearSolver<Pack>::configure_preconditioner(
     // Belos CG applies this inverse to the residual in its PCG recurrence
     // and applies the original A to search directions. BiCGStab requires
     // right attachment; retaining it also avoids preconditioned norm scaling.
-    d_problem->setRightPrec(d_preconditioner);
+    if (!d_problem.is_null())
+    {
+        d_problem->setRightPrec(d_preconditioner);
+    }
 }
 
 /**

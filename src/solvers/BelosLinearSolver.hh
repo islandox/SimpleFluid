@@ -23,6 +23,7 @@
 #include <Teuchos_ScalarTraits.hpp>
 
 #include <cstddef>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -177,6 +178,27 @@ inline std::string_view to_string(MultiRhsExecutionMode mode)
     throw std::invalid_argument("Unknown MultiRhsExecutionMode value.");
 }
 
+/** @brief Caller policy controlling multi-RHS execution strategy. */
+enum class MultiRhsExecutionPolicy
+{
+    Auto,
+    BatchedKrylov,
+    ColumnSerial
+};
+
+/** @brief Convert a multi-RHS execution policy to its stable diagnostic name. */
+inline std::string_view to_string(MultiRhsExecutionPolicy policy)
+{
+    switch (policy)
+    {
+        case MultiRhsExecutionPolicy::Auto:          return "auto";
+        case MultiRhsExecutionPolicy::BatchedKrylov: return "batched_krylov";
+        case MultiRhsExecutionPolicy::ColumnSerial:  return "column_serial";
+    }
+
+    throw std::invalid_argument("Unknown MultiRhsExecutionPolicy value.");
+}
+
 /**
  * @brief Optional explicit-residual scaling for one linear solve.
  *
@@ -305,13 +327,19 @@ struct LinearSolverOptions
     /**
      * @brief Maximum active RHS columns solved together per Krylov batch.
      *
-     * Zero (default) solves all active columns in a single batch for
-     * PseudoBlockGMRES. PseudoBlockCG is currently restricted to column-serial
-     * execution so each column keeps an independent, exact iteration budget;
-     * BiCGStab is likewise column-serial. Positive values chunk active GMRES
-     * columns into contiguous batches of at most @p max_batch_width.
+     * Zero (default) solves all active columns in a single batch for GMRES, CG,
+     * and BiCGStab when @p multi_rhs_policy allows batching. Positive values
+     * chunk active columns into contiguous batches of at most
+     * @p max_batch_width (1 forces column-serial execution).
      */
     int max_batch_width = 0;
+    /**
+     * @brief Multi-RHS execution policy for multi-column solves.
+     *
+     * Auto (default) runs batched multi-column Krylov whenever an active
+     * chunk has width > 1. ColumnSerial forces the 1-column serial path.
+     */
+    MultiRhsExecutionPolicy multi_rhs_policy = MultiRhsExecutionPolicy::Auto;
 };
 
 /** @brief Options for multi-RHS solves with per-column policies and active masks. */
@@ -528,6 +556,16 @@ private:
         bool zero_initial_guess,
         const Teuchos::RCP<const matrix_type>& preconditioning_matrix);
 
+    SIMPLEFLUID_SOLVERS_LOCAL LinearSolveStatistics solve_batched_native_impl(
+        const Teuchos::RCP<const operator_type>& matrix,
+        const multi_vector_type& rhs,
+        multi_vector_type& solution,
+        const LinearSolverOptions& options,
+        LinearResidualScaling residual_scaling,
+        const std::vector<ColumnResidualPolicy>& column_policies,
+        bool zero_initial_guess,
+        const Teuchos::RCP<const matrix_type>& preconditioning_matrix);
+
     /**
      * @brief Solve active columns in independent owned storage.
      *
@@ -678,6 +716,7 @@ private:
     Teuchos::RCP<const typename Pack::map_type> d_muelu_map;
     std::optional<LinearPreconditioner> d_muelu_kind;
     std::size_t d_muelu_configuration_count = 0;
+    std::function<void(multi_vector_type&, std::size_t)> d_batched_post_solve_hook;
 };
 
 /**
