@@ -96,6 +96,13 @@ simplefluid_add_mpi_test(
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(
+    NAME MultiColumnTransport_2procs
+    TARGET testMultiColumnTransport
+    PROCS 2
+    LABELS "mpi;transport;multi_rhs;ale;empty_rank"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
     NAME PressureGeometryAccess_2procs
     TARGET testPressureGeometryAccess
     PROCS 2

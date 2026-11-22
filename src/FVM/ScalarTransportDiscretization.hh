@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <compare>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -46,6 +47,9 @@ struct ScalarTransportDiscretization
     ScalarTimeScheme time = ScalarTimeScheme::BackwardEuler;
     ScalarConvectionScheme convection = ScalarConvectionScheme::Upwind;
     AssemblyMode mode = AssemblyMode::Transient;
+
+    bool operator==(const ScalarTransportDiscretization&) const = default;
+    auto operator<=>(const ScalarTransportDiscretization&) const = default;
 };
 
 namespace detail

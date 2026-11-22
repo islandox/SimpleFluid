@@ -14,7 +14,9 @@
 
 #include <Teuchos_RCP.hpp>
 #include <optional>
+#include <span>
 #include <type_traits>
+#include <vector>
 
 namespace SimpleFluid::FVM
 {
@@ -221,5 +223,64 @@ struct MomentumAssemblyContext
     const TransportGeometryCache<MeshType>* geometry_cache = nullptr;
     const ALEControlVolumeState* ale = nullptr;
     typename MeshFieldTraits<Pack, MeshType>::tensor_cell_type* gradient_workspace = nullptr;
+};
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+struct MultiColumnScalarInput
+{
+    using Field = typename MeshFieldTraits<Pack, MeshType>::scalar_cell_type;
+    using scalar_type = typename Pack::scalar_type;
+    const Field* old_values = nullptr;
+    const Field* older_values = nullptr;
+    std::span<const scalar_type> extensive_old_inventories = {};
+    ScalarCellValueProvider<Pack> source = {};
+    ScalarBoundaryValueProvider<Pack> boundary_value = {};
+    ScalarBoundaryValueProvider<Pack> neumann_flux = {};
+    std::function<scalar_type(typename Pack::local_ordinal_type)> fixed_cell_value = {};
+    const Field* lagged_correction_field = nullptr;
+    bool allow_negative = false;
+};
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+struct MultiColumnWeightedScalarTerms
+{
+    using mesh_type = MeshType;
+    using Field = typename MeshFieldTraits<Pack, MeshType>::scalar_cell_type;
+    using scalar_type = typename Pack::scalar_type;
+    scalar_type time_step = {};
+    const typename MeshFieldTraits<Pack, MeshType>::scalar_face_type& face_fluxes;
+    struct Coefficients
+    {
+        const Field& storage_weight;
+        const Field& advection_weight;
+        const Field& diffusivity;
+        const Field* old_storage_weight = nullptr;
+    } coefficients;
+    struct Sources
+    {
+        ScalarCellValueProvider<Pack> implicit_sink = {};
+    } sources = {};
+    struct Constraints
+    {
+        std::function<bool(typename Pack::local_ordinal_type)> fixed_cell_mask = {};
+    } constraints = {};
+    std::vector<MultiColumnScalarInput<Pack, MeshType>> columns;
+};
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+struct MultiColumnWeightedScalarBoundary
+{
+    ScalarBoundaryConditionProvider<Pack> condition;
+    const MeshBoundaryCache<Pack, MeshType>* coefficients = nullptr;
+};
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+struct MultiColumnWeightedScalarContext
+{
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null;
+    const TransportGeometryCache<MeshType>* geometry_cache = nullptr;
+    const ALEControlVolumeState* ale = nullptr;
+    detail::StoredTransportSymbolicPlan<Pack>* symbolic_plan = nullptr;
+    Teuchos::RCP<typename Pack::multi_vector_type> cached_rhs = Teuchos::null;
 };
 } // namespace SimpleFluid::FVM

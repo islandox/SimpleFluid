@@ -15,6 +15,12 @@ using Factory = TransportSystemFactory<Pack, Mesh>;
 template TransportSystem<Pack> Factory::assemble(Factory::WeightedScalarTerms, Factory::WeightedScalarBoundary,
     Factory::WeightedScalarOptions, Factory::WeightedScalarContext);
 
+template MultiColumnTransportSystem<Pack> Factory::assemble_multi_column(Factory::MultiColumnWeightedTerms,
+    Factory::MultiColumnWeightedBoundary, Factory::WeightedScalarOptions, Factory::MultiColumnWeightedContext);
+
+template MultiColumnTransportSystem<Pack> Factory::refresh_multi_column_rhs(Factory::MultiColumnWeightedTerms,
+    Factory::MultiColumnWeightedBoundary, Factory::WeightedScalarOptions, Factory::MultiColumnWeightedContext);
+
 template TransportSystem<Pack> Factory::assemble(
     Factory::TemperatureTerms, Factory::TemperatureBoundary, Factory::TemperatureOptions, Factory::TemperatureContext);
 
@@ -26,6 +32,10 @@ namespace detail
 template TransportSystem<Pack> assemble_stored_weighted<Pack, Mesh>(
     Factory::WeightedScalarTerms, Factory::WeightedScalarBoundary, Factory::WeightedScalarOptions,
     Factory::WeightedScalarContext);
+
+template MultiColumnTransportSystem<Pack> assemble_stored_multi_column_weighted<Pack, Mesh>(
+    Factory::MultiColumnWeightedTerms, Factory::MultiColumnWeightedBoundary, Factory::WeightedScalarOptions,
+    Factory::MultiColumnWeightedContext, bool);
 
 template TransportSystem<Pack> assemble_stored_temperature<Pack, Mesh>(
     Factory::TemperatureTerms, Factory::TemperatureBoundary, Factory::TemperatureOptions,

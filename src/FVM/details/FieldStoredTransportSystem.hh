@@ -37,6 +37,8 @@ template<TpetraTypePack Pack> struct TransportSystem;
 
 template<TpetraTypePack Pack> struct VectorTransportSystem;
 
+template<TpetraTypePack Pack> struct MultiColumnTransportSystem;
+
 namespace detail
 {
 
@@ -63,6 +65,12 @@ template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_weighted(WeightedScalarTerms<Pack, MeshType> terms,
     CoefficientTransportBoundary<Pack, MeshType> boundary, WeightedScalarAssemblyOptions<Pack, MeshType> options,
     WeightedScalarAssemblyContext<Pack, MeshType> resources);
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+SIMPLEFLUID_LOCAL MultiColumnTransportSystem<Pack> assemble_stored_multi_column_weighted(
+    MultiColumnWeightedScalarTerms<Pack, MeshType> terms, MultiColumnWeightedScalarBoundary<Pack, MeshType> boundary,
+    WeightedScalarAssemblyOptions<Pack, MeshType> options, MultiColumnWeightedScalarContext<Pack, MeshType> resources,
+    bool rhs_only);
 
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_temperature(TemperatureTerms<Pack, MeshType> terms,

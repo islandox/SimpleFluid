@@ -29,6 +29,14 @@ SIMPLEFLUID_FVM_LOCAL TransportSystem<Pack> assemble_factory_weighted(
     typename TransportSystemFactory<Pack, MeshType>::WeightedScalarContext context);
 
 template<TpetraTypePack Pack, class MeshType>
+SIMPLEFLUID_FVM_LOCAL MultiColumnTransportSystem<Pack> assemble_factory_multi_column_weighted(
+    typename TransportSystemFactory<Pack, MeshType>::MultiColumnWeightedTerms terms,
+    typename TransportSystemFactory<Pack, MeshType>::MultiColumnWeightedBoundary boundary,
+    typename TransportSystemFactory<Pack, MeshType>::WeightedScalarOptions options,
+    typename TransportSystemFactory<Pack, MeshType>::MultiColumnWeightedContext context,
+    bool rhs_only);
+
+template<TpetraTypePack Pack, class MeshType>
 SIMPLEFLUID_FVM_LOCAL TransportSystem<Pack> assemble_factory_temperature(
     typename TransportSystemFactory<Pack, MeshType>::TemperatureTerms terms,
     typename TransportSystemFactory<Pack, MeshType>::TemperatureBoundary boundary,

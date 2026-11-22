@@ -68,6 +68,27 @@ template<TpetraTypePack Pack> struct VectorTransportSystem
     Teuchos::RCP<typename Pack::multi_vector_type> rhs;
 };
 
+/** @brief Stage-1 FVM multi-column assembly timing breakdown. */
+struct MultiColumnTransportTimings
+{
+    double matrix_assembly_seconds = 0.0;
+    double rhs_assembly_seconds = 0.0;
+};
+
+/**
+ * @brief Shared operator matrix and N-column RHS MultiVector for one OperatorGroup.
+ *
+ * @tparam Pack The Tpetra type pack.
+ */
+template<TpetraTypePack Pack> struct MultiColumnTransportSystem
+{
+    Teuchos::RCP<typename Pack::matrix_type> matrix;
+    Teuchos::RCP<typename Pack::multi_vector_type> rhs;
+    /** Globally consistent active-column mask across all MPI ranks. */
+    std::vector<bool> active_columns;
+    MultiColumnTransportTimings timings = {};
+};
+
 /**
  * @brief Mesh-bound cache for transport reconstruction geometry.
  *

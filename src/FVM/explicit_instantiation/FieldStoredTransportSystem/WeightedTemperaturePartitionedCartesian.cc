@@ -22,6 +22,22 @@ TransportSystem<Pack> Factory::assemble(WeightedScalarTerms terms,
 }
 
 template<>
+MultiColumnTransportSystem<Pack> Factory::assemble_multi_column(MultiColumnWeightedTerms terms,
+    MultiColumnWeightedBoundary boundary, WeightedScalarOptions options, MultiColumnWeightedContext context)
+{
+    return detail::assemble_factory_multi_column_weighted<Pack, Mesh>(
+        std::move(terms), std::move(boundary), options, std::move(context), false);
+}
+
+template<>
+MultiColumnTransportSystem<Pack> Factory::refresh_multi_column_rhs(MultiColumnWeightedTerms terms,
+    MultiColumnWeightedBoundary boundary, WeightedScalarOptions options, MultiColumnWeightedContext context)
+{
+    return detail::assemble_factory_multi_column_weighted<Pack, Mesh>(
+        std::move(terms), std::move(boundary), options, std::move(context), true);
+}
+
+template<>
 TransportSystem<Pack> Factory::assemble(
     TemperatureTerms terms, TemperatureBoundary boundary, TemperatureOptions options, TemperatureContext context)
 {
@@ -42,6 +58,10 @@ namespace detail
 template TransportSystem<Pack> assemble_stored_weighted<Pack, Mesh>(
     Factory::WeightedScalarTerms, Factory::WeightedScalarBoundary, Factory::WeightedScalarOptions,
     Factory::WeightedScalarContext);
+
+template MultiColumnTransportSystem<Pack> assemble_stored_multi_column_weighted<Pack, Mesh>(
+    Factory::MultiColumnWeightedTerms, Factory::MultiColumnWeightedBoundary, Factory::WeightedScalarOptions,
+    Factory::MultiColumnWeightedContext, bool);
 
 template TransportSystem<Pack> assemble_stored_temperature<Pack, Mesh>(
     Factory::TemperatureTerms, Factory::TemperatureBoundary, Factory::TemperatureOptions,

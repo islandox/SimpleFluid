@@ -2281,3 +2281,608 @@ TEST(BelosLinearSolverTest, NonfiniteRhsNeverTakesZeroShortcutWithAbsoluteTolera
         EXPECT_FALSE(statistics.converged);
     }
 }
+
+namespace
+{
+
+class WidthRecordingOperator final : public Pack::operator_type
+{
+public:
+    explicit WidthRecordingOperator(Teuchos::RCP<const Pack::operator_type> target)
+        : d_target(std::move(target))
+    {
+    }
+
+    Teuchos::RCP<const Pack::map_type> getDomainMap() const override
+    {
+        return d_target->getDomainMap();
+    }
+
+    Teuchos::RCP<const Pack::map_type> getRangeMap() const override
+    {
+        return d_target->getRangeMap();
+    }
+
+    bool hasTransposeApply() const override
+    {
+        return d_target->hasTransposeApply();
+    }
+
+    void apply(
+        const Pack::multi_vector_type& input,
+        Pack::multi_vector_type& output,
+        Teuchos::ETransp mode = Teuchos::NO_TRANS,
+        double alpha = 1.0,
+        double beta = 0.0) const override
+    {
+        d_recorded_widths.push_back(static_cast<std::size_t>(input.getNumVectors()));
+        d_target->apply(input, output, mode, alpha, beta);
+    }
+
+    const std::vector<std::size_t>& recorded_widths() const noexcept
+    {
+        return d_recorded_widths;
+    }
+
+    void clear_recorded_widths() const noexcept
+    {
+        d_recorded_widths.clear();
+    }
+
+private:
+    Teuchos::RCP<const Pack::operator_type> d_target;
+    mutable std::vector<std::size_t> d_recorded_widths;
+};
+
+Teuchos::RCP<Pack::matrix_type> distributed_tridiagonal_matrix(
+    const Teuchos::RCP<const Teuchos::Comm<int>>& comm,
+    const Pack::global_ordinal_type global_rows,
+    const bool symmetric)
+{
+    auto map = Teuchos::rcp(new Pack::map_type(global_rows, 0, comm));
+    auto matrix = Teuchos::rcp(new Pack::matrix_type(map, 3));
+    for (std::size_t i = 0; i < map->getLocalNumElements(); ++i)
+    {
+        const auto gid = map->getGlobalElement(i);
+        Teuchos::Array<Pack::global_ordinal_type> cols;
+        Teuchos::Array<double> vals;
+        if (gid > 0)
+        {
+            cols.push_back(gid - 1);
+            vals.push_back(symmetric ? -1.0 : -1.2);
+        }
+        cols.push_back(gid);
+        vals.push_back(4.0 + 0.05 * static_cast<double>(gid % 7));
+        if (gid + 1 < global_rows)
+        {
+            cols.push_back(gid + 1);
+            vals.push_back(symmetric ? -1.0 : -0.6);
+        }
+        matrix->insertGlobalValues(gid, cols(), vals());
+    }
+    matrix->fillComplete();
+    return matrix;
+}
+
+} // namespace
+
+/** @brief Prove PseudoBlockGmres genuinely batches multi-column apply and re-sets Block Size. */
+TEST(BelosLinearSolverTest, GmresResetsBlockSizeAcrossConsecutiveSolvesAndRefinements)
+{
+    const auto matrix = distributed_tridiagonal_matrix(Tpetra::getDefaultComm(), 24, false);
+    const auto op = Teuchos::rcp(new WidthRecordingOperator(matrix));
+    const auto map = matrix->getRowMap();
+
+    SimpleFluid::LinearSolverOptions options;
+    options.backend = SimpleFluid::LinearSolverBackend::Gmres;
+    options.tolerance = 1.0e-12;
+    options.max_iterations = 100;
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+
+    for (const std::size_t cols : {1U, 4U, 2U, 5U})
+    {
+        SCOPED_TRACE(cols);
+        Pack::multi_vector_type exact(map, cols, true);
+        Pack::multi_vector_type rhs(map, cols, true);
+        Pack::multi_vector_type solution(map, cols, true);
+        for (std::size_t c = 0; c < cols; ++c)
+        {
+            auto x = exact.getDataNonConst(c);
+            for (std::size_t r = 0; r < map->getLocalNumElements(); ++r)
+            {
+                const auto gid = map->getGlobalElement(r);
+                x[r] = static_cast<double>(c + 1) * (1.0 + 0.1 * static_cast<double>(gid));
+            }
+        }
+        matrix->apply(exact, rhs);
+
+        op->clear_recorded_widths();
+        const auto stats = solver.solve_from_zero_with_statistics(op, rhs, solution, options);
+        ASSERT_TRUE(stats.converged);
+        EXPECT_EQ(stats.column_statistics.size(), cols);
+        EXPECT_GT(stats.operator_apply_calls, 0U);
+        EXPECT_EQ(stats.max_batch_width, cols);
+        EXPECT_GE(stats.operator_column_applies, cols * stats.operator_apply_calls);
+
+        if (cols > 1)
+        {
+            EXPECT_EQ(stats.execution_mode, SimpleFluid::MultiRhsExecutionMode::BatchedKrylov);
+            EXPECT_EQ(stats.batch_krylov_iterations, stats.iterations);
+            EXPECT_EQ(stats.column_serial_iterations, 0);
+            const auto& widths = op->recorded_widths();
+            EXPECT_TRUE(std::any_of(widths.begin(), widths.end(),
+                [cols](std::size_t w) { return w == cols; }));
+        }
+        else
+        {
+            EXPECT_EQ(stats.execution_mode, SimpleFluid::MultiRhsExecutionMode::SingleRhs);
+        }
+
+        for (std::size_t c = 0; c < cols; ++c)
+        {
+            EXPECT_TRUE(stats.column_statistics[c].converged);
+            EXPECT_LE(stats.column_statistics[c].achieved_tolerance, options.tolerance);
+            const auto actual = solution.getData(c);
+            const auto expected = exact.getData(c);
+            for (std::size_t r = 0; r < map->getLocalNumElements(); ++r)
+            {
+                EXPECT_NEAR(actual[r], expected[r], 1.0e-10);
+            }
+        }
+    }
+
+    // Also prove Block Size > 1 is re-applied during GMRES defect-correction refinement.
+    const std::size_t ref_cols = 3;
+    Pack::multi_vector_type ref_rhs(map, ref_cols, true);
+    Pack::multi_vector_type ref_sol(map, ref_cols, true);
+    for (std::size_t c = 0; c < ref_cols; ++c)
+    {
+        ref_rhs.getVectorNonConst(c)->putScalar(static_cast<double>(c + 1));
+    }
+    auto id_matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
+    auto id_op = Teuchos::rcp(new WidthRecordingOperator(id_matrix));
+
+    SimpleFluid::BelosLinearSolver<Pack> ref_solver;
+    SimpleFluid::LinearSolverOptions ref_options;
+    ref_options.backend = SimpleFluid::LinearSolverBackend::Gmres;
+    ref_options.tolerance = 1.0e-10;
+    ref_options.max_iterations = 20;
+    ASSERT_TRUE(ref_solver.solve_from_zero_with_statistics(id_op, ref_rhs, ref_sol, ref_options).converged);
+
+    ResidualGap gap{2.0 * ref_options.tolerance, 1};
+    inject_gmres_residual_gap(ref_solver, gap, true, true);
+    id_op->clear_recorded_widths();
+    const auto ref_stats = ref_solver.solve_from_zero_with_statistics(id_op, ref_rhs, ref_sol, ref_options);
+    ASSERT_TRUE(ref_stats.converged);
+    EXPECT_EQ(gap.solve_calls, 2);
+    EXPECT_EQ(ref_stats.execution_mode, SimpleFluid::MultiRhsExecutionMode::BatchedKrylov);
+    EXPECT_EQ(ref_stats.max_batch_width, ref_cols);
+    const std::size_t full_width_applies = std::count(
+        id_op->recorded_widths().begin(), id_op->recorded_widths().end(), ref_cols);
+    EXPECT_GE(full_width_applies, 4U);
+    for (std::size_t c = 0; c < ref_cols; ++c)
+    {
+        EXPECT_GE(ref_stats.column_statistics[c].refinement_passes, 1);
+    }
+}
+
+/** @brief Verify batch-width chunking invariance and BiCGStab ColumnSerial reporting. */
+TEST(BelosLinearSolverTest, BatchWidthChunkingInvarianceAndExecutionModes)
+{
+    const auto matrix = distributed_tridiagonal_matrix(Tpetra::getDefaultComm(), 20, false);
+    const auto map = matrix->getRowMap();
+    const std::size_t cols = 5;
+
+    Pack::multi_vector_type exact(map, cols, true);
+    Pack::multi_vector_type rhs(map, cols, true);
+    for (std::size_t c = 0; c < cols; ++c)
+    {
+        auto x = exact.getDataNonConst(c);
+        for (std::size_t r = 0; r < map->getLocalNumElements(); ++r)
+        {
+            x[r] = std::pow(10.0, static_cast<int>(c) - 2) * (1.0 + static_cast<double>(r));
+        }
+    }
+    matrix->apply(exact, rhs);
+
+    std::vector<double> baseline;
+    for (const int batch_width : {0, 1, 2, 3, 5})
+    {
+        SCOPED_TRACE(batch_width);
+        Pack::multi_vector_type solution(map, cols, true);
+        SimpleFluid::LinearSolverOptions options;
+        options.backend = SimpleFluid::LinearSolverBackend::Gmres;
+        options.tolerance = 1.0e-12;
+        options.max_iterations = 200;
+        options.max_batch_width = batch_width;
+        SimpleFluid::BelosLinearSolver<Pack> solver;
+        const auto stats = solver.solve_from_zero_with_statistics(matrix, rhs, solution, options);
+        ASSERT_TRUE(stats.converged);
+        EXPECT_EQ(stats.column_statistics.size(), cols);
+
+        if (batch_width == 1)
+        {
+            EXPECT_EQ(stats.execution_mode, SimpleFluid::MultiRhsExecutionMode::ColumnSerial);
+            EXPECT_EQ(stats.max_batch_width, 1U);
+            EXPECT_EQ(stats.batch_krylov_iterations, 0);
+            EXPECT_EQ(stats.column_serial_iterations, stats.iterations);
+        }
+        else
+        {
+            EXPECT_EQ(stats.execution_mode, SimpleFluid::MultiRhsExecutionMode::BatchedKrylov);
+            const std::size_t expected_max = batch_width == 0 ? cols : static_cast<std::size_t>(batch_width);
+            EXPECT_EQ(stats.max_batch_width, expected_max);
+            EXPECT_EQ(stats.batch_krylov_iterations, stats.iterations);
+            EXPECT_EQ(stats.column_serial_iterations, 0);
+        }
+
+        if (baseline.empty())
+        {
+            for (std::size_t c = 0; c < cols; ++c)
+            {
+                const auto s = solution.getData(c);
+                baseline.insert(baseline.end(), s.begin(), s.end());
+            }
+        }
+        else
+        {
+            std::size_t idx = 0;
+            for (std::size_t c = 0; c < cols; ++c)
+            {
+                const auto s = solution.getData(c);
+                for (std::size_t r = 0; r < map->getLocalNumElements(); ++r, ++idx)
+                {
+                    EXPECT_NEAR(s[r], baseline[idx], 1.0e-11 * std::max(1.0, std::abs(baseline[idx])));
+                }
+            }
+        }
+    }
+
+    // BiCGStab must preserve its safe ColumnSerial path and report ColumnSerial honestly.
+    Pack::multi_vector_type bicg_solution(map, cols, true);
+    SimpleFluid::LinearSolverOptions bicg_options;
+    bicg_options.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+    bicg_options.tolerance = 1.0e-12;
+    bicg_options.max_iterations = 200;
+    bicg_options.max_batch_width = 4; // Ignored safely for BiCGStab; still ColumnSerial.
+    SimpleFluid::BelosLinearSolver<Pack> bicg_solver;
+    const auto bicg_stats = bicg_solver.solve_from_zero_with_statistics(
+        matrix, rhs, bicg_solution, bicg_options);
+    ASSERT_TRUE(bicg_stats.converged);
+    EXPECT_EQ(bicg_stats.execution_mode, SimpleFluid::MultiRhsExecutionMode::ColumnSerial);
+    EXPECT_EQ(bicg_stats.max_batch_width, 1U);
+    EXPECT_EQ(bicg_stats.batch_krylov_iterations, 0);
+    EXPECT_EQ(bicg_stats.column_serial_iterations, bicg_stats.iterations);
+    EXPECT_EQ(bicg_stats.column_statistics.size(), cols);
+}
+
+/** @brief Verify per-column true residual prevents Frobenius masking of trace species and honors active mask. */
+TEST(BelosLinearSolverTest, PerColumnTrueResidualRejectsTraceMaskingAndHonorsActiveMask)
+{
+    const auto matrix = distributed_tridiagonal_matrix(Tpetra::getDefaultComm(), 16, false);
+    const auto map = matrix->getRowMap();
+
+    Pack::multi_vector_type exact(map, 4, true);
+    Pack::multi_vector_type rhs(map, 4, true);
+    for (std::size_t r = 0; r < map->getLocalNumElements(); ++r)
+    {
+        const auto gid = static_cast<double>(map->getGlobalElement(r));
+        exact.replaceLocalValue(static_cast<Pack::local_ordinal_type>(r), 0, 1.0e8 * (1.0 + gid));
+        exact.replaceLocalValue(static_cast<Pack::local_ordinal_type>(r), 1, 0.0);
+        exact.replaceLocalValue(static_cast<Pack::local_ordinal_type>(r), 2, 1.0e-10 * (1.0 + 0.5 * gid));
+        exact.replaceLocalValue(static_cast<Pack::local_ordinal_type>(r), 3, 1.0e6 * (2.0 + gid));
+    }
+    matrix->apply(exact, rhs);
+
+    // Tight per-column tolerance on trace col 2 with only 1 iteration: col 0/3 can have loose
+    // tolerance and pass, while col 2 fails — Frobenius norm must NOT mask col 2!
+    {
+        Pack::multi_vector_type solution(map, 4, true);
+        SimpleFluid::MultiRhsSolveOptions opts;
+        opts.solver.backend = SimpleFluid::LinearSolverBackend::Gmres;
+        opts.solver.tolerance = 1.0e-1;
+        opts.solver.max_iterations = 1;
+        opts.column_policies.resize(4);
+        opts.column_policies[0].tolerance = 1.0;
+        opts.column_policies[1].tolerance = 1.0;
+        opts.column_policies[2].tolerance = 1.0e-12;
+        opts.column_policies[3].tolerance = 1.0;
+        opts.active_columns = {true, false, true, true};
+
+        SimpleFluid::BelosLinearSolver<Pack> solver;
+        const auto stats = solver.solve_multi_rhs_from_zero_with_statistics(matrix, rhs, solution, opts);
+        EXPECT_FALSE(stats.converged);
+        ASSERT_EQ(stats.column_statistics.size(), 4U);
+        EXPECT_TRUE(stats.column_statistics[1].skipped_zero);
+        EXPECT_TRUE(stats.column_statistics[1].converged);
+        EXPECT_FALSE(stats.column_statistics[2].converged);
+        EXPECT_GT(stats.column_statistics[2].achieved_tolerance, 1.0e-12);
+    }
+
+    // Full convergence with poisoned inactive col 1 zeroed and trace col 2 solved accurately.
+    {
+        Pack::multi_vector_type solution(map, 4, true);
+        solution.getVectorNonConst(1)->putScalar(999.0);
+        SimpleFluid::MultiRhsSolveOptions opts;
+        opts.solver.backend = SimpleFluid::LinearSolverBackend::Gmres;
+        opts.solver.tolerance = 1.0e-12;
+        opts.solver.max_iterations = 200;
+        opts.active_columns = {true, false, true, true};
+
+        SimpleFluid::BelosLinearSolver<Pack> solver;
+        const auto stats = solver.solve_multi_rhs_from_zero_with_statistics(matrix, rhs, solution, opts);
+        ASSERT_TRUE(stats.converged);
+        EXPECT_EQ(stats.execution_mode, SimpleFluid::MultiRhsExecutionMode::BatchedKrylov);
+        EXPECT_EQ(stats.max_batch_width, 3U);
+        EXPECT_TRUE(stats.column_statistics[1].skipped_zero);
+        for (const auto val : solution.getData(1))
+        {
+            EXPECT_DOUBLE_EQ(val, 0.0);
+        }
+        for (const std::size_t col : {0U, 2U, 3U})
+        {
+            EXPECT_FALSE(stats.column_statistics[col].skipped_zero);
+            EXPECT_LE(stats.column_statistics[col].achieved_tolerance, 1.0e-12);
+            const auto actual = solution.getData(col);
+            const auto expected = exact.getData(col);
+            for (std::size_t r = 0; r < map->getLocalNumElements(); ++r)
+            {
+                EXPECT_NEAR(actual[r], expected[r], 1.0e-10 * std::abs(expected[r]));
+            }
+        }
+
+        if (Tpetra::getDefaultComm()->getSize() > 1)
+        {
+            opts.active_columns[1] = (Tpetra::getDefaultComm()->getRank() == 0);
+            EXPECT_THROW(
+                solver.solve_multi_rhs_from_zero_with_statistics(matrix, rhs, solution, opts),
+                std::invalid_argument);
+        }
+    }
+}
+
+/** @brief Verify PseudoBlockCG solves multi-RHS batches with BatchedKrylov mode and metrics. */
+TEST(BelosLinearSolverTest, CgSolvesMultiRhsBatchedKrylovAndReportsExecutionMode)
+{
+    const auto matrix = distributed_tridiagonal_matrix(Tpetra::getDefaultComm(), 24, true);
+    const auto op = Teuchos::rcp(new WidthRecordingOperator(matrix));
+    const auto map = matrix->getRowMap();
+    const std::size_t cols = 4;
+
+    Pack::multi_vector_type exact(map, cols, true);
+    Pack::multi_vector_type rhs(map, cols, true);
+    Pack::multi_vector_type solution(map, cols, true);
+    for (std::size_t c = 0; c < cols; ++c)
+    {
+        auto x = exact.getDataNonConst(c);
+        for (std::size_t r = 0; r < map->getLocalNumElements(); ++r)
+        {
+            const auto gid = static_cast<double>(map->getGlobalElement(r));
+            x[r] = static_cast<double>(c + 1) * (0.5 + 0.05 * gid);
+        }
+    }
+    matrix->apply(exact, rhs);
+
+    SimpleFluid::LinearSolverOptions options;
+    options.backend = SimpleFluid::LinearSolverBackend::Cg;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::Jacobi;
+    options.tolerance = 1.0e-12;
+    options.max_iterations = 100;
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    const auto stats = solver.solve_from_zero_with_statistics(
+        op, rhs, solution, options, {}, matrix);
+    ASSERT_TRUE(stats.converged);
+    EXPECT_EQ(stats.execution_mode, SimpleFluid::MultiRhsExecutionMode::BatchedKrylov);
+    EXPECT_EQ(stats.max_batch_width, cols);
+    EXPECT_EQ(stats.batch_krylov_iterations, stats.iterations);
+    EXPECT_EQ(stats.column_serial_iterations, 0);
+    EXPECT_TRUE(std::any_of(op->recorded_widths().begin(), op->recorded_widths().end(),
+        [cols](std::size_t w) { return w == cols; }));
+    for (std::size_t c = 0; c < cols; ++c)
+    {
+        EXPECT_LE(stats.column_statistics[c].achieved_tolerance, options.tolerance);
+        const auto actual = solution.getData(c);
+        const auto expected = exact.getData(c);
+        for (std::size_t r = 0; r < map->getLocalNumElements(); ++r)
+        {
+            EXPECT_NEAR(actual[r], expected[r], 1.0e-10);
+        }
+    }
+}
+
+/**
+ * @brief A tiny column accepted via ColumnResidualPolicy::absolute_tolerance or
+ *        rhs_norm_floor must never inflate the gap gate and block GMRES refinement
+ *        for another column.
+ */
+TEST(BelosLinearSolverTest, PerColumnPolicyTinyAcceptedColumnDoesNotBlockGmresRefinement)
+{
+    class TinyAcceptedGapSolver final : public Belos::PseudoBlockGmresSolMgr<
+        Pack::scalar_type, Pack::multi_vector_type, Pack::operator_type>
+    {
+        using Manager = Belos::PseudoBlockGmresSolMgr<
+            Pack::scalar_type, Pack::multi_vector_type, Pack::operator_type>;
+    public:
+        TinyAcceptedGapSolver(
+            const Teuchos::RCP<SimpleFluid::BelosLinearSolver<Pack>::problem_type>& problem,
+            const Teuchos::RCP<Teuchos::ParameterList>& parameters,
+            int& solve_calls)
+            : Manager(problem, parameters), d_solve_calls(solve_calls)
+        {
+        }
+
+        Belos::ReturnType solve() override
+        {
+            d_injected = false;
+            const auto status = Manager::solve();
+            ++d_solve_calls;
+            if (status == Belos::Converged && d_solve_calls == 1)
+            {
+                auto lhs = this->getProblem().getLHS();
+                // Column 0 gets an error of 1e-15 (huge relative to ||b_0|| = 1e-18 * sqrt(N),
+                // well above gmres_gap_ceiling, yet accepted by abs_tol=1e-12 and floor=1.0).
+                // Column 1 gets a 2*tol gap needing defect-correction refinement.
+                auto c0 = lhs->getDataNonConst(0);
+                std::fill(c0.begin(), c0.end(), 1.0e-15);
+                auto c1 = lhs->getDataNonConst(1);
+                for (auto& v : c1)
+                {
+                    v *= (1.0 - 2.0e-10);
+                }
+                d_injected = true;
+                return Belos::Unconverged;
+            }
+            return status;
+        }
+
+        bool isLOADetected() const override
+        {
+            return d_injected ? true : Manager::isLOADetected();
+        }
+
+    private:
+        int& d_solve_calls;
+        bool d_injected = false;
+    };
+
+    const auto map = Teuchos::rcp(new Pack::map_type(
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(),
+        4, 0, Tpetra::getDefaultComm()));
+    const auto id = SimpleFluid::FVM::identity_matrix<Pack>(map);
+
+    Pack::multi_vector_type rhs(map, 2, true);
+    rhs.getVectorNonConst(0)->putScalar(1.0e-18);
+    rhs.getVectorNonConst(1)->putScalar(1.0);
+
+    for (const bool use_floor : {false, true})
+    {
+        SCOPED_TRACE(use_floor);
+        Pack::multi_vector_type solution(map, 2, true);
+        SimpleFluid::BelosLinearSolver<Pack> solver;
+        SimpleFluid::MultiRhsSolveOptions opts;
+        opts.solver.backend = SimpleFluid::LinearSolverBackend::Gmres;
+        opts.solver.tolerance = 1.0e-10;
+        opts.solver.max_iterations = 20;
+        opts.column_policies.resize(2);
+        if (use_floor)
+        {
+            opts.column_policies[0].rhs_norm_floor = 1.0;
+        }
+        else
+        {
+            opts.column_policies[0].absolute_tolerance = 1.0e-12;
+        }
+
+        ASSERT_TRUE(solver.solve_multi_rhs_from_zero_with_statistics(id, rhs, solution, opts).converged);
+
+        int solve_calls = 0;
+        SimpleFluid::detail::BelosLinearSolverTestAccess<Pack>::replace_solver<TinyAcceptedGapSolver>(
+            solver, solve_calls);
+        const auto stats = solver.solve_multi_rhs_from_zero_with_statistics(id, rhs, solution, opts);
+        ASSERT_TRUE(stats.converged);
+        EXPECT_EQ(solve_calls, 2);
+        EXPECT_EQ(stats.column_statistics[0].refinement_passes, 0);
+        EXPECT_GE(stats.column_statistics[1].refinement_passes, 1);
+        for (const auto v : solution.getData(1))
+        {
+            EXPECT_NEAR(v, 1.0, 1.0e-12);
+        }
+    }
+}
+
+TEST(BelosLinearSolverTest, NonReusablePreconditionerRebuildsWhenLeadingChunkIsSkipped)
+{
+    using scalar_type = Pack::scalar_type;
+    using LO = Pack::local_ordinal_type;
+    using GO = Pack::global_ordinal_type;
+
+    const auto comm = Tpetra::getDefaultComm();
+    auto matrix = distributed_tridiagonal_matrix(comm, 24, false);
+    const auto map = matrix->getRowMap();
+    const std::size_t local_rows = map->getLocalNumElements();
+
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    SimpleFluid::MultiRhsSolveOptions prime_opts;
+    prime_opts.solver.backend = SimpleFluid::LinearSolverBackend::Gmres;
+    prime_opts.solver.preconditioner = SimpleFluid::LinearPreconditioner::SymmetricGaussSeidel;
+    prime_opts.solver.reuse_preconditioner = true;
+    prime_opts.solver.tolerance = 1.0e-12;
+    prime_opts.solver.absolute_tolerance = 1.0e-12;
+
+    Pack::multi_vector_type prime_rhs(map, 1);
+    Pack::multi_vector_type prime_sol(map, 1);
+    prime_rhs.putScalar(1.0);
+    ASSERT_TRUE(solver.solve_multi_rhs_from_zero_with_statistics(matrix, prime_rhs, prime_sol, prime_opts).converged);
+    ASSERT_EQ(preconditioner_setup_count(solver), 1U);
+
+    // Mutate M1 -> M2 in place so reusing M1's cached preconditioner would be stale.
+    matrix->resumeFill();
+    for (std::size_t r = 0; r < local_rows; ++r)
+    {
+        const GO gid = map->getGlobalElement(static_cast<LO>(r));
+        const scalar_type diag_shift = 6.0;
+        matrix->sumIntoGlobalValues(
+            gid, Teuchos::ArrayView<const GO>(&gid, 1), Teuchos::ArrayView<const scalar_type>(&diag_shift, 1));
+    }
+    matrix->fillComplete();
+
+    Pack::multi_vector_type rhs_zero_first(map, 2);
+    Pack::multi_vector_type rhs_nonzero_first(map, 2);
+    rhs_zero_first.putScalar(0.0);
+    rhs_nonzero_first.putScalar(0.0);
+    for (std::size_t r = 0; r < local_rows; ++r)
+    {
+        const double val = 1.0 + 0.1 * static_cast<double>(map->getGlobalElement(static_cast<LO>(r)));
+        rhs_zero_first.replaceLocalValue(static_cast<LO>(r), 1, val);
+        rhs_nonzero_first.replaceLocalValue(static_cast<LO>(r), 0, val);
+    }
+
+    // Reference exact solve on M2.
+    SimpleFluid::BelosLinearSolver<Pack> ref_solver;
+    SimpleFluid::MultiRhsSolveOptions ref_opts = prime_opts;
+    ref_opts.solver.reuse_preconditioner = false;
+    Pack::multi_vector_type ref_sol(map, 2);
+    ASSERT_TRUE(
+        ref_solver.solve_multi_rhs_from_zero_with_statistics(matrix, rhs_zero_first, ref_sol, ref_opts).converged);
+    ASSERT_EQ(preconditioner_setup_count(ref_solver), 1U);
+
+    // Leading chunk is zero (skipped), trailing chunk is nonzero: reuse_preconditioner=false must rebuild for M2.
+    SimpleFluid::MultiRhsSolveOptions chunked_opts = prime_opts;
+    chunked_opts.solver.reuse_preconditioner = false;
+    chunked_opts.solver.max_batch_width = 1;
+    Pack::multi_vector_type sol_zero_first(map, 2);
+    const auto stats_zero_first = solver.solve_multi_rhs_from_zero_with_statistics(
+        matrix, rhs_zero_first, sol_zero_first, chunked_opts);
+    ASSERT_TRUE(stats_zero_first.converged);
+    EXPECT_EQ(preconditioner_setup_count(solver), 2U);
+    EXPECT_TRUE(stats_zero_first.column_statistics[0].skipped_zero);
+    EXPECT_FALSE(stats_zero_first.column_statistics[1].skipped_zero);
+
+    for (std::size_t r = 0; r < local_rows; ++r)
+    {
+        EXPECT_DOUBLE_EQ(sol_zero_first.getData(0)[r], 0.0);
+        EXPECT_NEAR(sol_zero_first.getData(1)[r], ref_sol.getData(1)[r], 1.0e-11);
+    }
+
+    // Reversed column ordering [nonzero, zero] with max_batch_width=1 and batched max_batch_width=2 match M2 reference.
+    Pack::multi_vector_type sol_nonzero_first(map, 2);
+    const auto stats_nonzero_first = solver.solve_multi_rhs_from_zero_with_statistics(
+        matrix, rhs_nonzero_first, sol_nonzero_first, chunked_opts);
+    ASSERT_TRUE(stats_nonzero_first.converged);
+    EXPECT_EQ(preconditioner_setup_count(solver), 3U);
+
+    chunked_opts.solver.max_batch_width = 2;
+    Pack::multi_vector_type sol_batched(map, 2);
+    const auto stats_batched = solver.solve_multi_rhs_from_zero_with_statistics(
+        matrix, rhs_zero_first, sol_batched, chunked_opts);
+    ASSERT_TRUE(stats_batched.converged);
+    EXPECT_EQ(preconditioner_setup_count(solver), 4U);
+
+    for (std::size_t r = 0; r < local_rows; ++r)
+    {
+        EXPECT_NEAR(sol_nonzero_first.getData(0)[r], ref_sol.getData(1)[r], 1.0e-11);
+        EXPECT_DOUBLE_EQ(sol_nonzero_first.getData(1)[r], 0.0);
+        EXPECT_DOUBLE_EQ(sol_batched.getData(0)[r], 0.0);
+        EXPECT_NEAR(sol_batched.getData(1)[r], ref_sol.getData(1)[r], 1.0e-11);
+    }
+}

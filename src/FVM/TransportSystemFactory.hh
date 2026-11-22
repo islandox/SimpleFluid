@@ -40,6 +40,9 @@ public:
     using WeightedScalarContext = WeightedScalarAssemblyContext<Pack, MeshType>;
     using TemperatureContext = TemperatureAssemblyContext<Pack, MeshType>;
     using MomentumContext = MomentumAssemblyContext<Pack, MeshType>;
+    using MultiColumnWeightedTerms = FVM::MultiColumnWeightedScalarTerms<Pack, MeshType>;
+    using MultiColumnWeightedBoundary = FVM::MultiColumnWeightedScalarBoundary<Pack, MeshType>;
+    using MultiColumnWeightedContext = FVM::MultiColumnWeightedScalarContext<Pack, MeshType>;
 
     SIMPLEFLUID_FVM_EXPORT static TransportSystem<Pack> assemble(
         ScalarTerms terms, ScalarBoundary boundary, ScalarOptions options, ScalarContext context = {});
@@ -49,6 +52,12 @@ public:
         VectorTerms terms, VelocityBoundary boundary, VectorOptions options, VectorContext context = {});
     SIMPLEFLUID_FVM_EXPORT static TransportSystem<Pack> assemble(WeightedScalarTerms terms,
         WeightedScalarBoundary boundary, WeightedScalarOptions options, WeightedScalarContext context = {});
+    SIMPLEFLUID_FVM_EXPORT static MultiColumnTransportSystem<Pack> assemble_multi_column(
+        MultiColumnWeightedTerms terms, MultiColumnWeightedBoundary boundary, WeightedScalarOptions options,
+        MultiColumnWeightedContext context = {});
+    SIMPLEFLUID_FVM_EXPORT static MultiColumnTransportSystem<Pack> refresh_multi_column_rhs(
+        MultiColumnWeightedTerms terms, MultiColumnWeightedBoundary boundary, WeightedScalarOptions options,
+        MultiColumnWeightedContext context);
     SIMPLEFLUID_FVM_EXPORT static TransportSystem<Pack> assemble(TemperatureTerms terms, TemperatureBoundary boundary,
         TemperatureOptions options, TemperatureContext context = {});
     SIMPLEFLUID_FVM_EXPORT static TransportSystem<Pack> refresh_temperature_rhs(
@@ -76,6 +85,18 @@ SIMPLEFLUID_FVM_EXPORT TransportSystem<DefaultTpetraTypes>
 TransportSystemFactory<DefaultTpetraTypes,
     Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, DefaultTpetraTypes>>::assemble(
     WeightedScalarTerms, WeightedScalarBoundary, WeightedScalarOptions, WeightedScalarContext);
+
+template<>
+SIMPLEFLUID_FVM_EXPORT MultiColumnTransportSystem<DefaultTpetraTypes>
+TransportSystemFactory<DefaultTpetraTypes,
+    Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, DefaultTpetraTypes>>::assemble_multi_column(
+    MultiColumnWeightedTerms, MultiColumnWeightedBoundary, WeightedScalarOptions, MultiColumnWeightedContext);
+
+template<>
+SIMPLEFLUID_FVM_EXPORT MultiColumnTransportSystem<DefaultTpetraTypes>
+TransportSystemFactory<DefaultTpetraTypes,
+    Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, DefaultTpetraTypes>>::refresh_multi_column_rhs(
+    MultiColumnWeightedTerms, MultiColumnWeightedBoundary, WeightedScalarOptions, MultiColumnWeightedContext);
 
 template<>
 SIMPLEFLUID_FVM_EXPORT TransportSystem<DefaultTpetraTypes>

@@ -59,6 +59,18 @@ TransportSystem<Pack> assemble_factory_weighted(
 }
 
 template<TpetraTypePack Pack, class MeshType>
+MultiColumnTransportSystem<Pack> assemble_factory_multi_column_weighted(
+    typename TransportSystemFactory<Pack, MeshType>::MultiColumnWeightedTerms terms,
+    typename TransportSystemFactory<Pack, MeshType>::MultiColumnWeightedBoundary boundary,
+    typename TransportSystemFactory<Pack, MeshType>::WeightedScalarOptions options,
+    typename TransportSystemFactory<Pack, MeshType>::MultiColumnWeightedContext context,
+    bool rhs_only)
+{
+    return assemble_stored_multi_column_weighted<Pack, MeshType>(
+        std::move(terms), std::move(boundary), options, std::move(context), rhs_only);
+}
+
+template<TpetraTypePack Pack, class MeshType>
 TransportSystem<Pack> assemble_factory_temperature(
     typename TransportSystemFactory<Pack, MeshType>::TemperatureTerms terms,
     typename TransportSystemFactory<Pack, MeshType>::TemperatureBoundary boundary,

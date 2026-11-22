@@ -193,6 +193,14 @@ simplefluid_add_mpi_test(
     LABELS "mpi;linear_solver;preconditioner"
     TIMEOUT 120)
 
+simplefluid_add_mpi_test(
+    NAME BelosMultiRhs_2procs
+    TARGET testBelosLinearSolver
+    PROCS 2
+    ARGS "--gtest_filter=BelosLinearSolverTest.GmresResetsBlockSizeAcrossConsecutiveSolvesAndRefinements:BelosLinearSolverTest.BatchWidthChunkingInvarianceAndExecutionModes:BelosLinearSolverTest.PerColumnTrueResidualRejectsTraceMaskingAndHonorsActiveMask:BelosLinearSolverTest.CgSolvesMultiRhsBatchedKrylovAndReportsExecutionMode:BelosLinearSolverTest.PerColumnPolicyTinyAcceptedColumnDoesNotBlockGmresRefinement:BelosLinearSolverTest.NonReusablePreconditionerRebuildsWhenLeadingChunkIsSkipped"
+    LABELS "mpi;linear_solver;multi_rhs"
+    TIMEOUT 120)
+
 target_sources(testBoussinesqSolver PRIVATE
   PressureGradientStencilTestSupport.cc)
 

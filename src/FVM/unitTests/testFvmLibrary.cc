@@ -50,14 +50,24 @@ template<class Factory> void flow_links()
     using Weighted =
         TransportSystem<Pack> (*)(typename Factory::WeightedScalarTerms, typename Factory::WeightedScalarBoundary,
             typename Factory::WeightedScalarOptions, typename Factory::WeightedScalarContext);
+    using MultiColumnAssemble = MultiColumnTransportSystem<Pack> (*)(typename Factory::MultiColumnWeightedTerms,
+        typename Factory::MultiColumnWeightedBoundary, typename Factory::WeightedScalarOptions,
+        typename Factory::MultiColumnWeightedContext);
+    using MultiColumnRefresh = MultiColumnTransportSystem<Pack> (*)(typename Factory::MultiColumnWeightedTerms,
+        typename Factory::MultiColumnWeightedBoundary, typename Factory::WeightedScalarOptions,
+        typename Factory::MultiColumnWeightedContext);
     using Vector = VectorTransportSystem<Pack> (*)(typename Factory::VectorTerms, typename Factory::VelocityBoundary,
         typename Factory::VectorOptions, typename Factory::VectorContext);
     using Momentum = VectorTransportSystem<Pack> (*)(typename Factory::MomentumTerms,
         typename Factory::MomentumBoundary, typename Factory::MomentumOptions, typename Factory::MomentumContext);
     Weighted volatile weighted = &Factory::assemble;
+    MultiColumnAssemble volatile mc_assemble = &Factory::assemble_multi_column;
+    MultiColumnRefresh volatile mc_refresh = &Factory::refresh_multi_column_rhs;
     Vector volatile vector = &Factory::assemble;
     Momentum volatile momentum = &Factory::assemble;
     EXPECT_TRUE(weighted != nullptr);
+    EXPECT_TRUE(mc_assemble != nullptr);
+    EXPECT_TRUE(mc_refresh != nullptr);
     EXPECT_TRUE(vector != nullptr);
     EXPECT_TRUE(momentum != nullptr);
 }

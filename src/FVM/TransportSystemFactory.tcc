@@ -44,6 +44,24 @@ TransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble(WeightedS
 }
 
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+MultiColumnTransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble_multi_column(
+    MultiColumnWeightedTerms terms, MultiColumnWeightedBoundary boundary, WeightedScalarOptions options,
+    MultiColumnWeightedContext context)
+{
+    return detail::assemble_factory_multi_column_weighted<Pack, MeshType>(
+        std::move(terms), std::move(boundary), options, std::move(context), false);
+}
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+MultiColumnTransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::refresh_multi_column_rhs(
+    MultiColumnWeightedTerms terms, MultiColumnWeightedBoundary boundary, WeightedScalarOptions options,
+    MultiColumnWeightedContext context)
+{
+    return detail::assemble_factory_multi_column_weighted<Pack, MeshType>(
+        std::move(terms), std::move(boundary), options, std::move(context), true);
+}
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 TransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble(
     TemperatureTerms terms, TemperatureBoundary boundary, TemperatureOptions options, TemperatureContext context)
 {

@@ -8,11 +8,16 @@
 #include "utils/export_helper.hh"
 #include "fields/FieldStored.hh"
 
+#include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_RCP.hpp>
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
+#include <limits>
 #include <optional>
 #include <utility>
+#include <vector>
 
 namespace SimpleFluid::FVM::detail
 {
@@ -55,6 +60,24 @@ template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct SIMPLEFLUID
     vec_type cell_source{};
     vec_type boundary_value{};
     VectorBoundaryCondition condition{};
+};
+
+/** Multi-column scalar RHS staging and globally consistent active-mask tracking. */
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct SIMPLEFLUID_LOCAL MultiColumnWeightedTransportRhs
+{
+    using scalar_type = typename Pack::scalar_type;
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using multi_vector_type = typename Pack::multi_vector_type;
+
+    void initialize(
+        const MeshType& mesh, std::size_t num_columns, Teuchos::RCP<multi_vector_type> cached_rhs = Teuchos::null);
+    inline void observe_value(std::size_t column, scalar_type value);
+    inline void set_cell_value(local_ordinal_type cell, std::size_t column, scalar_type value);
+    inline void add_cell_value(local_ordinal_type cell, std::size_t column, scalar_type value) const;
+    std::vector<bool> finalize_active_columns(const MeshType& mesh);
+
+    Teuchos::RCP<multi_vector_type> values;
+    std::vector<double> local_max_abs;
 };
 
 } // namespace SimpleFluid::FVM::detail

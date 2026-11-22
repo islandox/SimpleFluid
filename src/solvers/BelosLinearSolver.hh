@@ -27,6 +27,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace SimpleFluid
 {
@@ -155,6 +156,27 @@ inline LinearPreconditioner parse_linear_preconditioner(
         "Unknown linear preconditioner '" + std::string(value) + "'.");
 }
 
+/** @brief Execution strategy actually used for a linear solve. */
+enum class MultiRhsExecutionMode
+{
+    SingleRhs,
+    BatchedKrylov,
+    ColumnSerial
+};
+
+/** @brief Convert a multi-RHS execution mode to its stable diagnostic name. */
+inline std::string_view to_string(MultiRhsExecutionMode mode)
+{
+    switch (mode)
+    {
+        case MultiRhsExecutionMode::SingleRhs:     return "single_rhs";
+        case MultiRhsExecutionMode::BatchedKrylov: return "batched_krylov";
+        case MultiRhsExecutionMode::ColumnSerial:  return "column_serial";
+    }
+
+    throw std::invalid_argument("Unknown MultiRhsExecutionMode value.");
+}
+
 /**
  * @brief Optional explicit-residual scaling for one linear solve.
  *
@@ -166,6 +188,26 @@ struct LinearResidualScaling
     real_t rhs_norm_floor = {};
 };
 
+/** @brief Timing breakdown for one linear solve invocation. */
+struct LinearSolveTimings
+{
+    double preconditioner_setup_seconds = 0.0;
+    double solve_seconds = 0.0;
+    double residual_check_seconds = 0.0;
+    double pack_unpack_seconds = 0.0;
+};
+
+/** @brief Per-column convergence and residual metrics on the original (A, B). */
+struct ColumnLinearSolveStatistics
+{
+    bool converged = false;
+    bool skipped_zero = false;
+    real_t achieved_tolerance = {};
+    real_t true_residual_norm = {};
+    real_t rhs_norm = {};
+    int refinement_passes = 0;
+};
+
 /** @brief Convergence statistics for one linear solve. */
 struct LinearSolveStatistics
 {
@@ -174,6 +216,22 @@ struct LinearSolveStatistics
     int iterations = 0;
     real_t achieved_tolerance = {};
     real_t rhs_norm = {};
+    MultiRhsExecutionMode execution_mode = MultiRhsExecutionMode::SingleRhs;
+    int batch_krylov_iterations = 0;
+    int column_serial_iterations = 0;
+    std::size_t operator_apply_calls = 0;
+    std::size_t operator_column_applies = 0;
+    std::size_t max_batch_width = 0;
+    LinearSolveTimings timings = {};
+    std::vector<ColumnLinearSolveStatistics> column_statistics = {};
+};
+
+/** @brief Per-column residual acceptance override for multi-RHS solves. */
+struct ColumnResidualPolicy
+{
+    std::optional<real_t> tolerance = {};
+    std::optional<real_t> absolute_tolerance = {};
+    std::optional<real_t> rhs_norm_floor = {};
 };
 
 /** @brief Aggregate convergence statistics across several linear solves. */
@@ -232,6 +290,30 @@ struct LinearSolverOptions
      * object always triggers a rebuild.
      */
     bool reuse_preconditioner = false;
+    /**
+     * @brief Maximum active RHS columns solved together per Krylov batch.
+     *
+     * Zero (default) solves all active columns in a single batch for batched
+     * Krylov backends (PseudoBlockGmres / PseudoBlockCG). Positive values chunk
+     * active columns into contiguous batches of at most @p max_batch_width.
+     * BiCGStab always executes column-serially and reports ColumnSerial.
+     */
+    int max_batch_width = 0;
+};
+
+/** @brief Options for multi-RHS solves with per-column policies and active masks. */
+struct MultiRhsSolveOptions
+{
+    LinearSolverOptions solver = {};
+    LinearResidualScaling default_residual_scaling = {};
+    std::vector<ColumnResidualPolicy> column_policies = {};
+    /**
+     * @brief Globally consistent active-column mask (empty = all columns active).
+     *
+     * Inactive columns are collectively skipped without entering Krylov and
+     * their solution columns are explicitly zeroed.
+     */
+    std::vector<bool> active_columns = {};
 };
 
 namespace detail
@@ -346,6 +428,35 @@ public:
             preconditioning_matrix);
     }
 
+    /**
+     * @brief Solve a multi-RHS system with optional per-column policies,
+     *        active-column masking, and batch-width chunking.
+     */
+    LinearSolveStatistics solve_multi_rhs_with_statistics(
+        const Teuchos::RCP<const operator_type>& matrix,
+        const multi_vector_type& rhs,
+        multi_vector_type& solution,
+        const MultiRhsSolveOptions& options = {},
+        const Teuchos::RCP<const matrix_type>& preconditioning_matrix = Teuchos::null)
+    {
+        return solve_multi_rhs_impl(
+            matrix, rhs, solution, options, false, preconditioning_matrix);
+    }
+
+    /**
+     * @brief Solve a multi-RHS system from an explicit zero initial guess.
+     */
+    LinearSolveStatistics solve_multi_rhs_from_zero_with_statistics(
+        const Teuchos::RCP<const operator_type>& matrix,
+        const multi_vector_type& rhs,
+        multi_vector_type& solution,
+        const MultiRhsSolveOptions& options = {},
+        const Teuchos::RCP<const matrix_type>& preconditioning_matrix = Teuchos::null)
+    {
+        return solve_multi_rhs_impl(
+            matrix, rhs, solution, options, true, preconditioning_matrix);
+    }
+
     bool solve(
         const Teuchos::RCP<const operator_type>& matrix,
         const vector_type& rhs,
@@ -386,6 +497,24 @@ private:
         bool zero_initial_guess,
         const Teuchos::RCP<const matrix_type>& preconditioning_matrix);
 
+    LinearSolveStatistics solve_multi_rhs_impl(
+        const Teuchos::RCP<const operator_type>& matrix,
+        const multi_vector_type& rhs,
+        multi_vector_type& solution,
+        const MultiRhsSolveOptions& options,
+        bool zero_initial_guess,
+        const Teuchos::RCP<const matrix_type>& preconditioning_matrix);
+
+    LinearSolveStatistics solve_contiguous_batch(
+        const Teuchos::RCP<const operator_type>& matrix,
+        const multi_vector_type& rhs,
+        multi_vector_type& solution,
+        const LinearSolverOptions& options,
+        LinearResidualScaling residual_scaling,
+        const std::vector<ColumnResidualPolicy>& column_policies,
+        bool zero_initial_guess,
+        const Teuchos::RCP<const matrix_type>& preconditioning_matrix);
+
     /**
      * @brief Solve BiCGStab columns in owned contiguous storage.
      *
@@ -402,6 +531,8 @@ private:
         const multi_vector_type& rhs, multi_vector_type& solution,
         const LinearSolverOptions& options,
         LinearResidualScaling residual_scaling,
+        const std::vector<ColumnResidualPolicy>& column_policies,
+        const std::vector<std::size_t>& active_indices,
         bool zero_initial_guess,
         const Teuchos::RCP<const matrix_type>& preconditioning_matrix);
 
@@ -431,7 +562,7 @@ private:
     bool has_compatible_maps(
         const Teuchos::RCP<const operator_type>& matrix) const;
 
-    void configure(const LinearSolverOptions& options);
+    void configure(const LinearSolverOptions& options, std::size_t batch_columns);
 
     void invalidate_preconditioner();
 
@@ -499,6 +630,7 @@ private:
 
     friend struct detail::BelosLinearSolverTestAccess<Pack>;
 
+    Teuchos::RCP<const operator_type> d_raw_operator;
     Teuchos::RCP<problem_type> d_problem;
     Teuchos::RCP<Teuchos::ParameterList> d_parameters;
     Teuchos::RCP<solver_type> d_solver;

@@ -61,4 +61,34 @@ inline void BasicVectorTransportRhs<Pack, MeshType>::add_neumann(
     }
 }
 
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+inline void MultiColumnWeightedTransportRhs<Pack, MeshType>::observe_value(std::size_t column, scalar_type value)
+{
+    if (!std::isfinite(value))
+    {
+        local_max_abs[column] = std::numeric_limits<double>::infinity();
+        return;
+    }
+    const double abs_val = static_cast<double>(std::abs(value));
+    if (std::isfinite(local_max_abs[column]) && abs_val > local_max_abs[column])
+    {
+        local_max_abs[column] = abs_val;
+    }
+}
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+inline void MultiColumnWeightedTransportRhs<Pack, MeshType>::set_cell_value(
+    local_ordinal_type cell, std::size_t column, scalar_type value)
+{
+    values->replaceLocalValue(cell, column, value);
+    observe_value(column, value);
+}
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+inline void MultiColumnWeightedTransportRhs<Pack, MeshType>::add_cell_value(
+    local_ordinal_type cell, std::size_t column, scalar_type value) const
+{
+    values->sumIntoLocalValue(cell, column, value);
+}
+
 } // namespace SimpleFluid::FVM::detail

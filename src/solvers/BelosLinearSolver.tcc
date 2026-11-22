@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <sstream>
@@ -28,6 +29,76 @@
 
 namespace SimpleFluid
 {
+
+namespace
+{
+
+template<TpetraTypePack Pack>
+class CountingLinearOperator final : public Pack::operator_type
+{
+public:
+    using scalar_type = typename Pack::scalar_type;
+    using multi_vector_type = typename Pack::multi_vector_type;
+    using operator_type = typename Pack::operator_type;
+    using map_type = typename Pack::map_type;
+
+    explicit CountingLinearOperator(Teuchos::RCP<const operator_type> target)
+        : d_target(std::move(target))
+    {
+    }
+
+    void set_target(Teuchos::RCP<const operator_type> target)
+    {
+        d_target = std::move(target);
+    }
+
+    Teuchos::RCP<const map_type> getDomainMap() const override
+    {
+        return d_target->getDomainMap();
+    }
+
+    Teuchos::RCP<const map_type> getRangeMap() const override
+    {
+        return d_target->getRangeMap();
+    }
+
+    bool hasTransposeApply() const override
+    {
+        return d_target->hasTransposeApply();
+    }
+
+    void apply(
+        const multi_vector_type& input,
+        multi_vector_type& output,
+        Teuchos::ETransp mode = Teuchos::NO_TRANS,
+        scalar_type alpha = Teuchos::ScalarTraits<scalar_type>::one(),
+        scalar_type beta = Teuchos::ScalarTraits<scalar_type>::zero()) const override
+    {
+        ++d_calls;
+        const auto width = static_cast<std::size_t>(input.getNumVectors());
+        d_column_applies += width;
+        d_max_batch_width = std::max(d_max_batch_width, width);
+        d_target->apply(input, output, mode, alpha, beta);
+    }
+
+    std::size_t calls() const noexcept { return d_calls; }
+    std::size_t column_applies() const noexcept { return d_column_applies; }
+    std::size_t max_batch_width() const noexcept { return d_max_batch_width; }
+
+private:
+    Teuchos::RCP<const operator_type> d_target;
+    mutable std::size_t d_calls = 0;
+    mutable std::size_t d_column_applies = 0;
+    mutable std::size_t d_max_batch_width = 0;
+};
+
+double elapsed_seconds(const std::chrono::steady_clock::time_point start) noexcept
+{
+    return std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - start).count();
+}
+
+} // namespace
 
 /**
 * @brief  Solve a linear system with the configured Belos solver and preconditioner.
@@ -52,15 +123,326 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_impl(
         bool zero_initial_guess,
         const Teuchos::RCP<const matrix_type>& preconditioning_matrix)
 {
-    validate_options(options);
-    validate_residual_scaling(residual_scaling);
+    return solve_multi_rhs_impl(
+        matrix,
+        rhs,
+        solution,
+        MultiRhsSolveOptions{options, residual_scaling, {}, {}},
+        zero_initial_guess,
+        preconditioning_matrix);
+}
+
+template <TpetraTypePack Pack>
+LinearSolveStatistics BelosLinearSolver<Pack>::solve_multi_rhs_impl(
+        const Teuchos::RCP<const operator_type>& matrix,
+        const multi_vector_type& rhs,
+        multi_vector_type& solution,
+        const MultiRhsSolveOptions& options,
+        bool zero_initial_guess,
+        const Teuchos::RCP<const matrix_type>& preconditioning_matrix)
+{
+    validate_options(options.solver);
+    validate_residual_scaling(options.default_residual_scaling);
+    if (matrix.is_null())
+    {
+        throw std::invalid_argument(
+            "BelosLinearSolver requires a non-null operator.");
+    }
+    const std::size_t num_cols = rhs.getNumVectors();
+    if (num_cols == 0)
+    {
+        throw std::invalid_argument(
+            "BelosLinearSolver requires at least one RHS column.");
+    }
+    if (num_cols != solution.getNumVectors()
+        || !matrix->getDomainMap()->isSameAs(*solution.getMap())
+        || !matrix->getRangeMap()->isSameAs(*rhs.getMap()))
+    {
+        throw std::invalid_argument(
+            "BelosLinearSolver requires matching operator maps and RHS/solution vector counts.");
+    }
+    if (!preconditioning_matrix.is_null()
+        && options.solver.preconditioner != LinearPreconditioner::None
+        && (!preconditioning_matrix->getDomainMap()->isSameAs(*matrix->getDomainMap())
+            || !preconditioning_matrix->getRangeMap()->isSameAs(*matrix->getRangeMap())
+            || !preconditioning_matrix->getDomainMap()->isSameAs(*solution.getMap())
+            || !preconditioning_matrix->getRangeMap()->isSameAs(*rhs.getMap())))
+    {
+        throw std::invalid_argument(
+            "BelosLinearSolver requires matching operator, preconditioning matrix, and vector maps.");
+    }
+    if (!options.column_policies.empty() && options.column_policies.size() != num_cols)
+    {
+        throw std::invalid_argument(
+            "BelosLinearSolver requires column_policies to be empty or match RHS column count.");
+    }
+    for (const auto& policy : options.column_policies)
+    {
+        if (policy.tolerance.has_value()
+            && (!std::isfinite(*policy.tolerance) || *policy.tolerance <= real_t{}))
+        {
+            throw std::invalid_argument(
+                "BelosLinearSolver requires positive finite per-column tolerance.");
+        }
+        if (policy.absolute_tolerance.has_value()
+            && (!std::isfinite(*policy.absolute_tolerance) || *policy.absolute_tolerance < real_t{}))
+        {
+            throw std::invalid_argument(
+                "BelosLinearSolver requires non-negative finite per-column absolute tolerance.");
+        }
+        if (policy.rhs_norm_floor.has_value()
+            && (!std::isfinite(*policy.rhs_norm_floor) || *policy.rhs_norm_floor < real_t{}))
+        {
+            throw std::invalid_argument(
+                "BelosLinearSolver requires non-negative finite per-column RHS norm floor.");
+        }
+    }
+
+    const auto comm = rhs.getMap()->getComm();
+    const int has_mask = options.active_columns.empty() ? 0 : 1;
+    std::vector<int> local_mask_state(num_cols + 2, 0);
+    local_mask_state[0] = has_mask;
+    local_mask_state[1] = static_cast<int>(options.active_columns.size());
+    if (has_mask != 0)
+    {
+        if (options.active_columns.size() != num_cols)
+        {
+            local_mask_state[0] = 2;
+        }
+        else
+        {
+            for (std::size_t c = 0; c < num_cols; ++c)
+            {
+                local_mask_state[2 + c] = options.active_columns[c] ? 1 : 0;
+            }
+        }
+    }
+    if (comm->getSize() > 1)
+    {
+        std::vector<int> min_state(local_mask_state.size(), 0);
+        std::vector<int> max_state(local_mask_state.size(), 0);
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN,
+            static_cast<int>(local_mask_state.size()), local_mask_state.data(), min_state.data());
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX,
+            static_cast<int>(local_mask_state.size()), local_mask_state.data(), max_state.data());
+        if (max_state[0] == 2 || min_state != max_state)
+        {
+            throw std::invalid_argument(
+                "BelosLinearSolver requires every rank to supply the exact same active_columns mask.");
+        }
+    }
+    else if (local_mask_state[0] == 2)
+    {
+        throw std::invalid_argument(
+            "BelosLinearSolver requires active_columns to be empty or match RHS column count.");
+    }
+
+    std::vector<std::size_t> active_indices;
+    active_indices.reserve(num_cols);
+    std::vector<ColumnLinearSolveStatistics> all_column_stats(num_cols);
+    for (std::size_t c = 0; c < num_cols; ++c)
+    {
+        const bool active = options.active_columns.empty() || options.active_columns[c];
+        if (active)
+        {
+            active_indices.push_back(c);
+        }
+        else
+        {
+            auto sol_col = solution.getDataNonConst(c);
+            std::fill(sol_col.begin(), sol_col.end(), scalar_type{});
+            all_column_stats[c] = ColumnLinearSolveStatistics{
+                true, true, real_t{}, real_t{}, real_t{}, 0};
+        }
+    }
+
+    if (!options.solver.reuse_preconditioner)
+    {
+        invalidate_preconditioner();
+    }
+
+    if (active_indices.empty())
+    {
+        LinearSolveStatistics skipped;
+        skipped.converged = true;
+        skipped.execution_mode =
+            (options.solver.backend == LinearSolverBackend::BiCGStab && num_cols > 1)
+                ? MultiRhsExecutionMode::ColumnSerial
+                : MultiRhsExecutionMode::SingleRhs;
+        skipped.column_statistics = std::move(all_column_stats);
+        return skipped;
+    }
+
+    if (options.solver.backend == LinearSolverBackend::BiCGStab && num_cols > 1)
+    {
+        return solve_bicgstab_columns(
+            matrix, rhs, solution, options.solver, options.default_residual_scaling,
+            options.column_policies, active_indices, zero_initial_guess,
+            preconditioning_matrix);
+    }
+
+    const std::size_t active_count = active_indices.size();
+    const std::size_t chunk_width = options.solver.max_batch_width > 0
+        ? std::min(active_count, static_cast<std::size_t>(options.solver.max_batch_width))
+        : active_count;
+
+    if (active_count == num_cols && chunk_width == num_cols)
+    {
+        auto stats = solve_contiguous_batch(
+            matrix, rhs, solution, options.solver, options.default_residual_scaling,
+            options.column_policies, zero_initial_guess, preconditioning_matrix);
+        if (num_cols == 1)
+        {
+            stats.execution_mode = MultiRhsExecutionMode::SingleRhs;
+        }
+        else
+        {
+            stats.execution_mode = MultiRhsExecutionMode::BatchedKrylov;
+            stats.batch_krylov_iterations = stats.iterations;
+            stats.column_serial_iterations = 0;
+        }
+        return stats;
+    }
+
+    LinearSolveStatistics combined;
+    combined.converged = true;
+    combined.execution_mode = num_cols == 1
+        ? MultiRhsExecutionMode::SingleRhs
+        : (chunk_width > 1 ? MultiRhsExecutionMode::BatchedKrylov
+                           : MultiRhsExecutionMode::ColumnSerial);
+
+    auto chunk_options = options.solver;
+    Teuchos::RCP<multi_vector_type> rhs_chunk;
+    Teuchos::RCP<multi_vector_type> sol_chunk;
+    for (std::size_t offset = 0; offset < active_count; offset += chunk_width)
+    {
+        const std::size_t this_width = std::min(chunk_width, active_count - offset);
+        const auto pack_start = std::chrono::steady_clock::now();
+        if (rhs_chunk.is_null() || rhs_chunk->getNumVectors() != this_width)
+        {
+            rhs_chunk = Teuchos::rcp(new multi_vector_type(rhs.getMap(), this_width, false));
+            sol_chunk = Teuchos::rcp(new multi_vector_type(solution.getMap(), this_width, false));
+        }
+        std::vector<ColumnResidualPolicy> chunk_policies;
+        if (!options.column_policies.empty())
+        {
+            chunk_policies.reserve(this_width);
+        }
+        for (std::size_t local_col = 0; local_col < this_width; ++local_col)
+        {
+            const std::size_t global_col = active_indices[offset + local_col];
+            const auto rhs_src = rhs.getData(global_col);
+            auto rhs_dst = rhs_chunk->getDataNonConst(local_col);
+            std::copy(rhs_src.begin(), rhs_src.end(), rhs_dst.begin());
+            if (!zero_initial_guess)
+            {
+                const auto sol_src = solution.getData(global_col);
+                auto sol_dst = sol_chunk->getDataNonConst(local_col);
+                std::copy(sol_src.begin(), sol_src.end(), sol_dst.begin());
+            }
+            if (!options.column_policies.empty())
+            {
+                chunk_policies.push_back(options.column_policies[global_col]);
+            }
+        }
+        combined.timings.pack_unpack_seconds += elapsed_seconds(pack_start);
+
+        const auto chunk_stats = solve_contiguous_batch(
+            matrix, *rhs_chunk, *sol_chunk, chunk_options,
+            options.default_residual_scaling, chunk_policies,
+            zero_initial_guess, preconditioning_matrix);
+
+        const auto unpack_start = std::chrono::steady_clock::now();
+        for (std::size_t local_col = 0; local_col < this_width; ++local_col)
+        {
+            const std::size_t global_col = active_indices[offset + local_col];
+            const auto sol_src = sol_chunk->getData(local_col);
+            auto sol_dst = solution.getDataNonConst(global_col);
+            std::copy(sol_src.begin(), sol_src.end(), sol_dst.begin());
+            if (local_col < chunk_stats.column_statistics.size())
+            {
+                all_column_stats[global_col] = chunk_stats.column_statistics[local_col];
+            }
+        }
+        combined.timings.pack_unpack_seconds += elapsed_seconds(unpack_start);
+
+        combined.converged = combined.converged && chunk_stats.converged;
+        combined.iterations += chunk_stats.iterations;
+        if (combined.execution_mode == MultiRhsExecutionMode::BatchedKrylov)
+        {
+            combined.batch_krylov_iterations += chunk_stats.iterations;
+        }
+        else if (combined.execution_mode == MultiRhsExecutionMode::ColumnSerial)
+        {
+            combined.column_serial_iterations += chunk_stats.iterations;
+        }
+        combined.achieved_tolerance = std::max(
+            combined.achieved_tolerance, chunk_stats.achieved_tolerance);
+        combined.rhs_norm = std::max(combined.rhs_norm, chunk_stats.rhs_norm);
+        combined.operator_apply_calls += chunk_stats.operator_apply_calls;
+        combined.operator_column_applies += chunk_stats.operator_column_applies;
+        combined.max_batch_width = std::max(
+            combined.max_batch_width, chunk_stats.max_batch_width);
+        combined.timings.preconditioner_setup_seconds +=
+            chunk_stats.timings.preconditioner_setup_seconds;
+        combined.timings.solve_seconds += chunk_stats.timings.solve_seconds;
+        combined.timings.residual_check_seconds +=
+            chunk_stats.timings.residual_check_seconds;
+        if (options.solver.preconditioner == LinearPreconditioner::None
+            || !d_preconditioner.is_null())
+        {
+            chunk_options.reuse_preconditioner = true;
+        }
+    }
+
+    combined.column_statistics = std::move(all_column_stats);
+    return combined;
+}
+
+template <TpetraTypePack Pack>
+LinearSolveStatistics BelosLinearSolver<Pack>::solve_contiguous_batch(
+        const Teuchos::RCP<const operator_type>& matrix,
+        const multi_vector_type& rhs,
+        multi_vector_type& solution,
+        const LinearSolverOptions& options,
+        LinearResidualScaling residual_scaling,
+        const std::vector<ColumnResidualPolicy>& column_policies,
+        bool zero_initial_guess,
+        const Teuchos::RCP<const matrix_type>& preconditioning_matrix)
+{
+    const std::size_t batch_cols = rhs.getNumVectors();
+    auto effective_tol = [&](std::size_t col) -> real_t
+    {
+        return (!column_policies.empty() && column_policies[col].tolerance.has_value())
+            ? *column_policies[col].tolerance
+            : options.tolerance;
+    };
+    auto effective_abs_tol = [&](std::size_t col) -> magnitude_type
+    {
+        return static_cast<magnitude_type>(
+            (!column_policies.empty() && column_policies[col].absolute_tolerance.has_value())
+                ? *column_policies[col].absolute_tolerance
+                : options.absolute_tolerance);
+    };
+    auto effective_floor = [&](std::size_t col) -> magnitude_type
+    {
+        return static_cast<magnitude_type>(
+            (!column_policies.empty() && column_policies[col].rhs_norm_floor.has_value())
+                ? *column_policies[col].rhs_norm_floor
+                : residual_scaling.rhs_norm_floor);
+    };
+
+    real_t manager_tolerance = options.tolerance;
+    for (std::size_t col = 0; col < batch_cols; ++col)
+    {
+        manager_tolerance = std::min(manager_tolerance, effective_tol(col));
+    }
+
     // Combined per-column acceptance: every RHS column must independently
-    // satisfy the absolute bound or the RHS-relative criterion, and any
-    // nonfinite column norm rejects the solve. std::max never propagates
-    // NaN, so finiteness is checked explicitly before each comparison.
+    // satisfy its own absolute bound or RHS-relative criterion on (A_g, B_g),
+    // and any nonfinite column norm rejects the solve.
     const auto columns_accept_combined =
-        [&options, &residual_scaling](
-            const Teuchos::ArrayView<const magnitude_type> rhs_norms,
+        [&](const Teuchos::ArrayView<const magnitude_type> rhs_norms,
             const Teuchos::ArrayView<const magnitude_type> residual_norms)
     {
         bool converged = true;
@@ -72,78 +454,84 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_impl(
                 return false;
             }
             const auto bound = std::max(
-                static_cast<magnitude_type>(options.absolute_tolerance),
-                static_cast<magnitude_type>(options.tolerance)
-                    * std::max(rhs_norms[column],
-                        static_cast<magnitude_type>(
-                            residual_scaling.rhs_norm_floor)));
+                effective_abs_tol(column),
+                static_cast<magnitude_type>(effective_tol(column))
+                    * std::max(rhs_norms[column], effective_floor(column)));
             converged = converged && residual_norms[column] <= bound;
         }
         return converged;
     };
-    if (options.backend == LinearSolverBackend::BiCGStab
-        && rhs.getNumVectors() > 1)
-    {
-        return solve_bicgstab_columns(
-            matrix, rhs, solution, options, residual_scaling, zero_initial_guess,
-            preconditioning_matrix);
-    }
-    if (matrix.is_null())
-    {
-        throw std::invalid_argument(
-            "BelosLinearSolver requires a non-null operator.");
-    }
-    if (!preconditioning_matrix.is_null()
-        && options.preconditioner != LinearPreconditioner::None
-        && (!preconditioning_matrix->getDomainMap()->isSameAs(*matrix->getDomainMap())
-            || !preconditioning_matrix->getRangeMap()->isSameAs(*matrix->getRangeMap())
-            || !preconditioning_matrix->getDomainMap()->isSameAs(*solution.getMap())
-            || !preconditioning_matrix->getRangeMap()->isSameAs(*rhs.getMap())))
-    {
-        throw std::invalid_argument(
-            "BelosLinearSolver requires matching operator, preconditioning matrix, and vector maps.");
-    }
+
+    auto counting_op = Teuchos::rcp(new CountingLinearOperator<Pack>(matrix));
+    auto counting_op_base = Teuchos::rcp_implicit_cast<const operator_type>(counting_op);
+    LinearSolveTimings timings;
+
     if (zero_initial_guess)
     {
-        if (rhs.getNumVectors() != solution.getNumVectors()
-            || !matrix->getDomainMap()->isSameAs(*solution.getMap())
-            || !matrix->getRangeMap()->isSameAs(*rhs.getMap()))
-        {
-            throw std::invalid_argument(
-                "BelosLinearSolver requires matching operator maps and RHS/solution vector counts.");
-        }
         solution.putScalar(scalar_type{});
         residual_workspace(rhs).update(scalar_type{1}, rhs, scalar_type{});
-        // Safe zero-RHS short-circuit: the zero-guess contract is the
-        // incremental/correction form, so returning the exact zero solution
-        // is the correct correction and never discards a warm field. The
-        // global norm agrees on every rank, keeping the exit collective
-        // without entering Krylov.
-        if (options.absolute_tolerance > magnitude_type{})
+        bool all_have_abs_tol = true;
+        for (std::size_t col = 0; col < batch_cols; ++col)
         {
-            Teuchos::Array<magnitude_type> zero_rhs_norms(rhs.getNumVectors());
-            rhs.norm2(zero_rhs_norms());
-            // Never rely on std::max to propagate NaN: a nonfinite RHS
-            // column must keep the solve out of the zero shortcut.
-            magnitude_type zero_rhs_norm{};
-            bool zero_rhs_finite = true;
-            for (std::size_t column = 0; column < rhs.getNumVectors(); ++column)
+            if (effective_abs_tol(col) <= magnitude_type{})
             {
-                if (!std::isfinite(zero_rhs_norms[column]))
+                all_have_abs_tol = false;
+                break;
+            }
+        }
+        if (all_have_abs_tol)
+        {
+            const auto check_start = std::chrono::steady_clock::now();
+            Teuchos::Array<magnitude_type> zero_rhs_norms(batch_cols);
+            rhs.norm2(zero_rhs_norms());
+            magnitude_type zero_rhs_norm{};
+            bool all_zero_accepted = true;
+            for (std::size_t column = 0; column < batch_cols; ++column)
+            {
+                if (!std::isfinite(zero_rhs_norms[column])
+                    || zero_rhs_norms[column] > effective_abs_tol(column))
                 {
-                    zero_rhs_finite = false;
+                    all_zero_accepted = false;
                     break;
                 }
                 zero_rhs_norm = std::max(zero_rhs_norm, zero_rhs_norms[column]);
             }
-            if (zero_rhs_finite && zero_rhs_norm <= options.absolute_tolerance)
-                return {true, 0, scalar_type{}, static_cast<real_t>(zero_rhs_norm)};
+            timings.residual_check_seconds += elapsed_seconds(check_start);
+            if (all_zero_accepted)
+            {
+                LinearSolveStatistics short_circuit;
+                short_circuit.converged = true;
+                short_circuit.iterations = 0;
+                short_circuit.achieved_tolerance = real_t{};
+                short_circuit.rhs_norm = static_cast<real_t>(zero_rhs_norm);
+                short_circuit.timings = timings;
+                short_circuit.column_statistics.reserve(batch_cols);
+                for (std::size_t col = 0; col < batch_cols; ++col)
+                {
+                    short_circuit.column_statistics.push_back(ColumnLinearSolveStatistics{
+                        true,
+                        true,
+                        real_t{},
+                        static_cast<real_t>(zero_rhs_norms[col]),
+                        static_cast<real_t>(zero_rhs_norms[col]),
+                        0});
+                }
+                return short_circuit;
+            }
         }
     }
     else
-        prepare_initial_guess(matrix, rhs, solution);
+    {
+        const auto prep_start = std::chrono::steady_clock::now();
+        prepare_initial_guess(counting_op_base, rhs, solution);
+        timings.residual_check_seconds += elapsed_seconds(prep_start);
+    }
+
     auto x = Teuchos::rcpFromRef(solution);
     auto b = Teuchos::rcpFromRef(rhs);
+
+    auto belos_options = options;
+    belos_options.tolerance = manager_tolerance;
 
     const bool rebuild_solver =
         !has_compatible_maps(matrix)
@@ -151,17 +539,16 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_impl(
         || *d_backend != options.backend;
     if (rebuild_solver)
     {
-        // A newly created Belos problem must never inherit a hierarchy
-        // prepared for the previous problem, even if an operator address
-        // were to be recycled.
         invalidate_preconditioner();
         d_solver = Teuchos::null;
         d_backend.reset();
+        d_raw_operator = matrix;
         d_problem = Teuchos::rcp(
-            new problem_type(matrix, x, b));
-        d_parameters = Teuchos::rcp(new Teuchos::ParameterList());
-        configure(options);
+            new problem_type(counting_op_base, x, b));
+        configure(belos_options, batch_cols);
+        const auto prec_start = std::chrono::steady_clock::now();
         configure_preconditioner(matrix, options, preconditioning_matrix);
+        timings.preconditioner_setup_seconds += elapsed_seconds(prec_start);
         if (!set_problem_with_prepared_residual())
         {
             return {};
@@ -171,37 +558,148 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_impl(
     }
     else
     {
-        d_problem->setOperator(matrix);
+        d_raw_operator = matrix;
+        d_problem->setOperator(counting_op_base);
         d_problem->setLHS(x);
         d_problem->setRHS(b);
-        configure(options);
+        configure(belos_options, batch_cols);
         d_solver->setParameters(d_parameters);
+        const auto prec_start = std::chrono::steady_clock::now();
         configure_preconditioner(matrix, options, preconditioning_matrix);
+        timings.preconditioner_setup_seconds += elapsed_seconds(prec_start);
         if (!set_problem_with_prepared_residual())
         {
             return {};
         }
     }
 
+    const auto solve_start = std::chrono::steady_clock::now();
     auto return_status = d_solver->solve();
+    timings.solve_seconds += elapsed_seconds(solve_start);
     int iterations = d_solver->getNumIters();
     real_t rhs_norm{};
     bool accurate_residual = false;
-    // The ceiling identifies a floating-point residual gap, not an
-    // acceptance tolerance. Dense pressure systems can exceed a small
-    // multiple of a 1e-14 target while remaining near roundoff.
-    const auto gmres_gap_ceiling = std::max(real_t{8} * options.tolerance,
-        static_cast<real_t>(std::sqrt(std::numeric_limits<magnitude_type>::epsilon())));
-    const auto checked_residual = [&] {
-        if (accurate_residual && accurate_crs_residual(matrix, rhs, solution))
-            return residual_relative_norm(rhs, residual_scaling, &rhs_norm);
-        const auto standard = true_relative_residual(matrix, rhs, solution, residual_scaling, &rhs_norm);
-        if (options.backend == LinearSolverBackend::Gmres
-            && std::isfinite(standard) && standard > options.tolerance
-            && standard <= gmres_gap_ceiling && accurate_crs_residual(matrix, rhs, solution))
+    const auto evaluate_column_norms = [&](
+        Teuchos::Array<magnitude_type>& b_norms,
+        Teuchos::Array<magnitude_type>& r_norms,
+        real_t* out_max_rhs,
+        real_t* out_max_rel,
+        real_t* out_unaccepted_ratio,
+        bool* out_unaccepted_within_gap,
+        bool* out_all_accepted)
+    {
+        rhs.norm2(b_norms());
+        residual_workspace(rhs).norm2(r_norms());
+        magnitude_type max_b{};
+        magnitude_type max_rel{};
+        magnitude_type worst_ratio{};
+        bool all_accepted = true;
+        bool within_gap = true;
+        bool any_nonfinite = false;
+        for (std::size_t col = 0; col < batch_cols; ++col)
         {
-            accurate_residual = true; // use the same operator evaluation for later defects/checks
-            const auto checked = residual_relative_norm(rhs, residual_scaling, &rhs_norm);
+            if (!std::isfinite(b_norms[col]) || !std::isfinite(r_norms[col]))
+            {
+                any_nonfinite = true;
+                all_accepted = false;
+                within_gap = false;
+                continue;
+            }
+            max_b = std::max(max_b, b_norms[col]);
+            const auto denom = std::max(b_norms[col], effective_floor(col));
+            const auto rel = denom > magnitude_type{} ? r_norms[col] / denom : r_norms[col];
+            if (!std::isfinite(rel))
+            {
+                any_nonfinite = true;
+                all_accepted = false;
+                within_gap = false;
+                continue;
+            }
+            max_rel = std::max(max_rel, rel);
+            const auto bound = std::max(
+                effective_abs_tol(col),
+                static_cast<magnitude_type>(effective_tol(col)) * denom);
+            const bool accepted = r_norms[col] <= bound;
+            if (!accepted)
+            {
+                all_accepted = false;
+                const auto col_tol = static_cast<magnitude_type>(effective_tol(col));
+                const auto ratio = rel / col_tol;
+                worst_ratio = std::max(worst_ratio, ratio);
+                const auto col_gap = options.backend == LinearSolverBackend::Gmres
+                    ? std::max(magnitude_type{8} * col_tol,
+                        static_cast<magnitude_type>(
+                            std::sqrt(std::numeric_limits<magnitude_type>::epsilon())))
+                    : magnitude_type{2} * col_tol;
+                if (rel > col_gap)
+                {
+                    within_gap = false;
+                }
+            }
+        }
+        if (out_max_rhs != nullptr)
+        {
+            *out_max_rhs = any_nonfinite
+                ? std::numeric_limits<real_t>::infinity()
+                : static_cast<real_t>(max_b);
+        }
+        if (out_max_rel != nullptr)
+        {
+            *out_max_rel = any_nonfinite
+                ? std::numeric_limits<real_t>::infinity()
+                : static_cast<real_t>(max_rel);
+        }
+        if (out_unaccepted_ratio != nullptr)
+        {
+            *out_unaccepted_ratio = any_nonfinite
+                ? std::numeric_limits<real_t>::infinity()
+                : static_cast<real_t>(worst_ratio);
+        }
+        if (out_unaccepted_within_gap != nullptr)
+        {
+            *out_unaccepted_within_gap = !any_nonfinite && within_gap;
+        }
+        if (out_all_accepted != nullptr)
+        {
+            *out_all_accepted = !any_nonfinite && all_accepted;
+        }
+    };
+
+    Teuchos::Array<magnitude_type> precheck_rhs_norms(batch_cols);
+    Teuchos::Array<magnitude_type> precheck_residual_norms(batch_cols);
+    real_t unaccepted_ratio{};
+    bool unaccepted_within_gap = false;
+    bool per_column_accepted = false;
+
+    const auto checked_residual = [&] {
+        const auto check_start = std::chrono::steady_clock::now();
+        real_t max_rel{};
+        if (accurate_residual && accurate_crs_residual(matrix, rhs, solution))
+        {
+            evaluate_column_norms(
+                precheck_rhs_norms, precheck_residual_norms,
+                &rhs_norm, &max_rel, &unaccepted_ratio,
+                &unaccepted_within_gap, &per_column_accepted);
+            timings.residual_check_seconds += elapsed_seconds(check_start);
+            return max_rel;
+        }
+        (void)true_relative_residual(
+            counting_op_base, rhs, solution, residual_scaling, &rhs_norm);
+        evaluate_column_norms(
+            precheck_rhs_norms, precheck_residual_norms,
+            &rhs_norm, &max_rel, &unaccepted_ratio,
+            &unaccepted_within_gap, &per_column_accepted);
+        if (options.backend == LinearSolverBackend::Gmres
+            && !per_column_accepted && unaccepted_within_gap
+            && unaccepted_ratio > real_t{1}
+            && accurate_crs_residual(matrix, rhs, solution))
+        {
+            accurate_residual = true;
+            const auto standard = max_rel;
+            evaluate_column_norms(
+                precheck_rhs_norms, precheck_residual_norms,
+                &rhs_norm, &max_rel, &unaccepted_ratio,
+                &unaccepted_within_gap, &per_column_accepted);
             if (!d_reported_accurate_residual)
             {
                 if (rhs.getMap()->getComm()->getRank() == 0 && (options.verbosity & Belos::Warnings))
@@ -209,95 +707,81 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_impl(
                     std::ostringstream message;
                     message.precision(std::numeric_limits<real_t>::max_digits10);
                     message << "BelosLinearSolver CRS residual precision check: standard=" << standard
-                            << " compensated=" << checked << " tolerance=" << options.tolerance << '\n';
+                            << " compensated=" << max_rel << " tolerance=" << manager_tolerance << '\n';
                     std::cerr << message.str();
                 }
                 d_reported_accurate_residual = true;
             }
-            return checked;
+            timings.residual_check_seconds += elapsed_seconds(check_start);
+            return max_rel;
         }
-        return standard;
+        timings.residual_check_seconds += elapsed_seconds(check_start);
+        return max_rel;
     };
+
     auto achieved_tolerance = checked_residual();
-    // Tracks whether the shared residual workspace still holds a fresh
-    // true residual for the original RHS; break paths leave it stale.
     bool residual_workspace_current = true;
 
-    // Pre-refinement check: with a positive absolute tolerance, a true
-    // residual that already satisfies the combined criterion skips the
-    // refinement loop entirely. The workspace still holds the true
-    // residual just computed by checked_residual; the final acceptance
-    // below reconfirms the same per-column criterion.
-    bool absolute_precheck_converged = false;
-    if (options.absolute_tolerance > magnitude_type{})
-    {
-        Teuchos::Array<magnitude_type> precheck_rhs_norms(rhs.getNumVectors());
-        Teuchos::Array<magnitude_type> precheck_residual_norms(rhs.getNumVectors());
-        rhs.norm2(precheck_rhs_norms());
-        residual_workspace(rhs).norm2(precheck_residual_norms());
-        absolute_precheck_converged = columns_accept_combined(
-            precheck_rhs_norms(), precheck_residual_norms());
-    }
-
-    // Recurrence residuals can pass while b - A*x is still just above the
-    // requested tolerance. GMRES may instead report loss of accuracy (LOA)
-    // and stop early with the same small residual gap. CG/BiCGStab restart
-    // from the recomputed residual; GMRES solves a zero-start defect
-    // correction so its explicit check does not subtract the full A*x
-    // inside every Krylov convergence test. The gap bounds select eligible
-    // retries only; final acceptance remains <= tolerance.
-    // An ordinary unconverged solve without LOA is never retried here.
-    // Keep both the original iteration budget and a separate restart cap:
-    // a zero-iteration or stagnating retry must still terminate. The
-    // preconditioner and original RHS scaling remain unchanged.
-    auto refinement_options = options;
+    auto refinement_options = belos_options;
     const int maximum_refinements = options.backend == LinearSolverBackend::Gmres ? 4 : 2;
     std::array<real_t, 5> refinement_residuals{achieved_tolerance};
     size_t refinement_count = 1;
+    std::vector<int> column_refinements(batch_cols, 0);
+
+    auto column_needs_refinement = [&](std::size_t col)
+    {
+        const auto bound = std::max(
+            effective_abs_tol(col),
+            static_cast<magnitude_type>(effective_tol(col))
+                * std::max(precheck_rhs_norms[col], effective_floor(col)));
+        return !std::isfinite(precheck_rhs_norms[col])
+            || !std::isfinite(precheck_residual_norms[col])
+            || precheck_residual_norms[col] > bound;
+    };
+
     for (int refinement = 0;
             refinement < maximum_refinements
-                && !absolute_precheck_converged
+                && !per_column_accepted
                 && (return_status == Belos::Converged
                     || (options.backend == LinearSolverBackend::Gmres
                         && d_solver->isLOADetected()))
-                && std::isfinite(achieved_tolerance)
-                && achieved_tolerance > options.tolerance
-                && (options.backend == LinearSolverBackend::Gmres
-                    ? achieved_tolerance <= gmres_gap_ceiling
-                    : achieved_tolerance / options.tolerance <= real_t{2})
+                && std::isfinite(unaccepted_ratio)
+                && unaccepted_ratio > real_t{1}
+                && unaccepted_within_gap
                 && iterations < options.max_iterations;
             ++refinement)
     {
+        for (std::size_t col = 0; col < batch_cols; ++col)
+        {
+            if (column_needs_refinement(col))
+            {
+                ++column_refinements[col];
+            }
+        }
         refinement_options.max_iterations =
             options.max_iterations - iterations;
         if (options.backend == LinearSolverBackend::Gmres)
         {
-            auto defect = Teuchos::rcp(new multi_vector_type(rhs.getMap(), rhs.getNumVectors()));
+            auto defect = Teuchos::rcp(new multi_vector_type(rhs.getMap(), batch_cols));
             defect->update(scalar_type{1}, residual_workspace(rhs), scalar_type{});
-            auto correction = Teuchos::rcp(new multi_vector_type(solution.getMap(), solution.getNumVectors()));
+            auto correction = Teuchos::rcp(new multi_vector_type(solution.getMap(), batch_cols));
             correction->putScalar(scalar_type{});
-            // This target is relative to the defect RHS, not the original
-            // RHS. It requests at most half the original absolute target
-            // for every column; only the original final residual accepts.
             refinement_options.tolerance = std::min(real_t{0.1},
-                real_t{0.5} / (achieved_tolerance / options.tolerance));
+                real_t{0.5} / std::max(unaccepted_ratio, real_t{1}));
             const auto restore_original_vectors = [&] {
                 d_problem->setLHS(x);
                 d_problem->setRHS(b);
                 d_problem->setInitResVec(d_residual_workspace);
                 d_problem->setInitPrecResVec(Teuchos::null);
-                // Clear any current-system views of the correction and
-                // defect, including if a manager threw before setCurrLS.
-                // The prepared original residual avoids another SpMV.
                 (void)d_problem->setProblem();
             };
             try
             {
-                configure(refinement_options);
+                configure(refinement_options, batch_cols);
                 d_solver->setParameters(d_parameters);
                 d_problem->setLHS(correction);
                 d_problem->setRHS(defect);
-                d_problem->setInitResVec(defect); // zero-start residual is exactly r
+                d_problem->setInitResVec(defect);
                 d_problem->setInitPrecResVec(Teuchos::null);
                 if (!d_problem->setProblem())
                 {
@@ -305,7 +789,9 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_impl(
                     residual_workspace_current = false;
                     break;
                 }
+                const auto ref_solve_start = std::chrono::steady_clock::now();
                 return_status = d_solver->solve();
+                timings.solve_seconds += elapsed_seconds(ref_solve_start);
                 iterations += d_solver->getNumIters();
             }
             catch (...)
@@ -321,14 +807,16 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_impl(
             refinement_options.tolerance *= real_t{0.1};
             if (refinement_options.tolerance <= real_t{})
                 break;
-            configure(refinement_options);
+            configure(refinement_options, batch_cols);
             d_solver->setParameters(d_parameters);
             if (!set_problem_with_prepared_residual())
             {
                 residual_workspace_current = false;
                 break;
             }
+            const auto ref_solve_start = std::chrono::steady_clock::now();
             return_status = d_solver->solve();
+            timings.solve_seconds += elapsed_seconds(ref_solve_start);
             iterations += d_solver->getNumIters();
         }
         achieved_tolerance = checked_residual();
@@ -336,27 +824,74 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_impl(
         refinement_residuals[refinement_count++] = achieved_tolerance;
     }
 
-    bool converged = std::isfinite(achieved_tolerance)
-        && achieved_tolerance <= options.tolerance;
-    // Combined stopping test: a positive absolute tolerance also accepts a
-    // true residual at or below it, independent of the RHS norm. This is
-    // the cold-start exit for compatibility-projected systems whose RHS is
-    // pure roundoff noise. Every column must satisfy the per-column
-    // criterion; one passing column can no longer mask a failing or
-    // nonfinite one.
-    if (!converged && options.absolute_tolerance > magnitude_type{})
+    if (!residual_workspace_current)
     {
-        if (!residual_workspace_current)
-        {
-            (void)true_relative_residual(matrix, rhs, solution, residual_scaling, nullptr);
-        }
-        Teuchos::Array<magnitude_type> absolute_rhs_norms(rhs.getNumVectors());
-        Teuchos::Array<magnitude_type> absolute_norms(rhs.getNumVectors());
-        rhs.norm2(absolute_rhs_norms());
-        residual_workspace(rhs).norm2(absolute_norms());
-        converged = columns_accept_combined(
-            absolute_rhs_norms(), absolute_norms());
+        const auto check_start = std::chrono::steady_clock::now();
+        (void)true_relative_residual(
+            counting_op_base, rhs, solution, residual_scaling, &rhs_norm);
+        rhs.norm2(precheck_rhs_norms());
+        residual_workspace(rhs).norm2(precheck_residual_norms());
+        timings.residual_check_seconds += elapsed_seconds(check_start);
     }
+
+    std::vector<ColumnLinearSolveStatistics> col_stats(batch_cols);
+    bool converged = true;
+    real_t max_col_achieved{};
+    real_t max_col_rhs{};
+    for (std::size_t col = 0; col < batch_cols; ++col)
+    {
+        const auto b_norm = precheck_rhs_norms[col];
+        const auto r_norm = precheck_residual_norms[col];
+        const bool finite = std::isfinite(b_norm) && std::isfinite(r_norm);
+        const auto denom = std::max(b_norm, effective_floor(col));
+        const auto col_achieved = !finite
+            ? std::numeric_limits<real_t>::infinity()
+            : static_cast<real_t>(denom > magnitude_type{} ? r_norm / denom : r_norm);
+        const auto bound = std::max(
+            effective_abs_tol(col),
+            static_cast<magnitude_type>(effective_tol(col)) * denom);
+        const bool col_conv = finite && std::isfinite(col_achieved) && r_norm <= bound;
+        converged = converged && col_conv;
+        if (!std::isfinite(col_achieved))
+        {
+            max_col_achieved = std::numeric_limits<real_t>::infinity();
+        }
+        else if (std::isfinite(max_col_achieved))
+        {
+            max_col_achieved = std::max(max_col_achieved, col_achieved);
+        }
+        if (finite)
+        {
+            max_col_rhs = std::max(max_col_rhs, static_cast<real_t>(b_norm));
+        }
+        else
+        {
+            max_col_rhs = std::numeric_limits<real_t>::infinity();
+        }
+        col_stats[col] = ColumnLinearSolveStatistics{
+            col_conv,
+            false,
+            col_achieved,
+            static_cast<real_t>(r_norm),
+            static_cast<real_t>(b_norm),
+            column_refinements[col]};
+    }
+    achieved_tolerance = column_policies.empty() ? achieved_tolerance : max_col_achieved;
+    if (column_policies.empty())
+    {
+        // Ensure per-column floor/relative policy still governs achieved_tolerance
+        // if any column had nonfinite residual.
+        if (!std::isfinite(max_col_achieved))
+        {
+            achieved_tolerance = std::numeric_limits<real_t>::infinity();
+        }
+        rhs_norm = std::isfinite(max_col_rhs) ? max_col_rhs : rhs_norm;
+    }
+    else
+    {
+        rhs_norm = max_col_rhs;
+    }
+
     // Belos::Errors is zero and denotes diagnostics that are always printed.
     if (!converged)
     {
@@ -370,13 +905,24 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_impl(
             std::cerr << message.str() << '\n';
         }
         report_failed_solve(
-            rhs, options, residual_scaling, return_status, iterations);
+            rhs, belos_options, residual_scaling, return_status, iterations);
     }
-    return {
-        converged,
-        iterations,
-        achieved_tolerance,
-        rhs_norm};
+    LinearSolveStatistics result;
+    result.converged = converged;
+    result.iterations = iterations;
+    result.achieved_tolerance = achieved_tolerance;
+    result.rhs_norm = rhs_norm;
+    result.execution_mode = batch_cols > 1
+        ? MultiRhsExecutionMode::BatchedKrylov
+        : MultiRhsExecutionMode::SingleRhs;
+    result.batch_krylov_iterations = batch_cols > 1 ? iterations : 0;
+    result.column_serial_iterations = 0;
+    result.operator_apply_calls = counting_op->calls();
+    result.operator_column_applies = counting_op->column_applies();
+    result.max_batch_width = counting_op->max_batch_width();
+    result.timings = timings;
+    result.column_statistics = std::move(col_stats);
+    return result;
 }
 
 /**
@@ -396,6 +942,8 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_bicgstab_columns(
     const multi_vector_type& rhs, multi_vector_type& solution,
     const LinearSolverOptions& options,
     LinearResidualScaling residual_scaling,
+    const std::vector<ColumnResidualPolicy>& column_policies,
+    const std::vector<std::size_t>& active_indices,
     bool zero_initial_guess,
     const Teuchos::RCP<const matrix_type>& preconditioning_matrix)
 {
@@ -417,11 +965,17 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_bicgstab_columns(
             new multi_vector_type(solution.getMap(), 1, false));
     }
 
+    const std::size_t num_cols = rhs.getNumVectors();
     LinearSolveStatistics combined;
     combined.converged = true;
+    combined.execution_mode = MultiRhsExecutionMode::ColumnSerial;
+    combined.column_statistics.assign(
+        num_cols, ColumnLinearSolveStatistics{true, true, real_t{}, real_t{}, real_t{}, 0});
+
     auto column_options = options;
-    for (std::size_t column = 0; column < rhs.getNumVectors(); ++column)
+    for (const std::size_t column : active_indices)
     {
+        const auto pack_start = std::chrono::steady_clock::now();
         {
             const auto source = rhs.getData(column);
             auto destination = d_bicgstab_rhs_workspace->getDataNonConst(0);
@@ -433,21 +987,49 @@ LinearSolveStatistics BelosLinearSolver<Pack>::solve_bicgstab_columns(
             auto destination = d_bicgstab_solution_workspace->getDataNonConst(0);
             std::copy(source.begin(), source.end(), destination.begin());
         }
-        const auto statistics = solve_impl(
+        combined.timings.pack_unpack_seconds += elapsed_seconds(pack_start);
+
+        std::vector<ColumnResidualPolicy> single_policy;
+        if (!column_policies.empty())
+        {
+            single_policy.push_back(column_policies[column]);
+        }
+        const auto statistics = solve_contiguous_batch(
             matrix, *d_bicgstab_rhs_workspace, *d_bicgstab_solution_workspace,
-            column_options, residual_scaling, zero_initial_guess,
+            column_options, residual_scaling, single_policy, zero_initial_guess,
             preconditioning_matrix);
+
+        const auto unpack_start = std::chrono::steady_clock::now();
         {
             const auto source = d_bicgstab_solution_workspace->getData(0);
             auto destination = solution.getDataNonConst(column);
             std::copy(source.begin(), source.end(), destination.begin());
         }
+        combined.timings.pack_unpack_seconds += elapsed_seconds(unpack_start);
+
         combined.converged = combined.converged && statistics.converged;
         combined.iterations += statistics.iterations;
+        combined.column_serial_iterations += statistics.iterations;
         combined.achieved_tolerance = std::max(
             combined.achieved_tolerance, statistics.achieved_tolerance);
         combined.rhs_norm = std::max(combined.rhs_norm, statistics.rhs_norm);
-        column_options.reuse_preconditioner = true;
+        combined.operator_apply_calls += statistics.operator_apply_calls;
+        combined.operator_column_applies += statistics.operator_column_applies;
+        combined.max_batch_width = std::max(combined.max_batch_width, statistics.max_batch_width);
+        combined.timings.preconditioner_setup_seconds +=
+            statistics.timings.preconditioner_setup_seconds;
+        combined.timings.solve_seconds += statistics.timings.solve_seconds;
+        combined.timings.residual_check_seconds +=
+            statistics.timings.residual_check_seconds;
+        if (!statistics.column_statistics.empty())
+        {
+            combined.column_statistics[column] = statistics.column_statistics[0];
+        }
+        if (options.preconditioner == LinearPreconditioner::None
+            || !d_preconditioner.is_null())
+        {
+            column_options.reuse_preconditioner = true;
+        }
     }
     return combined;
 }
@@ -690,6 +1272,7 @@ void BelosLinearSolver<Pack>::reset()
     {
         d_problem->setRightPrec(Teuchos::null);
     }
+    d_raw_operator = Teuchos::null;
     d_problem = Teuchos::null;
     d_parameters = Teuchos::null;
     d_solver = Teuchos::null;
@@ -773,13 +1356,17 @@ bool BelosLinearSolver<Pack>::has_compatible_maps(
         return false;
     }
 
-    const auto previous = d_problem->getOperator();
+    const auto previous = d_raw_operator.is_null()
+        ? d_problem->getOperator()
+        : d_raw_operator;
     return previous->getDomainMap()->isSameAs(*matrix->getDomainMap())
         && previous->getRangeMap()->isSameAs(*matrix->getRangeMap());
 }
 
 template <TpetraTypePack Pack>
-void BelosLinearSolver<Pack>::configure(const LinearSolverOptions& options)
+void BelosLinearSolver<Pack>::configure(
+    const LinearSolverOptions& options,
+    std::size_t batch_columns)
 {
     d_parameters = Teuchos::rcp(new Teuchos::ParameterList());
     d_parameters->set(
@@ -793,6 +1380,12 @@ void BelosLinearSolver<Pack>::configure(const LinearSolverOptions& options)
     {
         d_parameters->set(
             "Explicit Residual Scaling", "Norm of RHS");
+        // Always explicitly set Block Size on every solve and refinement call:
+        // Trilinos 17.2 PseudoBlockGmresSolMgr defaults Block Size to 1 and
+        // mutates blockSize_ during deflated/smaller solves.
+        d_parameters->set(
+            "Block Size",
+            static_cast<int>(std::max<std::size_t>(1, batch_columns)));
     }
 }
 
