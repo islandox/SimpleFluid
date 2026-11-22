@@ -246,7 +246,8 @@ TEST(ReactingGasModelTest, BiCGStabGaussSeidelTransportMatchesDefault)
     auto material = make_water_properties(mesh);
     reference.initialize_state(0.0, temperature, pressure, velocity, material);
     reference.advance(1.0e-4, 1.0e-4, temperature, pressure, velocity, flux, material);
-    ASSERT_EQ(reference.last_statistics().transport_linear.solves, 9);
+    ASSERT_EQ(reference.last_statistics().transport_linear.solves, 3);
+    ASSERT_EQ(reference.last_statistics().transport_multi_rhs.active_columns, 9u);
 
     for (const auto preconditioner :
         {SimpleFluid::LinearPreconditioner::GaussSeidel, SimpleFluid::LinearPreconditioner::SymmetricGaussSeidel})
@@ -260,7 +261,8 @@ TEST(ReactingGasModelTest, BiCGStabGaussSeidelTransportMatchesDefault)
         model.advance(1.0e-4, 1.0e-4, temperature, pressure, velocity, flux, material);
         const auto summary = model.last_statistics().transport_linear;
         EXPECT_TRUE(summary.converged);
-        EXPECT_EQ(summary.solves, 9);
+        EXPECT_EQ(summary.solves, 3);
+        EXPECT_EQ(model.last_statistics().transport_multi_rhs.active_columns, 9u);
         EXPECT_GT(summary.iterations, 0);
         EXPECT_LE(summary.achieved_tolerance, linear.tolerance);
         for (const auto& [name, expected_field] : reference.output_fields())
@@ -325,7 +327,8 @@ TEST(ReactingGasModelTest, TransportWorkspaceMatchesFreshAssemblyAcrossStages)
             model.restore(accepted);
             advance(model);
         }
-        EXPECT_EQ(model.last_statistics().transport_linear.solves, 9);
+        EXPECT_EQ(model.last_statistics().transport_linear.solves, 3);
+        EXPECT_EQ(model.last_statistics().transport_multi_rhs.active_columns, 9u);
         EXPECT_TRUE(model.last_statistics().transport_linear.converged);
         for (const auto& [name, expected] : fresh.output_fields())
         {
@@ -1922,7 +1925,8 @@ TEST(ReactingGasModelTest, CompositeTransportLeaseMatchesExplicitReference)
         const double before = model.global_species_moles(GeneralGas::one);
         model.advance(.01, .01, temperature, pressure, velocity, flux, material);
         const auto& statistics = model.last_statistics();
-        EXPECT_GE(statistics.transport_linear.solves, 6);
+        EXPECT_EQ(statistics.transport_linear.solves, 3);
+        EXPECT_EQ(statistics.transport_multi_rhs.active_columns, 9u);
         EXPECT_GT(GeneralGas::step_escape(model, GeneralGas::one, true), 0.);
         EXPECT_NEAR(model.global_species_moles(GeneralGas::one) + GeneralGas::step_escape(model), before, 1e-12);
         EXPECT_NEAR(GeneralGas::history(model).inventory_error, 0., 1e-12);
@@ -2288,6 +2292,588 @@ TEST(ReactingGasModelTest, ALEZeroAuxiliaryRetainsLiquidStorageValidation)
     state.advance(1.1, .001, .001);
     state.compare();
     state.rollback(a, b);
+}
+
+TEST(ReactingGasModelTest, BatchedMultiRhsMatchesScalarReferenceAcrossSolversAndChunking)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(2, 2, 3, 0.25));
+    auto p = GeneralGas::populated();
+    p.controls.transport_solver_tolerance = 1.0e-12;
+
+    auto scalar_options = GeneralGas::options(p);
+    scalar_options.batched_species_transport = false;
+    ReactingModelType scalar_ref(mesh, scalar_options);
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    VelocityFieldType velocity(mesh, Mesh::Vec3{0.05, -0.02, 0.12}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    for (const auto face_lid : flux.owned_face_ids())
+    {
+        const auto area = mesh->face_area_vector(face_lid);
+        flux.set_value(face_lid, 0.05 * area.x - 0.02 * area.y + 0.12 * area.z);
+    }
+    auto material = make_water_properties(mesh);
+    scalar_ref.initialize_state(0.0, temperature, pressure, velocity, material);
+    scalar_ref.advance(0.01, 0.01, temperature, pressure, velocity, flux, material);
+    ASSERT_EQ(scalar_ref.last_statistics().transport_linear.solves, 9);
+    ASSERT_EQ(scalar_ref.last_statistics().transport_multi_rhs.matrix_assemblies, 0u);
+
+    const auto compare_against_scalar = [&](const ReactingModelType& candidate, double rel_tol)
+    {
+        for (const auto& [name, expected_field] : scalar_ref.output_fields())
+        {
+            SCOPED_TRACE(name);
+            const auto& actual_field = *candidate.output_fields().at(name);
+            for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
+                const double expected = expected_field->value(cell_lid);
+                EXPECT_NEAR(actual_field.value(cell_lid), expected, std::max(1.0e-15, std::abs(expected) * rel_tol));
+            }
+        }
+        EXPECT_NEAR(GeneralGas::step_escape(candidate), GeneralGas::step_escape(scalar_ref),
+            std::max(1.0e-15, std::abs(GeneralGas::step_escape(scalar_ref)) * rel_tol));
+        EXPECT_NEAR(GeneralGas::history(candidate).inventory_error, 0.0, 1.0e-12);
+        EXPECT_EQ(candidate.population_escape_receipt().events.size(),
+            scalar_ref.population_escape_receipt().events.size());
+        for (std::size_t i = 0; i < scalar_ref.population_escape_receipt().events.size(); ++i)
+        {
+            const double expected = scalar_ref.population_escape_receipt().events[i].number;
+            EXPECT_NEAR(candidate.population_escape_receipt().events[i].number, expected,
+                std::max(1.0e-15, std::abs(expected) * rel_tol));
+        }
+        EXPECT_EQ(candidate.liquid_transport_volume_receipt(),
+            scalar_ref.liquid_transport_volume_receipt());
+        for (const auto face : scalar_ref.transported_liquid_material_volume_flux().owned_face_ids())
+        {
+            const double expected = scalar_ref.transported_liquid_material_volume_flux().value(face);
+            EXPECT_NEAR(candidate.transported_liquid_material_volume_flux().value(face), expected,
+                std::max(1.0e-15, std::abs(expected) * rel_tol));
+        }
+    };
+
+    struct SolverCase
+    {
+        SimpleFluid::LinearSolverBackend backend;
+        SimpleFluid::LinearPreconditioner precond;
+        SimpleFluid::MultiRhsExecutionPolicy policy;
+        int max_batch_width;
+        bool expect_batched_krylov;
+    };
+    const std::vector<SolverCase> cases = {
+        {SimpleFluid::LinearSolverBackend::Gmres, SimpleFluid::LinearPreconditioner::None,
+            SimpleFluid::MultiRhsExecutionPolicy::Auto, 0, true},
+        {SimpleFluid::LinearSolverBackend::Gmres, SimpleFluid::LinearPreconditioner::None,
+            SimpleFluid::MultiRhsExecutionPolicy::Auto, 2, true},
+        {SimpleFluid::LinearSolverBackend::Gmres, SimpleFluid::LinearPreconditioner::None,
+            SimpleFluid::MultiRhsExecutionPolicy::Auto, 1, false},
+        {SimpleFluid::LinearSolverBackend::BiCGStab, SimpleFluid::LinearPreconditioner::Jacobi,
+            SimpleFluid::MultiRhsExecutionPolicy::Auto, 0, true},
+        {SimpleFluid::LinearSolverBackend::BiCGStab, SimpleFluid::LinearPreconditioner::Jacobi,
+            SimpleFluid::MultiRhsExecutionPolicy::ColumnSerial, 0, false},
+    };
+    for (const auto& cfg : cases)
+    {
+        auto batched_options = GeneralGas::options(p);
+        batched_options.batched_species_transport = true;
+        ReactingModelType model(mesh, batched_options);
+        auto linear = model.transport_linear_solver_options();
+        linear.backend = cfg.backend;
+        linear.preconditioner = cfg.precond;
+        linear.multi_rhs_policy = cfg.policy;
+        linear.max_batch_width = cfg.max_batch_width;
+        model.set_transport_linear_solver_options(linear);
+        model.initialize_state(0.0, temperature, pressure, velocity, material);
+        model.advance(0.01, 0.01, temperature, pressure, velocity, flux, material);
+
+        const auto& stats = model.last_statistics();
+        const auto& multi = stats.transport_multi_rhs;
+        EXPECT_TRUE(stats.transport_linear.converged);
+        EXPECT_EQ(multi.operator_groups, 4u);
+        EXPECT_EQ(multi.matrix_assemblies, 3u);
+        EXPECT_EQ(multi.preconditioner_builds,
+            cfg.precond == SimpleFluid::LinearPreconditioner::None ? 0u : 3u);
+        EXPECT_EQ(multi.active_columns, 9u);
+        EXPECT_EQ(stats.transport_linear.solves, 3);
+        if (cfg.expect_batched_krylov)
+        {
+            EXPECT_EQ(multi.batched_krylov_solves, 3u);
+            EXPECT_EQ(multi.column_serial_solves, 0u);
+            EXPECT_GT(multi.operator_column_applies, multi.operator_apply_calls);
+            EXPECT_EQ(multi.max_batch_width, cfg.max_batch_width == 2 ? 2u : 3u);
+        }
+        else
+        {
+            EXPECT_EQ(multi.column_serial_solves, 3u);
+            EXPECT_EQ(multi.batched_krylov_solves, 0u);
+            EXPECT_EQ(multi.max_batch_width, 1u);
+        }
+        compare_against_scalar(model, 1.0e-9);
+    }
+
+    // Also verify ALE moving-mesh parity (Advective and NoAdvection).
+    for (const auto mode : {SimpleFluid::ReactingTransportMode::Advective,
+             SimpleFluid::ReactingTransportMode::NoAdvection})
+    {
+        const auto make_ale_mesh = []
+        {
+            return std::make_shared<ALEMeshType>(std::make_shared<ALEMeshType::Cartesian>(
+                SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 0.5, 1.0}, {0.0, 0.5, 1.0}, {0.0, 0.25, 0.5, 0.75, 1.0}}}));
+        };
+        auto ale_mesh_s = make_ale_mesh();
+        auto ale_mesh_b = make_ale_mesh();
+        SimpleFluid::PlanarALEMeshMotion<Pack> motion_scalar(ale_mesh_s), motion_batched(ale_mesh_b);
+        auto p_ale = p;
+        p_ale.controls.transport_solver_tolerance = 1.0e-12;
+        auto opt_s = GeneralGas::options(p_ale);
+        opt_s.solution_transport = mode;
+        opt_s.batched_species_transport = false;
+        auto opt_b = GeneralGas::options(p_ale);
+        opt_b.solution_transport = mode;
+        opt_b.batched_species_transport = true;
+
+        ALEReactingModelType model_s(ale_mesh_s, opt_s), model_b(ale_mesh_b, opt_b);
+        ALEFieldType temp_s(ale_mesh_s, 300.0, "temperature"), pres_s(ale_mesh_s, 0.0, "pressure");
+        ALEFieldType temp_b(ale_mesh_b, 300.0, "temperature"), pres_b(ale_mesh_b, 0.0, "pressure");
+        ALEVelocityFieldType vel_s(ale_mesh_s, Mesh::Vec3{0.0, 0.0, 0.1}, "velocity");
+        ALEVelocityFieldType vel_b(ale_mesh_b, Mesh::Vec3{0.0, 0.0, 0.1}, "velocity");
+        ALEFaceFieldType rel_flux_s(ale_mesh_s, 0.0, "flux"), rel_flux_b(ale_mesh_b, 0.0, "flux");
+        auto mat_s = make_ale_water_properties(ale_mesh_s);
+        auto mat_b = make_ale_water_properties(ale_mesh_b);
+        model_s.initialize_state(0.0, temp_s, pres_s, vel_s, mat_s);
+        model_b.initialize_state(0.0, temp_b, pres_b, vel_b, mat_b);
+        motion_scalar.begin_trial(1.15, 0.01);
+        motion_batched.begin_trial(1.15, 0.01);
+        model_s.refresh_geometry();
+        model_b.refresh_geometry();
+        const auto ale_s = SimpleFluid::FVM::make_ale_control_volume_state(*ale_mesh_s, motion_scalar);
+        const auto ale_b = SimpleFluid::FVM::make_ale_control_volume_state(*ale_mesh_b, motion_batched);
+        for (const auto face : rel_flux_s.owned_face_ids())
+        {
+            const double val = 0.1 * ale_mesh_s->face_area_vector(face).z;
+            rel_flux_s.set_value(face, val);
+            rel_flux_b.set_value(face, val);
+        }
+        model_s.advance(0.01, 0.01, temp_s, pres_s, vel_s, rel_flux_s, mat_s, &ale_s);
+        model_b.advance(0.01, 0.01, temp_b, pres_b, vel_b, rel_flux_b, mat_b, &ale_b);
+        const auto& multi = model_b.last_statistics().transport_multi_rhs;
+        EXPECT_EQ(multi.operator_groups, mode == SimpleFluid::ReactingTransportMode::Advective ? 4u : 5u);
+        EXPECT_EQ(multi.matrix_assemblies, mode == SimpleFluid::ReactingTransportMode::Advective ? 3u : 4u);
+        for (const auto& [name, expected_field] : model_s.output_fields())
+        {
+            const auto& actual_field = *model_b.output_fields().at(name);
+            for (std::size_t owned = 0; owned < ale_mesh_s->num_owned_cells(); ++owned)
+            {
+                const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
+                const double expected = expected_field->value(cell_lid);
+                EXPECT_NEAR(actual_field.value(cell_lid), expected, std::max(1.0e-14, std::abs(expected) * 1.0e-10));
+            }
+        }
+    }
+}
+
+TEST(ReactingGasModelTest, OperatorGroupSplitsNoAdvectionDissolvedAndKeepsResolvedStationary)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
+    auto p = GeneralGas::populated();
+    p.dissolved_one = 0.2;
+    p.dissolved_two = 0.1;
+    p.controls.transport_solver_tolerance = 1.0e-12;
+
+    auto opt_s = GeneralGas::options(p);
+    opt_s.solution_transport = SimpleFluid::ReactingTransportMode::NoAdvection;
+    opt_s.batched_species_transport = false;
+    auto opt_b = GeneralGas::options(p);
+    opt_b.solution_transport = SimpleFluid::ReactingTransportMode::NoAdvection;
+    opt_b.batched_species_transport = true;
+
+    ReactingModelType scalar_model(mesh, opt_s), batched_model(mesh, opt_b);
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    VelocityFieldType velocity(mesh, Mesh::Vec3{0.2, 0.0, 0.1}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    for (const auto face_lid : flux.owned_face_ids())
+    {
+        const auto area = mesh->face_area_vector(face_lid);
+        flux.set_value(face_lid, 0.2 * area.x + 0.1 * area.z);
+    }
+    auto material = make_water_properties(mesh);
+    scalar_model.initialize_state(0.0, temperature, pressure, velocity, material);
+    batched_model.initialize_state(0.0, temperature, pressure, velocity, material);
+
+    // Seed an inhomogeneous stationary Resolved compartment explicitly in cell 0 vs cell 1.
+    const auto& catalog = opt_b.reaction_mechanism->catalog();
+    std::vector<SimpleFluid::Reacting::CellSpeciesState> states;
+    std::vector<std::vector<double>> numbers;
+    for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
+        auto st = batched_model.cell_species_state(cell_lid);
+        st.set_amount(catalog, GeneralGas::one, GeneralGas::Phase::Resolved, owned == 0 ? 1.5e-3 : 0.0);
+        states.push_back(std::move(st));
+        numbers.push_back({
+            batched_model.population_number_field("micro").value(cell_lid) * mesh->cell_volume(cell_lid),
+            batched_model.population_number_field("large").value(cell_lid) * mesh->cell_volume(cell_lid)});
+    }
+    scalar_model.initialize_species(states, numbers);
+    batched_model.initialize_species(states, numbers);
+
+    const double resolved_cell0_before =
+        batched_model.species_field(GeneralGas::one, GeneralGas::Phase::Resolved).value(0);
+    const double resolved_cell1_before =
+        batched_model.species_field(GeneralGas::one, GeneralGas::Phase::Resolved).value(1);
+
+    scalar_model.advance(0.01, 0.01, temperature, pressure, velocity, flux, material);
+    batched_model.advance(0.01, 0.01, temperature, pressure, velocity, flux, material);
+
+    const auto& multi = batched_model.last_statistics().transport_multi_rhs;
+    // Liquid + Dissolved (split on NoAdvection) + Stationary Resolved + micro + large = 5 groups.
+    EXPECT_EQ(multi.operator_groups, 5u);
+    EXPECT_EQ(multi.matrix_assemblies, 5u);
+    EXPECT_EQ(batched_model.last_statistics().transport_linear.solves, 5);
+
+    // Verify stationary Resolved neither advected from cell 0 to cell 1 nor changed vs scalar.
+    EXPECT_DOUBLE_EQ(
+        batched_model.species_field(GeneralGas::one, GeneralGas::Phase::Resolved).value(0), resolved_cell0_before);
+    EXPECT_DOUBLE_EQ(
+        batched_model.species_field(GeneralGas::one, GeneralGas::Phase::Resolved).value(1), resolved_cell1_before);
+    for (const auto& [name, expected_field] : scalar_model.output_fields())
+    {
+        const auto& actual_field = *batched_model.output_fields().at(name);
+        for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
+            EXPECT_NEAR(actual_field.value(cell_lid), expected_field->value(cell_lid),
+                std::max(1.0e-15, std::abs(expected_field->value(cell_lid)) * 1.0e-10));
+        }
+    }
+}
+
+TEST(ReactingGasModelTest, BatchedTraceSpeciesPermutationInvarianceAndAtomicRollback)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
+    auto p = GeneralGas::populated();
+    p.dissolved_one = 0.25;
+    p.dissolved_two = 1.0e-15; // Trace species alongside large inventory (must not be Frobenius-masked).
+    p.molar_one = {2.0e-5, 6.0e-6};
+    p.molar_two = {1.0e-16, 1.0e-17};
+    p.controls.transport_solver_tolerance = 1.0e-12;
+
+    auto opt_s = GeneralGas::options(p);
+    opt_s.batched_species_transport = false;
+    auto opt_b = GeneralGas::options(p);
+    opt_b.batched_species_transport = true;
+
+    bool arm_mid_step_failure = false;
+    for (auto& prop : opt_b.species_properties)
+    {
+        auto prev = prop.carried_molar_enthalpy;
+        const auto species_id = prop.species;
+        prop.carried_molar_enthalpy = [prev, species_id, &arm_mid_step_failure](const auto& ctx, auto phase,
+                                          std::string_view pop)
+        {
+            if (arm_mid_step_failure && species_id == GeneralGas::two &&
+                phase == SimpleFluid::Reacting::SpeciesPhase::Dispersed && pop == "large")
+            {
+                throw std::runtime_error("Simulated mid-step escape enthalpy fault after group solves.");
+            }
+            return prev(ctx, phase, pop);
+        };
+    }
+
+    ReactingModelType scalar_model(mesh, opt_s), batched_model(mesh, opt_b);
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    VelocityFieldType velocity(mesh, Mesh::Vec3{0.1, 0.0, 0.0}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    for (const auto face_lid : flux.owned_face_ids())
+    {
+        flux.set_value(face_lid, 0.1 * mesh->face_area_vector(face_lid).x);
+    }
+    auto material = make_water_properties(mesh);
+    scalar_model.initialize_state(0.0, temperature, pressure, velocity, material);
+    batched_model.initialize_state(0.0, temperature, pressure, velocity, material);
+
+    // Genuine catalog/mechanism/EOS/population_ids permutation so MultiVector columns reorder.
+    auto opt_perm = opt_b;
+    {
+        namespace R = SimpleFluid::Reacting;
+        namespace M = SimpleFluid::Testing::ReactingMixture;
+        auto defs = opt_b.reaction_mechanism->catalog().species();
+        std::reverse(defs.begin(), defs.end());
+        auto perm_catalog = std::make_shared<const R::SpeciesCatalog>(std::move(defs), 8);
+        auto perm_mechanism = std::make_shared<const R::ReactionMechanism>(
+            perm_catalog, opt_b.reaction_mechanism->reactions(), opt_b.reaction_mechanism->energy_convention());
+        const R::ThermodynamicBounds bounds{250, 600, 1, 3e7};
+        std::vector<R::IdealGasCaloricSpecies> caloric;
+        for (const auto& sp : perm_catalog->species())
+        {
+            caloric.push_back({M::molar_heat_capacity(sp.id), 300, 100000 * sp.molarMass});
+        }
+        opt_perm.reaction_mechanism = perm_mechanism;
+        opt_perm.gas_thermodynamics = R::make_ideal_gas_mixture(
+            perm_catalog, std::move(caloric), bounds, R::EnergyConvention::SensibleEnergy, GeneralGas::gas_constant);
+        opt_perm.liquid_thermodynamics = R::make_linear_compressible_mixture_liquid(
+            perm_catalog, bounds,
+            [p](std::span<const double>)
+            {
+                return R::LinearCompressibleMixtureLiquid{
+                    300, p.pressure, p.density, 4200, 0, 0, 0, p.viscosity, 0};
+            },
+            R::EnergyConvention::SensibleEnergy);
+        std::reverse(opt_perm.population_ids.begin(), opt_perm.population_ids.end());
+        std::reverse(opt_perm.species_properties.begin(), opt_perm.species_properties.end());
+        for (auto& prop : opt_perm.species_properties)
+        {
+            const auto sp_id = prop.species;
+            prop.carried_molar_enthalpy =
+                [perm_catalog, liq_eos = opt_perm.liquid_thermodynamics, sp_id](
+                    const R::ReactionContext& ctx, auto phase, std::string_view)
+            {
+                const auto idx = perm_catalog->index(sp_id);
+                const double molar_mass = perm_catalog->species()[idx].molarMass;
+                if (phase == R::SpeciesPhase::Liquid || phase == R::SpeciesPhase::Dissolved)
+                {
+                    std::vector<double> pure(perm_catalog->species().size(), 0.0);
+                    pure[idx] = 1.0;
+                    return molar_mass *
+                           liq_eos->evaluate(ctx.environment.temperature, ctx.environment.absolutePressure, pure)
+                               .enthalpy;
+                }
+                return 100000.0 * molar_mass +
+                       M::molar_heat_capacity(sp_id) * (ctx.environment.temperature - 300.0) +
+                       GeneralGas::gas_constant * ctx.environment.temperature;
+            };
+        }
+        opt_perm.initial_species_state = [base_fn = opt_b.initial_species_state,
+                                            base_cat = std::make_shared<const R::SpeciesCatalog>(
+                                                opt_b.reaction_mechanism->catalog()),
+                                            perm_catalog](const R::ReactionEnvironment& e, std::int64_t gid)
+        {
+            const auto base_state = base_fn(e, gid);
+            R::CellSpeciesState remapped(*perm_catalog);
+            for (const auto& sp : perm_catalog->species())
+            {
+                const auto bi = base_cat->index(sp.id);
+                const auto pi = perm_catalog->index(sp.id);
+                for (std::size_t ph = 0; ph < 4; ++ph)
+                {
+                    remapped.amounts[ph * perm_catalog->species().size() + pi] =
+                        base_state.amounts[ph * base_cat->species().size() + bi];
+                }
+            }
+            // population_ids reversed: ("large", "micro") and permuted catalog species order
+            remapped.dispersedPopulations.resize(2);
+            for (std::size_t pop = 0; pop < 2; ++pop)
+            {
+                const std::size_t src_pop = 1 - pop;
+                remapped.dispersedPopulations[pop].id = base_state.dispersedPopulations[src_pop].id;
+                remapped.dispersedPopulations[pop].amounts.resize(perm_catalog->species().size(), 0.0);
+                for (const auto& sp : perm_catalog->species())
+                {
+                    remapped.dispersedPopulations[pop].amounts[perm_catalog->index(sp.id)] =
+                        base_state.dispersedPopulations[src_pop].amounts[base_cat->index(sp.id)];
+                }
+            }
+            remapped.validate(*perm_catalog);
+            return remapped;
+        };
+        opt_perm.initial_population_numbers = [base_fn = opt_b.initial_population_numbers](
+                                                  const R::ReactionContext& ctx)
+        {
+            auto nums = base_fn(ctx);
+            std::reverse(nums.begin(), nums.end());
+            return nums;
+        };
+    }
+    ReactingModelType perm_model(mesh, opt_perm);
+    perm_model.initialize_state(0.0, temperature, pressure, velocity, material);
+
+    scalar_model.advance(0.01, 0.01, temperature, pressure, velocity, flux, material);
+    batched_model.advance(0.01, 0.01, temperature, pressure, velocity, flux, material);
+    perm_model.advance(0.01, 0.01, temperature, pressure, velocity, flux, material);
+
+    for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
+        const double trace_ref =
+            scalar_model.species_field(GeneralGas::two, GeneralGas::Phase::Dissolved).value(cell_lid);
+        const double trace_batched =
+            batched_model.species_field(GeneralGas::two, GeneralGas::Phase::Dissolved).value(cell_lid);
+        const double trace_perm =
+            perm_model.species_field(GeneralGas::two, GeneralGas::Phase::Dissolved).value(cell_lid);
+        ASSERT_GT(trace_ref, 0.0);
+        EXPECT_NEAR(trace_batched, trace_ref, trace_ref * 1.0e-10);
+        EXPECT_NEAR(trace_perm, trace_ref, trace_ref * 1.0e-10);
+        EXPECT_NEAR(
+            perm_model.species_field(GeneralGas::one, GeneralGas::Phase::Liquid).value(cell_lid),
+            scalar_model.species_field(GeneralGas::one, GeneralGas::Phase::Liquid).value(cell_lid),
+            1.0e-12 * scalar_model.species_field(GeneralGas::one, GeneralGas::Phase::Liquid).value(cell_lid));
+        EXPECT_NEAR(
+            perm_model.population_number_field("large").value(cell_lid),
+            scalar_model.population_number_field("large").value(cell_lid),
+            1.0e-10 * scalar_model.population_number_field("large").value(cell_lid));
+    }
+
+    // Genuine mid-step rollback AFTER transport OperatorGroups have solved & unpacked:
+    // Capture accepted state, arm fault in boundary enthalpy callback, expect throw, and
+    // verify all fields/receipts/statistics remained untouched WITHOUT calling external restore().
+    std::map<std::string, std::vector<double>> accepted_fields;
+    for (const auto& [name, field] : batched_model.output_fields())
+    {
+        for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            accepted_fields[name].push_back(field->value(static_cast<Pack::local_ordinal_type>(owned)));
+        }
+    }
+    const auto accepted_receipt = batched_model.species_event_receipt();
+    const auto accepted_pop_escape = batched_model.population_escape_receipt();
+    const auto accepted_liq_receipt = batched_model.liquid_transport_volume_receipt();
+    const auto accepted_stats = batched_model.last_statistics();
+
+    arm_mid_step_failure = true;
+    EXPECT_THROW(
+        batched_model.advance(0.02, 0.01, temperature, pressure, velocity, flux, material), std::runtime_error);
+    arm_mid_step_failure = false;
+
+    for (const auto& [name, field] : batched_model.output_fields())
+    {
+        for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            EXPECT_DOUBLE_EQ(
+                field->value(static_cast<Pack::local_ordinal_type>(owned)), accepted_fields.at(name)[owned]);
+        }
+    }
+    EXPECT_EQ(batched_model.species_event_receipt(), accepted_receipt);
+    EXPECT_EQ(batched_model.population_escape_receipt().events, accepted_pop_escape.events);
+    EXPECT_EQ(batched_model.liquid_transport_volume_receipt(), accepted_liq_receipt);
+    EXPECT_EQ(batched_model.last_statistics().transport_linear.solves, accepted_stats.transport_linear.solves);
+
+    // Clean replay after rollback must match scalar_model step 2 exactly.
+    scalar_model.advance(0.02, 0.01, temperature, pressure, velocity, flux, material);
+    batched_model.advance(0.02, 0.01, temperature, pressure, velocity, flux, material);
+    for (const auto& [name, expected_field] : scalar_model.output_fields())
+    {
+        const auto& actual_field = *batched_model.output_fields().at(name);
+        for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
+            EXPECT_NEAR(actual_field.value(cell_lid), expected_field->value(cell_lid),
+                std::max(1.0e-15, std::abs(expected_field->value(cell_lid)) * 1.0e-10));
+        }
+    }
+}
+
+TEST(ReactingGasModelTest, BatchedAbsoluteToleranceRefinementAndZeroToActiveChemistryColumn)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(2, 2, 3, 0.25));
+    // Test 1: absolute_tolerance > 0 still runs inventory closure refinement (never short-circuits delta=0)
+    // and freezes already-converged columns inside the same OperatorGroup.
+    {
+        auto p = GeneralGas::populated();
+        p.number_density[1] = 1.0e-2;
+        p.molar_one[1] = 1.0e-14;
+        p.molar_two[1] = 1.0e-14;
+        auto opt_s = GeneralGas::options(p);
+        opt_s.batched_species_transport = false;
+        auto opt_b = GeneralGas::options(p);
+        opt_b.batched_species_transport = true;
+
+        ReactingModelType scalar_ref(mesh, opt_s), batched(mesh, opt_b);
+        auto linear = batched.transport_linear_solver_options();
+        linear.tolerance = 1.0e-12;
+        linear.absolute_tolerance = 1.0e-1;
+        scalar_ref.set_transport_linear_solver_options(linear);
+        batched.set_transport_linear_solver_options(linear);
+
+        FieldType temp(mesh, 300.0, "temperature"), pres(mesh, 0.0, "pressure");
+        VelocityFieldType vel(mesh, Mesh::Vec3{0.05, 0.0, 0.12}, "velocity");
+        FaceFieldType flux(mesh, 0.0, "flux");
+        for (const auto face : flux.owned_face_ids())
+        {
+            const auto area = mesh->face_area_vector(face);
+            flux.set_value(face, 0.05 * area.x + 0.12 * area.z);
+        }
+        auto mat = make_water_properties(mesh);
+        scalar_ref.initialize_state(0.0, temp, pres, vel, mat);
+        batched.initialize_state(0.0, temp, pres, vel, mat);
+
+        scalar_ref.advance(0.01, 0.01, temp, pres, vel, flux, mat);
+        batched.advance(0.01, 0.01, temp, pres, vel, flux, mat);
+
+        EXPECT_NEAR(GeneralGas::history(batched).inventory_error, 0.0, 1.0e-12);
+        EXPECT_GT(batched.last_statistics().transport_linear.solves, 3);
+        for (const auto& [name, expected_field] : scalar_ref.output_fields())
+        {
+            const auto& actual_field = *batched.output_fields().at(name);
+            for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+                EXPECT_NEAR(actual_field.value(cell), expected_field->value(cell),
+                    std::max(1.0e-15, std::abs(expected_field->value(cell)) * 1.0e-10));
+            }
+        }
+    }
+
+    // Test 2: Initially-zero species in a mixed-active OperatorGroup stays skipped on step 1
+    // (counting skipped > 0) while chemistry populates it so step 2 actively batches it.
+    {
+        GeneralGas::Parameters p;
+        p.dissolved_one = 0.2;
+        p.dissolved_two = 0.0; // zero at t=0 in Liquid+Dissolved OperatorGroup
+        p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+        p.controls.constant_slip_velocity = 0.2;
+        p.controls.free_surface_patches = {"zmax"};
+        p.source = [](const SimpleFluid::Reacting::ReactionContext& ctx, double dt)
+        {
+            SimpleFluid::Reacting::ReactionSourceInput src;
+            if (ctx.environment.location && ctx.environment.location->ownedCell &&
+                *ctx.environment.location->ownedCell == 0)
+            {
+                const double n = 1.0e-4 * dt;
+                src.externalTransfers.push_back({"test.declared_external_gas_feed", GeneralGas::two,
+                    SimpleFluid::Reacting::SpeciesPhase::Dissolved, n, 0.004 * n, 0.0, {}, ""});
+            }
+            return src;
+        };
+        auto opt_s = GeneralGas::options(p);
+        opt_s.batched_species_transport = false;
+        auto opt_b = GeneralGas::options(p);
+        opt_b.batched_species_transport = true;
+
+        ReactingModelType scalar_ref(mesh, opt_s), batched(mesh, opt_b);
+        FieldType temp(mesh, 300.0, "temperature"), pres(mesh, 0.0, "pressure");
+        VelocityFieldType vel(mesh, Mesh::Vec3{0.05, 0.0, 0.05}, "velocity");
+        FaceFieldType flux(mesh, 0.0, "flux");
+        for (const auto face : flux.owned_face_ids())
+        {
+            const auto area = mesh->face_area_vector(face);
+            flux.set_value(face, 0.05 * area.x + 0.05 * area.z);
+        }
+        auto mat = make_water_properties(mesh);
+        scalar_ref.initialize_state(0.0, temp, pres, vel, mat);
+        batched.initialize_state(0.0, temp, pres, vel, mat);
+
+        scalar_ref.advance(0.01, 0.01, temp, pres, vel, flux, mat);
+        batched.advance(0.01, 0.01, temp, pres, vel, flux, mat);
+        const auto step1_active = batched.last_statistics().transport_multi_rhs.active_columns;
+        EXPECT_LT(step1_active, batched.last_statistics().transport_multi_rhs.transported_columns);
+        EXPECT_GT(batched.last_statistics().transport_work[0].skipped, 0);
+
+        scalar_ref.advance(0.02, 0.01, temp, pres, vel, flux, mat);
+        batched.advance(0.02, 0.01, temp, pres, vel, flux, mat);
+        EXPECT_EQ(batched.last_statistics().transport_multi_rhs.active_columns, step1_active + 1u);
+        for (const auto& [name, expected_field] : scalar_ref.output_fields())
+        {
+            const auto& actual_field = *batched.output_fields().at(name);
+            for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+                EXPECT_NEAR(actual_field.value(cell), expected_field->value(cell),
+                    std::max(1.0e-15, std::abs(expected_field->value(cell)) * 1.0e-10));
+            }
+        }
+    }
 }
 
 } // namespace

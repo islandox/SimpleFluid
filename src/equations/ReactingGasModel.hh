@@ -13,6 +13,7 @@
 
 #include "geometry/MeshConcepts.hh"
 
+#include "FVM/CarrierTransportPlan.hh"
 #include "FVM/TransportSystem.hh"
 #include "equations/BoussFiniteVapor.hh"
 #include "equations/BoussinesqModel.hh"
@@ -51,6 +52,30 @@ struct ReactingTransportWork
     double total_seconds = 0;
 };
 
+/** @brief Aggregate multi-RHS transport metrics across CarrierTransportPlan OperatorGroups. */
+struct ReactingTransportMultiRhsStatistics
+{
+    std::size_t operator_groups = 0;
+    std::size_t transported_columns = 0;
+    std::size_t active_columns = 0;
+    std::size_t matrix_assemblies = 0;
+    std::size_t preconditioner_builds = 0;
+    std::size_t operator_apply_calls = 0;
+    std::size_t operator_column_applies = 0;
+    std::size_t max_batch_width = 0;
+    std::size_t batched_krylov_solves = 0;
+    std::size_t column_serial_solves = 0;
+    std::size_t single_rhs_solves = 0;
+    int batch_krylov_iterations = 0;
+    int column_serial_iterations = 0;
+    double matrix_assembly_seconds = 0.0;
+    double preconditioner_setup_seconds = 0.0;
+    double linear_solve_seconds = 0.0;
+    double residual_check_seconds = 0.0;
+    double pack_unpack_seconds = 0.0;
+    double consistency_repair_seconds = 0.0;
+};
+
 /** @brief Envelope of coefficients evaluated for active large populations. */
 struct BubbleMassTransferStepStatistics
 {
@@ -76,6 +101,7 @@ template<class Scalar> struct ReactingGasStepStatistics
     LinearSolveSummary transport_linear;
     std::array<ReactingTransportWork, 5>
         transport_work; ///< Reused scalar/number operator slots, not species identities.
+    ReactingTransportMultiRhsStatistics transport_multi_rhs;
     double gas_update_seconds = 0;
 };
 
@@ -472,6 +498,32 @@ private:
     /** Local callback guard; invoke inside an existing collective validation. */
 
     SIMPLEFLUID_EQUATIONS_LOCAL
+    void prepare_transport_flux(face_flux_field_type& target, const face_flux_field_type& liquid_face_flux,
+        const field_type* slip_velocity, Dimension slip_axis) const;
+
+    struct BatchedColumnTarget
+    {
+        field_type* field = nullptr;
+        field_type* escape_target = nullptr;
+        std::size_t work_lane = 0;
+        std::size_t species_index = 0;
+        bool liquid_weighted = false;
+        bool is_population_number = false;
+        bool record_escape = false;
+        Reacting::SpeciesPhase escape_phase = Reacting::SpeciesPhase::Liquid;
+        std::string_view escape_population = {};
+        bool accumulate_liquid_packet = false;
+        bool allow_negative = false;
+    };
+
+    SIMPLEFLUID_EQUATIONS_LOCAL
+    void transport_operator_group(std::size_t group_slot, const FVM::OperatorGroup& group,
+        const std::vector<FVM::TransportColumn>& plan_columns, std::span<const BatchedColumnTarget> targets,
+        scalar_type time_step, const face_flux_field_type& group_flux, const FVM::ALEControlVolumeState* ale,
+        std::vector<std::vector<detail::CompensatedSum<long double>>>* liquid_molar_packets,
+        const std::function<void(const BatchedColumnTarget&, const field_type&)>& escape_recorder);
+
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void transport_scalar(field_type& field, scalar_type time_step, const face_flux_field_type& liquid_face_flux,
         field_type* slip_velocity, scalar_type diffusivity, bool diffuse, bool liquid_weighted, field_type& escape_rate,
         const FVM::ALEControlVolumeState* ale, Dimension slip_axis, size_t operator_slot = 0,
@@ -552,16 +604,35 @@ private:
         explicit TransportWorkspace(const SP<const mesh_type>& mesh)
             : flux(mesh, 0.0, "reacting_transport_flux"), old_values(mesh, 0.0, "reacting_transport_old"),
               storage(mesh, 1.0, "reacting_storage_weight"), diffusion(mesh, 0.0, "reacting_diffusion_weight"),
-              solution(mesh, 0.0, "reacting_transport_solution"), zero_flux(mesh, 0.0, "reacting_zero_flux")
+              solution(mesh, 0.0, "reacting_transport_solution"), zero_flux(mesh, 0.0, "reacting_zero_flux"),
+              unit_weight(mesh, 1.0, "reacting_unit_weight"),
+              liquid_clamped_flux(mesh, 0.0, "reacting_liquid_clamped_flux")
         {
         }
+        struct MultiGroupWorkspace
+        {
+            FVM::MultiColumnTransportSystem<Pack> system;
+            FVM::detail::StoredTransportSymbolicPlan<Pack> symbolic_plan;
+            FVM::CarrierMultiVectorBuffer<Pack> solution_buffer;
+            Teuchos::RCP<typename Pack::multi_vector_type> residual;
+            Teuchos::RCP<typename Pack::multi_vector_type> correction;
+            Teuchos::RCP<typename Pack::multi_vector_type> overlap_solution;
+            Teuchos::RCP<typename Pack::import_type> overlap_import;
+            std::vector<std::unique_ptr<field_type>> old_fields;
+            std::vector<std::unique_ptr<field_type>> escape_fields;
+        };
         face_flux_field_type flux;
         field_type old_values, storage, diffusion, solution;
         face_flux_field_type zero_flux;
+        field_type unit_weight;
+        face_flux_field_type liquid_clamped_flux;
         // Separate scalar/number transport graph workspaces; no physical species slot is implied.
         std::array<FVM::TransportSystem<Pack>, 4> systems;
         std::array<bool, 4> operator_ready{};
         std::array<FVM::detail::StoredTransportSymbolicPlan<Pack>, 4> symbolic_plans;
+        std::vector<std::unique_ptr<face_flux_field_type>> population_fluxes;
+        std::vector<std::unique_ptr<MultiGroupWorkspace>> multi_groups;
+        std::uint64_t stage_epoch = 0;
     };
 
     std::vector<SpeciesFieldBundle> d_species_fields;

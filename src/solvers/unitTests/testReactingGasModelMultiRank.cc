@@ -187,7 +187,8 @@ TEST(ReactingGasModelMultiRankTest, CompositeTransportLeaseFailureIsCollectiveAn
         model.refresh_geometry();
         model.advance(
             .01, .01, temperature, pressure, velocity, relative_flux, material, &ale, SimpleFluid::Dimension::Z);
-        EXPECT_GE(model.last_statistics().transport_linear.solves, 4);
+        EXPECT_GE(model.last_statistics().transport_linear.solves, 2);
+        EXPECT_GE(model.last_statistics().transport_multi_rhs.active_columns, 4u);
         EXPECT_NEAR(model.global_species_moles(GeneralGas::one), before, 1e-12);
         EXPECT_NEAR(GeneralGas::history(model).inventory_error, 0., 1e-12);
         EXPECT_NO_THROW(geometry->require_geometry_writable());
@@ -404,6 +405,14 @@ TEST(ReactingGasModelMultiRankTest, TransportSolverPolicyIsCollective)
     if (comm->getRank() == 0)
         candidate.tolerance *= 2.0;
     EXPECT_THROW(model.set_transport_linear_solver_options(candidate), std::invalid_argument);
+    candidate = original;
+    if (comm->getRank() == 0)
+        candidate.max_batch_width = 2;
+    EXPECT_THROW(model.set_transport_linear_solver_options(candidate), std::invalid_argument);
+    candidate = original;
+    if (comm->getRank() == 0)
+        candidate.multi_rhs_policy = SimpleFluid::MultiRhsExecutionPolicy::ColumnSerial;
+    EXPECT_THROW(model.set_transport_linear_solver_options(candidate), std::invalid_argument);
     EXPECT_EQ(model.transport_linear_solver_options().backend, original.backend);
     EXPECT_EQ(model.transport_linear_solver_options().preconditioner, original.preconditioner);
     EXPECT_DOUBLE_EQ(model.options().transport_solver_tolerance, original.tolerance);
@@ -424,7 +433,8 @@ TEST(ReactingGasModelMultiRankTest, TransportSolverPolicyIsCollective)
     EXPECT_GT(GeneralGas::step_escape(model), 0.0);
     EXPECT_NEAR(GeneralGas::history(model).inventory_error, 0.0, 1.0e-13);
     EXPECT_TRUE(statistics.transport_linear.converged);
-    EXPECT_EQ(statistics.transport_linear.solves, 9);
+    EXPECT_EQ(statistics.transport_linear.solves, 3);
+    EXPECT_EQ(statistics.transport_multi_rhs.active_columns, 9u);
     EXPECT_GT(statistics.transport_linear.iterations, 0);
     EXPECT_LE(statistics.transport_linear.achieved_tolerance, candidate.tolerance);
     expect_same_on_all_ranks(*mesh, statistics.transport_linear.solves);
@@ -1188,7 +1198,8 @@ TEST(ReactingGasModelMultiRankTest, ZeroAuxiliaryTransportMatchesFullAndResumesC
         }
         EXPECT_EQ(full.model.last_statistics().transport_linear.solves,
             fresh.model.last_statistics().transport_linear.solves);
-        EXPECT_EQ(full.model.last_statistics().transport_linear.solves, step == 1 ? 1 : 4);
+        EXPECT_EQ(full.model.last_statistics().transport_linear.solves, step == 1 ? 1 : 2);
+        EXPECT_EQ(full.model.last_statistics().transport_multi_rhs.active_columns, step == 1 ? 1u : 4u);
         EXPECT_NEAR(GeneralGas::history(fresh.model).inventory_error, 0, 1e-14);
         check_import(fresh.model);
     }
@@ -1206,7 +1217,8 @@ TEST(ReactingGasModelMultiRankTest, ZeroAuxiliaryPolicyRetainsPopulatedInventori
     f.initialize();
     const double initial = f.model.global_species_moles(GeneralGas::one);
     f.advance(.001, .001);
-    EXPECT_EQ(f.model.last_statistics().transport_linear.solves, 4);
+    EXPECT_EQ(f.model.last_statistics().transport_linear.solves, 2);
+    EXPECT_EQ(f.model.last_statistics().transport_multi_rhs.active_columns, 4u);
     EXPECT_NEAR(f.model.global_species_moles(GeneralGas::one), initial, 1e-14);
     EXPECT_GT(GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dissolved), 0);
     EXPECT_GT(GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dispersed, "large"), 0);
@@ -1248,4 +1260,160 @@ TEST(ReactingGasModelMultiRankTest, ZeroNumberStillAssemblesPopulatedMoles)
     GeneralGas::Fixture<Mesh> malformed(mesh, invalid);
     EXPECT_THROW(malformed.initialize(), std::invalid_argument);
     EXPECT_FALSE(malformed.model.initial_state_initialized());
+}
+
+TEST(ReactingGasModelMultiRankTest, BatchedMultiRhsParityAndEmptyOwnerRankUnderALE2Procs)
+{
+    const auto make_dist_mesh = []
+    {
+        return std::make_shared<Mesh>(std::make_shared<Mesh::Cartesian>(
+            SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 0.5, 1.0}, {0.0, 0.5, 1.0}, {0.0, 0.25, 0.5, 0.75, 1.0}}}));
+    };
+    auto mesh = make_dist_mesh();
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    auto p = GeneralGas::populated();
+    p.controls.transport_solver_tolerance = 1.0e-12;
+    auto opt_s = GeneralGas::options(p);
+    opt_s.batched_species_transport = false;
+    auto opt_b = GeneralGas::options(p);
+    opt_b.batched_species_transport = true;
+
+    SimpleFluid::PlanarALEMeshMotion<Pack> motion_s(mesh);
+    ReactingModelType model_s(mesh, opt_s);
+    FieldType temp(mesh, 300.0, "temperature"), pres(mesh, 0.0, "pressure");
+    VelocityFieldType vel(mesh, Mesh::Vec3{0.05, 0.0, 0.1}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    auto mat = make_water_properties(mesh);
+    model_s.initialize_state(0.0, temp, pres, vel, mat);
+
+    motion_s.begin_trial(1.1, 0.01);
+    model_s.refresh_geometry();
+    const auto ale_s = SimpleFluid::FVM::make_ale_control_volume_state(*mesh, motion_s);
+    for (const auto face : flux.owned_face_ids())
+    {
+        const auto area = mesh->face_area_vector(face);
+        flux.set_owned_value(face, 0.05 * area.x + 0.1 * area.z);
+    }
+    flux.sync_ghosts();
+    model_s.advance(0.01, 0.01, temp, pres, vel, flux, mat, &ale_s);
+
+    auto mesh_b = make_dist_mesh();
+    SimpleFluid::PlanarALEMeshMotion<Pack> motion_b(mesh_b);
+    FieldType temp_b(mesh_b, 300.0, "temperature"), pres_b(mesh_b, 0.0, "pressure");
+    VelocityFieldType vel_b(mesh_b, Mesh::Vec3{0.05, 0.0, 0.1}, "velocity");
+    FaceFieldType flux_b(mesh_b, 0.0, "flux");
+    auto mat_b = make_water_properties(mesh_b);
+
+    for (const auto policy :
+        {SimpleFluid::MultiRhsExecutionPolicy::Auto, SimpleFluid::MultiRhsExecutionPolicy::ColumnSerial})
+    {
+        for (const auto backend :
+            {SimpleFluid::LinearSolverBackend::Gmres, SimpleFluid::LinearSolverBackend::BiCGStab})
+        {
+            ReactingModelType trial(mesh_b, opt_b);
+            auto linear = trial.transport_linear_solver_options();
+            linear.backend = backend;
+            linear.preconditioner = SimpleFluid::LinearPreconditioner::Jacobi;
+            linear.multi_rhs_policy = policy;
+            trial.set_transport_linear_solver_options(linear);
+            trial.initialize_state(0.0, temp_b, pres_b, vel_b, mat_b);
+
+            motion_b.begin_trial(1.1, 0.01);
+            trial.refresh_geometry();
+            for (const auto face : flux_b.owned_face_ids())
+            {
+                const auto area = mesh_b->face_area_vector(face);
+                flux_b.set_owned_value(face, 0.05 * area.x + 0.1 * area.z);
+            }
+            flux_b.sync_ghosts();
+            const auto ale_t = SimpleFluid::FVM::make_ale_control_volume_state(*mesh_b, motion_b);
+            trial.advance(0.01, 0.01, temp_b, pres_b, vel_b, flux_b, mat_b, &ale_t);
+            motion_b.rollback_trial();
+
+            const auto& multi = trial.last_statistics().transport_multi_rhs;
+            EXPECT_EQ(multi.operator_groups, 4u);
+            EXPECT_EQ(multi.matrix_assemblies, 3u);
+            EXPECT_EQ(multi.active_columns, 9u);
+            if (policy == SimpleFluid::MultiRhsExecutionPolicy::Auto)
+            {
+                EXPECT_GE(multi.batched_krylov_solves, 3u);
+                EXPECT_EQ(multi.batched_krylov_solves,
+                    static_cast<std::size_t>(trial.last_statistics().transport_linear.solves));
+                EXPECT_EQ(multi.max_batch_width, 3u);
+                EXPECT_GT(multi.operator_column_applies, multi.operator_apply_calls);
+            }
+            else
+            {
+                EXPECT_GE(multi.column_serial_solves, 3u);
+                EXPECT_EQ(multi.column_serial_solves,
+                    static_cast<std::size_t>(trial.last_statistics().transport_linear.solves));
+                EXPECT_EQ(multi.batched_krylov_solves, 0u);
+            }
+
+            for (const auto& [name, expected_field] : model_s.output_fields())
+            {
+                const auto& actual_field = *trial.output_fields().at(name);
+                for (std::size_t row = 0; row < mesh_b->num_owned_cells(); ++row)
+                {
+                    const auto cell = static_cast<Pack::local_ordinal_type>(row);
+                    const double expected = expected_field->value(cell);
+                    EXPECT_NEAR(actual_field.value(cell), expected, std::max(1.0e-14, std::abs(expected) * 1.0e-10));
+                }
+            }
+            for (const auto face : model_s.transported_liquid_material_volume_flux().owned_face_ids())
+            {
+                const double expected = model_s.transported_liquid_material_volume_flux().value(face);
+                EXPECT_NEAR(trial.transported_liquid_material_volume_flux().value(face), expected,
+                    std::max(1.0e-14, std::abs(expected) * 1.0e-10));
+            }
+        }
+    }
+
+    // Empty-owner rank exercise under batched multi-RHS (rank 1 owns zero cells).
+    Mesh::DistributionOptions d;
+    d.allow_empty_partitions = true;
+    auto one_cell = std::make_shared<Mesh>(
+        std::make_shared<Mesh::Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}}}),
+        d);
+    int local_empty = one_cell->num_owned_cells() == 0 ? 1 : 0;
+    int total_empty = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &total_empty);
+    EXPECT_EQ(total_empty, comm->getSize() - 1);
+
+    auto ep = GeneralGas::populated();
+    auto eopt_s = GeneralGas::options(ep);
+    eopt_s.solution_transport = SimpleFluid::ReactingTransportMode::NoAdvection;
+    eopt_s.batched_species_transport = false;
+    auto eopt_b = GeneralGas::options(ep);
+    eopt_b.solution_transport = SimpleFluid::ReactingTransportMode::NoAdvection;
+    eopt_b.batched_species_transport = true;
+
+    ReactingModelType empty_s(one_cell, eopt_s), empty_b(one_cell, eopt_b);
+    FieldType e_temp(one_cell, 300.0, "temperature"), e_pres(one_cell, 0.0, "pressure");
+    VelocityFieldType e_vel(one_cell, Mesh::Vec3{0.0, 0.0, 0.0}, "velocity");
+    FaceFieldType e_flux(one_cell, 0.0, "flux");
+    auto e_mat = make_water_properties(one_cell);
+    empty_s.initialize_state(0.0, e_temp, e_pres, e_vel, e_mat);
+    empty_b.initialize_state(0.0, e_temp, e_pres, e_vel, e_mat);
+    empty_s.advance(0.005, 0.005, e_temp, e_pres, e_vel, e_flux, e_mat);
+    empty_b.advance(0.005, 0.005, e_temp, e_pres, e_vel, e_flux, e_mat);
+    EXPECT_EQ(empty_b.last_statistics().transport_multi_rhs.operator_groups, 5u);
+    EXPECT_EQ(empty_b.last_statistics().transport_multi_rhs.matrix_assemblies, 4u);
+    for (const auto& [name, expected_field] : empty_s.output_fields())
+    {
+        const auto& actual_field = *empty_b.output_fields().at(name);
+        for (std::size_t row = 0; row < one_cell->num_owned_cells(); ++row)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(row);
+            const double expected = expected_field->value(cell);
+            EXPECT_NEAR(actual_field.value(cell), expected, std::max(1.0e-14, std::abs(expected) * 1.0e-10));
+        }
+    }
+    expect_same_on_all_ranks(*one_cell, empty_b.last_statistics().transport_linear.solves);
+    expect_same_on_all_ranks(*one_cell, empty_b.last_statistics().transport_multi_rhs.active_columns);
 }

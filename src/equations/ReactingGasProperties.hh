@@ -204,6 +204,7 @@ struct ReactingGasOptions
         pressure_history_values; ///< Absolute pressures corresponding to history times.
     std::vector<std::string> free_surface_patches; ///< Patches through which bubbles may escape.
     real_t transport_solver_tolerance = 1.0e-10; ///< Relative FV solve tolerance; default preserves existing behavior.
+    bool batched_species_transport = true; ///< Use CarrierTransportPlan multi-RHS FV transport; false selects scalar reference path.
 };
 
 /**

@@ -121,6 +121,10 @@ void ReactingGasModel<Pack, MeshType>::set_transport_linear_solver_options(Linea
     collective_detail::require_uniform_value(*d_mesh, options.verbosity, context);
     collective_detail::require_uniform_value(
         *d_mesh, static_cast<int>(options.reuse_preconditioner), context);
+    collective_detail::require_uniform_value(*d_mesh, options.max_batch_width, context);
+    collective_detail::require_uniform_value(
+        *d_mesh, static_cast<int>(options.multi_rhs_policy), context);
+    collective_detail::require_uniform_value(*d_mesh, options.absolute_tolerance, context);
 
     d_transport_solver.reset();
     d_transport_linear_options = std::move(options);
@@ -838,6 +842,7 @@ void ReactingGasModel<Pack, MeshType>::transport_scalar(field_type& field, scala
             scalar_type{-1}, scalar_type{1});
         auto refinement_options = solve_options;
         refinement_options.reuse_preconditioner = true;
+        refinement_options.absolute_tolerance = scalar_type{};
         const auto refinement_statistics = d_transport_solver.solve_from_zero_with_statistics(
             system.matrix, residual, correction, refinement_options);
         d_last_statistics.transport_linear.add(refinement_statistics);
@@ -936,6 +941,771 @@ void ReactingGasModel<Pack, MeshType>::transport_scalar(field_type& field, scala
         escape_values(owner, 0) += boundary_rate / volume;
     }
     work.total_seconds += elapsed(started);
+}
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+void ReactingGasModel<Pack, MeshType>::prepare_transport_flux(face_flux_field_type& target,
+    const face_flux_field_type& liquid_face_flux, const field_type* slip_velocity, Dimension slip_axis) const
+{
+    const auto slip_component = static_cast<int>(slip_axis);
+    if (slip_component < static_cast<int>(Dimension::X) || slip_component > static_cast<int>(Dimension::Z))
+    {
+        throw std::invalid_argument("Reacting bubble slip axis must be X, Y, or Z.");
+    }
+    auto is_free_surface = [&](local_ordinal_type face_lid)
+    {
+        if (!d_mesh->is_boundary_face(face_lid))
+        {
+            return false;
+        }
+        const auto& name = d_mesh->boundary_batch_name(d_mesh->boundary_id(face_lid));
+        return std::ranges::find(d_options.free_surface_patches, name) != d_options.free_surface_patches.end();
+    };
+    {
+        const auto liquid_flux_values = liquid_face_flux.owned_read_view();
+        const auto slip_values = slip_velocity ? slip_velocity->local_read_view()
+                                               : decltype(d_alpha_l.local_read_view()){};
+        const auto flux_values = target.owned_write_view();
+        for (const auto face_lid : target.owned_face_ids())
+        {
+            auto flux = liquid_face_flux.is_owned_face(face_lid)
+                ? liquid_flux_values(liquid_face_flux.owned_row(face_lid), 0)
+                : scalar_type{};
+            if (slip_velocity)
+            {
+                const auto owner = d_mesh->owner_cell(face_lid);
+                auto face_slip = slip_values(owner, 0);
+                if (!d_mesh->is_boundary_face(face_lid))
+                {
+                    const auto neighbor = d_mesh->opposite_or_periodic_neighbor_cell(face_lid, owner);
+                    face_slip = 0.5 * (face_slip + slip_values(neighbor, 0));
+                }
+                flux += face_slip * d_mesh->face_area_vector(face_lid).component(static_cast<size_t>(slip_component));
+            }
+            if (d_mesh->is_boundary_face(face_lid))
+            {
+                flux = is_free_surface(face_lid) ? std::max(flux, scalar_type{}) : scalar_type{};
+            }
+            flux_values(target.owned_row(face_lid), 0) = flux;
+        }
+    }
+    if constexpr (requires { target.sync_ghosts(); })
+    {
+        target.sync_ghosts();
+    }
+}
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+void ReactingGasModel<Pack, MeshType>::transport_operator_group(std::size_t group_slot,
+    const FVM::OperatorGroup& group, const std::vector<FVM::TransportColumn>& plan_columns,
+    std::span<const BatchedColumnTarget> targets, scalar_type time_step, const face_flux_field_type& group_flux,
+    const FVM::ALEControlVolumeState* ale,
+    std::vector<std::vector<detail::CompensatedSum<long double>>>* liquid_molar_packets,
+    const std::function<void(const BatchedColumnTarget&, const field_type&)>& escape_recorder)
+{
+    const auto started = std::chrono::steady_clock::now();
+    const auto elapsed = [](auto begin)
+    { return std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count(); };
+
+    const std::size_t ncols = group.plan_column_indices.size();
+    if (ncols == 0)
+    {
+        return;
+    }
+    const std::size_t owned_cells = d_mesh->num_owned_cells();
+    const auto comm = d_mesh->owned_cell_map()->getComm();
+
+    if (ale != nullptr)
+    {
+        ale->validate(*d_mesh, static_cast<real_t>(time_step));
+    }
+
+    auto& workspace = *d_transport_workspace;
+    if (workspace.multi_groups.size() <= group_slot)
+    {
+        workspace.multi_groups.resize(group_slot + 1);
+    }
+    if (!workspace.multi_groups[group_slot])
+    {
+        workspace.multi_groups[group_slot] =
+            std::make_unique<typename TransportWorkspace::MultiGroupWorkspace>();
+    }
+    auto& gws = *workspace.multi_groups[group_slot];
+    auto& multi_diag = d_last_statistics.transport_multi_rhs;
+
+    const std::size_t primary_col_idx = group.plan_column_indices.front();
+    const auto& primary_target = targets[plan_columns[primary_col_idx].source_index];
+    const bool group_liquid_weighted = primary_target.liquid_weighted;
+    const std::size_t group_work_lane = primary_target.work_lane;
+    auto& group_work = d_last_statistics.transport_work.at(group_work_lane);
+
+    if (gws.escape_fields.size() < ncols)
+    {
+        const std::size_t prev = gws.escape_fields.size();
+        gws.escape_fields.resize(ncols);
+        for (std::size_t k = prev; k < ncols; ++k)
+        {
+            gws.escape_fields[k] = std::make_unique<field_type>(
+                d_mesh, 0.0, "reacting_batched_escape_" + std::to_string(group_slot) + "_" + std::to_string(k));
+        }
+    }
+
+    std::vector<scalar_type> local_max_abs(ncols, scalar_type{});
+    std::vector<scalar_type> global_max_abs(ncols, scalar_type{});
+    collective_detail::collective_local_validation(*d_mesh, "Reacting batched transport inputs",
+        [&]
+        {
+            const auto liquid_values = d_alpha_l.owned_read_view();
+            for (std::size_t owned = 0; owned < owned_cells; ++owned)
+            {
+                const auto raw_liquid = liquid_values(owned, 0);
+                if (group_liquid_weighted && (!std::isfinite(raw_liquid) || raw_liquid < scalar_type{}))
+                {
+                    throw std::invalid_argument("Species transport needs a finite physical liquid carrier.");
+                }
+            }
+            for (std::size_t k = 0; k < ncols; ++k)
+            {
+                const auto col_idx = group.plan_column_indices[k];
+                const auto& col_meta = plan_columns[col_idx];
+                const auto& target = targets[col_meta.source_index];
+                if (!target.field || !target.escape_target)
+                {
+                    throw std::logic_error("Reacting batched column target must provide valid fields.");
+                }
+                if (&target.escape_target->mesh() != d_mesh.get() || &target.field->mesh() != d_mesh.get())
+                {
+                    throw std::invalid_argument("Reacting escape rate is on the wrong mesh.");
+                }
+                if (target.liquid_weighted != group_liquid_weighted)
+                {
+                    throw std::logic_error("Reacting OperatorGroup mixed incompatible storage weighting.");
+                }
+                const auto field_values = target.field->owned_read_view();
+                for (std::size_t owned = 0; owned < owned_cells; ++owned)
+                {
+                    const auto val = field_values(owned, 0);
+                    if (!std::isfinite(val) || (!col_meta.acceptance_policy.allow_negative && val < scalar_type{}))
+                    {
+                        throw std::invalid_argument("Reacting transport input inventory is invalid.");
+                    }
+                    if (group_liquid_weighted && liquid_values(owned, 0) == scalar_type{} && val != scalar_type{})
+                    {
+                        throw std::invalid_argument("Species transport needs a finite physical liquid carrier.");
+                    }
+                    local_max_abs[k] = std::max(local_max_abs[k], std::abs(val));
+                }
+            }
+        });
+
+    Teuchos::reduceAll(
+        *comm, Teuchos::REDUCE_MAX, static_cast<int>(ncols), local_max_abs.data(), global_max_abs.data());
+
+    std::vector<bool> active_mask(ncols, false);
+    std::size_t active_count = 0;
+    bool any_liquid_packet = false;
+    for (std::size_t k = 0; k < ncols; ++k)
+    {
+        const auto& col_meta = plan_columns[group.plan_column_indices[k]];
+        const auto& target = targets[col_meta.source_index];
+        gws.escape_fields[k]->put_scalar(0.0);
+        target.escape_target->put_scalar(0.0);
+        active_mask[k] = global_max_abs[k] > scalar_type{};
+        if (active_mask[k])
+        {
+            ++active_count;
+            if (target.accumulate_liquid_packet)
+            {
+                any_liquid_packet = true;
+            }
+        }
+    }
+
+    multi_diag.transported_columns += ncols;
+    multi_diag.active_columns += active_count;
+
+    if (active_count == 0)
+    {
+        for (std::size_t k = 0; k < ncols; ++k)
+        {
+            const auto& col_meta = plan_columns[group.plan_column_indices[k]];
+            const auto& target = targets[col_meta.source_index];
+            target.field->put_scalar(0.0);
+            ++d_last_statistics.transport_work.at(target.work_lane).skipped;
+        }
+        group_work.total_seconds += elapsed(started);
+        return;
+    }
+
+    auto is_free_surface = [&](local_ordinal_type face_lid)
+    {
+        if (!d_mesh->is_boundary_face(face_lid))
+        {
+            return false;
+        }
+        const auto& name = d_mesh->boundary_batch_name(d_mesh->boundary_id(face_lid));
+        return std::ranges::find(d_options.free_surface_patches, name) != d_options.free_surface_patches.end();
+    };
+
+    const auto pack_started = std::chrono::steady_clock::now();
+    workspace.diffusion.put_scalar(0.0);
+    if (group_liquid_weighted)
+    {
+        const auto liquid_values = d_alpha_l.owned_read_view();
+        const auto storage = workspace.storage.owned_write_view();
+        for (std::size_t owned = 0; owned < owned_cells; ++owned)
+        {
+            const auto raw_liquid = liquid_values(owned, 0);
+            storage(owned, 0) = raw_liquid == scalar_type{} ? scalar_type{1} : raw_liquid;
+        }
+        workspace.storage.sync_ghosts();
+
+        if (gws.old_fields.size() < ncols)
+        {
+            const std::size_t prev = gws.old_fields.size();
+            gws.old_fields.resize(ncols);
+            for (std::size_t k = prev; k < ncols; ++k)
+            {
+                gws.old_fields[k] = std::make_unique<field_type>(
+                    d_mesh, 0.0, "reacting_batched_old_" + std::to_string(group_slot) + "_" + std::to_string(k));
+            }
+        }
+        const auto storage_read = workspace.storage.owned_read_view();
+        for (std::size_t k = 0; k < ncols; ++k)
+        {
+            if (!active_mask[k])
+            {
+                continue;
+            }
+            const auto& col_meta = plan_columns[group.plan_column_indices[k]];
+            const auto& target = targets[col_meta.source_index];
+            const auto field_values = target.field->owned_read_view();
+            const auto old_write = gws.old_fields[k]->owned_write_view();
+            for (std::size_t owned = 0; owned < owned_cells; ++owned)
+            {
+                old_write(owned, 0) = field_values(owned, 0) / storage_read(owned, 0);
+            }
+            gws.old_fields[k]->sync_ghosts();
+        }
+    }
+    const field_type& storage_weight = group_liquid_weighted ? workspace.storage : workspace.unit_weight;
+
+    std::vector<FVM::MultiColumnScalarInput<Pack, mesh_type>> mc_cols(ncols);
+    for (std::size_t k = 0; k < ncols; ++k)
+    {
+        const auto col_idx = group.plan_column_indices[k];
+        const auto& col_meta = plan_columns[col_idx];
+        const auto& target = targets[col_meta.source_index];
+        const field_type* old_ptr = (group_liquid_weighted && active_mask[k]) ? gws.old_fields[k].get() : target.field;
+        mc_cols[k] = FVM::MultiColumnScalarInput<Pack, mesh_type>{
+            .old_values = old_ptr,
+            .source = [](local_ordinal_type) -> scalar_type { return 0.0; },
+            .boundary_value = [](int, size_t) -> scalar_type { return 0.0; },
+            .neumann_flux = [](int, size_t) -> scalar_type { return 0.0; },
+            .allow_negative = col_meta.acceptance_policy.allow_negative};
+    }
+    multi_diag.pack_unpack_seconds += elapsed(pack_started);
+
+    const auto assembly_started = std::chrono::steady_clock::now();
+    if (!gws.system.rhs.is_null() &&
+        (gws.system.rhs->getNumVectors() != ncols || !gws.system.rhs->getMap()->isSameAs(*d_mesh->owned_cell_map())))
+    {
+        gws.system = {};
+        gws.symbolic_plan = {};
+    }
+    gws.system = FVM::TransportSystemFactory<Pack, mesh_type>::assemble_multi_column(
+        typename FVM::TransportSystemFactory<Pack, mesh_type>::MultiColumnWeightedTerms{
+            .time_step = time_step,
+            .face_fluxes = group_flux,
+            .coefficients = {storage_weight, storage_weight, workspace.diffusion},
+            .columns = std::move(mc_cols)},
+        typename FVM::TransportSystemFactory<Pack, mesh_type>::MultiColumnWeightedBoundary{
+            .condition = [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0.0}; }},
+        typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarOptions{
+            .correction = {FVM::NonOrthogonalTreatment::Hybrid, nullptr}},
+        typename FVM::TransportSystemFactory<Pack, mesh_type>::MultiColumnWeightedContext{
+            .cached_matrix = gws.system.matrix,
+            .geometry_cache = &d_transport_geometry_cache,
+            .ale = ale,
+            .symbolic_plan = &gws.symbolic_plan,
+            .cached_rhs = gws.system.rhs});
+    const double assembly_elapsed = elapsed(assembly_started);
+    multi_diag.matrix_assembly_seconds += assembly_elapsed;
+    ++multi_diag.matrix_assemblies;
+    group_work.assembly_seconds += assembly_elapsed;
+    ++group_work.assemblies;
+
+    const auto solve_started = std::chrono::steady_clock::now();
+    auto& solution_mv = gws.solution_buffer.ensure(d_mesh->owned_cell_map(), ncols);
+    MultiRhsSolveOptions multi_opts;
+    multi_opts.solver = d_transport_linear_options;
+    multi_opts.solver.reuse_preconditioner = false;
+    multi_opts.active_columns = active_mask;
+    multi_opts.column_policies.reserve(ncols);
+    for (std::size_t k = 0; k < ncols; ++k)
+    {
+        const auto& policy = plan_columns[group.plan_column_indices[k]].acceptance_policy;
+        multi_opts.column_policies.push_back(ColumnResidualPolicy{
+            .tolerance = policy.relative_tolerance,
+            .absolute_tolerance = policy.absolute_tolerance,
+            .rhs_norm_floor = policy.rhs_norm_floor});
+    }
+    d_transport_solver.notify_operator_values_changed();
+    const auto solve_statistics = d_transport_solver.solve_multi_rhs_from_zero_with_statistics(
+        gws.system.matrix, *gws.system.rhs, solution_mv, multi_opts);
+    const double solve_elapsed = elapsed(solve_started);
+
+    auto record_linear_stats = [&](const LinearSolveStatistics& stats, std::size_t applied_work_lane)
+    {
+        d_last_statistics.transport_linear.add(stats);
+        auto& target_work = d_last_statistics.transport_work.at(applied_work_lane);
+        ++target_work.solves;
+        target_work.iterations += stats.iterations;
+        multi_diag.preconditioner_builds += stats.preconditioner_builds;
+        multi_diag.operator_apply_calls += stats.operator_apply_calls;
+        multi_diag.operator_column_applies += stats.operator_column_applies;
+        multi_diag.max_batch_width = std::max(multi_diag.max_batch_width, stats.max_batch_width);
+        multi_diag.batch_krylov_iterations += stats.batch_krylov_iterations;
+        multi_diag.column_serial_iterations += stats.column_serial_iterations;
+        multi_diag.preconditioner_setup_seconds += stats.timings.preconditioner_setup_seconds;
+        multi_diag.linear_solve_seconds += stats.timings.solve_seconds;
+        multi_diag.residual_check_seconds += stats.timings.residual_check_seconds;
+        multi_diag.pack_unpack_seconds += stats.timings.pack_unpack_seconds;
+        switch (stats.execution_mode)
+        {
+            case MultiRhsExecutionMode::BatchedKrylov:
+                ++multi_diag.batched_krylov_solves;
+                break;
+            case MultiRhsExecutionMode::ColumnSerial:
+                ++multi_diag.column_serial_solves;
+                break;
+            case MultiRhsExecutionMode::SingleRhs:
+                ++multi_diag.single_rhs_solves;
+                break;
+        }
+    };
+    record_linear_stats(solve_statistics, group_work_lane);
+    group_work.solve_seconds += solve_elapsed;
+    if (!solve_statistics.converged)
+    {
+        throw std::runtime_error("Reacting weighted transport solve did not converge.");
+    }
+
+    struct TransportBalance
+    {
+        scalar_type before = {};
+        scalar_type after = {};
+        scalar_type outflow = {};
+        scalar_type residual = {};
+        scalar_type tolerance = {};
+        bool satisfied() const { return std::abs(residual) <= tolerance; }
+    };
+
+    const auto evaluate_balances = [&](const std::vector<bool>& eval_mask,
+                                       const LinearSolveStatistics& latest_stats) -> std::vector<TransportBalance>
+    {
+        std::vector<TransportBalance> balances(ncols);
+        std::vector<scalar_type> local_stats(4 * ncols, scalar_type{});
+        std::vector<scalar_type> global_stats(4 * ncols, scalar_type{});
+        std::size_t first_bad_col = ncols;
+        std::size_t first_bad_row = owned_cells;
+        {
+            const auto storage = storage_weight.owned_read_view();
+            const auto advection = storage_weight.local_read_view();
+            const auto flux = group_flux.owned_read_view();
+            for (std::size_t k = 0; k < ncols; ++k)
+            {
+                if (!eval_mask[k])
+                {
+                    continue;
+                }
+                const auto col_idx = group.plan_column_indices[k];
+                const auto& col_meta = plan_columns[col_idx];
+                const auto& target = targets[col_meta.source_index];
+                const bool allow_negative = col_meta.acceptance_policy.allow_negative;
+                const auto previous = target.field->owned_read_view();
+                const auto candidate = solution_mv.getData(k);
+
+                std::array<detail::CompensatedSum<>, 3> accumulated;
+                int invalid_candidate = 0;
+                const auto published_value = [&](std::size_t owned)
+                {
+                    auto value = candidate[owned];
+                    if (group_liquid_weighted)
+                    {
+                        value *= storage(owned, 0);
+                    }
+                    if (!std::isfinite(value) || (!allow_negative && value < scalar_type{}))
+                    {
+                        invalid_candidate = 1;
+                        if (first_bad_col == ncols)
+                        {
+                            first_bad_col = k;
+                            first_bad_row = owned;
+                        }
+                        return scalar_type{};
+                    }
+                    return value;
+                };
+                for (std::size_t owned = 0; owned < owned_cells; ++owned)
+                {
+                    const auto cell = static_cast<local_ordinal_type>(owned);
+                    const auto new_volume = ale == nullptr
+                        ? static_cast<scalar_type>(d_mesh->cell_volume(cell))
+                        : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
+                    const auto old_volume = ale == nullptr
+                        ? new_volume
+                        : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
+                    accumulated[0] += static_cast<long double>(previous(owned, 0)) * old_volume;
+                    accumulated[1] += static_cast<long double>(published_value(owned)) * new_volume;
+                }
+                for (const auto face : group_flux.owned_face_ids())
+                {
+                    if (!is_free_surface(face))
+                    {
+                        continue;
+                    }
+                    const auto owner = d_mesh->owner_cell(face);
+                    const auto value = published_value(static_cast<std::size_t>(owner));
+                    const auto primary = group_liquid_weighted ? value / storage(owner, 0) : value;
+                    const auto boundary_rate =
+                        std::max(flux(group_flux.owned_row(face), 0), scalar_type{}) *
+                        advection(owner, 0) * primary;
+                    accumulated[2] += static_cast<long double>(boundary_rate) * time_step;
+                }
+                local_stats[4 * k + 0] = static_cast<scalar_type>(accumulated[0].value());
+                local_stats[4 * k + 1] = static_cast<scalar_type>(accumulated[1].value());
+                local_stats[4 * k + 2] = static_cast<scalar_type>(accumulated[2].value());
+                local_stats[4 * k + 3] = static_cast<scalar_type>(invalid_candidate);
+            }
+        }
+        Teuchos::reduceAll(
+            *comm, Teuchos::REDUCE_SUM, static_cast<int>(local_stats.size()), local_stats.data(), global_stats.data());
+
+        for (std::size_t k = 0; k < ncols; ++k)
+        {
+            if (!eval_mask[k])
+            {
+                continue;
+            }
+            const auto b0 = global_stats[4 * k + 0];
+            const auto b1 = global_stats[4 * k + 1];
+            const auto b2 = global_stats[4 * k + 2];
+            const auto bad = global_stats[4 * k + 3];
+            if (bad != scalar_type{} || !std::isfinite(b0) || !std::isfinite(b1) || !std::isfinite(b2))
+            {
+                const int local_bad_rank =
+                    first_bad_col < ncols ? comm->getRank() : std::numeric_limits<int>::max();
+                int first_bad_rank = std::numeric_limits<int>::max();
+                Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_bad_rank, &first_bad_rank);
+                collective_detail::collective_local_validation(*d_mesh, "Reacting transport invalid candidate inventory",
+                    [&]
+                    {
+                        if (comm->getRank() != first_bad_rank || first_bad_col >= ncols)
+                        {
+                            return;
+                        }
+                        const auto& bad_col_meta = plan_columns[group.plan_column_indices[first_bad_col]];
+                        const auto& bad_target = targets[bad_col_meta.source_index];
+                        const auto cell = static_cast<local_ordinal_type>(first_bad_row);
+                        const auto row_gid = gws.system.matrix->getRowMap()->getGlobalElement(cell);
+                        typename Pack::matrix_type::local_inds_host_view_type columns;
+                        typename Pack::matrix_type::values_host_view_type coefficients;
+                        gws.system.matrix->getLocalRowView(cell, columns, coefficients);
+                        scalar_type diagonal{};
+                        scalar_type off_min = std::numeric_limits<scalar_type>::infinity();
+                        scalar_type off_max = -std::numeric_limits<scalar_type>::infinity();
+                        size_t off_count = 0, positive_off = 0, nonfinite_coefficients = 0;
+                        for (size_t entry = 0; entry < columns.extent(0); ++entry)
+                        {
+                            const auto value = coefficients(entry);
+                            nonfinite_coefficients += !std::isfinite(value);
+                            if (gws.system.matrix->getColMap()->getGlobalElement(columns(entry)) == row_gid)
+                            {
+                                diagonal += value;
+                            }
+                            else
+                            {
+                                ++off_count;
+                                positive_off += value > 0;
+                                off_min = std::min(off_min, value);
+                                off_max = std::max(off_max, value);
+                            }
+                        }
+                        if (off_count == 0)
+                        {
+                            off_min = off_max = 0;
+                        }
+                        std::string_view field_name = "unregistered";
+                        for (const auto& [name, pointer] : d_output_fields)
+                        {
+                            if (pointer == bad_target.field)
+                            {
+                                field_name = name;
+                                break;
+                            }
+                        }
+                        auto geometry_gid = d_mesh->cell_global_id(cell);
+                        if constexpr (requires { d_mesh->cell_geometry_global_id(cell); })
+                        {
+                            geometry_gid = d_mesh->cell_geometry_global_id(cell);
+                        }
+                        const auto raw = solution_mv.getData(first_bad_col)[first_bad_row];
+                        const auto weight = storage_weight.owned_read_view()(first_bad_row, 0);
+                        const auto& col_stats = latest_stats.column_statistics[first_bad_col];
+                        std::ostringstream message;
+                        message << std::setprecision(std::numeric_limits<scalar_type>::max_digits10)
+                                << "Reacting transport produced an invalid candidate inventory: field=" << field_name
+                                << " operator_group=" << group_slot << " work_lane=" << bad_target.work_lane
+                                << " rank=" << first_bad_rank << " cell_lid=" << first_bad_row
+                                << " cell_gid=" << row_gid << " geometry_gid=" << geometry_gid
+                                << " old=" << bad_target.field->owned_read_view()(first_bad_row, 0)
+                                << " raw_candidate=" << raw
+                                << " published_candidate=" << (group_liquid_weighted ? raw * weight : raw)
+                                << " storage=" << weight
+                                << " rhs=" << gws.system.rhs->getData(first_bad_col)[first_bad_row]
+                                << " diagonal=" << diagonal << " offdiag_min=" << off_min
+                                << " offdiag_max=" << off_max << " positive_offdiagonals=" << positive_off
+                                << " nonfinite_coefficients=" << nonfinite_coefficients
+                                << " solver=" << to_string(multi_opts.solver.backend) << '/'
+                                << to_string(multi_opts.solver.preconditioner)
+                                << " iterations=" << col_stats.iterations
+                                << " rhs_norm=" << col_stats.rhs_norm
+                                << " achieved_tolerance=" << col_stats.achieved_tolerance
+                                << " requested_tolerance=" << multi_opts.solver.tolerance
+                                << " converged=" << col_stats.converged;
+                        throw std::runtime_error(message.str());
+                    });
+                throw std::runtime_error("Reacting transport produced an invalid candidate inventory.");
+            }
+            balances[k] = TransportBalance{
+                b0, b1, b2, (b1 - b0) + b2,
+                scalar_type{64} * std::max(
+                    std::numeric_limits<scalar_type>::epsilon() * std::max(std::abs(b0), std::abs(b1)),
+                    std::numeric_limits<scalar_type>::denorm_min())};
+        }
+        return balances;
+    };
+
+    const auto repair_started = std::chrono::steady_clock::now();
+    LinearSolveStatistics latest_solve_statistics = solve_statistics;
+    auto balances = evaluate_balances(active_mask, latest_solve_statistics);
+    std::vector<bool> pending(ncols, false);
+    bool any_pending = false;
+    for (std::size_t k = 0; k < ncols; ++k)
+    {
+        if (active_mask[k] && !balances[k].satisfied())
+        {
+            pending[k] = true;
+            any_pending = true;
+        }
+    }
+
+    constexpr int maximum_inventory_refinements = 2;
+    for (int refinement = 0; refinement < maximum_inventory_refinements && any_pending; ++refinement)
+    {
+        const auto ref_started = std::chrono::steady_clock::now();
+        if (gws.residual.is_null() || gws.residual->getNumVectors() != ncols ||
+            !gws.residual->getMap()->isSameAs(*d_mesh->owned_cell_map()))
+        {
+            gws.residual = Teuchos::rcp(new typename Pack::multi_vector_type(d_mesh->owned_cell_map(), ncols, false));
+            gws.correction = Teuchos::rcp(new typename Pack::multi_vector_type(d_mesh->owned_cell_map(), ncols, false));
+        }
+        gws.residual->update(scalar_type{1}, *gws.system.rhs, scalar_type{});
+        gws.system.matrix->apply(solution_mv, *gws.residual, Teuchos::NO_TRANS, scalar_type{-1}, scalar_type{1});
+        for (std::size_t k = 0; k < ncols; ++k)
+        {
+            if (!pending[k])
+            {
+                gws.residual->getVectorNonConst(k)->putScalar(scalar_type{});
+            }
+        }
+        auto ref_opts = multi_opts;
+        ref_opts.solver.reuse_preconditioner = true;
+        ref_opts.solver.absolute_tolerance = scalar_type{};
+        for (auto& policy : ref_opts.column_policies)
+        {
+            policy.absolute_tolerance = scalar_type{};
+            policy.rhs_norm_floor = scalar_type{};
+        }
+        ref_opts.active_columns = pending;
+        const auto ref_stats = d_transport_solver.solve_multi_rhs_from_zero_with_statistics(
+            gws.system.matrix, *gws.residual, *gws.correction, ref_opts);
+        record_linear_stats(ref_stats, group_work_lane);
+        group_work.solve_seconds += elapsed(ref_started);
+        if (!ref_stats.converged)
+        {
+            throw std::runtime_error("Reacting inventory residual correction did not converge.");
+        }
+        for (std::size_t k = 0; k < ncols; ++k)
+        {
+            if (pending[k])
+            {
+                solution_mv.getVectorNonConst(k)->update(scalar_type{1}, *gws.correction->getVector(k), scalar_type{1});
+            }
+        }
+        latest_solve_statistics = ref_stats;
+        const auto updated = evaluate_balances(pending, latest_solve_statistics);
+        any_pending = false;
+        for (std::size_t k = 0; k < ncols; ++k)
+        {
+            if (pending[k])
+            {
+                balances[k] = updated[k];
+                pending[k] = !balances[k].satisfied();
+                any_pending = any_pending || pending[k];
+            }
+        }
+    }
+    if (any_pending)
+    {
+        for (std::size_t k = 0; k < ncols; ++k)
+        {
+            if (pending[k])
+            {
+                std::ostringstream message;
+                message << std::scientific << std::setprecision(std::numeric_limits<scalar_type>::max_digits10)
+                        << "Reacting transport inventory closure failed after residual correction: before="
+                        << balances[k].before << ", after=" << balances[k].after << ", outflow=" << balances[k].outflow
+                        << ", residual=" << balances[k].residual << ", roundoff=" << balances[k].tolerance << '.';
+                throw std::runtime_error(message.str());
+            }
+        }
+    }
+    multi_diag.consistency_repair_seconds += elapsed(repair_started);
+
+    const auto unpack_started = std::chrono::steady_clock::now();
+    {
+        const auto storage = storage_weight.owned_read_view();
+        for (std::size_t k = 0; k < ncols; ++k)
+        {
+            const auto col_idx = group.plan_column_indices[k];
+            const auto& col_meta = plan_columns[col_idx];
+            const auto& target = targets[col_meta.source_index];
+            if (!active_mask[k])
+            {
+                target.field->put_scalar(scalar_type{});
+                ++d_last_statistics.transport_work.at(target.work_lane).skipped;
+                continue;
+            }
+            const bool allow_negative = col_meta.acceptance_policy.allow_negative;
+            const auto src = solution_mv.getData(k);
+            const auto dst = target.field->owned_write_view();
+            for (std::size_t owned = 0; owned < owned_cells; ++owned)
+            {
+                auto transported = src[owned];
+                if (group_liquid_weighted)
+                {
+                    transported *= storage(owned, 0);
+                }
+                if (!std::isfinite(transported) || (!allow_negative && transported < scalar_type{}))
+                {
+                    throw std::runtime_error("Reacting transport cannot publish a negative or nonfinite inventory.");
+                }
+                dst(owned, 0) = transported;
+            }
+            target.field->sync_ghosts();
+        }
+    }
+    multi_diag.pack_unpack_seconds += elapsed(unpack_started);
+
+    if (any_liquid_packet && liquid_molar_packets != nullptr)
+    {
+        const auto overlap_map = storage_weight.overlap_data().getMap();
+        if (gws.overlap_import.is_null() ||
+            !gws.overlap_import->getSourceMap()->isSameAs(*d_mesh->owned_cell_map()) ||
+            !gws.overlap_import->getTargetMap()->isSameAs(*overlap_map))
+        {
+            gws.overlap_import = Teuchos::rcp(new typename Pack::import_type(d_mesh->owned_cell_map(), overlap_map));
+            gws.overlap_solution = Teuchos::null;
+        }
+        if (gws.overlap_solution.is_null() || gws.overlap_solution->getNumVectors() != ncols ||
+            !gws.overlap_solution->getMap()->isSameAs(*overlap_map))
+        {
+            gws.overlap_solution = Teuchos::rcp(new typename Pack::multi_vector_type(overlap_map, ncols, false));
+        }
+        gws.overlap_solution->doImport(solution_mv, *gws.overlap_import, Tpetra::REPLACE);
+
+        collective_detail::collective_local_validation(*d_mesh, "Canonical transported molar face packet",
+            [&]
+            {
+                const auto& owned_faces = group_flux.owned_face_ids();
+                for (std::size_t k = 0; k < ncols; ++k)
+                {
+                    const auto col_idx = group.plan_column_indices[k];
+                    const auto& col_meta = plan_columns[col_idx];
+                    const auto& target = targets[col_meta.source_index];
+                    if (!active_mask[k] || !target.accumulate_liquid_packet)
+                    {
+                        continue;
+                    }
+                    const auto primary_overlap = gws.overlap_solution->getData(k);
+                    auto& packet_accum = (*liquid_molar_packets)[target.species_index];
+                    for (const auto face : owned_faces)
+                    {
+                        const auto flux = group_flux.value(face);
+                        const auto owner = d_mesh->owner_cell(face);
+                        const auto donor = flux >= scalar_type{} || d_mesh->is_boundary_face(face)
+                            ? owner
+                            : d_mesh->opposite_or_periodic_neighbor_cell(face, owner);
+                        const auto primary = primary_overlap[static_cast<std::size_t>(donor)];
+                        const auto weight = storage_weight.local_value(donor);
+                        const auto stored = flux * weight * primary;
+                        if (!std::isfinite(stored) || (flux != 0 && weight != 0 && primary != 0 && stored == 0) ||
+                            primary < 0 || weight < 0)
+                        {
+                            throw std::runtime_error("Canonical transported molar packet is invalid.");
+                        }
+                        packet_accum[group_flux.owned_row(face)] += stored;
+                    }
+                }
+            });
+    }
+
+    {
+        const auto flux_values = group_flux.owned_read_view();
+        const auto storage_values = storage_weight.owned_read_view();
+        const auto advection_values = storage_weight.local_read_view();
+        for (std::size_t k = 0; k < ncols; ++k)
+        {
+            const auto& col_meta = plan_columns[group.plan_column_indices[k]];
+            const auto& target = targets[col_meta.source_index];
+            if (active_mask[k])
+            {
+                const auto field_values = target.field->owned_read_view();
+                const auto escape_values = gws.escape_fields[k]->owned_write_view();
+                for (const auto face_lid : group_flux.owned_face_ids())
+                {
+                    if (!is_free_surface(face_lid))
+                    {
+                        continue;
+                    }
+                    const auto flux = std::max(flux_values(group_flux.owned_row(face_lid), 0), scalar_type{});
+                    const auto owner = d_mesh->owner_cell(face_lid);
+                    const auto primary_value = group_liquid_weighted
+                        ? field_values(owner, 0) / storage_values(owner, 0)
+                        : field_values(owner, 0);
+                    const auto boundary_rate = flux * advection_values(owner, 0) * primary_value;
+                    const auto volume = ale == nullptr
+                        ? static_cast<scalar_type>(d_mesh->cell_volume(owner))
+                        : static_cast<scalar_type>(ale->new_cell_volumes()[static_cast<size_t>(owner)]);
+                    escape_values(owner, 0) += boundary_rate / volume;
+                }
+                const auto escape_src = gws.escape_fields[k]->owned_read_view();
+                const auto escape_dst = target.escape_target->owned_write_view();
+                for (std::size_t owned = 0; owned < owned_cells; ++owned)
+                {
+                    escape_dst(owned, 0) = escape_src(owned, 0);
+                }
+            }
+            if (escape_recorder)
+            {
+                escape_recorder(target, *gws.escape_fields[k]);
+            }
+        }
+    }
+
+    group_work.total_seconds += elapsed(started);
 }
 
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>

@@ -170,6 +170,7 @@ inline std::uint64_t configuration_signature(const ReactingGasOptions& options)
         number(bounds.minimum_pressure);
         number(bounds.maximum_pressure);
     }
+    integer(options.batched_species_transport ? 1ULL : 0ULL);
     return signature;
 }
 inline Reacting::CellSpeciesState zero_like(const Reacting::CellSpeciesState& state)
@@ -1049,71 +1050,33 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                 liquid_packet_scratch = std::make_unique<face_flux_field_type>(d_mesh, "liquid_species_molar_packet");
             });
         face_flux_field_type* active_liquid_packet = nullptr;
-        const auto transport_one = [&](field_type& field, field_type& escape, const face_flux_field_type& flux,
-                                       field_type* slip, bool liquidWeighted, bool diffuse, std::size_t slot,
-                                       bool reuse)
-        {
-            escape.put_scalar(0.0);
-            if (active_liquid_packet)
-                active_liquid_packet->put_scalar(0.0);
-            if (global_integral(field, oldVolumes) == scalar_type{})
-            {
-                field.put_scalar(0.0);
-                return;
-            }
-            if (!reuse)
-            {
-                workspace.systems.at(slot) = {};
-                workspace.symbolic_plans.at(slot) = {};
-                workspace.operator_ready.at(slot) = false;
-            }
-            transport_scalar(field, dt, flux, slip, 0.0, diffuse, liquidWeighted, escape, ale, axis, slot, reuse,
-                diffuse ? &d_species_diffusivity : nullptr, active_liquid_packet);
-        };
-        for (auto& species : d_species_fields)
-        {
-            const auto* property = property_for(species.id);
-            collective_detail::collective_local_validation(*d_mesh, "Reacting species diffusivity",
-                [&]
-                {
-                    for (std::size_t owned = 0; owned < volumes.size(); ++owned)
-                    {
-                        const auto cell = static_cast<local_ordinal_type>(owned);
-                        const auto state = before[owned];
-                        const auto environment = species_environment(
-                            cell, time - dt, temperature.value(cell), ale ? oldVolumes[owned] : volumes[owned]);
-                        const Reacting::ReactionContext context{catalog, state, environment};
-                        const double value =
-                            property ? (property->diffusivity_provider ? property->diffusivity_provider(context)
-                                                                       : property->diffusivity)
-                                     : 0.0;
-                        require(std::isfinite(value) && value >= 0.0, "Supplied species diffusivity is invalid.");
-                        d_species_diffusivity.owned_write_view()(owned, 0) = value;
-                    }
-                });
-            active_liquid_packet = liquid_packet_scratch.get();
-            transport_one(*species.phases[0], *species.escape, liquid_flux, nullptr, true, false, 0, false);
-            record_escape(species.id, P::Liquid, {}, *species.escape);
-            const auto species_index = catalog.index(species.id);
-            for (const auto face : liquid_packet_scratch->owned_face_ids())
-                liquid_molar_packets[species_index][liquid_packet_scratch->owned_row(face)] +=
-                    liquid_packet_scratch->value(face);
-            const auto& dissolvedFlux =
-                d_options.solution_transport == ReactingTransportMode::Advective ? liquid_flux : workspace.zero_flux;
-            transport_one(*species.phases[1], *species.escape, dissolvedFlux, nullptr, true, false, 0,
-                false); // Film D never silently enables an unclosed bulk mass/energy diffusion model.
-            record_escape(species.id, P::Dissolved, {}, *species.escape);
-            for (const auto face : liquid_packet_scratch->owned_face_ids())
-                liquid_molar_packets[species_index][liquid_packet_scratch->owned_row(face)] +=
-                    liquid_packet_scratch->value(face);
-            active_liquid_packet = nullptr;
-            // This dispersed-bubble backend declares a stationary resolved compartment.
-            // Its zero carrier still needs conservative accepted-old/trial-new ALE storage.
-            // Advecting resolved interfaces are owned by the VoF phase-flux backend.
-            transport_one(*species.phases[3], *species.escape, workspace.zero_flux, nullptr, false, false, 3, false);
-        }
         Reacting::PopulationNumberEscapeReceipt number_escape;
         std::vector<double> local_number_escape, global_number_escape;
+        if (d_options.batched_species_transport)
+        {
+            for (auto& species : d_species_fields)
+            {
+                const auto* property = property_for(species.id);
+                collective_detail::collective_local_validation(*d_mesh, "Reacting species diffusivity",
+                    [&]
+                    {
+                        for (std::size_t owned = 0; owned < volumes.size(); ++owned)
+                        {
+                            const auto cell = static_cast<local_ordinal_type>(owned);
+                            const auto state = before[owned];
+                            const auto environment = species_environment(
+                                cell, time - dt, temperature.value(cell), ale ? oldVolumes[owned] : volumes[owned]);
+                            const Reacting::ReactionContext context{catalog, state, environment};
+                            const double value =
+                                property ? (property->diffusivity_provider ? property->diffusivity_provider(context)
+                                                                           : property->diffusivity)
+                                         : 0.0;
+                            require(std::isfinite(value) && value >= 0.0, "Supplied species diffusivity is invalid.");
+                            d_species_diffusivity.owned_write_view()(owned, 0) = value;
+                        }
+                    });
+            }
+        }
         collective_detail::collective_local_validation(*d_mesh, "Population number escape allocation",
             [&]
             {
@@ -1139,33 +1102,329 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                             environment, material.density.value(cell), material.dynamic_viscosity.value(cell));
                 }
             });
-        for (std::size_t p = 0; p < d_options.population_ids.size(); ++p)
+
+        if (d_options.batched_species_transport)
         {
-            const auto& id = d_options.population_ids[p];
-            auto& slip = *d_population_slip_fields[p];
-            slip.sync_ghosts();
-            workspace.operator_ready[1] = false;
-            transport_one(
-                mutable_population_number(id), d_escape_number_rate, liquid_flux, &slip, false, false, 1, false);
-            // Capture this actual number solve before the next population reuses its escape scratch.
-            collective_detail::collective_local_validation(*d_mesh, "Population number boundary packet",
-                [&]
+            prepare_transport_flux(workspace.liquid_clamped_flux, liquid_flux, nullptr, axis);
+            if (workspace.population_fluxes.size() < d_options.population_ids.size())
+            {
+                const std::size_t prev = workspace.population_fluxes.size();
+                workspace.population_fluxes.resize(d_options.population_ids.size());
+                for (std::size_t p = prev; p < d_options.population_ids.size(); ++p)
                 {
-                    detail::CompensatedSum<long double> escaped;
-                    for (std::size_t owned = 0; owned < volumes.size(); ++owned)
-                    {
-                        const auto cell = static_cast<local_ordinal_type>(owned);
-                        const double rate = d_escape_number_rate.value(cell);
-                        require(std::isfinite(rate) && rate >= 0, "Population escape rate must be finite/nonnegative.");
-                        escaped += static_cast<long double>(rate) * volumes[owned] * dt;
-                    }
-                    local_number_escape[p] = narrow(escaped.value());
-                    require(local_number_escape[p] >= 0, "Population escaped number must be nonnegative.");
-                });
+                    workspace.population_fluxes[p] = std::make_unique<face_flux_field_type>(
+                        d_mesh, 0.0, "reacting_population_flux_" + d_options.population_ids[p]);
+                }
+            }
+            for (std::size_t p = 0; p < d_options.population_ids.size(); ++p)
+            {
+                d_population_slip_fields[p]->sync_ghosts();
+                prepare_transport_flux(
+                    *workspace.population_fluxes[p], liquid_flux, d_population_slip_fields[p].get(), axis);
+            }
+
+            ++workspace.stage_epoch;
+            const std::uint64_t stage_epoch = workspace.stage_epoch;
+            const auto mesh_epoch = static_cast<std::uint64_t>(mesh_geometry_epoch(*d_mesh));
+
+            FVM::TransportOperatorKey base_key;
+            base_key.mesh_identity = d_mesh.get();
+            base_key.geometry_epoch = mesh_epoch;
+            base_key.has_ale = (ale != nullptr);
+            base_key.ale_old_geometry_epoch = ale ? ale->old_geometry_epoch() : 0;
+            base_key.ale_new_geometry_epoch = ale ? ale->new_geometry_epoch() : 0;
+            base_key.time_step = dt;
+            base_key.discretization = {.time = FVM::ScalarTimeScheme::BackwardEuler,
+                .convection = FVM::ScalarConvectionScheme::Upwind};
+            base_key.non_orthogonal_treatment = FVM::NonOrthogonalTreatment::Hybrid;
+            base_key.coefficient_interpolation = FVM::FaceCoefficientInterpolation::Harmonic;
+            base_key.diffusivity = {&workspace.diffusion, 1};
+
+            FVM::TransportAcceptancePolicy policy;
+            policy.relative_tolerance = d_transport_linear_options.tolerance;
+            policy.absolute_tolerance = d_transport_linear_options.absolute_tolerance;
+            policy.rhs_norm_floor = 0.0;
+            policy.allow_negative = false;
+
+            const std::size_t num_species = d_species_fields.size();
+            const std::size_t num_pops = d_options.population_ids.size();
+            std::vector<FVM::PlannedColumnEntry> entries;
+            std::vector<BatchedColumnTarget> targets;
+            std::vector<const face_flux_field_type*> entry_fluxes;
+            entries.reserve(3 * num_species + num_pops * (1 + num_species));
+            targets.reserve(entries.capacity());
+            entry_fluxes.reserve(entries.capacity());
+
+            const auto add_entry = [&](FVM::TransportColumn column, const FVM::TransportOperatorKey& key,
+                                       BatchedColumnTarget target, const face_flux_field_type* flux_ptr)
+            {
+                column.source_index = targets.size();
+                entries.push_back(FVM::PlannedColumnEntry{std::move(column), key});
+                targets.push_back(std::move(target));
+                entry_fluxes.push_back(flux_ptr);
+            };
+
+            const FVM::CarrierId liquid_carrier{FVM::CarrierKind::Liquid, "liquid"};
+            FVM::TransportOperatorKey liquid_key = base_key;
+            liquid_key.storage_weight = {&d_alpha_l, stage_epoch};
+            liquid_key.advection_weight = {&d_alpha_l, stage_epoch};
+            liquid_key.advection_flux = {&workspace.liquid_clamped_flux, stage_epoch};
+
+            FVM::TransportOperatorKey dissolved_key = liquid_key;
+            const auto& dissolved_flux =
+                d_options.solution_transport == ReactingTransportMode::Advective
+                    ? workspace.liquid_clamped_flux
+                    : workspace.zero_flux;
+            dissolved_key.advection_flux =
+                d_options.solution_transport == ReactingTransportMode::Advective
+                    ? FVM::FieldVersionKey{&workspace.liquid_clamped_flux, stage_epoch}
+                    : FVM::FieldVersionKey{&workspace.zero_flux, 1};
+
             for (auto& species : d_species_fields)
             {
-                transport_one(*species.populations[p], *species.escape, liquid_flux, &slip, false, false, 1, true);
-                record_escape(species.id, P::Dispersed, id, *species.escape);
+                const auto species_idx = catalog.index(species.id);
+                add_entry(
+                    FVM::TransportColumn{liquid_carrier, FVM::QuantityKind::SpeciesMoles, species.id,
+                        std::string("liquid"), policy, 0},
+                    liquid_key,
+                    BatchedColumnTarget{.field = species.phases[0].get(),
+                        .escape_target = species.escape.get(),
+                        .work_lane = 0,
+                        .species_index = species_idx,
+                        .liquid_weighted = true,
+                        .is_population_number = false,
+                        .record_escape = true,
+                        .escape_phase = P::Liquid,
+                        .escape_population = {},
+                        .accumulate_liquid_packet = true,
+                        .allow_negative = false},
+                    &workspace.liquid_clamped_flux);
+                add_entry(
+                    FVM::TransportColumn{liquid_carrier, FVM::QuantityKind::SpeciesMoles, species.id,
+                        std::string("dissolved"), policy, 0},
+                    dissolved_key,
+                    BatchedColumnTarget{.field = species.phases[1].get(),
+                        .escape_target = species.escape.get(),
+                        .work_lane = 0,
+                        .species_index = species_idx,
+                        .liquid_weighted = true,
+                        .is_population_number = false,
+                        .record_escape = true,
+                        .escape_phase = P::Dissolved,
+                        .escape_population = {},
+                        .accumulate_liquid_packet = true,
+                        .allow_negative = false},
+                    &dissolved_flux);
+            }
+
+            const FVM::CarrierId resolved_carrier{FVM::CarrierKind::BulkGas, "resolved"};
+            FVM::TransportOperatorKey resolved_key = base_key;
+            resolved_key.storage_weight = {&workspace.unit_weight, 1};
+            resolved_key.advection_weight = {&workspace.unit_weight, 1};
+            resolved_key.advection_flux = {&workspace.zero_flux, 1};
+            for (auto& species : d_species_fields)
+            {
+                const auto species_idx = catalog.index(species.id);
+                add_entry(
+                    FVM::TransportColumn{resolved_carrier, FVM::QuantityKind::SpeciesMoles, species.id,
+                        std::string("resolved"), policy, 0},
+                    resolved_key,
+                    BatchedColumnTarget{.field = species.phases[3].get(),
+                        .escape_target = species.escape.get(),
+                        .work_lane = 4,
+                        .species_index = species_idx,
+                        .liquid_weighted = false,
+                        .is_population_number = false,
+                        .record_escape = false,
+                        .escape_phase = P::Resolved,
+                        .escape_population = {},
+                        .accumulate_liquid_packet = false,
+                        .allow_negative = false},
+                    &workspace.zero_flux);
+            }
+
+            for (std::size_t p = 0; p < num_pops; ++p)
+            {
+                const auto& id = d_options.population_ids[p];
+                const FVM::CarrierId pop_carrier{FVM::CarrierKind::Population, id};
+                FVM::TransportOperatorKey pop_key = base_key;
+                pop_key.storage_weight = {&workspace.unit_weight, 1};
+                pop_key.advection_weight = {&workspace.unit_weight, 1};
+                pop_key.advection_flux = {workspace.population_fluxes[p].get(), stage_epoch};
+
+                add_entry(
+                    FVM::TransportColumn{pop_carrier, FVM::QuantityKind::PopulationNumber, std::nullopt,
+                        std::string("number"), policy, 0},
+                    pop_key,
+                    BatchedColumnTarget{.field = &mutable_population_number(id),
+                        .escape_target = &d_escape_number_rate,
+                        .work_lane = 1,
+                        .species_index = p,
+                        .liquid_weighted = false,
+                        .is_population_number = true,
+                        .record_escape = true,
+                        .escape_phase = P::Dispersed,
+                        .escape_population = id,
+                        .accumulate_liquid_packet = false,
+                        .allow_negative = false},
+                    workspace.population_fluxes[p].get());
+                for (auto& species : d_species_fields)
+                {
+                    const auto species_idx = catalog.index(species.id);
+                    add_entry(
+                        FVM::TransportColumn{pop_carrier, FVM::QuantityKind::SpeciesMoles, species.id, id, policy, 0},
+                        pop_key,
+                        BatchedColumnTarget{.field = species.populations[p].get(),
+                            .escape_target = species.escape.get(),
+                            .work_lane = 2,
+                            .species_index = species_idx,
+                            .liquid_weighted = false,
+                            .is_population_number = false,
+                            .record_escape = true,
+                            .escape_phase = P::Dispersed,
+                            .escape_population = id,
+                            .accumulate_liquid_packet = false,
+                            .allow_negative = false},
+                        workspace.population_fluxes[p].get());
+                }
+            }
+
+            const auto plan = FVM::build_carrier_transport_plan(
+                entries, FVM::CarrierTransportPlanOptions{.allow_cross_carrier_sharing = false});
+            d_last_statistics.transport_multi_rhs.operator_groups += plan.operator_groups.size();
+
+            const auto escape_recorder = [&](const BatchedColumnTarget& target, const field_type& escape_field)
+            {
+                if (target.is_population_number)
+                {
+                    const std::size_t p = target.species_index;
+                    collective_detail::collective_local_validation(*d_mesh, "Population number boundary packet",
+                        [&]
+                        {
+                            detail::CompensatedSum<long double> escaped;
+                            for (std::size_t owned = 0; owned < volumes.size(); ++owned)
+                            {
+                                const auto cell = static_cast<local_ordinal_type>(owned);
+                                const double rate = escape_field.value(cell);
+                                require(std::isfinite(rate) && rate >= 0,
+                                    "Population escape rate must be finite/nonnegative.");
+                                escaped += static_cast<long double>(rate) * volumes[owned] * dt;
+                            }
+                            local_number_escape[p] = narrow(escaped.value());
+                            require(local_number_escape[p] >= 0, "Population escaped number must be nonnegative.");
+                        });
+                    return;
+                }
+                if (target.record_escape)
+                {
+                    record_escape(catalog.species()[target.species_index].id, target.escape_phase,
+                        target.escape_population, escape_field);
+                }
+            };
+
+            for (std::size_t g = 0; g < plan.operator_groups.size(); ++g)
+            {
+                const auto& group = plan.operator_groups[g];
+                const auto* group_flux =
+                    entry_fluxes[plan.columns[group.plan_column_indices.front()].source_index];
+                transport_operator_group(g, group, plan.columns, targets, dt, *group_flux, ale, &liquid_molar_packets,
+                    escape_recorder);
+            }
+        }
+        else
+        {
+            const auto transport_one = [&](field_type& field, field_type& escape, const face_flux_field_type& flux,
+                                           field_type* slip, bool liquidWeighted, bool diffuse, std::size_t slot,
+                                           bool reuse)
+            {
+                escape.put_scalar(0.0);
+                if (active_liquid_packet)
+                    active_liquid_packet->put_scalar(0.0);
+                if (global_integral(field, oldVolumes) == scalar_type{})
+                {
+                    field.put_scalar(0.0);
+                    return;
+                }
+                if (!reuse)
+                {
+                    workspace.systems.at(slot) = {};
+                    workspace.symbolic_plans.at(slot) = {};
+                    workspace.operator_ready.at(slot) = false;
+                }
+                transport_scalar(field, dt, flux, slip, 0.0, diffuse, liquidWeighted, escape, ale, axis, slot, reuse,
+                    diffuse ? &d_species_diffusivity : nullptr, active_liquid_packet);
+            };
+            for (auto& species : d_species_fields)
+            {
+                const auto* property = property_for(species.id);
+                collective_detail::collective_local_validation(*d_mesh, "Reacting species diffusivity",
+                    [&]
+                    {
+                        for (std::size_t owned = 0; owned < volumes.size(); ++owned)
+                        {
+                            const auto cell = static_cast<local_ordinal_type>(owned);
+                            const auto state = before[owned];
+                            const auto environment = species_environment(
+                                cell, time - dt, temperature.value(cell), ale ? oldVolumes[owned] : volumes[owned]);
+                            const Reacting::ReactionContext context{catalog, state, environment};
+                            const double value =
+                                property ? (property->diffusivity_provider ? property->diffusivity_provider(context)
+                                                                           : property->diffusivity)
+                                         : 0.0;
+                            require(std::isfinite(value) && value >= 0.0, "Supplied species diffusivity is invalid.");
+                            d_species_diffusivity.owned_write_view()(owned, 0) = value;
+                        }
+                    });
+                active_liquid_packet = liquid_packet_scratch.get();
+                transport_one(*species.phases[0], *species.escape, liquid_flux, nullptr, true, false, 0, false);
+                record_escape(species.id, P::Liquid, {}, *species.escape);
+                const auto species_index = catalog.index(species.id);
+                for (const auto face : liquid_packet_scratch->owned_face_ids())
+                    liquid_molar_packets[species_index][liquid_packet_scratch->owned_row(face)] +=
+                        liquid_packet_scratch->value(face);
+                const auto& dissolvedFlux =
+                    d_options.solution_transport == ReactingTransportMode::Advective ? liquid_flux : workspace.zero_flux;
+                transport_one(*species.phases[1], *species.escape, dissolvedFlux, nullptr, true, false, 0,
+                    false); // Film D never silently enables an unclosed bulk mass/energy diffusion model.
+                record_escape(species.id, P::Dissolved, {}, *species.escape);
+                for (const auto face : liquid_packet_scratch->owned_face_ids())
+                    liquid_molar_packets[species_index][liquid_packet_scratch->owned_row(face)] +=
+                        liquid_packet_scratch->value(face);
+                active_liquid_packet = nullptr;
+                // This dispersed-bubble backend declares a stationary resolved compartment.
+                // Its zero carrier still needs conservative accepted-old/trial-new ALE storage.
+                // Advecting resolved interfaces are owned by the VoF phase-flux backend.
+                transport_one(*species.phases[3], *species.escape, workspace.zero_flux, nullptr, false, false, 3, false);
+            }
+            for (std::size_t p = 0; p < d_options.population_ids.size(); ++p)
+            {
+                const auto& id = d_options.population_ids[p];
+                auto& slip = *d_population_slip_fields[p];
+                slip.sync_ghosts();
+                workspace.operator_ready[1] = false;
+                transport_one(
+                    mutable_population_number(id), d_escape_number_rate, liquid_flux, &slip, false, false, 1, false);
+                // Capture this actual number solve before the next population reuses its escape scratch.
+                collective_detail::collective_local_validation(*d_mesh, "Population number boundary packet",
+                    [&]
+                    {
+                        detail::CompensatedSum<long double> escaped;
+                        for (std::size_t owned = 0; owned < volumes.size(); ++owned)
+                        {
+                            const auto cell = static_cast<local_ordinal_type>(owned);
+                            const double rate = d_escape_number_rate.value(cell);
+                            require(std::isfinite(rate) && rate >= 0,
+                                "Population escape rate must be finite/nonnegative.");
+                            escaped += static_cast<long double>(rate) * volumes[owned] * dt;
+                        }
+                        local_number_escape[p] = narrow(escaped.value());
+                        require(local_number_escape[p] >= 0, "Population escaped number must be nonnegative.");
+                    });
+                for (auto& species : d_species_fields)
+                {
+                    transport_one(*species.populations[p], *species.escape, liquid_flux, &slip, false, false, 1, true);
+                    record_escape(species.id, P::Dispersed, id, *species.escape);
+                }
             }
         }
         if (!local_number_escape.empty()) // Population schema size is already rank-uniform.
