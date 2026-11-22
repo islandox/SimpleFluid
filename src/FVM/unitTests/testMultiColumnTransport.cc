@@ -199,6 +199,45 @@ TEST(MultiColumnTransportTest, PermutationInvarianceAndDuplicateColumns)
     }
 }
 
+TEST(MultiColumnTransportTest, PlanningOrderUsesSourceOrdinalNotFluxPointer)
+{
+    const auto* mesh_id = reinterpret_cast<const void*>(0x77);
+    // Deliberately collide the carrier identity: the source ordinal alone must
+    // keep physical ordering independent of which process-local flux pointer
+    // happens to sort first.
+    const CarrierId shared_carrier{CarrierKind::Liquid, "liquid_0"};
+    int flux_zero = 0;
+    int flux_one = 0;
+
+    const auto plan_with = [&](const void* zero_flux, const void* one_flux)
+    {
+        std::vector<PlannedColumnEntry> entries{
+            {TransportColumn{shared_carrier, QuantityKind::SpeciesMoles, 1u, {}, {}, 0},
+                make_base_key(mesh_id)},
+            {TransportColumn{shared_carrier, QuantityKind::SpeciesMoles, 1u, {}, {}, 1},
+                make_base_key(mesh_id)}};
+        entries[0].operator_key.advection_flux = {zero_flux, 1};
+        entries[1].operator_key.advection_flux = {one_flux, 1};
+        return build_carrier_transport_plan(entries);
+    };
+
+    const auto plan_forward = plan_with(&flux_zero, &flux_one);
+    const auto plan_reversed = plan_with(&flux_one, &flux_zero);
+    ASSERT_EQ(plan_forward.columns.size(), 2U);
+    ASSERT_EQ(plan_reversed.columns.size(), 2U);
+    for (std::size_t i = 0; i < plan_forward.columns.size(); ++i)
+    {
+        EXPECT_EQ(plan_forward.columns[i].source_index, plan_reversed.columns[i].source_index);
+        EXPECT_EQ(plan_forward.columns[i].source_index, i);
+    }
+    ASSERT_EQ(plan_forward.operator_groups.size(), plan_reversed.operator_groups.size());
+    for (std::size_t g = 0; g < plan_forward.operator_groups.size(); ++g)
+    {
+        EXPECT_EQ(plan_forward.operator_groups[g].plan_column_indices,
+            plan_reversed.operator_groups[g].plan_column_indices);
+    }
+}
+
 TEST(MultiColumnTransportTest, ScalarVsMultiColumnEquivalenceAndRhsOnlyRefresh)
 {
     const auto mesh = make_distributed_line(8);

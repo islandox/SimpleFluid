@@ -244,9 +244,14 @@ inline CarrierTransportPlan build_carrier_transport_plan(
             return a.column.species_id < b.column.species_id;
         if (a.column.compartment_id != b.column.compartment_id)
             return a.column.compartment_id < b.column.compartment_id;
+        // Source ordinal is explicit and rank-invariant. Comparing operator keys
+        // first would order identical physical carriers by process-local field
+        // pointers, making collective solve/group order depend on allocation.
+        if (a.column.source_index != b.column.source_index)
+            return a.column.source_index < b.column.source_index;
         if (a.operator_key != b.operator_key)
             return a.operator_key < b.operator_key;
-        return a.column.source_index < b.column.source_index;
+        return false;
     };
 
     std::stable_sort(normalized.begin(), normalized.end(), column_order);

@@ -206,19 +206,31 @@ struct ColumnLinearSolveStatistics
     real_t true_residual_norm = {};
     real_t rhs_norm = {};
     int refinement_passes = 0;
+    /**
+     * @brief Krylov iterations attributable to this column.
+     *
+     * Sums each pass's scalar-equivalent work: for a batched pass this is the
+     * iteration at which the column first met that pass's acceptance bound,
+     * not the manager-wide iteration count that also serves slower columns.
+     * Initial passes and GMRES defect-correction passes are recorded and
+     * accumulated separately, so a column is never charged another column's
+     * iterations.
+     */
+    int iterations = 0;
 };
 
 /** @brief Convergence statistics for one linear solve. */
 struct LinearSolveStatistics
 {
     bool converged = false;
-    /** Includes refinement; BiCGStab also sums independently solved columns. */
+    /** Includes refinement; column-serial CG/BiCGStab sum independent columns. */
     int iterations = 0;
     real_t achieved_tolerance = {};
     real_t rhs_norm = {};
     MultiRhsExecutionMode execution_mode = MultiRhsExecutionMode::SingleRhs;
     int batch_krylov_iterations = 0;
     int column_serial_iterations = 0;
+    std::size_t preconditioner_builds = 0;
     std::size_t operator_apply_calls = 0;
     std::size_t operator_column_applies = 0;
     std::size_t max_batch_width = 0;
@@ -293,10 +305,11 @@ struct LinearSolverOptions
     /**
      * @brief Maximum active RHS columns solved together per Krylov batch.
      *
-     * Zero (default) solves all active columns in a single batch for batched
-     * Krylov backends (PseudoBlockGmres / PseudoBlockCG). Positive values chunk
-     * active columns into contiguous batches of at most @p max_batch_width.
-     * BiCGStab always executes column-serially and reports ColumnSerial.
+     * Zero (default) solves all active columns in a single batch for
+     * PseudoBlockGMRES. PseudoBlockCG is currently restricted to column-serial
+     * execution so each column keeps an independent, exact iteration budget;
+     * BiCGStab is likewise column-serial. Positive values chunk active GMRES
+     * columns into contiguous batches of at most @p max_batch_width.
      */
     int max_batch_width = 0;
 };
@@ -516,17 +529,23 @@ private:
         const Teuchos::RCP<const matrix_type>& preconditioning_matrix);
 
     /**
-     * @brief Solve BiCGStab columns in owned contiguous storage.
+     * @brief Solve active columns in independent owned storage.
      *
      * Trilinos 17.2 Tpetra single-column subviews of a nonconstant-stride
      * multivector use whichVectors[0] + index rather than whichVectors[index].
      * BiCGStab's per-column axpy reaches that path after RHS deflation; e.g.
      * surviving columns [0,2] cause an update intended for 2 to overwrite 1.
      * Independent owning columns avoid nested deflated views entirely.
+     *
+     * PseudoBlockCG uses this path as an explicit interim because its installed
+     * manager exposes no per-iteration status hook. Column-serial execution
+     * keeps each column's Krylov work and repair budget independent; the
+     * reported execution mode is ColumnSerial, not BatchedKrylov.
+     *
      * Each RHS retains its tolerance and iteration limit. A preconditioner
      * can safely be reused within this call because its matrix is unchanged.
      */
-    LinearSolveStatistics solve_bicgstab_columns(
+    LinearSolveStatistics solve_column_serial(
         const Teuchos::RCP<const operator_type>& matrix,
         const multi_vector_type& rhs, multi_vector_type& solution,
         const LinearSolverOptions& options,
@@ -637,6 +656,15 @@ private:
     std::optional<LinearSolverBackend> d_backend;
     mutable Teuchos::RCP<multi_vector_type> d_residual_workspace;
     bool d_reported_accurate_residual = false;
+    // Retained across solver reuse: a Belos manager keeps the debug status test
+    // installed at its first solve, so the recorder must outlive that solve and
+    // keep pointing at valid per-pass scratch.
+    std::vector<int> d_column_convergence_iterations;
+    std::vector<magnitude_type> d_column_convergence_bounds;
+    // Local column -> caller column for the current pass. Initial solves are the
+    // identity; packed defect-correction solves map their narrow block back to
+    // the original batch columns.
+    std::vector<int> d_column_convergence_columns;
     Teuchos::RCP<multi_vector_type> d_bicgstab_rhs_workspace;
     Teuchos::RCP<multi_vector_type> d_bicgstab_solution_workspace;
     Teuchos::RCP<const operator_type> d_preconditioner;

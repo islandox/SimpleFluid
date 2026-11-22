@@ -120,6 +120,9 @@ foreach(_mixture_ranks IN ITEMS 2 4)
     simplefluid_add_mpi_test(NAME LowMachMixture_${_mixture_ranks}procs
         TARGET testLowMachMixtureSolver PROCS ${_mixture_ranks}
         LABELS "mpi;low_mach;reacting;conservation;transaction;empty_rank" TIMEOUT 120)
+    simplefluid_add_mpi_test(NAME LowMachMultiRhsTransport_${_mixture_ranks}procs
+        TARGET testLowMachMultiRhsTransport PROCS ${_mixture_ranks}
+        LABELS "mpi;low_mach;reacting;multi_rhs;conservation;transaction;empty_rank" TIMEOUT 120)
     simplefluid_add_mpi_test(NAME ReactingMixtureCoupler_${_mixture_ranks}procs
         TARGET testReactingMixtureCoupler PROCS ${_mixture_ranks}
         LABELS "mpi;low_mach;reacting;conservation;transaction;empty_rank" TIMEOUT 120)
@@ -197,7 +200,7 @@ simplefluid_add_mpi_test(
     NAME BelosMultiRhs_2procs
     TARGET testBelosLinearSolver
     PROCS 2
-    ARGS "--gtest_filter=BelosLinearSolverTest.GmresResetsBlockSizeAcrossConsecutiveSolvesAndRefinements:BelosLinearSolverTest.BatchWidthChunkingInvarianceAndExecutionModes:BelosLinearSolverTest.PerColumnTrueResidualRejectsTraceMaskingAndHonorsActiveMask:BelosLinearSolverTest.CgSolvesMultiRhsBatchedKrylovAndReportsExecutionMode:BelosLinearSolverTest.PerColumnPolicyTinyAcceptedColumnDoesNotBlockGmresRefinement:BelosLinearSolverTest.NonReusablePreconditionerRebuildsWhenLeadingChunkIsSkipped"
+    ARGS "--gtest_filter=BelosLinearSolverTest.GmresResetsBlockSizeAcrossConsecutiveSolvesAndRefinements:BelosLinearSolverTest.BatchWidthChunkingInvarianceAndExecutionModes:BelosLinearSolverTest.PerColumnTrueResidualRejectsTraceMaskingAndHonorsActiveMask:BelosLinearSolverTest.CgSolvesMultiRhsColumnSeriallyAndReportsExecutionMode:BelosLinearSolverTest.PerColumnPolicyTinyAcceptedColumnDoesNotBlockGmresRefinement:BelosLinearSolverTest.NonReusablePreconditionerRebuildsWhenLeadingChunkIsSkipped:BelosLinearSolverTest.BatchedColumnIterationsMatchColumnSerialConvergence:BelosLinearSolverTest.CgColumnsKeepIndependentIterationCounts:BelosLinearSolverTest.GmresRefinementPassesResetAndAccumulatePerColumn:BelosLinearSolverTest.GmresRefinementUsesEachColumnsRemainingBudget:BelosLinearSolverTest.GmresRefinementGroupsColumnsByRemainingBudget:BelosLinearSolverTest.GmresRefinementRetriesLoaGroupAfterLaterGroupSucceeds:BelosLinearSolverTest.GmresAsymmetricGapAccountingMatchesScalarColumns:BelosLinearSolverTest.GmresColumnIterationsOnEmptyRank"
     LABELS "mpi;linear_solver;multi_rhs"
     TIMEOUT 120)
 

@@ -51,6 +51,7 @@ public:
         int maximum_caloric_seed_evaluations = 64;
         std::shared_ptr<const CaloricPressureDomainProvider> caloric_domain_provider;
         LinearSolverOptions linear;
+        bool use_multi_rhs_transport = true;
         std::function<double(std::span<const PhaseThermalState>, std::span<const double>)> mixture_dynamic_viscosity;
         std::vector<PhaseRoleDescriptor> phase_roles; ///< Constructor-copied immutable schema, aligned with EOS phases.
     };
@@ -191,6 +192,33 @@ public:
         ///< The separate consistency-refinement count completes the work accounting.
         LinearSolveStatistics pressure_linear; ///< Final corrector, including its actual global RHS norm.
         double pressure_linear_rhs_norm_floor = 0; ///< Pressure-only true-residual normalization, m3/s.
+        struct TransportMultiRhsDiagnostics
+        {
+            std::size_t operator_groups = 0;
+            std::size_t transported_columns = 0;
+            std::size_t active_columns = 0;
+            std::size_t matrix_assemblies = 0;
+            std::size_t preconditioner_builds = 0;
+            std::size_t batched_krylov_solves = 0;
+            std::size_t column_serial_solves = 0;
+            std::size_t single_rhs_solves = 0;
+            std::size_t operator_apply_calls = 0;
+            std::size_t operator_column_applies = 0;
+            std::size_t max_batch_width = 0;
+            int batch_krylov_iterations = 0;
+            int column_serial_iterations = 0;
+            std::size_t halo_cell_imports = 0;
+            std::size_t halo_face_imports = 0;
+            MultiRhsExecutionMode execution_mode = MultiRhsExecutionMode::SingleRhs;
+            std::vector<int> column_consistency_sweeps = {};
+            double pack_unpack_seconds = 0;
+            double matrix_assembly_seconds = 0;
+            double preconditioner_setup_seconds = 0;
+            double linear_solve_seconds = 0;
+            double halo_exchange_seconds = 0;
+            double consistency_repair_seconds = 0;
+        };
+        TransportMultiRhsDiagnostics transport_multi_rhs = {};
     };
     class Checkpoint
     {

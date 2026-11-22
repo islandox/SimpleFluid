@@ -2,6 +2,7 @@
  * @brief Conservative native mixture transport, thermodynamic closure and immutable advancement.
  */
 #include "solvers/LowMachMixtureSolver.hh"
+#include "FVM/CarrierTransportPlan.hh"
 #include "FVM/CellOperators.hh"
 #include "FVM/TransportSystem.hh"
 #include "FVM/TransportSystemFactory.hh"
@@ -15,6 +16,7 @@
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <exception>
 #include <limits>
@@ -23,6 +25,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <type_traits>
+#include <unordered_map>
 
 namespace SimpleFluid::Reacting
 {
@@ -37,6 +40,24 @@ void check(bool valid, const char* message)
 {
     if (!valid)
         throw std::invalid_argument(message);
+}
+/** Resolve the default identity exactly once so every rank sees the same carrier key. */
+FVM::CarrierId resolved_carrier_identity(const Solver::PhaseRoleDescriptor& role, std::size_t phase_index)
+{
+    switch (role.role)
+    {
+        case Solver::PhaseRole::BulkLiquid:
+            return FVM::CarrierId{
+                FVM::CarrierKind::Liquid,
+                role.identity.empty() ? "liquid_" + std::to_string(phase_index) : role.identity};
+        case Solver::PhaseRole::BulkGas:
+            return FVM::CarrierId{
+                FVM::CarrierKind::BulkGas,
+                role.identity.empty() ? "bulk_gas_" + std::to_string(phase_index) : role.identity};
+        case Solver::PhaseRole::DispersedGas:
+            return FVM::CarrierId{FVM::CarrierKind::Population, role.identity};
+    }
+    throw std::logic_error("Unknown Low-Mach phase role in carrier identity resolution.");
 }
 double phase_mass(const PhaseThermalState& phase)
 {
@@ -238,6 +259,8 @@ struct LowMachMixtureSolver::Implementation
     FVM::TransportGeometryCache<Mesh> geometry;
     FVM::CellGradientCache<Pack, Mesh> gradient_cache;
     BelosLinearSolver<Pack> transport_solver;
+    std::vector<transport_consistency_detail::BatchedWorkspace> transport_workspaces;
+    std::vector<FVM::CarrierMultiVectorBuffer<Pack>> carrier_buffers;
     VariableDensityMomentumEquation<Pack, Mesh> momentum;
     std::optional<LowMachPressureEquation> pressure;
     Implementation(
@@ -292,7 +315,8 @@ struct LowMachMixtureSolver::Implementation
                         options.phase_roles.push_back(
                             {provider->kind() == EOSKind::Liquid ? PhaseRole::BulkLiquid : PhaseRole::BulkGas, {}});
                 check(options.phase_roles.size() == eos.size(), "Physical phase-role schema must match EOS phases.");
-                std::set<std::string> identities;
+                std::set<std::string> explicit_identities;
+                std::set<FVM::CarrierId> carriers;
                 for (size_t a = 0; a < eos.size(); ++a)
                 {
                     const auto& role = options.phase_roles[a];
@@ -301,10 +325,13 @@ struct LowMachMixtureSolver::Implementation
                         "Unknown physical phase role.");
                     check((role.role == PhaseRole::BulkLiquid) == (eos[a]->kind() == EOSKind::Liquid),
                         "Physical phase role/EOS kind mismatch.");
+                    const auto carrier = resolved_carrier_identity(role, a);
                     check(role.identity.size() <= static_cast<size_t>(std::numeric_limits<int>::max()) &&
                               (role.role != PhaseRole::DispersedGas || !role.identity.empty()) &&
-                              (role.identity.empty() || identities.insert(role.identity).second),
-                        "Physical phase identities must be unique and dispersed identities explicit.");
+                              (role.identity.empty() || explicit_identities.insert(role.identity).second) &&
+                              carriers.insert(carrier).second,
+                        "Physical phase identities must resolve to unique carrier identities; "
+                        "dispersed identities must be explicit.");
                 }
                 for (size_t f = 0; f < mesh->num_faces(); ++f)
                 {
@@ -323,6 +350,8 @@ struct LowMachMixtureSolver::Implementation
                         "Low-Mach mixture currently requires orthogonal mapped face geometry.");
                 }
             });
+        collective_detail::require_uniform_value(
+            *mesh, static_cast<int>(options.use_multi_rhs_transport), "Low-Mach multi-RHS transport selection");
         collective_detail::require_uniform_value(*mesh, options.minimum_pressure, "Low-Mach minimum pressure");
         collective_detail::require_uniform_value(*mesh, options.maximum_pressure, "Low-Mach maximum pressure");
         collective_detail::require_uniform_value(*mesh, options.maximum_correctors, "Low-Mach maximum correctors");
@@ -492,6 +521,338 @@ struct LowMachMixtureSolver::Implementation
         else
             statistics.maximum_population_transport_residual =
                 std::max(statistics.maximum_population_transport_residual, consistent.final_residual);
+    }
+    struct CarrierSpeciesSlot
+    {
+        std::size_t group_index = 0;
+        std::size_t column_index = 0;
+    };
+    void transport_all_carriers(const State& accepted_state, State& trial_state,
+        const std::vector<std::unique_ptr<FaceField>>& phase_fluxes, double dt, int corrector_iteration,
+        Diagnostics& statistics, std::vector<CarrierSpeciesSlot>& species_slots, double& local_caloric_transport,
+        double& local_energy_transport, const FVM::ALEControlVolumeState* ale)
+    {
+        using Factory = FVM::TransportSystemFactory<Pack, Mesh>;
+        using Quantity = transport_consistency_detail::Quantity;
+        const std::size_t nc = accepted_state.cells.size();
+        const std::size_t np = eos.size();
+        const std::size_t ns = eos.front()->catalog().species().size();
+        const auto& catalog = eos.front()->catalog();
+        const auto comm = mesh->owned_cell_map()->getComm();
+
+        auto carrier_for_phase = [&](std::size_t phase_index) -> FVM::CarrierId
+        { return resolved_carrier_identity(options.phase_roles[phase_index], phase_index); };
+
+        std::vector<FVM::PlannedColumnEntry> entries;
+        entries.reserve(np * (ns + 2));
+        for (std::size_t a = 0; a < np; ++a)
+        {
+            const auto carrier = carrier_for_phase(a);
+            FVM::TransportOperatorKey key;
+            key.mesh_identity = mesh.get();
+            key.geometry_epoch = epoch;
+            key.has_ale = (ale != nullptr);
+            key.ale_old_geometry_epoch = ale ? ale->old_geometry_epoch() : 0;
+            key.ale_new_geometry_epoch = ale ? ale->new_geometry_epoch() : 0;
+            key.time_step = dt;
+            key.discretization = {.time = FVM::ScalarTimeScheme::BackwardEuler,
+                .convection = FVM::ScalarConvectionScheme::Upwind};
+            key.non_orthogonal_treatment = FVM::NonOrthogonalTreatment::Implicit;
+            key.storage_weight = {&unit, 1};
+            key.advection_flux = {phase_fluxes[a].get(), static_cast<std::uint64_t>(corrector_iteration + 1)};
+            key.advection_weight = {&unit, 1};
+            key.diffusivity = {&zero, 1};
+
+            if (options.phase_roles[a].role == PhaseRole::DispersedGas)
+            {
+                entries.push_back(FVM::PlannedColumnEntry{
+                    FVM::TransportColumn{carrier, FVM::QuantityKind::PopulationNumber, std::nullopt,
+                        carrier.identity, {.allow_negative = false}, a},
+                    key});
+            }
+            for (std::size_t s = 0; s < ns; ++s)
+            {
+                entries.push_back(FVM::PlannedColumnEntry{
+                    FVM::TransportColumn{carrier, FVM::QuantityKind::SpeciesMoles, catalog.species()[s].id, {},
+                        {.allow_negative = false}, a},
+                    key});
+            }
+            entries.push_back(FVM::PlannedColumnEntry{
+                FVM::TransportColumn{carrier, FVM::QuantityKind::InternalEnergy, std::nullopt, {},
+                    {.allow_negative = true}, a},
+                key});
+        }
+
+        const auto plan = FVM::build_carrier_transport_plan(
+            entries, FVM::CarrierTransportPlanOptions{.allow_cross_carrier_sharing = false});
+        transport_workspaces.resize(plan.operator_groups.size());
+        carrier_buffers.resize(plan.operator_groups.size());
+        species_slots.assign(np * ns, {});
+
+        auto& multi_diag = statistics.transport_multi_rhs;
+        multi_diag = {};
+        multi_diag.operator_groups = plan.operator_groups.size();
+        multi_diag.transported_columns = plan.columns.size();
+
+        std::unordered_map<std::uint64_t, std::size_t> species_index_by_id;
+        species_index_by_id.reserve(ns);
+        for (std::size_t s = 0; s < ns; ++s)
+        {
+            species_index_by_id[catalog.species()[s].id] = s;
+        }
+
+        const auto old_volume = [&](std::size_t c)
+        { return ale ? ale->old_cell_volumes()[c] : mesh->cell_volume(static_cast<LO>(c)); };
+
+        for (std::size_t g = 0; g < plan.operator_groups.size(); ++g)
+        {
+            const auto& group = plan.operator_groups[g];
+            const std::size_t a = plan.columns[group.plan_column_indices.front()].source_index;
+            const std::size_t ncols = group.plan_column_indices.size();
+
+            std::vector<std::vector<double>> old_amounts(ncols, std::vector<double>(nc, 0.0));
+            std::vector<Quantity> quantities(ncols);
+            std::vector<std::size_t> local_species_indices(ncols, ns);
+            std::vector<double> local_max_abs(ncols, 0.0);
+            std::vector<double> global_max_abs(ncols, 0.0);
+            std::vector<bool> active_mask(ncols, false);
+
+            const auto pack_start = std::chrono::steady_clock::now();
+            auto& buffer_mv = carrier_buffers[g].ensure(mesh->owned_cell_map(), ncols);
+            collective_detail::collective_local_validation(*mesh, "Accepted low-Mach batched transport concentration",
+                [&]
+                {
+                    for (std::size_t k = 0; k < ncols; ++k)
+                    {
+                        const auto& col_meta = plan.columns[group.plan_column_indices[k]];
+                        check(col_meta.source_index == a,
+                            "Low-Mach cross-carrier operator sharing is disabled.");
+                        auto sol_col = buffer_mv.getDataNonConst(k);
+                        if (col_meta.quantity == FVM::QuantityKind::PopulationNumber)
+                        {
+                            quantities[k] = Quantity::Population;
+                            for (std::size_t c = 0; c < nc; ++c)
+                            {
+                                const double val = *accepted_state.cells[c].phase_numbers[a];
+                                const double conc = val / old_volume(c);
+                                check(std::isfinite(val) && std::isfinite(conc) && (val == 0 || conc != 0) && val >= 0,
+                                    "Population number concentration is not representable.");
+                                old_amounts[k][c] = val;
+                                sol_col[c] = conc;
+                                local_max_abs[k] = std::max(local_max_abs[k], std::abs(val));
+                            }
+                        }
+                        else if (col_meta.quantity == FVM::QuantityKind::SpeciesMoles)
+                        {
+                            quantities[k] = Quantity::Species;
+                            const std::size_t s = species_index_by_id.at(*col_meta.species_id);
+                            local_species_indices[k] = s;
+                            for (std::size_t c = 0; c < nc; ++c)
+                            {
+                                const double val = accepted_state.cells[c].phases[a].moles[s];
+                                const double conc = val / old_volume(c);
+                                check(std::isfinite(val) && std::isfinite(conc) && (val == 0 || conc != 0) && val >= 0,
+                                    "Accepted phase transport inventory/concentration is invalid or unrepresentable.");
+                                old_amounts[k][c] = val;
+                                sol_col[c] = conc;
+                                local_max_abs[k] = std::max(local_max_abs[k], std::abs(val));
+                            }
+                        }
+                        else
+                        {
+                            quantities[k] = Quantity::Energy;
+                            for (std::size_t c = 0; c < nc; ++c)
+                            {
+                                const double val = accepted_state.cells[c].phases[a].internal_energy;
+                                const double conc = val / old_volume(c);
+                                check(std::isfinite(val) && std::isfinite(conc) && (val == 0 || conc != 0),
+                                    "Accepted phase transport inventory/concentration is invalid or unrepresentable.");
+                                old_amounts[k][c] = val;
+                                sol_col[c] = conc;
+                                local_max_abs[k] = std::max(local_max_abs[k], std::abs(val));
+                            }
+                        }
+                    }
+                });
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, static_cast<int>(ncols),
+                local_max_abs.data(), global_max_abs.data());
+            for (std::size_t k = 0; k < ncols; ++k)
+            {
+                active_mask[k] = global_max_abs[k] > 0.0;
+                if (active_mask[k])
+                {
+                    ++multi_diag.active_columns;
+                }
+            }
+            multi_diag.pack_unpack_seconds +=
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - pack_start).count();
+
+            std::vector<FVM::MultiColumnScalarInput<Pack, Mesh>> mc_cols(ncols);
+            std::vector<std::span<const double>> old_spans(ncols);
+            for (std::size_t k = 0; k < ncols; ++k)
+            {
+                old_spans[k] = old_amounts[k];
+                mc_cols[k] = FVM::MultiColumnScalarInput<Pack, Mesh>{
+                    .extensive_old_inventories = old_spans[k],
+                    .source = [](LO) { return 0.0; },
+                    .boundary_value = [](int, std::size_t) { return 0.0; },
+                    .neumann_flux = [](int, std::size_t) { return 0.0; },
+                    .allow_negative = (quantities[k] == Quantity::Energy)};
+            }
+
+            const auto asm_start = std::chrono::steady_clock::now();
+            auto mc_sys = Factory::assemble_multi_column(
+                typename Factory::MultiColumnWeightedTerms{
+                    .time_step = dt,
+                    .face_fluxes = *phase_fluxes[a],
+                    .coefficients = {unit, unit, zero},
+                    .columns = std::move(mc_cols)},
+                typename Factory::MultiColumnWeightedBoundary{
+                    .condition = [](int, std::size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0}; }},
+                typename Factory::WeightedScalarOptions{
+                    .discretization = {.time = FVM::ScalarTimeScheme::BackwardEuler,
+                        .convection = FVM::ScalarConvectionScheme::Upwind},
+                    .correction = {FVM::NonOrthogonalTreatment::Implicit, nullptr}},
+                typename Factory::MultiColumnWeightedContext{.geometry_cache = &geometry, .ale = ale});
+            multi_diag.matrix_assembly_seconds +=
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - asm_start).count();
+            ++multi_diag.matrix_assemblies;
+
+            transport_solver.notify_operator_values_changed();
+            MultiRhsSolveOptions multi_opts;
+            multi_opts.solver = options.linear;
+            multi_opts.active_columns = active_mask;
+            const auto linear_result = transport_solver.solve_multi_rhs_with_statistics(
+                mc_sys.matrix, *mc_sys.rhs, buffer_mv, multi_opts);
+            if (!linear_result.converged)
+            {
+                throw std::runtime_error("Low-Mach phase transport failed true linear residual gate.");
+            }
+
+            multi_diag.preconditioner_builds += linear_result.preconditioner_builds;
+            multi_diag.operator_apply_calls += linear_result.operator_apply_calls;
+            multi_diag.operator_column_applies += linear_result.operator_column_applies;
+            multi_diag.max_batch_width = std::max(multi_diag.max_batch_width, linear_result.max_batch_width);
+            multi_diag.batch_krylov_iterations += linear_result.batch_krylov_iterations;
+            multi_diag.column_serial_iterations += linear_result.column_serial_iterations;
+            multi_diag.preconditioner_setup_seconds += linear_result.timings.preconditioner_setup_seconds;
+            multi_diag.linear_solve_seconds += linear_result.timings.solve_seconds;
+            multi_diag.pack_unpack_seconds += linear_result.timings.pack_unpack_seconds;
+            switch (linear_result.execution_mode)
+            {
+                case MultiRhsExecutionMode::BatchedKrylov:
+                    ++multi_diag.batched_krylov_solves;
+                    break;
+                case MultiRhsExecutionMode::ColumnSerial:
+                    ++multi_diag.column_serial_solves;
+                    break;
+                case MultiRhsExecutionMode::SingleRhs:
+                    ++multi_diag.single_rhs_solves;
+                    break;
+            }
+
+            std::vector<std::vector<double>> new_amounts;
+            const auto consistent = transport_consistency_detail::enforce_batch(
+                mesh, old_spans, quantities, active_mask, *phase_fluxes[a], dt, buffer_mv, new_amounts,
+                *mc_sys.matrix, *mc_sys.rhs, linear_result, options.linear,
+                options.conservation_relative_tolerance, ale, transport_workspaces[g]);
+
+            statistics.transport_linear.add(consistent.linear);
+            statistics.transport_consistency_refinements += consistent.total_refinements;
+            statistics.maximum_initial_transport_residual =
+                std::max(statistics.maximum_initial_transport_residual, consistent.initial_residual);
+            multi_diag.halo_cell_imports += consistent.halo_cell_imports;
+            multi_diag.halo_face_imports += consistent.halo_face_imports;
+            multi_diag.halo_exchange_seconds += consistent.halo_exchange_seconds;
+            multi_diag.consistency_repair_seconds += consistent.consistency_repair_seconds;
+
+            const auto unpack_start = std::chrono::steady_clock::now();
+            for (std::size_t k = 0; k < ncols; ++k)
+            {
+                multi_diag.column_consistency_sweeps.push_back(consistent.column_refinements[k]);
+                if (quantities[k] == Quantity::Species)
+                {
+                    statistics.maximum_species_transport_residual = std::max(
+                        statistics.maximum_species_transport_residual, consistent.column_final_residuals[k]);
+                    const std::size_t s = local_species_indices[k];
+                    species_slots[a * ns + s] = {g, k};
+                    for (std::size_t c = 0; c < nc; ++c)
+                    {
+                        trial_state.cells[c].phases[a].moles[s] = new_amounts[k][c];
+                    }
+                }
+                else if (quantities[k] == Quantity::Population)
+                {
+                    statistics.maximum_population_transport_residual = std::max(
+                        statistics.maximum_population_transport_residual, consistent.column_final_residuals[k]);
+                    collective_detail::collective_local_validation(*mesh, "Transported population numbers",
+                        [&]
+                        {
+                            for (std::size_t c = 0; c < nc; ++c)
+                            {
+                                check(std::isfinite(new_amounts[k][c]) && new_amounts[k][c] >= 0,
+                                    "Population transport produced a negative/nonfinite number.");
+                                trial_state.cells[c].phase_numbers[a] = new_amounts[k][c];
+                                const double concentration = new_amounts[k][c] / mesh->cell_volume(static_cast<LO>(c));
+                                check(std::isfinite(concentration),
+                                    "Transported population concentration is not representable.");
+                            }
+                        });
+                }
+                else
+                {
+                    statistics.maximum_energy_transport_residual = std::max(
+                        statistics.maximum_energy_transport_residual, consistent.column_final_residuals[k]);
+                    for (std::size_t c = 0; c < nc; ++c)
+                    {
+                        trial_state.cells[c].phases[a].internal_energy = new_amounts[k][c];
+                    }
+                    ScalarField caloric_carrier_density(mesh, "caloric_transport_characteristic");
+                    collective_detail::collective_local_validation(*mesh, "Low-Mach caloric transport scales",
+                        [&]
+                        {
+                            for (std::size_t c = 0; c < nc; ++c)
+                            {
+                                const LO cell = static_cast<LO>(c);
+                                const auto& old_phase = accepted_state.cells[c].phases[a];
+                                const double mass = phase_mass(old_phase);
+                                double caloric = 0;
+                                if (mass > 0)
+                                {
+                                    caloric = mass * old_phase.temperature *
+                                              old_phase.thermodynamics
+                                                  ->evaluate(old_phase.temperature, old_phase.absolute_pressure,
+                                                      fractions(old_phase))
+                                                  .internal_energy_temperature;
+                                }
+                                caloric_carrier_density.set_owned_value(
+                                    cell, caloric / (ale ? ale->old_cell_volumes()[c] : mesh->cell_volume(cell)));
+                            }
+                        });
+                    caloric_carrier_density.sync_ghosts();
+                    const auto energy_overlap = transport_workspaces[g].conc_overlap->getData(k);
+                    for (std::size_t f = 0; f < mesh->num_owned_faces(); ++f)
+                    {
+                        const LO face = static_cast<LO>(f);
+                        if (mesh->is_boundary_face(face))
+                        {
+                            continue;
+                        }
+                        const double phi = phase_fluxes[a]->local_value(face);
+                        const LO owner = mesh->owner_cell(face);
+                        const LO donor = phi >= 0 ? owner : mesh->opposite_or_periodic_neighbor_cell(face, owner);
+                        local_energy_transport += dt * std::abs(phi * energy_overlap[donor]);
+                        local_caloric_transport += dt * std::abs(phi * caloric_carrier_density.local_value(donor));
+                    }
+                }
+            }
+            multi_diag.pack_unpack_seconds +=
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - unpack_start).count();
+        }
+        multi_diag.execution_mode = multi_diag.batched_krylov_solves > 0
+                                        ? MultiRhsExecutionMode::BatchedKrylov
+                                        : (multi_diag.column_serial_solves > 0 ? MultiRhsExecutionMode::ColumnSerial
+                                                                               : MultiRhsExecutionMode::SingleRhs);
     }
 };
 LowMachMixtureSolver::LowMachMixtureSolver(
@@ -863,7 +1224,18 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             pressure_impulse = {};
             double local_caloric_transport = 0, local_energy_transport = 0;
             std::vector<std::vector<double>> adv_volumes(nc, std::vector<double>(np));
-            std::vector<std::unique_ptr<ScalarField>> transported_species(np * ns);
+            std::vector<std::unique_ptr<ScalarField>> transported_species(
+                d->options.use_multi_rhs_transport ? 0 : np * ns);
+            std::vector<Implementation::CarrierSpeciesSlot> species_slots;
+            const auto species_donor_concentration = [&](size_t a, size_t s, LO donor) -> double
+            {
+                if (d->options.use_multi_rhs_transport)
+                {
+                    const auto& slot = species_slots[a * ns + s];
+                    return d->transport_workspaces[slot.group_index].conc_overlap->getData(slot.column_index)[donor];
+                }
+                return transported_species[a * ns + s]->local_value(donor);
+            };
             std::vector<std::unique_ptr<FaceField>> material_face_fraction(np);
             std::vector<std::unique_ptr<VectorField>> drift(np);
             std::vector<std::unique_ptr<FaceField>> phase_flux(np);
@@ -899,152 +1271,163 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                                              slip.dot(mesh.face_area_vector(face)));
                 }
                 phase_flux[a]->sync_ghosts();
-                if (d->options.phase_roles[a].role == PhaseRole::DispersedGas)
+            }
+            if (d->options.use_multi_rhs_transport)
+            {
+                d->transport_all_carriers(accepted, trial, phase_flux, dt, iteration, result, species_slots,
+                    local_caloric_transport, local_energy_transport, ale);
+            }
+            for (size_t a = 0; a < np; ++a)
+            {
+                if (!d->options.use_multi_rhs_transport)
                 {
-                    collective_detail::collective_local_validation(mesh, "Population transport input",
-                        [&]
-                        {
-                            for (size_t c = 0; c < nc; ++c)
+                    if (d->options.phase_roles[a].role == PhaseRole::DispersedGas)
+                    {
+                        collective_detail::collective_local_validation(mesh, "Population transport input",
+                            [&]
                             {
-                                before[c] = *accepted.cells[c].phase_numbers[a];
-                                check(std::isfinite(before[c] / (ale ? ale->old_cell_volumes()[c]
-                                                                     : mesh.cell_volume(static_cast<LO>(c)))),
-                                    "Population number concentration is not representable.");
-                            }
-                        });
-                    d->transport(before, *phase_flux[a], dt, after, result,
-                        transport_consistency_detail::Quantity::Population, ale);
-
-                    ScalarField number_concentration(d->mesh, 0.0, "transported_population_number");
-                    FaceField number_flux(d->mesh, 0.0, "conservative_population_number_flux");
-                    collective_detail::collective_local_validation(mesh, "Transported population numbers",
-                        [&]
-                        {
-                            for (size_t c = 0; c < nc; ++c)
-                            {
-                                check(std::isfinite(after[c]) && after[c] >= 0,
-                                    "Population transport produced a negative/nonfinite number.");
-                                trial.cells[c].phase_numbers[a] = after[c];
-                                const double concentration = after[c] / mesh.cell_volume(static_cast<LO>(c));
-                                check(std::isfinite(concentration),
-                                    "Transported population concentration is not representable.");
-                                number_concentration.set_owned_value(static_cast<LO>(c), concentration);
-                            }
-                        });
-                    number_concentration.sync_ghosts();
-                    collective_detail::collective_local_validation(mesh, "Canonical population number flux",
-                        [&]
-                        {
-                            for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
-                            {
-                                const LO face = static_cast<LO>(f);
-                                if (mesh.is_geometry_exterior_face(face))
-                                    continue;
-                                const double phi = phase_flux[a]->local_value(face);
-                                const LO owner = mesh.owner_cell(face),
-                                         donor =
-                                             phi >= 0 ? owner : mesh.opposite_or_periodic_neighbor_cell(face, owner);
-                                const double flux = phi * number_concentration.local_value(donor);
-                                check(std::isfinite(flux), "Population number face flux overflow.");
-                                number_flux.set_owned_value(face, flux);
-                            }
-                        });
-                    number_flux.sync_ghosts();
-                    double local_number_error = 0;
-                    std::optional<LO> worst_number_cell;
-                    std::array<long double, 3> worst_number_operands{};
-                    collective_detail::collective_local_validation(mesh, "Physical local population balance",
-                        [&]
-                        {
-                            for (size_t c = 0; c < nc; ++c)
-                            {
-                                const long double flux = static_cast<long double>(dt) *
-                                                         FVM::cell_flux_balance(mesh, number_flux, static_cast<LO>(c));
-                                const long double residual = static_cast<long double>(after[c]) - before[c] + flux;
-                                const double error = source_stage_detail::normalized(residual,
-                                    std::abs(static_cast<long double>(after[c])) +
-                                        std::abs(static_cast<long double>(before[c])) + std::abs(flux),
-                                    d->options.conservation_relative_tolerance);
-                                if (error > local_number_error)
+                                for (size_t c = 0; c < nc; ++c)
                                 {
-                                    local_number_error = error;
-                                    worst_number_cell = static_cast<LO>(c);
-                                    worst_number_operands = {before[c], after[c], flux};
+                                    before[c] = *accepted.cells[c].phase_numbers[a];
+                                    check(std::isfinite(before[c] / (ale ? ale->old_cell_volumes()[c]
+                                                                         : mesh.cell_volume(static_cast<LO>(c)))),
+                                        "Population number concentration is not representable.");
                                 }
-                            }
-                        });
-                    const double count_error = d->maximum(local_number_error);
-                    result.maximum_population_transport_residual =
-                        std::max(result.maximum_population_transport_residual, count_error);
-                    if (count_error > 1)
-                    {
-                        std::ostringstream message;
-                        message.precision(17);
-                        message << "Population transport fails its physical local count-balance gate: normalized="
-                                << count_error << ", local=" << local_number_error;
-                        if (worst_number_cell)
-                            message << ", geometry cell=" << mesh.cell_geometry_global_id(*worst_number_cell)
-                                    << ", phase=" << a << ", before=" << worst_number_operands[0]
-                                    << ", after=" << worst_number_operands[1]
-                                    << ", integrated outgoing=" << worst_number_operands[2];
-                        throw std::runtime_error(message.str());
+                            });
+                        d->transport(before, *phase_flux[a], dt, after, result,
+                            transport_consistency_detail::Quantity::Population, ale);
+
+                        ScalarField number_concentration(d->mesh, 0.0, "transported_population_number");
+                        FaceField number_flux(d->mesh, 0.0, "conservative_population_number_flux");
+                        collective_detail::collective_local_validation(mesh, "Transported population numbers",
+                            [&]
+                            {
+                                for (size_t c = 0; c < nc; ++c)
+                                {
+                                    check(std::isfinite(after[c]) && after[c] >= 0,
+                                        "Population transport produced a negative/nonfinite number.");
+                                    trial.cells[c].phase_numbers[a] = after[c];
+                                    const double concentration = after[c] / mesh.cell_volume(static_cast<LO>(c));
+                                    check(std::isfinite(concentration),
+                                        "Transported population concentration is not representable.");
+                                    number_concentration.set_owned_value(static_cast<LO>(c), concentration);
+                                }
+                            });
+                        number_concentration.sync_ghosts();
+                        collective_detail::collective_local_validation(mesh, "Canonical population number flux",
+                            [&]
+                            {
+                                for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
+                                {
+                                    const LO face = static_cast<LO>(f);
+                                    if (mesh.is_geometry_exterior_face(face))
+                                        continue;
+                                    const double phi = phase_flux[a]->local_value(face);
+                                    const LO owner = mesh.owner_cell(face),
+                                             donor =
+                                                 phi >= 0 ? owner : mesh.opposite_or_periodic_neighbor_cell(face, owner);
+                                    const double flux = phi * number_concentration.local_value(donor);
+                                    check(std::isfinite(flux), "Population number face flux overflow.");
+                                    number_flux.set_owned_value(face, flux);
+                                }
+                            });
+                        number_flux.sync_ghosts();
+                        double local_number_error = 0;
+                        std::optional<LO> worst_number_cell;
+                        std::array<long double, 3> worst_number_operands{};
+                        collective_detail::collective_local_validation(mesh, "Physical local population balance",
+                            [&]
+                            {
+                                for (size_t c = 0; c < nc; ++c)
+                                {
+                                    const long double flux = static_cast<long double>(dt) *
+                                                             FVM::cell_flux_balance(mesh, number_flux, static_cast<LO>(c));
+                                    const long double residual = static_cast<long double>(after[c]) - before[c] + flux;
+                                    const double error = source_stage_detail::normalized(residual,
+                                        std::abs(static_cast<long double>(after[c])) +
+                                            std::abs(static_cast<long double>(before[c])) + std::abs(flux),
+                                        d->options.conservation_relative_tolerance);
+                                    if (error > local_number_error)
+                                    {
+                                        local_number_error = error;
+                                        worst_number_cell = static_cast<LO>(c);
+                                        worst_number_operands = {before[c], after[c], flux};
+                                    }
+                                }
+                            });
+                        const double count_error = d->maximum(local_number_error);
+                        result.maximum_population_transport_residual =
+                            std::max(result.maximum_population_transport_residual, count_error);
+                        if (count_error > 1)
+                        {
+                            std::ostringstream message;
+                            message.precision(17);
+                            message << "Population transport fails its physical local count-balance gate: normalized="
+                                    << count_error << ", local=" << local_number_error;
+                            if (worst_number_cell)
+                                message << ", geometry cell=" << mesh.cell_geometry_global_id(*worst_number_cell)
+                                        << ", phase=" << a << ", before=" << worst_number_operands[0]
+                                        << ", after=" << worst_number_operands[1]
+                                        << ", integrated outgoing=" << worst_number_operands[2];
+                            throw std::runtime_error(message.str());
+                        }
                     }
-                }
-                for (size_t s = 0; s < ns; ++s)
-                {
-                    for (size_t c = 0; c < nc; ++c)
-                        before[c] = accepted.cells[c].phases[a].moles[s];
-                    d->transport(before, *phase_flux[a], dt, after, result,
-                        transport_consistency_detail::Quantity::Species, ale);
-                    auto field = std::make_unique<ScalarField>(d->mesh, "transported_species_concentration");
-                    for (size_t c = 0; c < nc; ++c)
-                    {
-                        trial.cells[c].phases[a].moles[s] = after[c];
-                        field->set_owned_value(static_cast<LO>(c), after[c] / mesh.cell_volume(static_cast<LO>(c)));
-                    }
-                    field->sync_ghosts();
-                    transported_species[a * ns + s] = std::move(field);
-                }
-                for (size_t c = 0; c < nc; ++c)
-                    before[c] = accepted.cells[c].phases[a].internal_energy;
-                d->transport(before, *phase_flux[a], dt, after, result,
-                    transport_consistency_detail::Quantity::Energy, ale);
-                for (size_t c = 0; c < nc; ++c)
-                    trial.cells[c].phases[a].internal_energy = after[c];
-                ScalarField transported_energy_density(d->mesh, "transported_energy_operand");
-                ScalarField caloric_carrier_density(d->mesh, "caloric_transport_characteristic");
-                collective_detail::collective_local_validation(mesh, "Low-Mach caloric transport scales",
-                    [&]
+                    for (size_t s = 0; s < ns; ++s)
                     {
                         for (size_t c = 0; c < nc; ++c)
+                            before[c] = accepted.cells[c].phases[a].moles[s];
+                        d->transport(before, *phase_flux[a], dt, after, result,
+                            transport_consistency_detail::Quantity::Species, ale);
+                        auto field = std::make_unique<ScalarField>(d->mesh, "transported_species_concentration");
+                        for (size_t c = 0; c < nc; ++c)
                         {
-                            const LO cell = static_cast<LO>(c);
-                            transported_energy_density.set_owned_value(cell, after[c] / mesh.cell_volume(cell));
-                            const auto& old_phase = accepted.cells[c].phases[a];
-                            const double mass = phase_mass(old_phase);
-                            double caloric = 0;
-                            if (mass > 0)
-                                caloric = mass * old_phase.temperature *
-                                          old_phase.thermodynamics
-                                              ->evaluate(old_phase.temperature, old_phase.absolute_pressure,
-                                                  fractions(old_phase))
-                                              .internal_energy_temperature;
-                            caloric_carrier_density.set_owned_value(
-                                cell, caloric / (ale ? ale->old_cell_volumes()[c] : mesh.cell_volume(cell)));
+                            trial.cells[c].phases[a].moles[s] = after[c];
+                            field->set_owned_value(static_cast<LO>(c), after[c] / mesh.cell_volume(static_cast<LO>(c)));
                         }
-                    });
-                transported_energy_density.sync_ghosts();
-                caloric_carrier_density.sync_ghosts();
-                for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
-                {
-                    const LO face = static_cast<LO>(f);
-                    if (mesh.is_boundary_face(face))
-                        continue;
-                    const double phi = phase_flux[a]->local_value(face);
-                    const LO owner = mesh.owner_cell(face);
-                    const LO donor = phi >= 0 ? owner : mesh.opposite_or_periodic_neighbor_cell(face, owner);
-                    local_energy_transport += dt * std::abs(phi * transported_energy_density.local_value(donor));
-                    local_caloric_transport += dt * std::abs(phi * caloric_carrier_density.local_value(donor));
+                        field->sync_ghosts();
+                        transported_species[a * ns + s] = std::move(field);
+                    }
+                    for (size_t c = 0; c < nc; ++c)
+                        before[c] = accepted.cells[c].phases[a].internal_energy;
+                    d->transport(before, *phase_flux[a], dt, after, result,
+                        transport_consistency_detail::Quantity::Energy, ale);
+                    for (size_t c = 0; c < nc; ++c)
+                        trial.cells[c].phases[a].internal_energy = after[c];
+                    ScalarField transported_energy_density(d->mesh, "transported_energy_operand");
+                    ScalarField caloric_carrier_density(d->mesh, "caloric_transport_characteristic");
+                    collective_detail::collective_local_validation(mesh, "Low-Mach caloric transport scales",
+                        [&]
+                        {
+                            for (size_t c = 0; c < nc; ++c)
+                            {
+                                const LO cell = static_cast<LO>(c);
+                                transported_energy_density.set_owned_value(cell, after[c] / mesh.cell_volume(cell));
+                                const auto& old_phase = accepted.cells[c].phases[a];
+                                const double mass = phase_mass(old_phase);
+                                double caloric = 0;
+                                if (mass > 0)
+                                    caloric = mass * old_phase.temperature *
+                                              old_phase.thermodynamics
+                                                  ->evaluate(old_phase.temperature, old_phase.absolute_pressure,
+                                                      fractions(old_phase))
+                                                  .internal_energy_temperature;
+                                caloric_carrier_density.set_owned_value(
+                                    cell, caloric / (ale ? ale->old_cell_volumes()[c] : mesh.cell_volume(cell)));
+                            }
+                        });
+                    transported_energy_density.sync_ghosts();
+                    caloric_carrier_density.sync_ghosts();
+                    for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
+                    {
+                        const LO face = static_cast<LO>(f);
+                        if (mesh.is_boundary_face(face))
+                            continue;
+                        const double phi = phase_flux[a]->local_value(face);
+                        const LO owner = mesh.owner_cell(face);
+                        const LO donor = phi >= 0 ? owner : mesh.opposite_or_periodic_neighbor_cell(face, owner);
+                        local_energy_transport += dt * std::abs(phi * transported_energy_density.local_value(donor));
+                        local_caloric_transport += dt * std::abs(phi * caloric_carrier_density.local_value(donor));
+                    }
                 }
                 // Reconstruct material-volume packets from the same transported species and upwind trial EOS.
                 // A separately advected passive volume label would introduce a CFL-squared occupancy defect.
@@ -1092,7 +1475,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             double amount = 0, transported_mass_density = 0;
                             for (size_t s = 0; s < ns; ++s)
                             {
-                                x[s] = transported_species[a * ns + s]->local_value(donor);
+                                x[s] = species_donor_concentration(a, s, donor);
                                 amount += x[s];
                                 transported_mass_density += x[s] * d->eos[a]->catalog().species()[s].molarMass;
                             }
@@ -1609,7 +1992,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             const LO donor = phi >= 0 ? owner : neighbor;
                             double density = 0;
                             for (size_t s = 0; s < ns; ++s)
-                                density += transported_species[a * ns + s]->local_value(donor) *
+                                density += species_donor_concentration(a, s, donor) *
                                            d->eos[a]->catalog().species()[s].molarMass;
                             const double mf = phi * density;
                             mass_flux += mf;
