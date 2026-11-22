@@ -29,6 +29,58 @@ class PlanarALEGeometryAccess
 {
     template<::SimpleFluid::TpetraTypePack Pack> friend class ::SimpleFluid::PlanarALEMeshMotion;
 
+public:
+    static void replace_unleased_axial_edges(OrthogonalCylindrial3D& mesh, Arr<real_t> edges)
+    {
+        if (!motion_available(mesh))
+        {
+            throw std::logic_error("Planar ALE geometry is owned by a motion controller.");
+        }
+        replace_axial_edges(mesh, std::move(edges));
+    }
+
+    static void replace_unleased_axial_edges(MultiRegionMesh& mesh, Arr<real_t> edges)
+    {
+        if (!motion_available(mesh))
+        {
+            throw std::logic_error("Planar ALE geometry is owned by a motion controller.");
+        }
+        replace_axial_edges(mesh, std::move(edges));
+    }
+
+    [[nodiscard]] static std::shared_ptr<MultiRegionMesh> clone_unleased(
+        const MultiRegionMesh& source,
+        Arr<real_t> axial_edges)
+    {
+        const auto execution = source.acquire_execution_view();
+        auto copy = std::shared_ptr<MultiRegionMesh>(new MultiRegionMesh(MultiRegionMesh::PartitionTag{}));
+        copy->d_regions = source.d_regions;
+        copy->d_interfaces = source.d_interfaces;
+        copy->d_explicit = source.d_explicit;
+        copy->d_region_interfaces = source.d_region_interfaces;
+        copy->d_interface_sides = source.d_interface_sides;
+        copy->d_removed_patch_index = source.d_removed_patch_index;
+        copy->d_cells = source.d_cells;
+        copy->d_faces = source.d_faces;
+        copy->d_nodes = source.d_nodes;
+        copy->d_native_faces = source.d_native_faces;
+        copy->d_boundaries = source.d_boundaries;
+        copy->d_tolerance = source.d_tolerance;
+        copy->d_indexer = source.d_indexer;
+        copy->d_reference_axial_edges = source.d_reference_axial_edges;
+        copy->d_axial_edges = source.d_reference_axial_edges;
+        copy->d_comm = source.d_comm;
+        copy->d_partition_resident = source.d_partition_resident;
+        copy->d_num_cells = source.d_num_cells;
+        copy->d_num_local_cells = source.d_num_local_cells;
+        copy->d_num_owned_cells = source.d_num_owned_cells;
+        copy->d_num_faces = source.d_num_faces;
+        copy->d_num_owned_faces = source.d_num_owned_faces;
+        copy->d_num_nodes = source.d_num_nodes;
+        copy->replace_axial_edges_fixed_topology(std::move(axial_edges));
+        return copy;
+    }
+
 private:
     template<class Mesh> static bool motion_available(const Mesh& mesh) noexcept
     {

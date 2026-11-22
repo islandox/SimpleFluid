@@ -333,6 +333,62 @@ inline bool MeshHandle<Pack>::has_mutable_geometry() const noexcept
 }
 
 template<TpetraTypePack Pack>
+template<class ConstPtr, class MutablePtr>
+inline SP<MeshHandle<Pack>> MeshHandle<Pack>::clone_with_mutable_geometry_impl(MutablePtr mesh) const
+{
+    require_mesh(mesh);
+    const auto* current = std::get_if<ConstPtr>(&d_mesh);
+    if (!current || !*current || (*current)->num_cells() != mesh->num_cells() ||
+        (*current)->num_faces() != mesh->num_faces() || (*current)->num_nodes() != mesh->num_nodes())
+    {
+        throw std::invalid_argument("MeshHandle geometry replacement must match the existing mesh topology.");
+    }
+    auto copy = SP<MeshHandle<Pack>>(new MeshHandle<Pack>());
+    copy->d_map_indexing = d_map_indexing;
+    copy->d_node_global_ids = d_node_global_ids;
+    copy->d_serial_identity = d_serial_identity;
+    copy->d_serial_counts = d_serial_counts;
+    copy->d_semi_structured_decomposition = d_semi_structured_decomposition;
+    copy->d_orthogonal_decomposition = d_orthogonal_decomposition;
+    copy->d_orthogonal_topology = d_orthogonal_topology;
+    copy->d_orthogonal_cell_permutation = d_orthogonal_cell_permutation;
+    copy->d_orthogonal_cell_inverse_permutation = d_orthogonal_cell_inverse_permutation;
+    copy->d_mesh = ConstPtr(mesh);
+    copy->d_mutable_mesh.emplace(std::move(mesh));
+    copy->d_layout_generation = d_layout_generation;
+    copy->d_indexer = d_indexer;
+    copy->d_cells_reordered = d_cells_reordered;
+    copy->d_cell_geometry_lids = d_cell_geometry_lids;
+    copy->d_cell_local_lids_by_geometry = d_cell_local_lids_by_geometry;
+    copy->d_cell_face_offsets = d_cell_face_offsets;
+    copy->d_cell_face_lids = d_cell_face_lids;
+    copy->d_boundary_names = d_boundary_names;
+    copy->d_boundary_batches = d_boundary_batches;
+    copy->d_semi_structured_topology = d_semi_structured_topology;
+    copy->d_semi_cell_permutation = d_semi_cell_permutation;
+    copy->d_semi_cell_inverse_permutation = d_semi_cell_inverse_permutation;
+    copy->d_owned_cell_map = d_owned_cell_map;
+    copy->d_overlap_cell_map = d_overlap_cell_map;
+    copy->d_owned_face_map = d_owned_face_map;
+    copy->d_overlap_face_map = d_overlap_face_map;
+    copy->d_boundary_face_map = d_boundary_face_map;
+    copy->publish_binding();
+    return copy;
+}
+
+template<TpetraTypePack Pack>
+inline SP<MeshHandle<Pack>> MeshHandle<Pack>::clone_with_mutable_geometry(MutableMultiRegionPtr mesh) const
+{
+    return clone_with_mutable_geometry_impl<MultiRegionPtr>(std::move(mesh));
+}
+
+template<TpetraTypePack Pack>
+inline SP<MeshHandle<Pack>> MeshHandle<Pack>::clone_with_mutable_geometry(MutableCylindricalPtr mesh) const
+{
+    return clone_with_mutable_geometry_impl<CylindricalPtr>(std::move(mesh));
+}
+
+template<TpetraTypePack Pack>
 inline std::uint64_t MeshHandle<Pack>::geometry_epoch() const
 {
     return geometry().geometry_epoch();

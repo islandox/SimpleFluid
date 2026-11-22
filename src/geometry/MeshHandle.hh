@@ -477,6 +477,18 @@ public:
     /** @brief True when visit_mutable() can access the concrete geometry. */
     bool has_mutable_geometry() const noexcept;
 
+    /**
+     * @brief Clone this handle's decomposition, indexing, and Tpetra maps around
+     *        a compatible mutable composite geometry.
+     */
+    [[nodiscard]] SP<MeshHandle<Pack>> clone_with_mutable_geometry(MutableMultiRegionPtr mesh) const;
+
+    /**
+     * @brief Clone this handle's decomposition, indexing, and Tpetra maps around
+     *        a compatible mutable cylindrical geometry.
+     */
+    [[nodiscard]] SP<MeshHandle<Pack>> clone_with_mutable_geometry(MutableCylindricalPtr mesh) const;
+
     /** @brief Pin and validate composite geometry for a bulk operation; native paths are unchanged. */
     [[nodiscard]] Meshes::MultiRegionMesh::ExecutionView acquire_execution_view() const;
 
@@ -740,6 +752,11 @@ public:
     VTUWriter::TopologyHandle vtu_topology() const;
 
 private:
+    MeshHandle() = default;
+
+    template<class ConstPtr, class MutablePtr>
+    [[nodiscard]] SIMPLEFLUID_LOCAL SP<MeshHandle<Pack>> clone_with_mutable_geometry_impl(MutablePtr mesh) const;
+
     template<class Pointer>
     SIMPLEFLUID_LOCAL static Pointer require_mesh(Pointer mesh)
     {
