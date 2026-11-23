@@ -170,13 +170,19 @@ CaloricCell recover_enthalpy(const Solver::CellState& transported, std::span<con
         check(std::isfinite(minimum) && std::isfinite(maximum), "Low-Mach enthalpy bounds are nonfinite.");
         if (target < minimum || target > maximum)
             throw CaloricRangeError("Low-Mach phase enthalpy is outside supplied caloric validity bounds.");
+        if (target == minimum)
+            return lo;
+        if (target == maximum)
+            return hi;
+        // Resolve the monotone caloric law to its representable temperature bracket rather than stopping
+        // early on a reference-shifted energy roundoff band.
         for (int iteration = 0; iteration < 180; ++iteration)
         {
-            const double mid = std::midpoint(lo, hi), value = enthalpy(mid);
-            const double scale = std::max({std::numeric_limits<double>::min(), std::abs(value), std::abs(target)});
-            if (std::abs(value - target) <= 32 * std::numeric_limits<double>::epsilon() * scale || mid == lo ||
-                mid == hi)
+            const double mid = std::midpoint(lo, hi);
+            if (mid == lo || mid == hi)
                 return mid;
+            const double value = enthalpy(mid);
+            check(std::isfinite(value), "Low-Mach enthalpy inversion returned nonfinite enthalpy.");
             if (value < target)
                 lo = mid;
             else

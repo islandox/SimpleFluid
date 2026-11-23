@@ -6,6 +6,7 @@
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_CommHelpers.hpp>
+#include <Teuchos_DefaultComm.hpp>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -43,6 +44,17 @@ SP<Flow::Mesh> make_mesh_1d(ArrReal z_nodes)
 void expect_state_and_snapshot_near(
     const Flow::Trial& expected, const Flow::Trial& actual, double tol)
 {
+    double local_max_mech_pressure = 0.0;
+    for (const auto& cell : expected.state().cells)
+    {
+        local_max_mech_pressure = std::max(local_max_mech_pressure, std::abs(cell.mechanical_pressure));
+    }
+    double global_max_mech_pressure = 0.0;
+    Teuchos::reduceAll(
+        *Teuchos::DefaultComm<int>::getComm(), Teuchos::REDUCE_MAX, 1, &local_max_mech_pressure,
+        &global_max_mech_pressure);
+    const double mech_pressure_scale = std::max(1.0, global_max_mech_pressure);
+
     EXPECT_NEAR(actual.state().thermodynamic_pressure, expected.state().thermodynamic_pressure,
         tol * std::max(1.0, std::abs(expected.state().thermodynamic_pressure)));
     ASSERT_EQ(actual.state().cells.size(), expected.state().cells.size());
@@ -50,8 +62,9 @@ void expect_state_and_snapshot_near(
     {
         const auto& ec = expected.state().cells[c];
         const auto& ac = actual.state().cells[c];
-        EXPECT_NEAR(ac.mechanical_pressure, ec.mechanical_pressure,
-            tol * std::max(1.0, std::abs(ec.mechanical_pressure)));
+        // Mechanical pressure is a gauge-pinned elliptic perturbation field; scale its tolerance by the
+        // domain L_inf mechanical pressure rather than pointwise magnitude near the zero-pressure gauge cell.
+        EXPECT_NEAR(ac.mechanical_pressure, ec.mechanical_pressure, tol * mech_pressure_scale);
         for (std::size_t axis = 0; axis < 3; ++axis)
         {
             EXPECT_NEAR(ac.velocity.component(axis), ec.velocity.component(axis), tol);
@@ -549,6 +562,91 @@ TEST(LowMachMultiRhsTransportTest, VanishedPopulationAndSourceNucleationInvarian
         EXPECT_GT(cell.phases[2].temperature, 0.0);
     }
     EXPECT_NO_THROW(solver.commit(multi_nuc));
+}
+
+TEST(LowMachMultiRhsTransportTest, ShiftedEnergyReferenceAndUlpPerturbationInvariance)
+{
+    auto run_nucleation = [](double shift, int top_cell_ulps)
+    {
+        MultiCarrierFixture f({0.0, 0.25, 0.5, 0.75, 1.0}, shift);
+        f.options.linear.preconditioner = LinearPreconditioner::SymmetricGaussSeidel;
+        f.options.linear.tolerance = 1e-14;
+        for (std::size_t c = 0; c < f.initial.cells.size(); ++c)
+        {
+            auto& cell = f.initial.cells[c];
+            const double vol = f.mesh->cell_volume(static_cast<LO>(c));
+            const double z = f.mesh->cell_centroid(static_cast<LO>(c)).z;
+            const double frac = z < 0.5 ? 0.75 : 0.25;
+            const double bulk_moles = 100000 * 0.30 * vol / (gas_constant * 300.0);
+            cell.phases[1].moles = {frac * bulk_moles, (1.0 - frac) * bulk_moles};
+            cell.phases[1].internal_energy = (6000.0 + shift) * bulk_moles;
+            cell.phases[2].moles = {0.0, 0.0};
+            cell.phases[2].internal_energy = 0.0;
+            cell.phases[2].temperature = 0.0;
+            cell.phase_numbers[2] = 0.0;
+        }
+        Flow solver(f.mesh, {f.liquid, f.gas, f.gas}, f.options);
+        solver.initialize(f.initial);
+
+        const auto mesh = f.mesh;
+        const auto fingerprint = f.catalog->fingerprint();
+        auto provider = std::make_shared<Flow::SourceStageProvider>(Flow::SourceStageProvider{
+            "nucleation", 1, fingerprint,
+            [mesh, shift, top_cell_ulps](const Flow::SourceStageContext& ctx)
+            {
+                Flow::SourceStageResult res;
+                res.sources.resize(ctx.transport.cells.size());
+                for (std::size_t c = 0; c < ctx.transport.cells.size(); ++c)
+                {
+                    const double n_nuc = 0.005;
+                    const double molar_enthalpy = 6000.0 + shift + gas_constant * 300.0;
+                    double bulk_e_src = -molar_enthalpy * n_nuc;
+                    if (top_cell_ulps != 0 && mesh->cell_centroid(static_cast<LO>(c)).z > 0.75)
+                    {
+                        const double scale_e = ctx.transport.cells[c].phases[1].internal_energy;
+                        const double ulp =
+                            std::nextafter(scale_e, std::numeric_limits<double>::infinity()) - scale_e;
+                        bulk_e_src += static_cast<double>(top_cell_ulps) * ulp;
+                    }
+                    res.sources[c].species_moles = {{0.0, 0.0}, {-n_nuc, 0.0}, {n_nuc, 0.0}};
+                    res.sources[c].internal_energy = {0.0, bulk_e_src, molar_enthalpy * n_nuc};
+                    res.sources[c].population_number_changes = {0.0, 0.0, 5.0 * n_nuc};
+                }
+                return res;
+            },
+            0.0, 0});
+        return solver.preview_with_sources(0.005, provider);
+    };
+
+    // Caloric inversion must remain invariant to a 1e6 J/mol energy reference shift without
+    // premature 32*eps*scale bisection termination (which previously caused >1e-7 Pa drift).
+    const auto shift0 = run_nucleation(0.0, 0);
+    const auto shift1e6 = run_nucleation(1.0e6, 0);
+    EXPECT_NEAR(shift1e6.state().thermodynamic_pressure, shift0.state().thermodynamic_pressure, 1.0e-7);
+    ASSERT_EQ(shift1e6.state().cells.size(), shift0.state().cells.size());
+    for (std::size_t c = 0; c < shift0.state().cells.size(); ++c)
+    {
+        EXPECT_NEAR(shift1e6.state().cells[c].mechanical_pressure, shift0.state().cells[c].mechanical_pressure,
+            1.0e-8);
+        EXPECT_NEAR(shift1e6.state().cells[c].phases[1].temperature, shift0.state().cells[c].phases[1].temperature,
+            5.0e-11);
+    }
+
+    // A 1-ULP BulkGas energy perturbation under a 1e6 J/mol shift must not trigger a discrete
+    // bisection-step jump in recovered temperature or mechanical pressure.
+    for (const int ulps : {-1, 1})
+    {
+        SCOPED_TRACE(ulps);
+        const auto perturbed = run_nucleation(1.0e6, ulps);
+        ASSERT_EQ(perturbed.state().cells.size(), shift1e6.state().cells.size());
+        for (std::size_t c = 0; c < shift1e6.state().cells.size(); ++c)
+        {
+            EXPECT_NEAR(perturbed.state().cells[c].mechanical_pressure,
+                shift1e6.state().cells[c].mechanical_pressure, 1.2e-8);
+            EXPECT_NEAR(perturbed.state().cells[c].phases[1].temperature,
+                shift1e6.state().cells[c].phases[1].temperature, 3.0e-11);
+        }
+    }
 }
 
 TEST(LowMachMultiRhsTransportTest, MpiEmptyOwnerCrossPartitionAleAndRollback)

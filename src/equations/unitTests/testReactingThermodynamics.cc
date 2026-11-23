@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cmath>
 #include <limits>
 #include <numbers>
@@ -504,6 +505,69 @@ TEST(ReactingThermodynamicsTest, BubbleRadiusRoundsPressureIntersectionInwardWit
                 (void) R::solve_bubble_radius(gas, amounts, t, liquid_pressure, sigma, number, 1.1 * radius, 1e-3),
                 std::invalid_argument);
         }
+}
+
+TEST(ReactingThermodynamicsTest, ShiftedReferenceCaloricInversionResolvesBracketWithoutPrematureJumps)
+{
+    const auto species = catalog();
+    constexpr double shift = 1.0e6;
+    const auto unshifted = R::make_ideal_gas_mixture(
+        species, {{20, 300, 6000}, {20, 300, 6000}, {20, 300, 6000}}, bounds);
+    const auto shifted = R::make_ideal_gas_mixture(
+        species, {{20, 300, 6000 + shift}, {20, 300, 6000 + shift}, {20, 300, 6000 + shift}}, bounds);
+    const std::vector<double> moles{0.75, 0.25, 0.0};
+    constexpr double reference_temperature = 300.123456789;
+    constexpr double pressure = 100000.0;
+
+    // 1) Shifted vs unshifted recovery agrees well below the old 32*eps*scale (~3.6e-10 K) early-exit band.
+    for (const auto mode : {R::PhaseThermalMode::Equilibrium, R::PhaseThermalMode::SeparatePhaseTemperatures})
+    {
+        const auto p_unshifted = phase(unshifted, moles, reference_temperature, pressure);
+        const auto p_shifted = phase(shifted, moles, reference_temperature, pressure);
+        const auto r_unshifted =
+            R::recover_phase_temperatures(std::array{p_unshifted}, p_unshifted.internal_energy, mode);
+        const auto r_shifted = R::recover_phase_temperatures(std::array{p_shifted}, p_shifted.internal_energy, mode);
+        EXPECT_NEAR(r_unshifted.phases[0].temperature, reference_temperature, 1.0e-12);
+        EXPECT_NEAR(r_shifted.phases[0].temperature, reference_temperature, 2.0e-11);
+        EXPECT_NEAR(r_shifted.phases[0].temperature, r_unshifted.phases[0].temperature, 2.0e-11);
+    }
+
+    // 2) Sweeping 1-ULP target perturbations across [-32, +32] ULPs stays monotone and tightly accurate
+    // (previously premature 32*eps*scale termination produced O(1e-10 K) discrete jumps).
+    const auto base_phase = phase(shifted, moles, reference_temperature, pressure);
+    const double base_energy = base_phase.internal_energy;
+    const double ulp = std::nextafter(base_energy, std::numeric_limits<double>::infinity()) - base_energy;
+    double previous_temperature = 0.0;
+    for (int k = -32; k <= 32; ++k)
+    {
+        auto perturbed = base_phase;
+        perturbed.internal_energy = base_energy + static_cast<double>(k) * ulp;
+        const auto recovered = R::recover_phase_temperatures(
+            std::array{perturbed}, perturbed.internal_energy, R::PhaseThermalMode::SeparatePhaseTemperatures);
+        const double t = recovered.phases[0].temperature;
+        const double expected_t = reference_temperature + static_cast<double>(k) * ulp / 20.0;
+        EXPECT_NEAR(t, expected_t, 2.0e-11);
+        if (k > -32)
+        {
+            EXPECT_GE(t, previous_temperature);
+            EXPECT_LE(t - previous_temperature, 2.0e-11);
+        }
+        previous_temperature = t;
+    }
+
+    // 3) Endpoint recovery and out-of-range rejection remain intact.
+    const auto low_phase = phase(shifted, moles, bounds.minimum_temperature, pressure);
+    const auto high_phase = phase(shifted, moles, bounds.maximum_temperature, pressure);
+    EXPECT_DOUBLE_EQ(
+        R::recover_phase_temperatures(std::array{low_phase}, low_phase.internal_energy).phases[0].temperature,
+        bounds.minimum_temperature);
+    EXPECT_DOUBLE_EQ(
+        R::recover_phase_temperatures(std::array{high_phase}, high_phase.internal_energy).phases[0].temperature,
+        bounds.maximum_temperature);
+    auto below = low_phase;
+    below.internal_energy -= 1.0e-3;
+    EXPECT_THROW(
+        (void) R::recover_phase_temperatures(std::array{below}, below.internal_energy), std::invalid_argument);
 }
 
 } // namespace

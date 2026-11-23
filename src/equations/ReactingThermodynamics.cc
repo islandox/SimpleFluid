@@ -102,15 +102,15 @@ template<class Energy> double invert_energy(double lower, double upper, double t
         return lower;
     if (target == high_energy)
         return upper;
+    // Resolve the monotone caloric law to its representable temperature bracket rather than stopping
+    // early on a reference-shifted energy roundoff band.
     for (int iteration = 0; iteration < 180; ++iteration)
     {
         const double middle = std::midpoint(lower, upper);
-        const double value = energy(middle);
-        require(finite(value), "Caloric inversion returned nonfinite energy.");
-        if (std::abs(value - target) <= tolerance)
-            return middle;
         if (middle == lower || middle == upper)
             break;
+        const double value = energy(middle);
+        require(finite(value), "Caloric inversion returned nonfinite energy.");
         if (value < target)
             lower = middle;
         else
@@ -248,16 +248,18 @@ std::shared_ptr<const MixtureThermodynamics> make_ideal_gas_mixture(std::shared_
     auto evaluate = [catalog, caloric = std::move(caloric), gas_constant, transport = std::move(transport)](
                         double t, double p, std::span<const double> x)
     {
-        double molecular_weight = 0, cv = 0, e = 0;
+        double molecular_weight = 0, cv = 0, reference_e = 0, sensible_e = 0;
         for (std::size_t i = 0; i < x.size(); ++i)
         {
             molecular_weight += x[i] * catalog->species()[i].molarMass;
             cv += x[i] * caloric[i].molar_heat_capacity_v;
-            e += x[i] * (caloric[i].reference_internal_energy +
-                            caloric[i].molar_heat_capacity_v * (t - caloric[i].reference_temperature));
+            reference_e += x[i] * caloric[i].reference_internal_energy;
+            sensible_e += x[i] * (caloric[i].molar_heat_capacity_v * (t - caloric[i].reference_temperature));
         }
+        const double e = reference_e + sensible_e;
+        const double h = reference_e + (sensible_e + gas_constant * t);
         const double rho = p * molecular_weight / (gas_constant * t);
-        MixtureThermodynamicPoint result{rho, e / molecular_weight, (e + gas_constant * t) / molecular_weight,
+        MixtureThermodynamicPoint result{rho, e / molecular_weight, h / molecular_weight,
             cv / molecular_weight, 0, -rho / t, rho / p, {}, {}};
         if (transport)
             std::tie(result.dynamic_viscosity, result.thermal_conductivity) = transport(t, p, x);
