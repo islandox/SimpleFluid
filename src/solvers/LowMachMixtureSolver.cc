@@ -1745,6 +1745,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             double p0 = std::clamp(thermodynamic_guess.thermodynamic_pressure, lower, upper);
             double last_feasible_pressure = p0;
             bool have_feasible_pressure = false;
+            bool saw_positive = false, saw_negative = false;
             const double domain_volume = d->sum(local_domain_volume);
             // Only an actual initial CaloricRangeError enters discovery. Source
             // callbacks are NOT evaluated during these inner pressure trials.
@@ -1958,12 +1959,21 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 check(std::isfinite(derivative) && derivative < 0,
                     "Low-Mach mixture has unstable pressure susceptibility.");
                 if (residual > 0)
+                {
+                    saw_positive = true;
                     lower = std::max(lower, p0);
-                else
+                }
+                else if (residual < 0)
+                {
+                    saw_negative = true;
                     upper = std::min(upper, p0);
+                }
                 double next = p0 - residual / derivative;
                 if (!std::isfinite(next) || next <= lower || next >= upper)
                     next = std::midpoint(lower, upper);
+                if (next == p0 && saw_positive && saw_negative &&
+                    std::abs(residual) <= d->options.volume_relative_tolerance * domain_volume)
+                    break;
                 check(next != p0 && next >= lower && next <= upper,
                     "Low-Mach bounded pressure interval cannot resolve physical volume closure.");
                 p0 = next;

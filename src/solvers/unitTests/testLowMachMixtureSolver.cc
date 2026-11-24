@@ -1270,4 +1270,142 @@ TEST(LowMachMixtureSolverTest, FixedGeometryRejectsChangedEpochBeforeInitializat
     Solver fresh(grid, {gas}, options());
     EXPECT_NO_THROW(fresh.initialize(state(*grid, gas)));
 }
+
+void expect_unchanged_state(const Solver& solver, const Solver::State& initial)
+{
+    EXPECT_EQ(solver.state().revision, initial.revision);
+    EXPECT_DOUBLE_EQ(solver.state().time, initial.time);
+    EXPECT_DOUBLE_EQ(solver.state().thermodynamic_pressure, initial.thermodynamic_pressure);
+    for (size_t c = 0; c < initial.cells.size(); ++c)
+    {
+        EXPECT_EQ(solver.state().cells[c].phases[0].moles, initial.cells[c].phases[0].moles);
+        EXPECT_DOUBLE_EQ(
+            solver.state().cells[c].phases[0].internal_energy, initial.cells[c].phases[0].internal_energy);
+        EXPECT_DOUBLE_EQ(solver.velocity().value(static_cast<LO>(c)).z, 0.);
+    }
+    for (const auto face : solver.volume_flux().owned_face_ids())
+        EXPECT_DOUBLE_EQ(solver.volume_flux().value(face), 0.);
+}
+
+TEST(LowMachMixtureSolverTest, InteriorOneUlpPressureBracketHandsOffCleanlyToContinuityGate)
+{
+    const auto make_state = [](const Solver::Mesh& grid, std::shared_ptr<const R::MixtureThermodynamics> gas,
+                                double pressure)
+    {
+        auto result = state(grid, gas, true);
+        result.thermodynamic_pressure = pressure;
+        for (size_t c = 0; c < result.cells.size(); ++c)
+        {
+            const double volume = grid.cell_volume(static_cast<LO>(c));
+            const double n = pressure * volume / (gas_constant * 300);
+            const double fraction = grid.cell_global_id(static_cast<LO>(c)) % 2 ? 0.8 : 0.2;
+            result.cells[c].phases = {{gas, {fraction * n, (1 - fraction) * n}, pressure, 20 * n * 300, 300}};
+        }
+        return result;
+    };
+
+    // At domain_volume = 1 m3 and continuity_tolerance = 1e-10, dt = 5e-6 puts
+    // 0.1 * continuity_tolerance * dt = 5e-17 < 1 ULP(1.0) < continuity_tolerance * dt = 5e-16.
+    // An interior 1-ULP p0 bracket must hand off cleanly to the physical gate rather than aborting.
+    const double dt_resolvable = 5e-6;
+    const auto controls = options();
+    for (const double pressure : {100000., 132000.})
+    {
+        for (const double heat : {dt_resolvable, 1e-4, 1e-3})
+        {
+            SCOPED_TRACE(pressure);
+            SCOPED_TRACE(heat);
+            auto grid = mesh();
+            const auto gas = ideal(catalog());
+            Solver solver(grid, {gas}, controls);
+            solver.initialize(make_state(*grid, gas, pressure));
+            const auto initial = solver.state();
+            std::vector<Solver::CellSources> sources(initial.cells.size());
+            for (size_t c = 0; c < sources.size(); ++c)
+                sources[c].internal_energy = {grid->cell_centroid(static_cast<LO>(c)).z < .5 ? heat : 0.};
+            Solver::Diagnostics result;
+            ASSERT_NO_THROW(result = solver.advance(dt_resolvable, sources));
+            EXPECT_EQ(solver.state().revision, initial.revision + 1);
+            EXPECT_DOUBLE_EQ(solver.state().time, dt_resolvable);
+            EXPECT_LE(result.maximum_occupancy_error, controls.volume_relative_tolerance);
+            EXPECT_LE(result.maximum_continuity_residual, controls.continuity_tolerance);
+            EXPECT_LE(std::abs(result.internal_energy_error),
+                controls.conservation_relative_tolerance * result.caloric_energy_scale +
+                    result.internal_energy_roundoff_bound);
+            EXPECT_NEAR(result.mass_error, 0., 1e-12);
+            for (const double error : result.species_errors)
+                EXPECT_NEAR(error, 0., 1e-12);
+        }
+    }
+
+    // At dt = 1e-8 on O(1 m3), an interior 1-ULP residual must still reach the
+    // downstream global pressure compatibility gate and reject without publishing.
+    const double dt_unresolved = 1e-8;
+    int rejections = 0;
+    for (const double pressure : {100000., 132000.})
+    {
+        for (const double heat : {1e-8, 1e-7, 1e-6})
+        {
+            SCOPED_TRACE(pressure);
+            SCOPED_TRACE(heat);
+            auto grid = mesh();
+            const auto gas = ideal(catalog());
+            Solver solver(grid, {gas}, controls);
+            solver.initialize(make_state(*grid, gas, pressure));
+            const auto initial = solver.state();
+            std::vector<Solver::CellSources> sources(initial.cells.size());
+            for (size_t c = 0; c < sources.size(); ++c)
+                sources[c].internal_energy = {grid->cell_centroid(static_cast<LO>(c)).z < .5 ? heat : 0.};
+            try
+            {
+                const auto trial = solver.preview(dt_unresolved, sources);
+                EXPECT_LE(trial.diagnostics().maximum_occupancy_error, controls.volume_relative_tolerance);
+                EXPECT_LE(trial.diagnostics().maximum_continuity_residual, controls.continuity_tolerance);
+            }
+            catch (const std::exception& error)
+            {
+                ++rejections;
+                const std::string message = error.what();
+                EXPECT_NE(message.find("global pressure compatibility: residual="), std::string::npos) << message;
+                EXPECT_NE(message.find("original limit="), std::string::npos) << message;
+                EXPECT_NE(message.find("dt="), std::string::npos) << message;
+            }
+            expect_unchanged_state(solver, initial);
+        }
+    }
+    EXPECT_GT(rejections, 0);
+}
+
+TEST(LowMachMixtureSolverTest, OutOfBracketThermodynamicPressureRejectsWithoutPublishing)
+{
+    for (const bool exceed_upper : {true, false})
+    {
+        SCOPED_TRACE(exceed_upper);
+        auto grid = mesh();
+        const auto gas = ideal(catalog());
+        auto controls = options();
+        if (exceed_upper)
+            controls.maximum_pressure = 120000;
+        else
+            controls.minimum_pressure = 95000;
+        Solver solver(grid, {gas}, controls);
+        solver.initialize(state(*grid, gas, true));
+        const auto initial = solver.state();
+        std::vector<Solver::CellSources> sources(initial.cells.size());
+        const double factor = exceed_upper ? 0.5 : -0.1;
+        for (size_t c = 0; c < sources.size(); ++c)
+            sources[c].internal_energy = {factor * initial.cells[c].phases[0].internal_energy};
+        try
+        {
+            (void) solver.preview(0.01, sources);
+            FAIL() << "Expected bounded pressure interval rejection.";
+        }
+        catch (const std::exception& error)
+        {
+            const std::string message = error.what();
+            EXPECT_NE(message.find("cannot resolve physical volume closure"), std::string::npos) << message;
+        }
+        expect_unchanged_state(solver, initial);
+    }
+}
 } // namespace
