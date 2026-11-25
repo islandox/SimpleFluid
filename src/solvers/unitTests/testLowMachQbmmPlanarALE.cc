@@ -106,6 +106,7 @@ struct Piston
         R::QbmmClosureVersions policies, std::optional<SlopeLimiter> limiter)
     {
         Flow::Options options;
+        options.use_multi_rhs_transport = RestartIO::use_multi_rhs_transport();
         if (limiter)
         {
             options.qbmm_model.family_transport = R::QbmmModelOptions::FamilyTransport::RealizableLinearSSPRK2;
@@ -229,6 +230,14 @@ void check_closed_piston(std::optional<SlopeLimiter> limiter = {})
             const auto& accepted = f.flow.state();
             const auto initial = f.flow.qbmm_report();
             const auto trial = f.flow.preview_ale(dt, f.motion, ratio);
+            EXPECT_EQ(trial.diagnostics().transport_multi_rhs.operator_groups, 0U);
+            if (!limiter)
+            {
+                const auto& block = trial.diagnostics().qbmm_block_transport;
+                EXPECT_EQ(block.families, 1U);
+                EXPECT_EQ(block.halo_cell_imports, block.sweeps + 1);
+                EXPECT_EQ(block.halo_face_imports, block.sweeps + 1);
+            }
             const auto report = f.flow.qbmm_report(trial);
             EXPECT_EQ(f.flow.state().time, 0);
             EXPECT_FALSE(f.motion.has_active_trial());

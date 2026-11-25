@@ -102,6 +102,7 @@ struct Fixture
         : grid(make_mesh(geometry, different, repartition))
     {
         Flow::Options options;
+        options.use_multi_rhs_transport = Restart::use_multi_rhs_transport();
         options.minimum_pressure = bounds.minimum_pressure;
         options.maximum_pressure = bounds.maximum_pressure;
         options.linear.preconditioner = LinearPreconditioner::None;

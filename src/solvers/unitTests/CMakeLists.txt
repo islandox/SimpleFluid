@@ -63,6 +63,8 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       ${TEST_NAME}
       PROPERTIES LABELS "ale\\;free_surface\\;boussinesq\\;conservation\\;transaction"
     )
+  elseif(TEST_NAME STREQUAL "testLowMachQbmmTransport")
+    simplefluid_discover_tests(${TEST_NAME} TEST_FILTER "-QbmmMixedCarrierTransport.*")
   elseif(TEST_NAME STREQUAL "testLowMachQbmmLinearTransport")
     simplefluid_discover_tests(${TEST_NAME}
       XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q7c/$<CONFIG>"
@@ -146,6 +148,16 @@ foreach(_raw_population_ranks IN ITEMS 2 4)
             TARGET test${_raw_population_case} PROCS ${_raw_population_ranks}
             LABELS "mpi;species;population;conservation;transaction;empty_rank" TIMEOUT 180)
     endforeach()
+endforeach()
+
+# Packed family transport on native overlap maps.
+foreach(ranks IN ITEMS 2 4)
+    set(test "LowMachQbmmPackedTransport_${ranks}procs")
+    simplefluid_add_mpi_test(NAME "${test}" TARGET testLowMachQbmmPackedTransport PROCS "${ranks}"
+        LABELS "mpi;low_mach;qbmm;multi_rhs;ale;conservation;empty_rank")
+    if(TEST "${test}")
+        set_tests_properties("${test}" PROPERTIES ENVIRONMENT "SIMPLEFLUID_QBMM_PACKED_EXPECTED_RANKS=${ranks}")
+    endif()
 endforeach()
 
 # Prescribed native ALE transactions and actual source geometry frames.
@@ -305,6 +317,22 @@ foreach(_interphase_ranks IN ITEMS 2 4)
         LABELS "mpi;reacting;low_mach;thermal;ale;conservation;transaction;empty_rank" TIMEOUT 180)
 endforeach()
 
+foreach(ranks IN ITEMS 1 2 4)
+    set(test QbmmMixedCarrierTransport_${ranks}procs)
+    if(ranks EQUAL 1)
+        add_test(NAME "${test}" COMMAND "$<TARGET_FILE:testLowMachQbmmTransport>"
+            "--gtest_filter=QbmmMixedCarrierTransport.*")
+        set_tests_properties("${test}" PROPERTIES LABELS "low_mach;qbmm;multi_rhs;conservation;restart" TIMEOUT 300)
+    else()
+        simplefluid_add_mpi_test(NAME "${test}" TARGET testLowMachQbmmTransport PROCS "${ranks}"
+            ARGS "--gtest_filter=QbmmMixedCarrierTransport.*"
+            LABELS "mpi;low_mach;qbmm;multi_rhs;conservation;restart;empty_rank" TIMEOUT 300)
+    endif()
+    if(TEST ${test})
+        set_tests_properties(${test} PROPERTIES ENVIRONMENT "SIMPLEFLUID_MIXED_CARRIER_RANKS=${ranks}")
+    endif()
+endforeach()
+
 # Conservative native mixture flow and its external reaction controller.
 foreach(_mixture_ranks IN ITEMS 2 4)
     simplefluid_add_mpi_test(NAME QbmmSlipAndGravity_${_mixture_ranks}procs
@@ -331,7 +359,7 @@ foreach(_mixture_ranks IN ITEMS 2 4)
         TARGET testReactingMixtureQbmmReleaseGate PROCS ${_mixture_ranks}
         LABELS "mpi;low_mach;reacting;qbmm;population;conservation;transaction;empty_rank" TIMEOUT 300)
     simplefluid_add_mpi_test(NAME LowMachQbmmTransport_${_mixture_ranks}procs
-        TARGET testLowMachQbmmTransport PROCS ${_mixture_ranks}
+        TARGET testLowMachQbmmTransport PROCS ${_mixture_ranks} ARGS "--gtest_filter=-QbmmMixedCarrierTransport.*"
         LABELS "mpi;low_mach;qbmm;population;conservation;transaction;empty_rank" TIMEOUT 180)
     simplefluid_add_mpi_test(NAME ReactingMixtureQbmmSources_${_mixture_ranks}procs
         TARGET testReactingMixtureQbmmSources PROCS ${_mixture_ranks} ARGS "--gtest_filter=-*.TvdMc*"

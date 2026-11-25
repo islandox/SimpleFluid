@@ -3,6 +3,7 @@
 #include <Teuchos_CommHelpers.hpp>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <span>
 #include <stdexcept>
@@ -11,6 +12,12 @@
 
 namespace SimpleFluid::Testing::QbmmRestart
 {
+// Legacy byte comparisons replay the scalar execution used to produce their reference shards.
+inline bool use_multi_rhs_transport()
+{
+    return std::getenv("SIMPLEFLUID_QBMM_RESTART_SCALAR_REFERENCE") == nullptr;
+}
+
 inline void append_restart_word(std::vector<std::byte>& body, std::uint64_t value)
 {
     for (unsigned shift = 0; shift < 64; shift += 8)

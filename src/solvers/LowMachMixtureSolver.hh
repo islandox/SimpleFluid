@@ -433,6 +433,16 @@ public:
             double consistency_repair_seconds = 0;
         };
         TransportMultiRhsDiagnostics transport_multi_rhs = {};
+        struct QbmmBlockTransportDiagnostics
+        {
+            std::size_t families = 0;
+            std::size_t sweeps = 0;
+            std::size_t halo_cell_imports = 0;
+            std::size_t halo_face_imports = 0;
+            double halo_exchange_seconds = 0;
+            double consistency_repair_seconds = 0;
+        };
+        QbmmBlockTransportDiagnostics qbmm_block_transport = {}; ///< NativeImplicit families in the final corrector.
         std::optional<double> maximum_fourier_gross_comparison_uncertainty_j;
         ///< Fourier operand comparison bound in joules, retained by portable v5 when known.
         int kinetic_substeps = 0; ///< Actual globally synchronized substeps in the final corrector.

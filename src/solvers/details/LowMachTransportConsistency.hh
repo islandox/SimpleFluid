@@ -9,12 +9,15 @@
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <sstream>
+#include <utility>
 #include <vector>
 
 namespace SimpleFluid::Reacting::transport_consistency_detail
@@ -51,8 +54,19 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void require_transport_roundoff(double rounded,
         throw std::invalid_argument(message);
 }
 
-SIMPLEFLUID_SOLVERS_LOCAL inline void set_owned_donor_packets(const Flow::Mesh& mesh, const Face& phase_flux,
-    const Scalar& concentration, Face& packets, bool require_relative_roundoff = false)
+SIMPLEFLUID_SOLVERS_LOCAL inline double donor_packet(double phi, double trace, bool require_relative_roundoff = false)
+{
+    const double packet = phi * trace;
+    if (!std::isfinite(packet) || (phi != 0 && trace != 0 && packet == 0))
+        throw std::invalid_argument("Canonical transport face packet is not representable.");
+    if (require_relative_roundoff && std::fpclassify(packet) == FP_SUBNORMAL)
+        require_transport_roundoff(
+            packet, static_cast<long double>(phi) * trace, "QBMM canonical face packet loses relative precision.");
+    return packet;
+}
+
+SIMPLEFLUID_SOLVERS_LOCAL inline void set_owned_donor_packets(
+    const Flow::Mesh& mesh, const Face& phase_flux, const Scalar& concentration, Face& packets)
 {
     for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
     {
@@ -67,14 +81,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void set_owned_donor_packets(const Flow::Mesh& 
         }
         const LO owner = mesh.owner_cell(face);
         const LO donor = phi >= 0 ? owner : mesh.opposite_or_periodic_neighbor_cell(face, owner);
-        const double trace = concentration.local_value(donor);
-        const double packet = phi * trace;
-        if (!std::isfinite(packet) || (phi != 0 && trace != 0 && packet == 0))
-            throw std::invalid_argument("Canonical transport face packet is not representable.");
-        if (require_relative_roundoff && std::fpclassify(packet) == FP_SUBNORMAL)
-            require_transport_roundoff(
-                packet, static_cast<long double>(phi) * trace, "QBMM canonical face packet loses relative precision.");
-        packets.set_owned_value(face, packet);
+        packets.set_owned_value(face, donor_packet(phi, concentration.local_value(donor)));
     }
 }
 
@@ -277,59 +284,95 @@ struct BatchedResult
 
 struct SIMPLEFLUID_SOLVERS_LOCAL BatchedWorkspace
 {
+    using Import = Flow::Pack::import_type;
+    using MultiVector = Flow::Pack::multi_vector_type;
+
     Teuchos::RCP<const Flow::Pack::map_type> owned_cell_map;
     Teuchos::RCP<const Flow::Pack::map_type> overlap_cell_map;
     Teuchos::RCP<const Flow::Pack::map_type> owned_face_map;
     Teuchos::RCP<const Flow::Pack::map_type> overlap_face_map;
-    std::unique_ptr<Flow::Pack::import_type> cell_import;
-    std::unique_ptr<Flow::Pack::import_type> face_import;
+    std::shared_ptr<Import> cell_import;
+    std::shared_ptr<Import> face_import;
     Teuchos::RCP<Flow::Pack::multi_vector_type> conc_owned;
     Teuchos::RCP<Flow::Pack::multi_vector_type> conc_overlap;
     Teuchos::RCP<Flow::Pack::multi_vector_type> face_owned;
     Teuchos::RCP<Flow::Pack::multi_vector_type> face_overlap;
     Teuchos::RCP<Flow::Pack::multi_vector_type> residual_mv;
 
-    void ensure(const Flow::Mesh& mesh, const Face& phase_flux, std::size_t ncols)
+    void ensure(const Flow::Mesh& mesh, const Face& phase_flux, std::size_t ncols, bool store_residual = false)
     {
         const auto cell_owned_map = mesh.owned_cell_map();
         const auto cell_overlap_map = mesh.overlap_cell_map();
         const auto face_owned_map_now = phase_flux.owned_data().getMap();
         const auto face_overlap_map_now = phase_flux.overlap_data().getMap();
-        const bool cell_maps_changed =
-            owned_cell_map.is_null() || overlap_cell_map.is_null() ||
-            owned_cell_map.getRawPtr() != cell_owned_map.getRawPtr() ||
-            overlap_cell_map.getRawPtr() != cell_overlap_map.getRawPtr();
-        if (cell_maps_changed)
+        const auto wrong_width = [ncols](const Teuchos::RCP<MultiVector>& buffer)
+        { return buffer.is_null() || buffer->getNumVectors() != ncols; };
+        const std::array<int, 5> local{
+            !cell_import || owned_cell_map != cell_owned_map || overlap_cell_map != cell_overlap_map,
+            !face_import || owned_face_map != face_owned_map_now || overlap_face_map != face_overlap_map_now,
+            wrong_width(conc_owned) || wrong_width(conc_overlap),
+            wrong_width(face_owned) || wrong_width(face_overlap),
+            store_residual && wrong_width(residual_mv)};
+        std::array<int, 5> refresh{};
+        Teuchos::reduceAll(*cell_owned_map->getComm(), Teuchos::REDUCE_MAX, static_cast<int>(local.size()),
+            local.data(), refresh.data());
+        const bool new_cells = refresh[0] || refresh[2], new_faces = refresh[1] || refresh[3];
+        const bool new_residual = store_residual && (new_cells || refresh[4]);
+        if (!new_cells && !new_faces && !new_residual)
+            return;
+
+        // Reserve host storage collectively before entering the importer constructors.
+        // Keep the previous workspace complete until all replacement buffers are ready.
+        std::shared_ptr<std::optional<Import>> cell_storage, face_storage;
+        Teuchos::RCP<MultiVector> next_conc_owned, next_conc_overlap, next_face_owned, next_face_overlap, next_residual;
+        collective_detail::collective_local_validation(mesh, "Batched transport workspace allocation",
+            [&]
+            {
+                if (refresh[0])
+                    cell_storage = std::make_shared<std::optional<Import>>();
+                if (refresh[1])
+                    face_storage = std::make_shared<std::optional<Import>>();
+                if (new_cells)
+                {
+                    next_conc_owned = Teuchos::rcp(new MultiVector(cell_owned_map, ncols, false));
+                    next_conc_overlap = Teuchos::rcp(new MultiVector(cell_overlap_map, ncols, false));
+                }
+                if (new_faces)
+                {
+                    next_face_owned = Teuchos::rcp(new MultiVector(face_owned_map_now, ncols, false));
+                    next_face_overlap = Teuchos::rcp(new MultiVector(face_overlap_map_now, ncols, false));
+                }
+                if (new_residual)
+                    next_residual = Teuchos::rcp(new MultiVector(cell_owned_map, ncols, false));
+            });
+        if (cell_storage)
+            cell_storage->emplace(cell_owned_map, cell_overlap_map);
+        if (face_storage)
+            face_storage->emplace(face_owned_map_now, face_overlap_map_now);
+        if (cell_storage)
         {
+            cell_import = std::shared_ptr<Import>(cell_storage, &cell_storage->value());
             owned_cell_map = cell_owned_map;
             overlap_cell_map = cell_overlap_map;
-            cell_import = std::make_unique<Flow::Pack::import_type>(owned_cell_map, overlap_cell_map);
-            conc_owned = Teuchos::null;
-            conc_overlap = Teuchos::null;
-            residual_mv = Teuchos::null;
         }
-        const bool face_maps_changed =
-            owned_face_map.is_null() || overlap_face_map.is_null() ||
-            owned_face_map.getRawPtr() != face_owned_map_now.getRawPtr() ||
-            overlap_face_map.getRawPtr() != face_overlap_map_now.getRawPtr();
-        if (face_maps_changed)
+        if (face_storage)
         {
+            face_import = std::shared_ptr<Import>(face_storage, &face_storage->value());
             owned_face_map = face_owned_map_now;
             overlap_face_map = face_overlap_map_now;
-            face_import = std::make_unique<Flow::Pack::import_type>(owned_face_map, overlap_face_map);
-            face_owned = Teuchos::null;
-            face_overlap = Teuchos::null;
         }
-        if (conc_owned.is_null() || conc_owned->getNumVectors() != ncols)
+        if (new_cells)
         {
-            conc_owned = Teuchos::rcp(new Flow::Pack::multi_vector_type(owned_cell_map, ncols, false));
-            conc_overlap = Teuchos::rcp(new Flow::Pack::multi_vector_type(overlap_cell_map, ncols, false));
-            residual_mv = Teuchos::rcp(new Flow::Pack::multi_vector_type(owned_cell_map, ncols, false));
+            conc_owned = std::move(next_conc_owned);
+            conc_overlap = std::move(next_conc_overlap);
+            residual_mv = std::move(next_residual);
         }
-        if (face_owned.is_null() || face_owned->getNumVectors() != ncols)
+        else if (new_residual)
+            residual_mv = std::move(next_residual);
+        if (new_faces)
         {
-            face_owned = Teuchos::rcp(new Flow::Pack::multi_vector_type(owned_face_map, ncols, false));
-            face_overlap = Teuchos::rcp(new Flow::Pack::multi_vector_type(overlap_face_map, ncols, false));
+            face_owned = std::move(next_face_owned);
+            face_overlap = std::move(next_face_overlap);
         }
     }
 };
@@ -365,7 +408,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline BatchedResult enforce_batch(const SP<const Flow
         throw std::invalid_argument("Low-Mach batched transport consistency column count mismatch.");
     }
 
-    ws.ensure(mesh, phase_flux, ncols);
+    ws.ensure(mesh, phase_flux, ncols, true);
     ws.conc_owned->putScalar(0.0);
     ws.conc_overlap->putScalar(0.0);
     ws.face_owned->putScalar(0.0);
@@ -517,13 +560,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline BatchedResult enforce_batch(const SP<const Flow
                         }
                         const LO owner = mesh.owner_cell(face);
                         const LO donor = phi >= 0 ? owner : mesh.opposite_or_periodic_neighbor_cell(face, owner);
-                        const double donor_trace = conc_local[donor];
-                        const double packet = phi * donor_trace;
-                        if (!std::isfinite(packet) || (phi != 0 && donor_trace != 0 && packet == 0))
-                        {
-                            throw std::invalid_argument("Canonical transport face packet is not representable.");
-                        }
-                        face_dst[f_row] = packet;
+                        face_dst[f_row] = donor_packet(phi, conc_local[donor]);
                     }
                 }
             });

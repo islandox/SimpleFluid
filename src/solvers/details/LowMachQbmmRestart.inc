@@ -448,6 +448,8 @@ std::uint64_t restart_kinetic_policy_fingerprint(const Solver::Options& options)
 
 std::uint64_t restart_advance_controls(const Solver::Options& options)
 {
+    // Preserve the legacy physical advancement fingerprint across scalar and
+    // grouped execution. The multi-RHS policy and width tune the same operator.
     RestartHash hash;
     hash.number(options.minimum_pressure);
     hash.number(options.maximum_pressure);
@@ -596,6 +598,8 @@ template<class Archive, class Diagnostics>
 void restart_diagnostics(
     Archive& io, Diagnostics& value, size_t phases, size_t species, std::uint64_t version, RestartPayload type)
 {
+    // Keep the existing portable summaries. The multi-RHS and family halo
+    // instrumentation stays in live diagnostics.
     io(value.correctors, value.source_evaluations, value.maximum_source_residual, value.maximum_transport_residual,
         value.maximum_thermal_residual, value.maximum_event_residual, value.maximum_conditioned_thermal_residual,
         value.conditioned_raw_energy_roundoff_bound, value.maximum_occupancy_error, value.maximum_continuity_residual,

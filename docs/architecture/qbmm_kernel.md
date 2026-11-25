@@ -317,7 +317,7 @@ fraction and an energy-balanced timestep give no empirical validity range for a 
 | Selection | Baseline contract and gate |
 | --- | --- |
 | Native mesh and boundaries | Closed, supported orthogonal native geometry with common pressure and equilibrium temperature. Prescribed fixed-topology planar ALE supports Cartesian X/Y/Z, cylindrical axial Z on a nonperiodic sector, and `SemiStructuredXY_Z` axial Z. Moving geometry requires nonperiodic topology, zero mixture viscosity and native slip walls. General remap, AMR and open-reservoir face transport are outside this capability. |
-| Velocity and order | `NativeImplicit` admits `SharedCarrier` (default) and `SuppliedPhaseSlip`. Fixed closed Cartesian meshes and qualified cylinders admit `NodeDependentSlip` with `KineticEuler`. Cylindrical kinetic drift is axial. Closed orthogonal Cartesian, native cylindrical and cylindrical `SemiStructuredXY_Z` meshes admit `SharedCarrier` with `RealizableLinearSSPRK2` and either linear slope limiter. Prescribed planar motion is supported with this pairing and absent acceleration. The scalar background uses transient backward Euler and upwind. Independent phase momentum, steady assembly, BDF2 and ordinary scalar high-order limiters reject. |
+| Velocity and order | `NativeImplicit` admits `SharedCarrier` (default) and `SuppliedPhaseSlip`. Fixed closed Cartesian meshes and qualified cylinders admit `NodeDependentSlip` with `KineticEuler`. Cylindrical kinetic drift is axial. Closed orthogonal Cartesian, native cylindrical and cylindrical `SemiStructuredXY_Z` meshes admit `SharedCarrier` with `RealizableLinearSSPRK2` and either linear slope limiter. Prescribed planar motion is supported with this pairing and absent acceleration. Unbound phases use transient backward Euler and upwind with carrier-grouped linear solves or scalar opt-out. Independent phase momentum, steady assembly, BDF2 and ordinary scalar high-order limiters reject. |
 | Gravity and applicability | Fixed native implicit transport, fixed closed Cartesian kinetic Euler, and fixed shared-carrier SSPRK2 on Cartesian or qualified cylindrical meshes admit optional SI acceleration. Fixed cylindrical kinetic Euler admits optional axial acceleration. A supplied zero vector selects the forced policy. Planar ALE requires absent acceleration. Applicability ranges come from the supplied laws. |
 | Family schema | One named fixed-composition family per dispersed gas phase; catalog, family stamp, reference scale and phase ordering agree on all ranks. Variable composition, cross-family coalescence and unmigrated count-only state reject. |
 | Local material and topology | Constructive paired birth, growth, shrinkage, disappearance, coalescence and breakup; transfers may involve the liquid carrier or a declared external reservoir. Declaring either direction of a family-to-background-gas material slot rejects. Generic chemistry, face transport and interphase laws can act on unbound compartments. A legacy number law must name only unbound populations. Selective or unpaired family material returned by a law rejects the preview. |
@@ -1375,3 +1375,51 @@ earlier preview, which could then commit without replaying callbacks.
 The legacy byte comparison matched all 315 partition-local shards produced at
 one, two and four ranks against the pre-change executable. It covered versions
 5–8 and version 9 tags 3–6, including 28 tag-6 shards.
+
+## Upstream adaptation #2 for carrier-grouped transport
+
+With `use_multi_rhs_transport` enabled, each unbound physical phase supplies
+its species, signed internal energy and, for an unbound dispersed phase, count
+to its carrier's multi-column backward-Euler upwind operator. The operator
+shares assembly and linear setup across those columns. The existing multi-RHS
+policy and batch-width controls select the linear execution strategy. With
+`use_multi_rhs_transport` disabled, those phases take the scalar path. Both
+paths retain the physical and stored-operator residual checks. The phase flux
+used by the plan includes supplied slip where admitted. Planar ALE uses
+mesh-relative advection and accepted-old and trial-new storage volumes.
+
+Each bound phase skips the carrier group and advances with its selected family
+integrator. `NativeImplicit` applies its existing common positive Jacobi map
+to catalog species, H0, H2, H3 and signed energy. H1 is derived from species.
+A persistent workspace per bound phase stores the concentrations and canonical
+donor packets in cell and face multivectors. Each sweep, including the final
+converged replay, imports one whole cell multivector and one whole face
+multivector. The scalar count balance, compensated sums, true stored-CRS
+residual and closed inventory checks retain their original arithmetic order.
+The material-volume reconstruction reads the converged family or unbound
+concentration directly from its overlap workspace using the trial bulk volume
+on moving meshes.
+
+`transport_multi_rhs` accounts for unbound carrier groups, their solves and
+their halo exchanges. `qbmm_block_transport` accounts for the NativeImplicit
+family sweeps and imports in the final corrector. For each of the cell and face
+imports, the aggregate count equals the sum of family sweeps plus the number
+of participating bound families. Owners with empty local maps participate in
+each recorded import. The family buffers follow the native maps and column
+layout across correctors and accepted steps.
+
+When a forced TVD-MC preview on a polygonal extrusion enters the late Fourier
+relaxation with grouped transport, subsequent correctors retain the damping and
+blend positive temperature guesses along with the pressure and flux guesses.
+If a phase has just appeared, the cell keeps its recovered equilibrium
+temperature. Each corrector recomputes the physical packets and evaluates the
+unrelaxed candidate against the original acceptance gates and iteration budget.
+
+Portable v5–v9 archives retain the previous payloads and advancement
+fingerprints. `use_multi_rhs_transport`, `linear.multi_rhs_policy`, and
+`linear.max_batch_width` select execution of the same unbound-phase operator
+and are independent of restart admission. Live packing and halo measurements
+stay in trial and owner-checkpoint diagnostics. The scalar compatibility
+fixtures reproduce the prior scalar execution for byte comparisons. A
+continuation using a different execution policy is subject to the same
+physical gates and can differ in floating-point rounding and solve statistics.

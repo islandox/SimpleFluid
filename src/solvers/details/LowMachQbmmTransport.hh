@@ -4,6 +4,8 @@
 #pragma once
 #include "solvers/details/LowMachTransportConsistency.hh"
 #include <Teuchos_DefaultMpiComm.hpp>
+#include <chrono>
+#include <utility>
 
 namespace SimpleFluid::Reacting::transport_consistency_detail
 {
@@ -12,6 +14,10 @@ struct BlockResult
     std::vector<Result> components;
     std::vector<Flow::QbmmFaceFlux> owned_flux;
     int sweeps = 0;
+    std::size_t halo_cell_imports = 0;
+    std::size_t halo_face_imports = 0;
+    double halo_exchange_seconds = 0;
+    double consistency_repair_seconds = 0;
 };
 
 SIMPLEFLUID_SOLVERS_LOCAL inline double transport_concentration(double amount, double volume)
@@ -61,14 +67,13 @@ SIMPLEFLUID_SOLVERS_LOCAL inline BlockResult enforce_block(const SP<const Flow::
     const std::vector<std::vector<double>>& old_amount, const Face& phase_flux, double dt,
     std::vector<std::vector<double>>& amount, const Flow::Pack::matrix_type& matrix,
     const Flow::Pack::vector_type& count_rhs, const LinearSolverOptions& options, double physical_tolerance,
-    size_t species, const FVM::ALEControlVolumeState* ale)
+    size_t species, const FVM::ALEControlVolumeState* ale, BatchedWorkspace& ws)
 {
+    const auto repair_start = std::chrono::steady_clock::now();
     const auto& mesh = *grid;
     const auto comm = mesh.owned_cell_map()->getComm();
     const size_t channels = species + 4, cells = mesh.num_owned_cells();
     BlockResult result;
-    std::vector<Scalar> concentrations;
-    std::vector<Face> packets;
     std::vector<std::vector<double>> rhs;
     std::vector<std::vector<Sum>> incoming;
     std::vector<double> volume, local_rhs_max, rhs_max, local_error, error;
@@ -89,8 +94,6 @@ SIMPLEFLUID_SOLVERS_LOCAL inline BlockResult enforce_block(const SP<const Flow::
             result.owned_flux.resize(mesh.num_owned_faces());
             for (auto& packet : result.owned_flux)
                 packet.species_molar_flux.resize(species);
-            concentrations.reserve(channels);
-            packets.reserve(channels);
             rhs.assign(channels, std::vector<double>(cells));
             incoming.assign(channels, std::vector<Sum>(cells));
             volume.resize(cells);
@@ -154,39 +157,63 @@ SIMPLEFLUID_SOLVERS_LOCAL inline BlockResult enforce_block(const SP<const Flow::
     const auto channel_count = static_cast<int>(channels);
     const double budget_tolerance = qbmm_closed_budget_tolerance(comm->getSize());
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, channel_count, local_rhs_max.data(), rhs_max.data());
-    for (size_t q = 0; q < channels; ++q)
-    {
-        concentrations.emplace_back(grid, "qbmm_common_transport_trace", false);
-        packets.emplace_back(grid, "qbmm_common_transport_packet", false);
-    }
+    ws.ensure(mesh, phase_flux, channels);
     for (int sweep = 0;; ++sweep)
     {
         collective_detail::collective_local_validation(mesh, "QBMM common transport concentrations",
             [&]
             {
-                for (size_t q = 0; q < channels; ++q)
-                    for (size_t c = 0; c < cells; ++c)
+                auto concentrations = ws.conc_owned->getLocalViewHost(Tpetra::Access::OverwriteAll);
+                for (size_t c = 0; c < cells; ++c)
+                    for (size_t q = 0; q < channels; ++q)
                     {
                         if (q + 1 != channels && amount[q][c] < 0)
                             throw std::invalid_argument("QBMM common transported channel is invalid.");
-                        concentrations[q].set_owned_value(
-                            static_cast<LO>(c), transport_concentration(amount[q][c], volume[c]));
+                        concentrations(c, q) = transport_concentration(amount[q][c], volume[c]);
                     }
             });
-        for (auto& concentration : concentrations)
-            concentration.sync_ghosts();
+        const auto cell_import_start = std::chrono::steady_clock::now();
+        ws.conc_overlap->doImport(*ws.conc_owned, *ws.cell_import, Tpetra::REPLACE);
+        result.halo_exchange_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - cell_import_start).count();
+        ++result.halo_cell_imports;
         collective_detail::collective_local_validation(mesh, "QBMM common canonical packets",
             [&]
             {
-                for (size_t q = 0; q < channels; ++q)
-                    set_owned_donor_packets(
-                        mesh, phase_flux, concentrations[q], packets[q], /*require_relative_roundoff=*/true);
+                const auto concentrations = ws.conc_overlap->getLocalViewHost(Tpetra::Access::ReadOnly);
+                auto packets = ws.face_owned->getLocalViewHost(Tpetra::Access::OverwriteAll);
+                const auto phase_packets = phase_flux.local_read_view();
+                for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
+                {
+                    const LO face = static_cast<LO>(f);
+                    const LO row = phase_flux.owned_row(face);
+                    const double phi = phase_packets(face, 0);
+                    if (mesh.is_geometry_exterior_face(face))
+                    {
+                        if (phi != 0)
+                            throw std::invalid_argument("Closed phase transport has nonzero relative boundary flux.");
+                        for (size_t q = 0; q < channels; ++q)
+                            packets(row, q) = 0.;
+                        continue;
+                    }
+                    const LO owner = mesh.owner_cell(face);
+                    const LO donor = phi >= 0 ? owner : mesh.opposite_or_periodic_neighbor_cell(face, owner);
+                    for (size_t q = 0; q < channels; ++q)
+                        packets(row, q) =
+                            donor_packet(phi, concentrations(donor, q), /*require_relative_roundoff=*/true);
+                }
             });
-        for (auto& packet : packets)
-            packet.sync_ghosts();
+        const auto face_import_start = std::chrono::steady_clock::now();
+        ws.face_overlap->doImport(*ws.face_owned, *ws.face_import, Tpetra::REPLACE);
+        result.halo_exchange_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - face_import_start).count();
+        ++result.halo_face_imports;
         collective_detail::collective_local_validation(mesh, "QBMM physical and stored-matrix balances",
             [&]
             {
+                const auto concentrations = ws.conc_overlap->getLocalViewHost(Tpetra::Access::ReadOnly);
+                const auto packets = ws.face_overlap->getLocalViewHost(Tpetra::Access::ReadOnly);
+                const auto count_packets = Kokkos::subview(packets, Kokkos::ALL(), std::pair{species, species + 1});
                 for (size_t q = 0; q < channels; ++q)
                 {
                     Sum stock_delta, stock_magnitude, rhs_squared, residual_squared;
@@ -200,7 +227,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline BlockResult enforce_block(const SP<const Flow::
                         for (const LO face : mesh.faces(cell))
                         {
                             const double sign = mesh.owner_cell(face) == cell ? 1. : -1.;
-                            const double packet = sign * packets[q].local_value(face);
+                            const double packet = sign * packets(face, q);
                             const double phi = sign * phase_flux.local_value(face);
                             face_balance += static_cast<long double>(dt) * packet;
                             face_magnitude += std::abs(static_cast<long double>(dt) * packet);
@@ -220,8 +247,8 @@ SIMPLEFLUID_SOLVERS_LOCAL inline BlockResult enforce_block(const SP<const Flow::
                         if (q == species)
                         {
                             // Retain the count path's independently ordered native balance check.
-                            const long double flux =
-                                static_cast<long double>(dt) * FVM::cell_flux_balance(mesh, packets[q], cell);
+                            const long double flux = static_cast<long double>(dt) *
+                                                     FVM::cell_flux_balance(mesh, phase_flux, count_packets, cell);
                             cell_error = std::max(
                                 cell_error, source_stage_detail::normalized(
                                                 static_cast<long double>(amount[q][c]) - old_amount[q][c] + flux,
@@ -234,8 +261,8 @@ SIMPLEFLUID_SOLVERS_LOCAL inline BlockResult enforce_block(const SP<const Flow::
                             ++entry)
                         {
                             const LO column = overlap_columns[local_matrix.graph.entries(entry)];
-                            residual += -static_cast<long double>(local_matrix.values(entry)) *
-                                        concentrations[q].local_value(column);
+                            residual +=
+                                -static_cast<long double>(local_matrix.values(entry)) * concentrations(column, q);
                         }
                         const long double b = rhs[q][c] / norm_scale, r = residual.value() / norm_scale;
                         rhs_squared += b * b;
@@ -276,16 +303,19 @@ SIMPLEFLUID_SOLVERS_LOCAL inline BlockResult enforce_block(const SP<const Flow::
         if (converged)
         {
             result.sweeps = sweep;
+            const auto packets = ws.face_owned->getLocalViewHost(Tpetra::Access::ReadOnly);
             for (size_t f = 0; f < result.owned_flux.size(); ++f)
             {
-                const LO face = static_cast<LO>(f);
+                const LO row = phase_flux.owned_row(static_cast<LO>(f));
                 auto& receipt = result.owned_flux[f];
                 for (size_t s = 0; s < species; ++s)
-                    receipt.species_molar_flux[s] = packets[s].owned_value(face);
-                receipt.population_number_flux = packets[species].owned_value(face);
-                receipt.shape_flux = {packets[species + 1].owned_value(face), packets[species + 2].owned_value(face)};
-                receipt.internal_energy_flux = packets[species + 3].owned_value(face);
+                    receipt.species_molar_flux[s] = packets(row, s);
+                receipt.population_number_flux = packets(row, species);
+                receipt.shape_flux = {packets(row, species + 1), packets(row, species + 2)};
+                receipt.internal_energy_flux = packets(row, species + 3);
             }
+            result.consistency_repair_seconds =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - repair_start).count();
             return result;
         }
         if (sweep >= options.max_iterations)

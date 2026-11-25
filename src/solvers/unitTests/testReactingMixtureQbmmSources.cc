@@ -64,6 +64,7 @@ struct Fixture : Thermo::Fixture
                 Vec3D<ArrReal>{ArrReal{0, 1}, ArrReal{0, 1}, moving ? ArrReal{0, 1, 2} : ArrReal{0, 1}}),
             partition);
         Flow::Options controls;
+        controls.use_multi_rhs_transport = RestartIO::use_multi_rhs_transport();
         controls.minimum_pressure = 50000;
         controls.maximum_pressure = 1000000;
         controls.linear.preconditioner = LinearPreconditioner::None;

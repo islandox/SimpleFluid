@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <gtest/gtest.h>
 #include <limits>
 #include <numeric>
@@ -47,6 +48,21 @@ struct FixtureOptions
     double gas_reference = 6000; // J/mol at 300 K.
 };
 
+using FamilyTransport = R::QbmmModelOptions::FamilyTransport;
+using Velocity = R::QbmmModelOptions::Velocity;
+using SlopeLimiter = R::QbmmModelOptions::LinearSlopeLimiter;
+
+struct MixedCarrierCase
+{
+    FamilyTransport family = FamilyTransport::NativeImplicit;
+    Velocity velocity = Velocity::SharedCarrier;
+    SlopeLimiter limiter = SlopeLimiter::RealizabilityOnly;
+    LinearSolverBackend backend = LinearSolverBackend::Gmres;
+    MultiRhsExecutionPolicy policy = MultiRhsExecutionPolicy::Auto;
+    int width = 0;
+    bool ale = false;
+};
+
 struct Fixture
 {
     SP<Flow::Mesh> mesh;
@@ -56,13 +72,15 @@ struct Fixture
     std::shared_ptr<Flow> flow;
     unsigned cells;
 
-    explicit Fixture(FixtureOptions input = {}) : cells(input.cells)
+    explicit Fixture(FixtureOptions input = {}, std::optional<MixedCarrierCase> mixed = {}, bool batched = true)
+        : cells(input.cells)
     {
         Flow::Mesh::DistributionOptions distribution;
         distribution.allow_empty_partitions = true;
         mesh = std::make_shared<Flow::Mesh>(
             std::make_shared<Meshes::OrthogonalCartesian3D>(Vec3D<ArrReal>{
-                cells == 4 ? ArrReal{0, input.x_split, 1} : ArrReal{0, 1}, ArrReal{0, 1}, ArrReal{0, .5, 1}}),
+                cells == 4 ? ArrReal{0, input.x_split, 1} : ArrReal{0, 1}, ArrReal{0, 1},
+                cells == 3 ? ArrReal{0, 1. / 3, 2. / 3, 1} : ArrReal{0, .5, 1}}),
             distribution);
         const std::vector phases{R::SpeciesPhase::Liquid, R::SpeciesPhase::Dispersed};
         catalog = std::make_shared<const R::SpeciesCatalog>(
@@ -127,6 +145,47 @@ struct Fixture
                 cell.velocity = Flow::Vector{.5 - center.z, 0, vertical};
             }
         }
+        if (mixed)
+        {
+            options.use_multi_rhs_transport = batched;
+            options.linear.multi_rhs_policy = mixed->policy;
+            options.linear.max_batch_width = mixed->width;
+            options.linear.backend = mixed->backend;
+            options.qbmm_model.family_transport = mixed->family;
+            options.qbmm_model.velocity = mixed->velocity;
+            options.qbmm_model.linear_slope_limiter = mixed->limiter;
+            options.qbmm_families[2].reset(); // Ordinary dispersed gas retains its finite count.
+            state.qbmm_families[2].reset();
+            if (mixed->family == FamilyTransport::KineticEuler)
+            {
+                R::QbmmLawMetadata slip{"mass-dependent z slip", 1, R::QbmmLawKind::NodeSlip, "mass in kg", "m/s"};
+                R::QbmmClosureVersions versions;
+                versions.laws.push_back(slip);
+                options.qbmm_families[1] =
+                    std::make_shared<const R::QbmmPopulationSchema>(catalog, catalog->fingerprint(), "fine",
+                        options.phase_roles[1], .001, std::vector<R::QbmmMassFraction>{{11, .5}, {29, .5}}, versions);
+                state.qbmm_families[1] = Flow::qbmm_family_stamp(*options.qbmm_families[1]);
+                options.qbmm_node_slip_laws = {nullptr,
+                    std::make_shared<const R::QbmmNodeSlipLaw>(
+                        R::QbmmNodeSlipLaw{slip, [](const R::QbmmNodeSlipInput& atom)
+                            { return std::array{0., 0., 2. * atom.mass_kg_per_bubble}; }}),
+                    nullptr};
+            }
+            for (size_t c = 0; c < state.cells.size(); ++c)
+            {
+                auto& cell = state.cells[c];
+                cell.qbmm_shape[2].reset();
+                // The second gas species starts on just one cell. Preserve total gas moles and EOS volume.
+                auto& ordinary = cell.phases[2];
+                const double total = ordinary.moles[0] + ordinary.moles[1];
+                const size_t index = global_cell(static_cast<LO>(c));
+                ordinary.moles[1] = index == 0 ? .01 * total : 0.;
+                ordinary.moles[0] = total - ordinary.moles[1];
+                cell.phase_numbers[2] = mesh->cell_volume(static_cast<LO>(c)) * (5 - index);
+                if (mixed->velocity == Velocity::SuppliedPhaseSlip && index == 1)
+                    cell.drift_velocity = {{}, {0, 0, .004}, {0, 0, -.002}};
+            }
+        }
         flow = std::make_shared<Flow>(mesh, eos, options);
         flow->initialize(state);
     }
@@ -134,6 +193,8 @@ struct Fixture
     size_t global_cell(LO cell) const
     {
         const auto center = mesh->cell_centroid(cell);
+        if (cells == 3)
+            return static_cast<size_t>(center.z * 3);
         return (center.z > .5 ? (cells == 4 ? 2 : 1) : 0) + (cells == 4 && center.x > .5 ? 1 : 0);
     }
 };
@@ -178,7 +239,9 @@ void audit_transport(Fixture& f, bool require_motion)
 {
     const auto before = f.flow->state();
     const auto trial = f.flow->preview(dt);
-    EXPECT_EQ(trial.diagnostics().transport_multi_rhs.operator_groups, 0U);
+    // Only the unbound liquid enters the carrier plan. The two family blocks have their own common map.
+    EXPECT_EQ(trial.diagnostics().transport_multi_rhs.operator_groups, 1U);
+    EXPECT_EQ(trial.diagnostics().transport_multi_rhs.transported_columns, 3U);
     const auto& snapshot = trial.transport_snapshot();
     const auto receipts = trial.owned_phase_transport();
     const auto comm = f.mesh->owned_cell_map()->getComm();
@@ -767,5 +830,374 @@ TEST(LowMachQbmmTransportTest, NativePreviewRejectsUnresolvedArrivalOnOneOwnerAn
     EXPECT_EQ(f.flow->serialize_qbmm_restart(), accepted);
     EXPECT_NO_THROW(f.flow->commit(retained));
     EXPECT_EQ(f.flow->state().revision, state.revision + 1);
+}
+
+void expect_carrier_value(double value, double reference)
+{
+    EXPECT_NEAR(value, reference, 2e-10 * std::abs(reference) + 1e-12);
+}
+
+void expect_carrier_vector(const Flow::Vector& value, const Flow::Vector& reference)
+{
+    for (int axis = 0; axis < 3; ++axis)
+        expect_carrier_value(value.component(axis), reference.component(axis));
+}
+
+void expect_carrier_array(std::span<const double> value, std::span<const double> reference)
+{
+    ASSERT_EQ(value.size(), reference.size());
+    for (size_t i = 0; i < value.size(); ++i)
+        expect_carrier_value(value[i], reference[i]);
+}
+
+void expect_carrier_trial(const Flow::Trial& trial, const Flow::Trial& reference)
+{
+    const auto& state = trial.state();
+    const auto& expected = reference.state();
+    expect_carrier_value(state.thermodynamic_pressure, expected.thermodynamic_pressure);
+    const auto& diagnostics = trial.diagnostics();
+    const auto& expected_diagnostics = reference.diagnostics();
+    EXPECT_NEAR(diagnostics.caloric_energy_scale, expected_diagnostics.caloric_energy_scale,
+        2e-10 * expected_diagnostics.caloric_energy_scale);
+    EXPECT_NEAR(diagnostics.internal_energy_roundoff_bound, expected_diagnostics.internal_energy_roundoff_bound,
+        2e-10 * expected_diagnostics.internal_energy_roundoff_bound);
+    EXPECT_EQ(state.revision, expected.revision);
+    EXPECT_EQ(state.time, expected.time);
+    EXPECT_EQ(state.qbmm_families, expected.qbmm_families);
+    EXPECT_EQ(trial.qbmm_inversion_status(), reference.qbmm_inversion_status());
+    const auto& snapshot = trial.transport_snapshot();
+    const auto& old = reference.transport_snapshot();
+    EXPECT_EQ(snapshot.old_control_volumes, old.old_control_volumes);
+    EXPECT_EQ(snapshot.new_control_volumes, old.new_control_volumes);
+    ASSERT_EQ(state.cells.size(), expected.cells.size());
+    for (size_t c = 0; c < state.cells.size(); ++c)
+    {
+        const auto& cell = state.cells[c];
+        const auto& other = expected.cells[c];
+        expect_carrier_vector(cell.velocity, other.velocity);
+        EXPECT_EQ(cell.drift_velocity, other.drift_velocity);
+        // Pressure perturbation is gauge-pinned, including cells whose true perturbation vanishes.
+        EXPECT_NEAR(
+            cell.mechanical_pressure, other.mechanical_pressure, 1e-8 + 2e-10 * std::abs(other.mechanical_pressure));
+        for (size_t a = 0; a < 3; ++a)
+        {
+            SCOPED_TRACE(::testing::Message() << "owned cell " << c << ", phase " << a);
+            const auto& phase = cell.phases.at(a);
+            const auto& previous = other.phases.at(a);
+            expect_carrier_array(phase.moles, previous.moles);
+            expect_carrier_value(phase.internal_energy, previous.internal_energy);
+            expect_carrier_value(phase.temperature, previous.temperature);
+            expect_carrier_value(phase.absolute_pressure, previous.absolute_pressure);
+            const auto& inventory = snapshot.cells.at(c).phases.at(a);
+            const auto& ref = old.cells.at(c).phases.at(a);
+            expect_carrier_array(inventory.moles, ref.moles);
+            expect_carrier_value(inventory.internal_energy, ref.internal_energy);
+            expect_carrier_value(inventory.advected_material_volume, ref.advected_material_volume);
+            ASSERT_EQ(cell.phase_numbers.at(a).has_value(), a != 0);
+            ASSERT_EQ(inventory.population_number.has_value(), a != 0);
+            ASSERT_EQ(cell.qbmm_shape.at(a).has_value(), a == 1);
+            ASSERT_EQ(inventory.qbmm_shape.has_value(), a == 1);
+            if (a != 0)
+            {
+                expect_carrier_value(*cell.phase_numbers[a], other.phase_numbers[a].value());
+                expect_carrier_value(*inventory.population_number, ref.population_number.value());
+            }
+            if (a == 1)
+            {
+                expect_carrier_value(cell.qbmm_shape[a]->H2, other.qbmm_shape[a].value().H2);
+                expect_carrier_value(cell.qbmm_shape[a]->H3, other.qbmm_shape[a].value().H3);
+                expect_carrier_value(inventory.qbmm_shape->H2, ref.qbmm_shape.value().H2);
+                expect_carrier_value(inventory.qbmm_shape->H3, ref.qbmm_shape.value().H3);
+            }
+            if (a == 0)
+                EXPECT_DOUBLE_EQ(inventory.moles[1], 0.);
+        }
+    }
+    expect_carrier_array(trial.owned_volume_flux(), reference.owned_volume_flux());
+    const auto faces = trial.owned_phase_transport(), others = reference.owned_phase_transport();
+    ASSERT_EQ(faces.size(), others.size());
+    for (size_t f = 0; f < faces.size(); ++f)
+    {
+        const auto& face = faces[f];
+        const auto& other = others[f];
+        expect_carrier_array(face.relative_phase_volume_flux, other.relative_phase_volume_flux);
+        expect_carrier_array(face.material_fraction, other.material_fraction);
+        expect_carrier_value(face.material_volume_flux, other.material_volume_flux);
+        expect_carrier_value(face.momentum_mass_flux, other.momentum_mass_flux);
+        expect_carrier_vector(face.drift_momentum_flux, other.drift_momentum_flux);
+        expect_carrier_vector(face.implicit_carrier_momentum_flux, other.implicit_carrier_momentum_flux);
+        ASSERT_EQ(face.qbmm_flux.size(), 3u);
+        EXPECT_FALSE(face.qbmm_flux[0]);
+        EXPECT_FALSE(face.qbmm_flux[2]);
+        const auto& packet = face.qbmm_flux[1].value();
+        const auto& ref = other.qbmm_flux[1].value();
+        expect_carrier_array(packet.species_molar_flux, ref.species_molar_flux);
+        expect_carrier_value(packet.population_number_flux, ref.population_number_flux);
+        expect_carrier_value(packet.shape_flux.H2, ref.shape_flux.H2);
+        expect_carrier_value(packet.shape_flux.H3, ref.shape_flux.H3);
+        expect_carrier_value(packet.internal_energy_flux, ref.internal_energy_flux);
+        expect_carrier_value(packet.material_volume_flux, ref.material_volume_flux);
+        expect_carrier_value(packet.derived_mass_flux, ref.derived_mass_flux);
+        expect_carrier_vector(packet.derived_drift_momentum_flux, ref.derived_drift_momentum_flux);
+        ASSERT_EQ(packet.kinetic.has_value(), ref.kinetic.has_value());
+        if (packet.kinetic)
+            for (auto direction : {&Flow::QbmmKineticFaceFlux::forward, &Flow::QbmmKineticFaceFlux::backward})
+            {
+                const auto& actual = (*packet.kinetic).*direction;
+                const auto& expected_packet = (*ref.kinetic).*direction;
+                expect_carrier_array(actual.moment_flux, expected_packet.moment_flux);
+                expect_carrier_array(actual.species_molar_flux, expected_packet.species_molar_flux);
+                expect_carrier_value(actual.integrated_count, expected_packet.integrated_count);
+                expect_carrier_value(actual.integrated_mass, expected_packet.integrated_mass);
+            }
+    }
+}
+
+// Independent backward-Euler solution for the numbered unbound gas. Assemble from published
+// owner-oriented relative rates and trial volumes, in geometry order independent of the MPI layout.
+void expect_unbound_gas_balance(const Fixture& f, const Flow::Trial& trial)
+{
+    const size_t n = f.cells;
+    std::vector<double> local(n * (n + 4)), global(local.size());
+    const auto& snapshot = trial.transport_snapshot();
+    for (size_t c = 0; c < f.mesh->num_owned_cells(); ++c)
+    {
+        const size_t i = f.global_cell(static_cast<LO>(c));
+        const auto& cell = f.flow->state().cells[c];
+        local[i * n + i] = snapshot.new_control_volumes[c];
+        local[n * n + i] = cell.phases[2].moles[0];
+        local[n * (n + 1) + i] = cell.phases[2].moles[1];
+        local[n * (n + 2) + i] = *cell.phase_numbers[2];
+        local[n * (n + 3) + i] = cell.phases[2].internal_energy;
+    }
+    for (size_t fidx = 0; fidx < f.mesh->num_owned_faces(); ++fidx)
+    {
+        const auto face = static_cast<LO>(fidx);
+        if (f.mesh->is_geometry_exterior_face(face))
+            continue;
+        const size_t i = f.global_cell(f.mesh->owner_cell(face)), j = f.global_cell(f.mesh->neighbor_cell(face));
+        const double transported_volume = dt * trial.owned_phase_transport()[fidx].relative_phase_volume_flux[2];
+        const size_t donor = transported_volume >= 0 ? i : j;
+        local[i * n + donor] += transported_volume;
+        local[j * n + donor] -= transported_volume;
+    }
+    Teuchos::reduceAll(
+        *f.mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, int(local.size()), local.data(), global.data());
+    const std::vector<double> matrix(global.begin(), global.begin() + n * n);
+    for (size_t k = 0; k < 4; ++k)
+    {
+        const auto begin = global.begin() + n * (n + k);
+        const auto concentration = solve(matrix, {begin, begin + n});
+        for (size_t c = 0; c < snapshot.cells.size(); ++c)
+        {
+            const auto& gas = snapshot.cells[c].phases[2];
+            const std::array amounts{gas.moles[0], gas.moles[1], *gas.population_number, gas.internal_energy};
+            near_stock(amounts[k], concentration[f.global_cell(static_cast<LO>(c))] * snapshot.new_control_volumes[c]);
+        }
+    }
+}
+
+void check_mixed_carriers(MixedCarrierCase controls, unsigned cells = 4)
+{
+    SCOPED_TRACE(::testing::Message() << "family " << static_cast<int>(controls.family) << ", ALE " << controls.ale
+                                      << ", backend " << to_string(controls.backend) << ", policy "
+                                      << to_string(controls.policy) << ", width " << controls.width);
+    const FixtureOptions setup{.cells = cells, .gas_reference = -6000};
+    Fixture scalar(setup, controls, false), multi(setup, controls);
+    Flow::PlanarMotion scalar_motion(scalar.mesh), multi_motion(multi.mesh);
+    const auto preview = [&](Fixture& f, Flow::PlanarMotion& motion)
+    { return controls.ale ? f.flow->preview_ale(dt, motion, 1.00001) : f.flow->preview(dt); };
+    const auto reference = preview(scalar, scalar_motion);
+    const auto trial = preview(multi, multi_motion);
+    expect_carrier_trial(trial, reference);
+    expect_unbound_gas_balance(multi, trial);
+    const auto& diag = trial.diagnostics();
+    EXPECT_EQ(diag.family_transport, controls.family);
+    EXPECT_EQ(diag.kinetic_substeps > 0, controls.family == FamilyTransport::KineticEuler);
+    EXPECT_EQ(diag.linear_substeps > 0, controls.family == FamilyTransport::RealizableLinearSSPRK2);
+    EXPECT_LE(diag.maximum_population_transport_residual, 1.);
+    EXPECT_LE(diag.maximum_species_transport_residual, 1.);
+    EXPECT_LE(diag.maximum_energy_transport_residual, 1.);
+    EXPECT_LE(diag.maximum_shape_transport_residual, 1.);
+    EXPECT_EQ(reference.diagnostics().transport_multi_rhs.operator_groups, 0u);
+    const auto& block = diag.qbmm_block_transport;
+    EXPECT_EQ(block.families, controls.family == FamilyTransport::NativeImplicit ? 1u : 0u);
+    EXPECT_EQ(block.halo_cell_imports, block.sweeps + block.families);
+    EXPECT_EQ(block.halo_face_imports, block.sweeps + block.families);
+    const auto& plan = diag.transport_multi_rhs;
+    // Two ordinary carriers: [nA, nB=0, U] and [nA, nB, N, U]. No family channels.
+    EXPECT_EQ(plan.operator_groups, 2u);
+    EXPECT_EQ(plan.matrix_assemblies, 2u);
+    EXPECT_EQ(plan.transported_columns, 7u);
+    EXPECT_EQ(plan.active_columns, 6u);
+    EXPECT_EQ(plan.column_consistency_sweeps.size(), 7u);
+    const bool serial = controls.policy == MultiRhsExecutionPolicy::ColumnSerial || controls.width == 1;
+    EXPECT_EQ(plan.execution_mode, serial ? MultiRhsExecutionMode::ColumnSerial : MultiRhsExecutionMode::BatchedKrylov);
+    EXPECT_EQ(plan.batched_krylov_solves, serial ? 0u : 2u);
+    EXPECT_EQ(plan.column_serial_solves, serial ? 2u : 0u);
+    EXPECT_EQ(plan.max_batch_width, serial ? 1 : controls.width == 0 ? 4 : controls.width);
+    if (!serial)
+        EXPECT_LT(plan.operator_apply_calls, plan.operator_column_applies);
+    const auto comm = multi.mesh->owned_cell_map()->getComm();
+    if (const char* expected = std::getenv("SIMPLEFLUID_MIXED_CARRIER_RANKS"))
+        EXPECT_EQ(comm->getSize(), std::stoi(expected));
+    int local[3]{int(multi.mesh->num_owned_cells() == 0), 0, 0}, totals[3]{};
+    for (size_t f = 0; f < multi.mesh->num_owned_faces(); ++f)
+    {
+        const auto face = static_cast<LO>(f);
+        if (multi.mesh->is_geometry_exterior_face(face))
+            continue;
+        const auto& receipt = trial.owned_phase_transport()[f];
+        if (std::abs(receipt.relative_phase_volume_flux[2]) > 1e-12)
+        {
+            ++local[1];
+            if (size_t(multi.mesh->owner_cell(face)) >= multi.mesh->num_owned_cells() ||
+                size_t(multi.mesh->neighbor_cell(face)) >= multi.mesh->num_owned_cells())
+                ++local[2];
+        }
+    }
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 3, local, totals);
+    EXPECT_EQ(totals[0], std::max(0, comm->getSize() - int(cells)));
+    if (cells == 2 && !controls.ale)
+        EXPECT_EQ(totals[1], 0); // Stationary control used for the symmetric CG operator.
+    else
+    {
+        EXPECT_GT(totals[1], 0);
+        if (comm->getSize() > 1)
+            EXPECT_GT(totals[2], 0);
+    }
+    if (controls.ale)
+        for (size_t c = 0; c < multi.mesh->num_owned_cells(); ++c)
+            EXPECT_GT(
+                trial.transport_snapshot().new_control_volumes[c], trial.transport_snapshot().old_control_volumes[c]);
+}
+
+TEST(QbmmMixedCarrierTransport, NativeSharedAndSuppliedSlipOnFixedAndPlanarGeometry)
+{
+    for (const bool ale : {false, true})
+    {
+        check_mixed_carriers({.ale = ale});
+        // Only the middle cell has slip, so both end walls have zero normal drift.
+        check_mixed_carriers({.velocity = Velocity::SuppliedPhaseSlip, .width = 2, .ale = ale}, 3);
+    }
+}
+
+TEST(QbmmMixedCarrierTransport, KineticNodeSlipAndLinearLimitersUseOnlyUnboundColumns)
+{
+    check_mixed_carriers({.family = FamilyTransport::KineticEuler, .velocity = Velocity::NodeDependentSlip});
+    for (const bool ale : {false, true})
+        for (const auto limiter : {SlopeLimiter::RealizabilityOnly, SlopeLimiter::TvdMc})
+            check_mixed_carriers({.family = FamilyTransport::RealizableLinearSSPRK2, .limiter = limiter, .ale = ale});
+}
+
+TEST(QbmmMixedCarrierTransport, KrylovPoliciesAndWidthsMatchScalarTransport)
+{
+    check_mixed_carriers({.backend = LinearSolverBackend::Cg}, 2);
+    for (const auto backend : {LinearSolverBackend::Gmres, LinearSolverBackend::BiCGStab})
+    {
+        check_mixed_carriers({.backend = backend, .policy = MultiRhsExecutionPolicy::BatchedKrylov, .width = 2});
+        check_mixed_carriers({.backend = backend, .policy = MultiRhsExecutionPolicy::ColumnSerial});
+        check_mixed_carriers({.backend = backend, .width = 1});
+    }
+}
+
+TEST(QbmmMixedCarrierTransport, EmptyOwnersParticipateInPlanarTransportAndControlValidation)
+{
+    check_mixed_carriers({.ale = true}, 2);
+    Fixture f({.cells = 2}, MixedCarrierCase{});
+    const auto comm = f.mesh->owned_cell_map()->getComm();
+    const bool different = comm->getRank() == comm->getSize() - 1;
+    for (int control = 0; control < 3; ++control)
+    {
+        auto options = f.options;
+        if (different && control == 0)
+            options.use_multi_rhs_transport = false;
+        if (different && control == 1)
+            options.linear.max_batch_width = 1;
+        if (different && control == 2)
+            options.linear.multi_rhs_policy = MultiRhsExecutionPolicy::ColumnSerial;
+        if (comm->getSize() > 1)
+            EXPECT_THROW((Flow(f.mesh, f.eos, options)), std::exception);
+        else
+            EXPECT_NO_THROW((Flow(f.mesh, f.eos, options)));
+    }
+}
+
+TEST(QbmmMixedCarrierTransport, ScalarAndBatchedBothContinueTheirPortableCheckpoint)
+{
+    const FixtureOptions setup{.gas_reference = -6000};
+    for (const bool batched : {false, true})
+    {
+        SCOPED_TRACE(batched);
+        Fixture full(setup, MixedCarrierCase{}, batched), resumed(setup, MixedCarrierCase{}, batched);
+        Fixture switched(setup, MixedCarrierCase{}, !batched);
+        const auto first = full.flow->preview(dt);
+        full.flow->commit(first);
+        const auto image = full.flow->serialize_qbmm_restart();
+        resumed.flow->restore_qbmm_restart(image);
+        switched.flow->restore_qbmm_restart(image);
+        const auto second = full.flow->preview(dt);
+        const auto replay = resumed.flow->preview(dt);
+        expect_carrier_trial(replay, second);
+        const auto switched_replay = switched.flow->preview(dt);
+        expect_carrier_trial(switched_replay, second);
+        EXPECT_EQ(switched_replay.diagnostics().transport_multi_rhs.operator_groups, batched ? 0u : 2u);
+        EXPECT_EQ(replay.diagnostics().transport_multi_rhs.operator_groups, batched ? 2u : 0u);
+        full.flow->commit(second);
+        resumed.flow->commit(replay);
+        switched.flow->commit(switched_replay);
+        EXPECT_EQ(full.flow->state().revision, 2u);
+        EXPECT_EQ(resumed.flow->state().revision, full.flow->state().revision);
+        EXPECT_EQ(switched.flow->state().revision, full.flow->state().revision);
+    }
+}
+
+TEST(QbmmMixedCarrierTransport, UnrepresentableUnboundCountColumnRollsBackOnEveryRank)
+{
+    Fixture f({}, MixedCarrierCase{});
+    const auto checkpoint = f.flow->checkpoint();
+    const auto reference = f.flow->preview(dt);
+    auto state = f.flow->state();
+    bool has_invalid_column = false;
+    for (size_t c = 0; c < state.cells.size(); ++c)
+        if (f.global_cell(static_cast<LO>(c)) == 0)
+        {
+            // Finite extensive count, but N/V overflows in just one unbound column on one owner.
+            state.cells[c].phase_numbers[2] = std::numeric_limits<double>::max();
+            has_invalid_column = true;
+        }
+    f.flow->initialize(state);
+    const auto accepted = f.flow->serialize_qbmm_restart();
+    std::string message;
+    try
+    {
+        (void) f.flow->preview(dt);
+    }
+    catch (const std::exception& error)
+    {
+        message = error.what();
+    }
+    if (has_invalid_column)
+        EXPECT_EQ(message, "Population number concentration is not representable.");
+    else
+        EXPECT_EQ(message, "Accepted low-Mach batched transport concentration failed on another rank.");
+    EXPECT_EQ(f.flow->serialize_qbmm_restart(), accepted);
+    f.flow->restore(checkpoint);
+    expect_carrier_trial(f.flow->preview(dt), reference);
+}
+
+TEST(QbmmMixedCarrierTransport, OneUnboundSpeciesFailureRetainsAcceptedStateAndValidTrial)
+{
+    Fixture f({}, MixedCarrierCase{});
+    const auto retained = f.flow->preview(dt);
+    const auto accepted = f.flow->serialize_qbmm_restart();
+    std::vector<Flow::CellSources> sources(f.mesh->num_owned_cells());
+    for (size_t c = 0; c < sources.size(); ++c)
+        if (f.global_cell(static_cast<LO>(c)) == 0)
+            sources[c].species_moles = {{0., -1.}, {0., 0.}, {0., 0.}};
+    EXPECT_THROW((void) f.flow->preview(dt, sources), std::exception);
+    EXPECT_EQ(f.flow->serialize_qbmm_restart(), accepted);
+    ASSERT_NO_THROW(f.flow->commit(retained));
+    EXPECT_EQ(f.flow->state().revision, 1u);
 }
 } // namespace

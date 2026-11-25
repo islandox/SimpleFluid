@@ -454,6 +454,9 @@ void check_step(const Vessel& vessel, Controller& controller, double dt, Metrics
     const auto after = inventory(vessel, trial.state());
     const auto& diagnostics = trial.diagnostics().flow;
     const auto& controls = vessel.flow->options();
+    EXPECT_EQ(diagnostics.transport_multi_rhs.operator_groups, controls.use_multi_rhs_transport ? 2U : 0U);
+    if (controls.use_multi_rhs_transport)
+        EXPECT_GT(diagnostics.transport_multi_rhs.batched_krylov_solves, 0U);
     if (vessel.kinetic)
     {
         EXPECT_EQ(diagnostics.family_transport, FamilyTransport::KineticEuler);

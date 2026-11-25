@@ -105,11 +105,12 @@ larger inventories elsewhere while its incoming material-volume packet remains
 positive. Species, signed phase internal energy and population counts therefore
 also pass an independent local extensive balance before any source callback.
 
-Grouped multi-RHS transport and the optional absolute linear residual bound
-apply to Low-Mach configurations without QBMM. A QBMM configuration uses
-scalar transport for unbound phases, its selected family operator for bound
-phases, and the relative linear tolerance recorded by the portable restart
-contract.
+Grouped multi-RHS transport advances unbound phases in Low-Mach configurations
+with or without QBMM. Setting `use_multi_rhs_transport` to false selects the
+scalar path for those phases. Each bound phase uses its selected QBMM family
+operator. QBMM configurations retain the relative linear tolerance recorded by
+the portable restart contract. The optional absolute residual bound applies to
+configurations without QBMM.
 
 For returned amount `q`, donor concentration `C = q/V_new`, and the actual
 owner-oriented face packets `F = phi*C_upwind`, the cell defect is
