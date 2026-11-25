@@ -79,6 +79,8 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
 
     // Iteration history belongs to this accepted substep and survives only internal replay.
     std::optional<SafeguardedAitken> target_aitken;
+    std::vector<std::size_t> population_substeps;
+    bool population_schedule_changed = false;
     std::vector<real_t> accepted_cell_volumes;
     scalar_type accepted_mesh_volume{}, old_energy{}, time_step{};
     std::vector<scalar_type> old_material_volume, accepted_alpha;
@@ -147,6 +149,11 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
         capture_geometry_and_energy();
         capture_thermal_state();
         initialize_iteration();
+        if (coupler.species_surface_enabled() &&
+            coupler.d_reacting_gas_model->options().population_substep_relative_tolerance > 0)
+            collective_detail::collective_local_validation(*d_solver.d_mesh, "ALE population schedule", [&] {
+                population_substeps.assign(d_solver.d_mesh->num_owned_cells(), 1);
+            });
     }
 
     /** @brief Run the coupled corrector schedule with one outward rollback boundary. */
@@ -183,6 +190,15 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
                 }
                 preview_volume_balance(trial);
                 validate_energy_balance(trial);
+                if (corrector > 1 && population_schedule_changed)
+                {
+                    // The new grid defines a different map. Start a fresh secant and
+                    // use this valid trial as the first species reference on that map.
+                    if (target_aitken)
+                        target_aitken->reset();
+                    replay_trial(trial);
+                    continue;
+                }
                 evaluate_convergence(trial, corrector);
                 if (trial.converged)
                 {
@@ -587,10 +603,34 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
                 coupler.d_reacting_gas_model->set_absolute_pressure_offset(offset);
             {
                 const auto gas_timing = d_solver.d_solver_timings.scope(SolverPhase::Gas);
-                coupler.d_reacting_gas_model->advance(d_solver.d_time + time_step, time_step,
-                    typed ? *thermal_guess : d_solver.temperature(), d_solver.pressure(), d_solver.velocity(),
-                    *coupler.d_mesh_relative_face_flux, d_solver.stored_material_properties(), &*coupler.d_active_ale,
-                    coupler.d_free_surface_options.gravity_axis);
+                auto& gas = *coupler.d_reacting_gas_model;
+                const bool monitor_schedule = typed && gas.options().population_substep_relative_tolerance > 0;
+                std::vector<std::size_t> previous_schedule;
+                if (monitor_schedule)
+                    collective_detail::collective_local_validation(*d_solver.d_mesh, "ALE previous population schedule",
+                        [&] { previous_schedule = population_substeps; });
+                gas.d_population_substep_schedule = population_substeps;
+                try
+                {
+                    gas.advance(d_solver.d_time + time_step, time_step,
+                        typed ? *thermal_guess : d_solver.temperature(), d_solver.pressure(), d_solver.velocity(),
+                        *coupler.d_mesh_relative_face_flux, d_solver.stored_material_properties(), &*coupler.d_active_ale,
+                        coupler.d_free_surface_options.gravity_axis);
+                }
+                catch (...)
+                {
+                    gas.d_population_substep_schedule = {};
+                    throw;
+                }
+                gas.d_population_substep_schedule = {};
+                if (monitor_schedule)
+                {
+                    const int local = previous_schedule != population_substeps;
+                    int changed = 0;
+                    Teuchos::reduceAll(*d_solver.d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1,
+                        &local, &changed);
+                    population_schedule_changed = changed != 0;
+                }
             }
             {
                 const auto material_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEMaterial);

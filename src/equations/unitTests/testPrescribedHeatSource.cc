@@ -483,3 +483,45 @@ TEST(PrescribedHeatSourceTest, SignedCoolingProfilesAndIntervalEnergyRemainIndep
     EXPECT_NEAR(source.integrated_power(), -3.0, 1e-12);
     EXPECT_FALSE(source.has_interval_energy());
 }
+
+TEST(PrescribedHeatSourceTest, NominalSubstepsPreserveIntervalEnergyAtRoundedClockTimes)
+{
+    auto mesh = make_unit_box(1);
+    SimpleFluid::TemperatureSourceRegistry<Pack> registry(mesh);
+    SourceType source(mesh, registry);
+
+    const double start = 0.023099999999999996;
+    const double duration = 5.e-5;
+    const double end = start + duration;
+    const double substep = duration / 2.0;
+    const double middle = start + substep;
+    const double original_tolerance = 32.0 * std::numeric_limits<double>::epsilon() * duration;
+    ASSERT_GT(std::abs((end - start) - duration), original_tolerance);
+    ASSERT_GT(std::abs((middle - start) - substep), original_tolerance);
+    ASSERT_EQ(middle + substep, end);
+
+    const std::vector<double> joules(mesh->num_owned_cells(), duration * 8.0);
+    ASSERT_NO_THROW(source.set_interval_energy(joules, start, duration));
+    EXPECT_EQ(source.interval_end_time(), end);
+    EXPECT_EQ(source.interval_duration(), duration);
+    ASSERT_NO_THROW(source.refresh_interval_energy(start, substep));
+    const double first_energy = source.integrated_power() * substep;
+    ASSERT_NO_THROW(source.refresh_interval_energy(middle, substep));
+    EXPECT_DOUBLE_EQ(first_energy + source.integrated_power() * substep, joules.front());
+
+    const double overrun = std::nextafter(end, std::numeric_limits<double>::infinity());
+    EXPECT_THROW(source.refresh_interval_energy(start, overrun - start), std::invalid_argument);
+    EXPECT_THROW(source.refresh_interval_energy(start, std::numeric_limits<double>::denorm_min()),
+                 std::invalid_argument);
+    EXPECT_EQ(source.interval_end_time(), end);
+    EXPECT_DOUBLE_EQ(source.integrated_power(), 8.0);
+
+    const double large_start = 1.e8;
+    const double tick = std::nextafter(large_start, std::numeric_limits<double>::infinity()) - large_start;
+    EXPECT_THROW(source.set_interval_energy(joules, large_start, 1.25 * tick), std::invalid_argument);
+    EXPECT_EQ(source.interval_end_time(), end);
+    EXPECT_DOUBLE_EQ(source.integrated_power(), 8.0);
+    ASSERT_NO_THROW(source.set_interval_energy(joules, large_start, 2.0 * tick));
+    EXPECT_THROW(source.refresh_interval_energy(large_start, 1.25 * tick), std::invalid_argument);
+    EXPECT_NO_THROW(source.refresh_interval_energy(large_start, tick));
+}

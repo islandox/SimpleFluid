@@ -27,6 +27,12 @@ struct SpeciesFilmLaw
         equilibrium_concentration; ///< mol/m3 actual liquid, using the supplied mixture fugacities.
 };
 
+struct PopulationFilmLaws
+{
+    std::string population;
+    std::vector<SpeciesFilmLaw> species;
+};
+
 /** All processes see the SAME state; concatenate their original events without
  * sequential incoming credits. The field adapter or advance_multispecies_population_exchange
  * performs the single atomic joint donor reservation. Laws must be pure/reentrant,
@@ -74,5 +80,15 @@ struct SpeciesFilmLaw
  */
 [[nodiscard]] SIMPLEFLUID_EQUATIONS_EXPORT PopulationProcess make_film_transfer_process(
     std::string population, std::vector<SpeciesFilmLaw> species);
+
+/** Backward Euler film exchange, sharing one end-of-stage dissolved inventory
+ * per species across all supplied populations. Liquid volume, area and supplied
+ * laws are evaluated at the frozen stage state. Each signed film request becomes
+ * a paired transfer of the same species. The executor still reserves gross
+ * requests against the original donors of the joint packet. Film emits no count
+ * or energy events. Exact population depletion needs an explicit count owner.
+ */
+[[nodiscard]] SIMPLEFLUID_EQUATIONS_EXPORT PopulationProcess make_implicit_film_transfer_process(
+    std::vector<PopulationFilmLaws> populations);
 
 } // namespace SimpleFluid::BubbleGasPhysics

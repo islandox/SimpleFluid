@@ -1,8 +1,12 @@
 #include "equations/SpeciesBubbleProcesses.hh"
 
+#include "utils/CompensatedSum.hh"
+
 #include <algorithm>
 #include <cmath>
 #include <iterator>
+#include <limits>
+#include <map>
 #include <numbers>
 #include <set>
 #include <stdexcept>
@@ -79,6 +83,50 @@ void append(MultispeciesPopulationPacket& target, MultispeciesPopulationPacket s
     target.numberEvents.insert(target.numberEvents.end(), std::make_move_iterator(source.numberEvents.begin()),
         std::make_move_iterator(source.numberEvents.end()));
 }
+
+void validate_film_laws(std::string_view id, const std::vector<SpeciesFilmLaw>& species)
+{
+    require(!id.empty() && !species.empty(), "Film transfer requires a named population and supplied species laws.");
+    std::set<Reacting::SpeciesId> ids;
+    for (const auto& law : species)
+        require(law.coefficient && law.equilibrium_concentration && ids.insert(law.species).second,
+            "Film species require unique IDs, supplied coefficients and mixture equilibrium laws.");
+}
+
+double film_liquid_volume(const MultispeciesPopulationContext& context, const PopulationCondition& condition)
+{
+    require(std::isfinite(condition.radius) && condition.radius > 0,
+        "Occupied film population requires a finite positive radius.");
+    const auto volume = context.chemistry.environment.liquidVolume;
+    require(std::isfinite(volume) && volume > 0, "Film transfer requires finite positive actual liquid volume.");
+    return volume;
+}
+
+std::pair<double, double> film_values(
+    const SpeciesFilmLaw& law, const MultispeciesPopulationContext& context, const PopulationCondition& condition)
+{
+    const auto coefficient = law.coefficient(context, condition);
+    const auto equilibrium = law.equilibrium_concentration(context, condition);
+    require(nonnegative(coefficient) && nonnegative(equilibrium),
+        "Supplied film coefficient and equilibrium concentration must be finite and nonnegative.");
+    return {coefficient, equilibrium};
+}
+
+void append_film_request(
+    MultispeciesPopulationPacket& result, Reacting::SpeciesId species, std::string_view id, double moles)
+{
+    if (moles > 0)
+        result.transfers.push_back({species, Phase::Dissolved, Phase::Dispersed, {}, std::string(id), moles});
+    else if (moles < 0)
+        result.transfers.push_back({species, Phase::Dispersed, Phase::Dissolved, std::string(id), {}, -moles});
+}
+
+struct ImplicitFilmRequest
+{
+    std::string_view population;
+    long double alpha;
+    long double equilibrium_moles;
+};
 } // namespace
 
 PopulationProcess compose_population_processes(std::vector<PopulationProcess> processes)
@@ -206,11 +254,7 @@ PopulationProcess make_population_conversion_process(std::string donor, std::str
 
 PopulationProcess make_film_transfer_process(std::string id, std::vector<SpeciesFilmLaw> species)
 {
-    require(!id.empty() && !species.empty(), "Film transfer requires a named population and supplied species laws.");
-    std::set<Reacting::SpeciesId> ids;
-    for (const auto& law : species)
-        require(law.coefficient && law.equilibrium_concentration && ids.insert(law.species).second,
-            "Film species require unique IDs, supplied coefficients and mixture equilibrium laws.");
+    validate_film_laws(id, species);
     return [id = std::move(id), species = std::move(species)](
                const MultispeciesPopulationContext& context, double duration)
     {
@@ -222,23 +266,80 @@ PopulationProcess make_film_transfer_process(std::string id, std::vector<Species
             validate_species(context, law.species);
             if (condition.number == 0)
                 continue;
-            require(std::isfinite(condition.radius) && condition.radius > 0,
-                "Occupied film population requires a finite positive radius.");
-            const auto volume = context.chemistry.environment.liquidVolume;
-            require(std::isfinite(volume) && volume > 0, "Film transfer requires finite positive actual liquid volume.");
-            const auto coefficient = law.coefficient(context, condition);
-            const auto equilibrium = law.equilibrium_concentration(context, condition);
-            require(nonnegative(coefficient) && nonnegative(equilibrium),
-                "Supplied film coefficient and equilibrium concentration must be finite and nonnegative.");
+            const auto volume = film_liquid_volume(context, condition);
+            const auto [coefficient, equilibrium] = film_values(law, context, condition);
             const auto dissolved = context.chemistry.state.amount(
                 context.chemistry.catalog, law.species, Phase::Dissolved);
             const double moles = duration * coefficient * 4 * std::numbers::pi * condition.radius * condition.radius *
                                  condition.number * (dissolved / volume - equilibrium);
             require(std::isfinite(moles), "Supplied film request must be finite.");
-            if (moles > 0)
-                result.transfers.push_back({law.species, Phase::Dissolved, Phase::Dispersed, {}, id, moles});
-            else if (moles < 0)
-                result.transfers.push_back({law.species, Phase::Dispersed, Phase::Dissolved, id, {}, -moles});
+            append_film_request(result, law.species, id, moles);
+        }
+        return result;
+    };
+}
+
+PopulationProcess make_implicit_film_transfer_process(std::vector<PopulationFilmLaws> populations)
+{
+    std::set<std::string_view> ids;
+    for (const auto& group : populations)
+    {
+        validate_film_laws(group.population, group.species);
+        require(ids.insert(group.population).second, "Implicit film transfer requires distinct populations.");
+    }
+    return [populations = std::move(populations)](const MultispeciesPopulationContext& context, double duration)
+    {
+        validate_step(context, duration);
+        std::map<Reacting::SpeciesId, std::vector<ImplicitFilmRequest>> requests;
+        for (const auto& group : populations)
+        {
+            const auto& condition = population(context, group.population);
+            for (const auto& law : group.species)
+            {
+                validate_species(context, law.species);
+                if (condition.number == 0)
+                    continue;
+                const long double volume = film_liquid_volume(context, condition);
+                const auto [coefficient, equilibrium] = film_values(law, context, condition);
+                const long double area =
+                    4 * std::numbers::pi_v<long double> * condition.radius * condition.radius * condition.number;
+                const long double alpha = duration * static_cast<long double>(coefficient) * area / volume;
+                const auto equilibrium_moles = volume * equilibrium;
+                require(std::isfinite(alpha) && std::isfinite(equilibrium_moles),
+                    "Implicit film weights and equilibrium inventories must be finite.");
+                if (alpha > 0)
+                    requests[law.species].push_back({group.population, alpha, equilibrium_moles});
+            }
+        }
+
+        MultispeciesPopulationPacket result;
+        for (const auto& [species, films] : requests)
+        {
+            const long double dissolved = context.chemistry.state.amount(
+                context.chemistry.catalog, species, Phase::Dissolved);
+            // Solve for the common dissolved endpoint relative to the stiffest film's equilibrium.
+            // This retains the driving difference even when the endpoint rounds to that equilibrium.
+            const auto equilibrium =
+                std::ranges::max_element(films, {}, &ImplicitFilmRequest::alpha)->equilibrium_moles;
+            detail::CompensatedSum<long double> denominator, numerator;
+            denominator += 1;
+            numerator += dissolved - equilibrium;
+            for (const auto& film : films)
+            {
+                denominator += film.alpha;
+                numerator += film.alpha * (film.equilibrium_moles - equilibrium);
+            }
+            const auto endpoint_offset = numerator.value() / denominator.value();
+            for (const auto& film : films)
+            {
+                const auto moles = film.alpha * (endpoint_offset - (film.equilibrium_moles - equilibrium));
+                if (!std::isfinite(moles) || std::abs(moles) > std::numeric_limits<double>::max())
+                    throw std::runtime_error("Implicit film request must be finite and representable.");
+                const auto transfer = static_cast<double>(moles);
+                if (moles != 0.0L && transfer == 0.0)
+                    throw std::runtime_error("Implicit film request cannot be represented as a molar transfer.");
+                append_film_request(result, species, film.population, transfer);
+            }
         }
         return result;
     };

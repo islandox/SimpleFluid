@@ -326,9 +326,12 @@ public:
      * Stable cell IDs follow the moving material mesh. The interval is replayable:
      * refresh_interval_energy() never consumes energy or advances a ledger.
      * Collective; values must be finite, duration positive, and no
-     * user time multiplier may be installed. Time endpoints and substeps must
-     * advance representably, with clock rounding within 32 epsilon times the
-     * interval duration; underresolved time intervals fail before source mutation.
+     * user time multiplier may be installed. Endpoints and substeps must
+     * advance representably. Duration roundoff is allowed up to 32 epsilon
+     * times the interval duration, or up to one endpoint clock tick when the
+     * error is within 1e-10 of the requested duration. The supplied interval
+     * duration sets the power normalization. Substep containment retains the
+     * interval-relative bound. Underresolved times fail before source mutation.
      */
     void set_interval_energy(std::span<const scalar_type> owned_energy,
         scalar_type start, scalar_type duration);

@@ -175,6 +175,8 @@ struct ReactingGasOptions
     std::function<BubbleGasPhysics::MultispeciesPopulationPacket(
         const BubbleGasPhysics::MultispeciesPopulationContext&, double)>
         population_process;
+    /// Full-stage versus two-half-stage error relative to cell inventories. Zero keeps the legacy schedule.
+    double population_substep_relative_tolerance = 0.0;
     Reacting::ReactionAdvanceOptions reaction_advance;
     double micro_dissolution_frequency = 0.0; ///< 1/s, optional supplied first-order population dissolution.
     double large_dissolution_frequency = 0.0; ///< 1/s.

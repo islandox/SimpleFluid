@@ -10,6 +10,25 @@
 namespace SimpleFluid
 {
 
+namespace
+{
+
+template<typename Scalar>
+bool prescribed_heat_clock_resolves_duration(Scalar start, Scalar end, Scalar duration, Scalar tolerance)
+{
+    const auto roundoff = std::abs((end - start) - duration);
+    if (roundoff <= tolerance)
+        return true;
+
+    // The rounded end can lose an absolute-clock tick even when duration is
+    // well resolved. Bound this allowance by the relative error in this step.
+    constexpr auto relative_roundoff_limit = static_cast<Scalar>(1.e-10);
+    const auto clock_tick = end - std::nextafter(end, start);
+    return roundoff <= std::min(clock_tick, relative_roundoff_limit * duration);
+}
+
+} // namespace
+
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PrescribedHeatSource<Pack, MeshType>::set_interval_energy(
     std::span<const scalar_type> owned_energy, scalar_type start, scalar_type duration)
@@ -23,7 +42,7 @@ void PrescribedHeatSource<Pack, MeshType>::set_interval_energy(
             throw std::invalid_argument("Prescribed heat interval energy requires owned-cell joules, finite time, "
                                         "positive duration, and no user multiplier.");
         const auto tolerance = scalar_type{32} * std::numeric_limits<scalar_type>::epsilon() * duration;
-        if (std::abs((end - start) - duration) > tolerance)
+        if (!prescribed_heat_clock_resolves_duration(start, end, duration, tolerance))
             throw std::invalid_argument("Prescribed heat interval duration is not resolved by the source clock.");
         for (size_t owned = 0; owned < owned_energy.size(); ++owned)
         {
@@ -57,7 +76,7 @@ void PrescribedHeatSource<Pack, MeshType>::refresh_interval_energy(scalar_type t
             !std::isfinite(next) || next <= time || time >= end ||
             time < d_interval_start - tolerance || next > end + tolerance)
             throw std::invalid_argument("Prescribed heat substep lies outside the configured energy interval.");
-        if (std::abs((next - time) - time_step) > tolerance)
+        if (!prescribed_heat_clock_resolves_duration(time, next, time_step, tolerance))
             throw std::invalid_argument("Prescribed heat substep duration is not resolved by the source clock.");
         for (size_t owned = 0; owned < d_interval_energy.size(); ++owned)
         {

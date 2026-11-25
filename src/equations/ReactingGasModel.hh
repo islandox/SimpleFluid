@@ -713,6 +713,8 @@ private:
     Teuchos::RCP<typename Pack::multi_vector_type> d_state_sync_overlap;
     Teuchos::RCP<typename Pack::import_type> d_state_sync_import;
     statistics_type d_last_statistics;
+    // Borrowed only while PlanarALE advances a trial. The schedule belongs to the physical substep.
+    std::span<std::size_t> d_population_substep_schedule;
     std::map<std::string, const field_type*> d_output_fields;
 };
 

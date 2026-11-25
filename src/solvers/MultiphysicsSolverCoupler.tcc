@@ -296,6 +296,7 @@ namespace
         scalar(gas->micro_conversion_frequency);
         scalar(static_cast<bool>(gas->species_source));
         scalar(static_cast<bool>(gas->population_process));
+        scalar(gas->population_substep_relative_tolerance);
         scalar(static_cast<bool>(gas->initial_species_state));
         scalar(static_cast<bool>(gas->initial_population_numbers));
         scalar(static_cast<bool>(gas->surface_tension_correlation));

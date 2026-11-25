@@ -244,6 +244,9 @@ void validate_reacting_gas_options(const ReactingGasOptions& options)
             throw std::invalid_argument(
                 "General reacting transport/process selection is invalid or lacks its callback.");
         (void) select_bubble_mass_transfer_evaluator(options.mass_transfer_mode);
+        if (!std::isfinite(options.population_substep_relative_tolerance) ||
+            options.population_substep_relative_tolerance < 0.0 || options.population_substep_relative_tolerance >= 1.0)
+            throw std::invalid_argument("Population substep relative tolerance must be finite and in [0, 1).");
         if (options.bouss_reference)
         {
             if (!options.bouss_sources || options.mode != ReactingGasMode::Species || options.alpha_min != 0 ||

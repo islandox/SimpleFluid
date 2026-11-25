@@ -1,5 +1,6 @@
 #include "equations/BubblePopulationKinetics.hh"
 #include "equations/ReactingGasModel.hh"
+#include "equations/SpeciesBubbleProcesses.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
@@ -145,6 +146,91 @@ struct Fixture
         return result;
     }
 };
+
+TEST(ReactingSpeciesModelTest, AdaptiveImplicitFilmApproachesAnalyticEquilibriumAndRollsBackExhaustedGrid)
+{
+    using P = R::SpeciesPhase;
+    constexpr double initialDissolved = 1., initialMicro = .05, equilibrium = .25, rate = 10., dt = .1;
+    const auto run = [&](double tolerance, int maxStages, bool reject)
+    {
+        auto selected = options();
+        selected.population_substep_relative_tolerance = tolerance;
+        selected.max_subcycles = maxStages;
+        const B::SpeciesFilmLaw film{gasOne,
+            [](const auto& context, const auto& bubble)
+            {
+                return rate * context.chemistry.environment.liquidVolume /
+                       (4 * std::numbers::pi * bubble.radius * bubble.radius * bubble.number);
+            },
+            [](const auto& context, const auto&)
+            {
+                return equilibrium / context.chemistry.environment.liquidVolume;
+            }};
+        selected.population_process = B::make_implicit_film_transfer_process({{"micro", {film}}});
+        Fixture fixture(selected, 1);
+        auto initial = fixture.initial(initialMicro, 0., true);
+        const auto& catalog = fixture.settings.reaction_mechanism->catalog();
+        for (auto& state : initial)
+            state.set_amount(catalog, gasOne, P::Dissolved, initialDissolved);
+        fixture.initialize(initial, true);
+        const auto receipt = fixture.model.species_event_receipt();
+        if (reject)
+            EXPECT_THROW(fixture.advance(dt), std::exception);
+        else
+            EXPECT_NO_THROW(fixture.advance(dt));
+        double localError = 0.0;
+        for (std::size_t owned = 0; owned < initial.size(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            const auto state = fixture.model.cell_species_state(cell);
+            const auto dissolved = state.amount(catalog, gasOne, P::Dissolved);
+            const auto micro = state.amount(catalog, gasOne, P::Dispersed, "micro");
+            EXPECT_NEAR(dissolved + micro, initialDissolved + initialMicro, 2e-15);
+            EXPECT_DOUBLE_EQ(fixture.model.population_number_field("micro").value(cell), 1e6);
+            if (reject)
+            {
+                EXPECT_EQ(fixture.model.species_event_receipt(), receipt);
+                EXPECT_DOUBLE_EQ(dissolved, initialDissolved);
+                EXPECT_DOUBLE_EQ(micro, initialMicro);
+                continue;
+            }
+            const auto& ledger = fixture.model.population_ledgers()[owned];
+            EXPECT_GT(ledger.substeps, 1u);
+            EXPECT_GT(ledger.retries, 0u);
+            EXPECT_GT(dissolved, equilibrium);
+            const auto expected = equilibrium + (initialDissolved - equilibrium) *
+                std::pow(1.0 + rate * dt / ledger.substeps, -static_cast<double>(ledger.substeps));
+            EXPECT_NEAR(dissolved, expected, 2e-14);
+            const auto exact = equilibrium + (initialDissolved - equilibrium) * std::exp(-rate * dt);
+            localError = std::abs(dissolved - exact);
+        }
+        return fixture.sum(localError);
+    };
+    const auto coarse = run(.02, 64, false);
+    const auto fine = run(.001, 64, false);
+    EXPECT_LT(fine, coarse / 2);
+    (void) run(.02, 1, true);
+}
+
+TEST(ReactingSpeciesModelTest, AdaptivePopulationRetriesProvisionalDomainFailure)
+{
+    auto selected = options();
+    selected.population_substep_relative_tolerance = .01;
+    selected.population_process = [](const B::MultispeciesPopulationContext& context, double duration)
+    {
+        if (context.chemistry.environment.time > 0.0 && duration > .03)
+            throw std::domain_error("Provisional stage outside the supplied law's domain");
+        return B::MultispeciesPopulationPacket{};
+    };
+    Fixture fixture(selected, 1);
+    fixture.initialize(fixture.initial());
+    ASSERT_NO_THROW(fixture.advance(.1));
+    for (const auto& ledger : fixture.model.population_ledgers())
+    {
+        EXPECT_EQ(ledger.substeps, 4u);
+        EXPECT_EQ(ledger.retries, 2u);
+    }
+}
 
 TEST(ReactingSpeciesModelTest, FiniteDonorMultigasSourcesAreIndependentOfPrescribedHeatAndReplay)
 {

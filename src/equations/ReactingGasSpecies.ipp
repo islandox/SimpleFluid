@@ -69,6 +69,46 @@ inline double gas_volume(const ReactingGasOptions& options, const Reacting::Spec
                : mass(catalog, moles) /
                      options.gas_thermodynamics->evaluate(temperature, pressure, composition(moles)).density;
 }
+inline bool population_stage_accurate(const Reacting::SpeciesCatalog& catalog,
+    const Reacting::CellSpeciesState& initial, std::span<const BubbleGasPhysics::PopulationNumberState> initialNumbers,
+    const BubbleGasPhysics::MultispeciesPopulationResult& coarse,
+    const BubbleGasPhysics::MultispeciesPopulationResult& fine, double tolerance, double stepFraction)
+{
+    using P = Reacting::SpeciesPhase;
+    for (const auto& species : catalog.species())
+    {
+        if (!catalog.allows(species.id, P::Dispersed))
+            continue;
+        const auto dissolved = [&](const auto& cell) { return cell.amount(catalog, species.id, P::Dissolved); };
+        const auto index = catalog.index(species.id);
+        long double inventory = dissolved(initial);
+        double error = std::abs(dissolved(coarse.state) - dissolved(fine.state));
+        for (std::size_t p = 0; p < initial.dispersedPopulations.size(); ++p)
+        {
+            inventory += initial.dispersedPopulations[p].amounts[index];
+            error = std::max(error, std::abs(coarse.state.dispersedPopulations[p].amounts[index] -
+                fine.state.dispersedPopulations[p].amounts[index]));
+        }
+        if (error > tolerance * inventory)
+            return false;
+    }
+    // A birth event can turn on at the half-stage. Scale this comparison by
+    // the available count or by the source increment extrapolated over the
+    // physical step. This resolves a switch to a finite time bracket even
+    // when the count at the start of the stage is zero.
+    for (std::size_t p = 0; p < initialNumbers.size(); ++p)
+    {
+        const auto initialNumber = initialNumbers[p].number;
+        const auto error = std::abs(coarse.numbers[p].number - fine.numbers[p].number);
+        const auto scale = std::max({initialNumber, coarse.numbers[p].number, fine.numbers[p].number});
+        const auto increment = std::max(std::abs(coarse.numbers[p].number - initialNumber),
+            std::abs(fine.numbers[p].number - initialNumber));
+        if (error > tolerance * scale && error * stepFraction > tolerance * increment)
+            return false;
+    }
+    return true;
+}
+
 inline std::uint64_t configuration_signature(const ReactingGasOptions& options)
 {
     std::uint64_t signature = 14695981039346656037ULL;
@@ -118,6 +158,7 @@ inline std::uint64_t configuration_signature(const ReactingGasOptions& options)
     integer(static_cast<std::uint64_t>(options.surface_tension_mode));
     integer(static_cast<bool>(options.species_source));
     integer(static_cast<bool>(options.population_process));
+    number(options.population_substep_relative_tolerance);
     integer(static_cast<bool>(options.initial_species_state));
     integer(static_cast<bool>(options.initial_population_numbers));
     integer(static_cast<bool>(options.surface_tension_correlation));
@@ -1794,222 +1835,322 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                     for (const auto& population : state.dispersedPopulations)
                         for (const auto value : population.amounts)
                             validateMaterial(value);
-                    double elapsed = 0.0, next = dt;
-                    std::size_t substeps = 0;
-                    while (elapsed < dt)
+                    const auto makeStage = [&](const auto& stageState, const auto& stageNumbers,
+                                               double elapsed, double step, bool provisional)
                     {
-                        require(substeps < static_cast<std::size_t>(d_options.max_subcycles),
-                            "Population local subcycle limit exceeded.");
-                        double step = std::min(next, dt - elapsed);
-                        std::size_t retries = 0;
-                        for (;;)
+                        try
                         {
-                            require(step > 0.0 && elapsed + step > elapsed,
-                                "Population step cannot advance representable time.");
-                            try
-                            {
-                                auto stageEnvironment = environment;
-                                stageEnvironment.time = environment.time + elapsed;
-                                require(stageEnvironment.time + step > stageEnvironment.time,
-                                    "Population callback interval cannot advance representable absolute time.");
-                                std::vector<double> stageLiquid(catalog.species().size());
-                                for (std::size_t s = 0; s < stageLiquid.size(); ++s)
-                                    stageLiquid[s] = state.amount(catalog, catalog.species()[s].id, P::Liquid) +
-                                                     state.amount(catalog, catalog.species()[s].id, P::Dissolved);
-                                stageEnvironment.liquidVolume =
-                                    reacting_species_detail::total(stageLiquid) > 0.0
-                                        ? reacting_species_detail::mass(catalog, stageLiquid) /
-                                              reacting_species_detail::liquid_density(d_options,
-                                                  stageEnvironment.temperature, stageEnvironment.absolutePressure,
-                                                  stageLiquid)
-                                        : 0.0;
-                                const auto conditions = population_conditions(state, numbers, stageEnvironment);
-                                const Reacting::ReactionContext stageContext{catalog, state, stageEnvironment};
-                                // Recompute drift from this source stage's bubble state, using the same
-                                // configured carrier properties as transport rather than a frozen old slip.
-                                const auto packet = population_packet(stageContext, conditions, step,
-                                    material.density.value(cell), material.dynamic_viscosity.value(cell));
-                                if (d_options.bouss_reference && d_options.bouss_sources->vapor)
-                                    for (const auto& transfer : packet.transfers)
-                                    {
-                                        const auto solution = [](P phase)
-                                        { return phase == P::Liquid || phase == P::Dissolved; };
-                                        require(transfer.species != d_options.bouss_sources->vapor->solvent ||
-                                                    solution(transfer.donor) == solution(transfer.receiver),
-                                            "Bound solvent phase change must use its coordinated latent owner, "
-                                            "not a population packet with no thermal channel.");
-                                    }
-
-                                // Reserve this packet's gross deaths from
-                                // current raw stock before any incoming birth.
-                                auto countDonors = countEndpoints;
-                                for (const auto& event : packet.numberEvents)
-                                {
-                                    const auto found = std::ranges::find(numbers, event.population,
-                                        &BubbleGasPhysics::PopulationNumberState::population);
-                                    require(found != numbers.end() && std::isfinite(event.deaths) && event.deaths >= 0,
-                                        "Population count donor event is invalid.");
-                                    countDonors[static_cast<std::size_t>(found - numbers.begin())] +=
-                                        -static_cast<long double>(event.deaths);
-                                }
-                                for (const auto& donor : countDonors)
-                                    if (!std::isfinite(donor.value()) || donor.value() < 0)
-                                        throw std::runtime_error(
-                                            "Population deaths overdraw raw pre-packet count stock.");
-
-                                const auto result = d_options.bouss_reference
-                                                        ? Reacting::advance_bouss_population_exchange(catalog,
-                                                              *d_options.bouss_reference, state, numbers,
-                                                              stageEnvironment, d_options.alpha_max, packet)
-                                                        : BubbleGasPhysics::advance_multispecies_population_exchange(
-                                                              catalog, state, numbers, stageEnvironment, packet);
-                                auto acceptedChanges = changes;
-                                auto acceptedMaterial = materialEndpoints;
-                                auto donorMargins = materialEndpoints;
-                                auto acceptedCounts = countEndpoints;
-                                // The pure kernel creates one reaction per original transfer slot,
-                                // with no admission/scaling. Reporting net chemicalChange is NOT a receipt.
-                                require(result.ledger.reactionExtents.size() == packet.transfers.size(),
-                                    "Population material receipt changed its original transfer dimensions.");
-                                for (std::size_t event = 0; event < packet.transfers.size(); ++event)
-                                {
-                                    const auto& transfer = packet.transfers[event];
-                                    require(std::isfinite(transfer.moles) && transfer.moles >= 0 &&
-                                                result.ledger.reactionExtents[event] == transfer.moles,
-                                        "Population material receipt changed an accepted original transfer.");
-                                    const auto donor = species_compartment_index(
-                                        transfer.species, transfer.donor, transfer.donorPopulation);
-                                    const auto receiver = species_compartment_index(
-                                        transfer.species, transfer.receiver, transfer.receiverPopulation);
-                                    const auto amount = static_cast<long double>(transfer.moles);
-                                    donorMargins[donor] += -amount; // Never credit incoming material to a gross donor.
-                                    acceptedMaterial[donor] += -amount;
-                                    acceptedMaterial[receiver] += amount;
-                                    acceptedChanges[donor] += -amount;
-                                    acceptedChanges[receiver] += amount;
-                                }
-                                for (const auto& margin : donorMargins)
-                                    if (!std::isfinite(margin.value()) || margin.value() < 0)
-                                        throw std::runtime_error(
-                                            "Raw population transfers overdraw an original material donor.");
-                                auto acceptedState = populationInitial;
-                                require(result.state.amounts.size() == acceptedState.amounts.size() &&
-                                            result.state.dispersedPopulations.size() ==
-                                                acceptedState.dispersedPopulations.size(),
-                                    "Population sequential material state changed its compartment schema.");
-                                std::size_t i = 0;
-                                const auto endpoint = [&](std::size_t index, double sequential)
-                                {
-                                    const auto wide = acceptedMaterial[index].value();
-                                    if (!std::isfinite(wide) || wide < 0)
-                                        throw std::runtime_error(
-                                            "Raw population material endpoint is negative or nonfinite.");
-                                    const auto value = narrow(wide);
-                                    const auto density = static_cast<double>(wide / volumes[owned]);
-                                    if (value < 0 ||
-                                        (wide > 0 && (value == 0 || density == 0 || !std::isfinite(density))))
-                                        throw std::runtime_error("Raw population material endpoint cannot be "
-                                                                 "represented by its stored field.");
-                                    require(std::isfinite(sequential) && sequential >= 0 &&
-                                                ((value == 0) == (sequential == 0)),
-                                        "Raw population material replay changed an empty/nonempty sequential state.");
-                                    const long double scale =
-                                        std::max(std::abs(wide), std::abs(static_cast<long double>(sequential)));
-                                    require(std::abs(wide - sequential) <=
-                                                64 * std::numeric_limits<double>::epsilon() * scale,
-                                        "Raw population material replay differs from its actual sequential state.");
-                                    return value;
-                                };
-                                for (auto& value : acceptedState.amounts)
-                                {
-                                    value = endpoint(i, result.state.amounts[i]);
-                                    ++i;
-                                }
-                                for (std::size_t population = 0; population < acceptedState.dispersedPopulations.size();
-                                    ++population)
-                                {
-                                    auto& output = acceptedState.dispersedPopulations[population];
-                                    const auto& sequential = result.state.dispersedPopulations[population];
-                                    require(output.id == sequential.id &&
-                                                output.amounts.size() == sequential.amounts.size(),
-                                        "Population sequential material state changed a configured bin.");
-                                    for (std::size_t species = 0; species < output.amounts.size(); ++species)
-                                        output.amounts[species] = endpoint(i++, sequential.amounts[species]);
-                                }
-                                auto acceptedNumbers = initialNumbers;
-                                require(result.localNumberChanges.size() == acceptedNumbers.size() &&
-                                            result.numbers.size() == acceptedNumbers.size(),
-                                    "Population raw number receipt has the wrong dimensions.");
-                                for (std::size_t p = 0; p < acceptedNumbers.size(); ++p)
-                                {
-                                    const auto& raw = result.localNumberChanges[p];
-                                    require(std::isfinite(raw.high) && std::isfinite(raw.correction),
-                                        "Population raw number receipt is nonfinite.");
-                                    acceptedCounts[p] += raw.high;
-                                    acceptedCounts[p] += raw.correction;
-                                    const auto wide = acceptedCounts[p].value();
-                                    acceptedNumbers[p].number = narrow(wide);
-                                    if (acceptedNumbers[p].number < 0 || (wide > 0 && acceptedNumbers[p].number == 0))
-                                        throw std::runtime_error(
-                                            "Accumulated population count endpoint is invalid or unrepresentable.");
-                                    const double sequential = result.numbers[p].number;
-                                    require(result.numbers[p].population == acceptedNumbers[p].population,
-                                        "Population raw number receipt changed its configured identity.");
-                                    require(std::isfinite(sequential) && sequential >= 0 &&
-                                                ((acceptedNumbers[p].number == 0) == (sequential == 0)),
-                                        "Population raw count replay changed an empty/nonempty sequential state.");
-                                    const long double scale =
-                                        std::max(std::abs(wide), std::abs(static_cast<long double>(sequential)));
-                                    require(std::abs(wide - sequential) <=
-                                                64 * std::numeric_limits<double>::epsilon() * scale,
-                                        "Population raw count replay differs from its actual sequential state.");
-                                }
-                                changes = std::move(acceptedChanges);
-                                materialEndpoints = std::move(acceptedMaterial);
-                                countEndpoints = std::move(acceptedCounts);
-                                state = std::move(acceptedState);
-                                numbers = std::move(acceptedNumbers);
-                                // Only accepted packets enter gross interphase histories. Rejected retries
-                                // cannot debit donors or increment diagnostic events.
+                            auto stageEnvironment = environment;
+                            stageEnvironment.time = environment.time + elapsed;
+                            require(stageEnvironment.time + step > stageEnvironment.time,
+                                "Population callback interval cannot advance representable absolute time.");
+                            std::vector<double> stageLiquid(catalog.species().size());
+                            for (std::size_t s = 0; s < stageLiquid.size(); ++s)
+                                stageLiquid[s] = stageState.amount(catalog, catalog.species()[s].id, P::Liquid) +
+                                                 stageState.amount(catalog, catalog.species()[s].id, P::Dissolved);
+                            stageEnvironment.liquidVolume =
+                                reacting_species_detail::total(stageLiquid) > 0.0
+                                    ? reacting_species_detail::mass(catalog, stageLiquid) /
+                                          reacting_species_detail::liquid_density(d_options,
+                                              stageEnvironment.temperature, stageEnvironment.absolutePressure,
+                                              stageLiquid)
+                                    : 0.0;
+                            const auto conditions = population_conditions(stageState, stageNumbers, stageEnvironment);
+                            const Reacting::ReactionContext stageContext{catalog, stageState, stageEnvironment};
+                            // Recompute drift from this source stage's bubble state, using the same
+                            // configured carrier properties as transport rather than a frozen old slip.
+                            auto packet = population_packet(stageContext, conditions, step,
+                                material.density.value(cell), material.dynamic_viscosity.value(cell));
+                            if (d_options.bouss_reference && d_options.bouss_sources->vapor)
                                 for (const auto& transfer : packet.transfers)
                                 {
-                                    const auto donor = species_compartment_index(
-                                        transfer.species, transfer.donor, transfer.donorPopulation);
-                                    const auto receiver = species_compartment_index(
-                                        transfer.species, transfer.receiver, transfer.receiverPopulation);
-                                    interphase_step[donor].source_change += -static_cast<long double>(transfer.moles);
-                                    interphase_step[receiver].source_change += transfer.moles;
-                                    const auto s = catalog.index(transfer.species);
-                                    const bool donor_gas = transfer.donor != P::Liquid;
-                                    const bool receiver_gas = transfer.receiver != P::Liquid;
-                                    const bool donor_solution =
-                                        transfer.donor == P::Liquid || transfer.donor == P::Dissolved;
-                                    const bool receiver_solution =
-                                        transfer.receiver == P::Liquid || transfer.receiver == P::Dissolved;
-                                    if (donor_gas != receiver_gas)
-                                        interphase_step[s].gas_subset_source +=
-                                            receiver_gas ? static_cast<long double>(transfer.moles)
-                                                         : -static_cast<long double>(transfer.moles);
-                                    if (donor_solution != receiver_solution)
-                                        interphase_step[s].solution_subset_source +=
-                                            receiver_solution ? static_cast<long double>(transfer.moles)
-                                                              : -static_cast<long double>(transfer.moles);
-                                    interphase_step[donor].amount[Reacting::history_detail::InterphaseOutflow] +=
-                                        transfer.moles;
-                                    interphase_step[receiver].amount[Reacting::history_detail::InterphaseInflow] +=
-                                        transfer.moles;
+                                    const auto solution = [](P phase)
+                                    { return phase == P::Liquid || phase == P::Dissolved; };
+                                    require(transfer.species != d_options.bouss_sources->vapor->solvent ||
+                                                solution(transfer.donor) == solution(transfer.receiver),
+                                        "Bound solvent phase change must use its coordinated latent owner, "
+                                        "not a population packet with no thermal channel.");
                                 }
-                                ++substeps;
-                                elapsed = step == dt - elapsed ? dt : elapsed + step;
-                                next = std::min(dt, 2 * step);
-                                break;
+                            return std::pair{std::move(stageEnvironment), std::move(packet)};
+                        }
+                        catch (const std::domain_error& error)
+                        {
+                            if (!provisional)
+                                throw;
+                            // The input state must satisfy the constitutive domain. A state
+                            // produced on a provisional grid can be retried on a finer grid.
+                            throw std::runtime_error(std::string("Provisional population stage: ") + error.what());
+                        }
+                    };
+                    const auto solveStage = [&](const auto& stageState, const auto& stageNumbers,
+                                                const auto& stageEnvironment, const auto& packet)
+                    {
+                        return d_options.bouss_reference
+                            ? Reacting::advance_bouss_population_exchange(catalog, *d_options.bouss_reference,
+                                  stageState, stageNumbers, stageEnvironment, d_options.alpha_max, packet)
+                            : BubbleGasPhysics::advance_multispecies_population_exchange(
+                                  catalog, stageState, stageNumbers, stageEnvironment, packet);
+                    };
+                    const auto recordInterphase = [&](const auto& packet)
+                    {
+                        // Only accepted packets enter gross interphase histories. Rejected retries
+                        // cannot debit donors or increment diagnostic events.
+                        for (const auto& transfer : packet.transfers)
+                        {
+                            const auto donor = species_compartment_index(
+                                transfer.species, transfer.donor, transfer.donorPopulation);
+                            const auto receiver = species_compartment_index(
+                                transfer.species, transfer.receiver, transfer.receiverPopulation);
+                            interphase_step[donor].source_change += -static_cast<long double>(transfer.moles);
+                            interphase_step[receiver].source_change += transfer.moles;
+                            const auto s = catalog.index(transfer.species);
+                            const bool donor_gas = transfer.donor != P::Liquid;
+                            const bool receiver_gas = transfer.receiver != P::Liquid;
+                            const bool donor_solution =
+                                transfer.donor == P::Liquid || transfer.donor == P::Dissolved;
+                            const bool receiver_solution =
+                                transfer.receiver == P::Liquid || transfer.receiver == P::Dissolved;
+                            if (donor_gas != receiver_gas)
+                                interphase_step[s].gas_subset_source +=
+                                    receiver_gas ? static_cast<long double>(transfer.moles)
+                                                 : -static_cast<long double>(transfer.moles);
+                            if (donor_solution != receiver_solution)
+                                interphase_step[s].solution_subset_source +=
+                                    receiver_solution ? static_cast<long double>(transfer.moles)
+                                                      : -static_cast<long double>(transfer.moles);
+                            interphase_step[donor].amount[Reacting::history_detail::InterphaseOutflow] +=
+                                transfer.moles;
+                            interphase_step[receiver].amount[Reacting::history_detail::InterphaseInflow] +=
+                                transfer.moles;
+                        }
+                    };
+                    const auto accuracy = d_options.population_substep_relative_tolerance;
+                    std::size_t substeps = 0;
+                    const auto hasEvents = [](const auto& packet)
+                    { return !packet.transfers.empty() || !packet.numberEvents.empty(); };
+                    const auto advanceStage = [&](double elapsed, double step)
+                    {
+                        require(step > 0.0 && elapsed + step > elapsed,
+                            "Population step cannot advance representable time.");
+                        auto [stageEnvironment, packet] = makeStage(state, numbers, elapsed, step, accuracy > 0 && elapsed > 0.0);
+                        // Reserve this packet's gross deaths from
+                        // current raw stock before any incoming birth.
+                        auto countDonors = countEndpoints;
+                        for (const auto& event : packet.numberEvents)
+                        {
+                            const auto found = std::ranges::find(numbers, event.population,
+                                &BubbleGasPhysics::PopulationNumberState::population);
+                            require(found != numbers.end() && std::isfinite(event.deaths) && event.deaths >= 0,
+                                "Population count donor event is invalid.");
+                            countDonors[static_cast<std::size_t>(found - numbers.begin())] +=
+                                -static_cast<long double>(event.deaths);
+                        }
+                        for (const auto& donor : countDonors)
+                            if (!std::isfinite(donor.value()) || donor.value() < 0)
+                                throw std::runtime_error(
+                                    "Population deaths overdraw raw pre-packet count stock.");
+
+                        const auto result = solveStage(state, numbers, stageEnvironment, packet);
+                        if (accuracy > 0)
+                        {
+                            const auto half = step * 0.5;
+                            const auto [firstEnvironment, firstPacket] = makeStage(state, numbers, elapsed, half, true);
+                            std::optional<BubbleGasPhysics::MultispeciesPopulationResult> midpoint;
+                            if (hasEvents(firstPacket))
+                                midpoint = solveStage(state, numbers, firstEnvironment, firstPacket);
+                            const auto& midState = midpoint ? midpoint->state : state;
+                            const auto& midNumbers = midpoint ? midpoint->numbers : numbers;
+                            const auto [secondEnvironment, secondPacket] =
+                                makeStage(midState, midNumbers, elapsed + half, half, true);
+                            if (hasEvents(packet) || midpoint || hasEvents(secondPacket))
+                            {
+                                const auto fine = solveStage(midState, midNumbers, secondEnvironment, secondPacket);
+                                if (!reacting_species_detail::population_stage_accurate(
+                                        catalog, state, numbers, result, fine, accuracy, step / dt))
+                                    throw std::runtime_error(
+                                        "Population source stage exceeds its local error tolerance.");
+                            }
+                        }
+                        auto acceptedChanges = changes;
+                        auto acceptedMaterial = materialEndpoints;
+                        auto donorMargins = materialEndpoints;
+                        auto acceptedCounts = countEndpoints;
+                        // The pure kernel creates one reaction per original transfer slot,
+                        // with no admission/scaling. Reporting net chemicalChange is NOT a receipt.
+                        require(result.ledger.reactionExtents.size() == packet.transfers.size(),
+                            "Population material receipt changed its original transfer dimensions.");
+                        for (std::size_t event = 0; event < packet.transfers.size(); ++event)
+                        {
+                            const auto& transfer = packet.transfers[event];
+                            require(std::isfinite(transfer.moles) && transfer.moles >= 0 &&
+                                        result.ledger.reactionExtents[event] == transfer.moles,
+                                "Population material receipt changed an accepted original transfer.");
+                            const auto donor = species_compartment_index(
+                                transfer.species, transfer.donor, transfer.donorPopulation);
+                            const auto receiver = species_compartment_index(
+                                transfer.species, transfer.receiver, transfer.receiverPopulation);
+                            const auto amount = static_cast<long double>(transfer.moles);
+                            donorMargins[donor] += -amount; // Never credit incoming material to a gross donor.
+                            acceptedMaterial[donor] += -amount;
+                            acceptedMaterial[receiver] += amount;
+                            acceptedChanges[donor] += -amount;
+                            acceptedChanges[receiver] += amount;
+                        }
+                        for (const auto& margin : donorMargins)
+                            if (!std::isfinite(margin.value()) || margin.value() < 0)
+                                throw std::runtime_error(
+                                    "Raw population transfers overdraw an original material donor.");
+                        auto acceptedState = populationInitial;
+                        require(result.state.amounts.size() == acceptedState.amounts.size() &&
+                                    result.state.dispersedPopulations.size() ==
+                                        acceptedState.dispersedPopulations.size(),
+                            "Population sequential material state changed its compartment schema.");
+                        std::size_t i = 0;
+                        const auto endpoint = [&](std::size_t index, double sequential)
+                        {
+                            const auto wide = acceptedMaterial[index].value();
+                            if (!std::isfinite(wide) || wide < 0)
+                                throw std::runtime_error(
+                                    "Raw population material endpoint is negative or nonfinite.");
+                            const auto value = narrow(wide);
+                            const auto density = static_cast<double>(wide / volumes[owned]);
+                            if (value < 0 ||
+                                (wide > 0 && (value == 0 || density == 0 || !std::isfinite(density))))
+                                throw std::runtime_error("Raw population material endpoint cannot be "
+                                                         "represented by its stored field.");
+                            require(std::isfinite(sequential) && sequential >= 0 &&
+                                        ((value == 0) == (sequential == 0)),
+                                "Raw population material replay changed an empty/nonempty sequential state.");
+                            const long double scale =
+                                std::max(std::abs(wide), std::abs(static_cast<long double>(sequential)));
+                            require(std::abs(wide - sequential) <=
+                                        64 * std::numeric_limits<double>::epsilon() * scale,
+                                "Raw population material replay differs from its actual sequential state.");
+                            return value;
+                        };
+                        for (auto& value : acceptedState.amounts)
+                        {
+                            value = endpoint(i, result.state.amounts[i]);
+                            ++i;
+                        }
+                        for (std::size_t population = 0; population < acceptedState.dispersedPopulations.size();
+                            ++population)
+                        {
+                            auto& output = acceptedState.dispersedPopulations[population];
+                            const auto& sequential = result.state.dispersedPopulations[population];
+                            require(output.id == sequential.id &&
+                                        output.amounts.size() == sequential.amounts.size(),
+                                "Population sequential material state changed a configured bin.");
+                            for (std::size_t species = 0; species < output.amounts.size(); ++species)
+                                output.amounts[species] = endpoint(i++, sequential.amounts[species]);
+                        }
+                        auto acceptedNumbers = initialNumbers;
+                        require(result.localNumberChanges.size() == acceptedNumbers.size() &&
+                                    result.numbers.size() == acceptedNumbers.size(),
+                            "Population raw number receipt has the wrong dimensions.");
+                        for (std::size_t p = 0; p < acceptedNumbers.size(); ++p)
+                        {
+                            const auto& raw = result.localNumberChanges[p];
+                            require(std::isfinite(raw.high) && std::isfinite(raw.correction),
+                                "Population raw number receipt is nonfinite.");
+                            acceptedCounts[p] += raw.high;
+                            acceptedCounts[p] += raw.correction;
+                            const auto wide = acceptedCounts[p].value();
+                            acceptedNumbers[p].number = narrow(wide);
+                            if (acceptedNumbers[p].number < 0 || (wide > 0 && acceptedNumbers[p].number == 0))
+                                throw std::runtime_error(
+                                    "Accumulated population count endpoint is invalid or unrepresentable.");
+                            const double sequential = result.numbers[p].number;
+                            require(result.numbers[p].population == acceptedNumbers[p].population,
+                                "Population raw number receipt changed its configured identity.");
+                            require(std::isfinite(sequential) && sequential >= 0 &&
+                                        ((acceptedNumbers[p].number == 0) == (sequential == 0)),
+                                "Population raw count replay changed an empty/nonempty sequential state.");
+                            const long double scale =
+                                std::max(std::abs(wide), std::abs(static_cast<long double>(sequential)));
+                            require(std::abs(wide - sequential) <=
+                                        64 * std::numeric_limits<double>::epsilon() * scale,
+                                "Population raw count replay differs from its actual sequential state.");
+                        }
+                        changes = std::move(acceptedChanges);
+                        materialEndpoints = std::move(acceptedMaterial);
+                        countEndpoints = std::move(acceptedCounts);
+                        state = std::move(acceptedState);
+                        numbers = std::move(acceptedNumbers);
+                        return packet;
+                    };
+                    if (accuracy > 0)
+                    {
+                        // Refine the whole local grid so all packets in this cell use one schedule.
+                        // Only a completed grid can publish events to the shared step ledger.
+                        const auto initialMaterial = materialEndpoints;
+                        const auto initialCounts = countEndpoints;
+                        const auto initialChanges = changes;
+                        auto stages = d_population_substep_schedule.empty() ? std::size_t{1}
+                                                                           : d_population_substep_schedule[owned];
+                        for (;;)
+                        {
+                            std::vector<BubbleGasPhysics::MultispeciesPopulationPacket> packets;
+                            try
+                            {
+                                double elapsed = 0.0;
+                                for (std::size_t stage = 1; stage <= stages; ++stage)
+                                {
+                                    const auto end = dt * (static_cast<double>(stage) / static_cast<double>(stages));
+                                    auto packet = advanceStage(elapsed, end - elapsed);
+                                    if (!packet.transfers.empty())
+                                        packets.push_back(std::move(packet));
+                                    elapsed = end;
+                                }
                             }
                             catch (const std::runtime_error&)
                             {
-                                if (retries++ >= d_options.reaction_advance.maximumRetries)
+                                if (populationLedger.retries >= d_options.reaction_advance.maximumRetries ||
+                                    stages > static_cast<std::size_t>(d_options.max_subcycles) / 2)
                                     throw;
                                 ++populationLedger.retries;
-                                step *= 0.5;
+                                stages *= 2;
+                                changes = initialChanges;
+                                materialEndpoints = initialMaterial;
+                                countEndpoints = initialCounts;
+                                state = populationInitial;
+                                numbers = initialNumbers;
+                                continue;
+                            }
+                            for (const auto& packet : packets)
+                                recordInterphase(packet);
+                            substeps = stages;
+                            if (!d_population_substep_schedule.empty())
+                                d_population_substep_schedule[owned] = stages;
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        double elapsed = 0.0, next = dt;
+                        while (elapsed < dt)
+                        {
+                            require(substeps < static_cast<std::size_t>(d_options.max_subcycles),
+                                "Population local subcycle limit exceeded.");
+                            double step = std::min(next, dt - elapsed);
+                            std::size_t retries = 0;
+                            for (;;)
+                            {
+                                try
+                                {
+                                    recordInterphase(advanceStage(elapsed, step));
+                                    ++substeps;
+                                    elapsed = step == dt - elapsed ? dt : elapsed + step;
+                                    next = std::min(dt, 2 * step);
+                                    break;
+                                }
+                                catch (const std::runtime_error&)
+                                {
+                                    if (retries++ >= d_options.reaction_advance.maximumRetries)
+                                        throw;
+                                    ++populationLedger.retries;
+                                    step *= 0.5;
+                                }
                             }
                         }
                     }
