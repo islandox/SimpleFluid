@@ -1423,3 +1423,65 @@ stay in trial and owner-checkpoint diagnostics. The scalar compatibility
 fixtures reproduce the prior scalar execution for byte comparisons. A
 continuation using a different execution policy is subject to the same
 physical gates and can differ in floating-point rounding and solve statistics.
+
+
+## Upstream adaptation #3 for implicit film transfer
+
+`QbmmLawInputs::carrier_liquid_volume_m3` gives the occupied carrier liquid's
+physical EOS volume for this source evaluation. The controller evaluates it
+from the same predecessor material used for the liquid concentration. An
+absent liquid has neither value. `carrier_liquid_dissolved_moles` gives the
+original catalog-ordered Dissolved inventory for typed callbacks. On planar
+ALE the source frame is the certified trial geometry. The liquid EOS volume
+and the trial bulk volume remain separate operands.
+
+`qbmm_implicit_film_transfer` accepts one family or a span of
+`QbmmImplicitFilmFamily` records. Each record supplies active-node film
+coefficients \(k_L\) in m/s, equilibrium concentrations \(C_{\rm eq}\) in
+mol/m³, and the original extensive dissolved inventory in mol. Read that
+inventory from the frozen material snapshot. A participating family has one
+nonzero fixed-composition species admitted to both Dissolved and Dispersed.
+An absent family supplies an empty node span.
+
+Each node has film weight
+\(\alpha_i=\Delta t\,k_{L,i}\pi d_i^2 N_i/V_l\) and equilibrium amount
+\(n_{{\rm eq},i}=V_l C_{{\rm eq},i}\). All positive weights for a species
+contribute to one backward-Euler endpoint. Let \(n_*\) be the equilibrium
+amount of the largest-weight node. The adapter accumulates the numerator and
+denominator in stable family and node order with compensated sums. It
+solves for the dissolved endpoint offset from \(n_*\),
+\[
+e=\frac{n_{\rm diss}-n_*+\sum_i\alpha_i(n_{{\rm eq},i}-n_*)}
+        {1+\sum_i\alpha_i},\qquad
+\Delta n_i=\alpha_i\bigl(e-(n_{{\rm eq},i}-n_*)\bigr).
+\]
+Equilibrium differences are formed before multiplication by the common
+volume. The adapter recenters the compensated solve at a node if subtracting
+its equilibrium offset would lose the driving difference to cancellation.
+Each signed transfer becomes one
+count-preserving resize with a paired Dissolved exchange. The destination
+must reproduce the integrated mass within the existing reconstruction
+tolerance. An unrepresentable destination or complete depletion rejects.
+
+A single-family provider can call the adapter from its integrated
+`evaluate` callback or from an existing `MixtureQbmmLaw` using the
+frozen liquid trace. The typed overload reads the frozen extensive inventory
+directly, which avoids roundoff from multiplying concentration by volume.
+The integrated and joint callbacks can also supply the original stock
+explicitly. A provider can select `evaluate_joint` to
+return one event row per bound family. The controller builds all family
+inputs and checks their declared applicability against the same material
+predecessor before invoking the callback once per owned cell in each source
+evaluation. The callback and the event application use stable family identity
+order, independent of physical phase slots. The controller reserves
+every gross withdrawal against the original stock, and uses the configured
+paired partial-molar enthalpy slots. Joint transfer receipts index the
+controller's simultaneous slots ordered by species and physical phase
+identities. A release from one family cannot
+finance a simultaneous withdrawal by another. Failed source evaluations
+leave accepted state, geometry, and earlier compatible previews intact.
+
+Joint evaluation has distinct controller provenance. The signature marker
+is present only for the joint hook. The existing v5–v9 payload layouts and
+non-joint signatures retain their wire encoding. Legacy default-only
+admission requires the non-joint provider mode.

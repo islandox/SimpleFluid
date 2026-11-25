@@ -38,6 +38,8 @@ struct QbmmFrozenLawState
     std::optional<double> carrier_liquid_temperature_K;
     std::array<double, 3> drift_m_per_s;
     std::optional<ReactionLocation> location{};
+    std::optional<double> carrier_liquid_volume_m3{};
+    std::optional<std::vector<double>> carrier_liquid_dissolved_moles{};
 };
 
 [[nodiscard]] inline QbmmLawInputs make_qbmm_law_inputs(const QbmmPopulationSchema& family, QbmmFrozenLawState frozen)
@@ -49,6 +51,20 @@ struct QbmmFrozenLawState
         throw std::invalid_argument("QBMM law input snapshot needs valid geometry, quadrature and finite drift.");
     if (absent != (frozen.phase_volume_m3 == 0))
         throw std::invalid_argument("QBMM law input population absence disagrees with the physical phase volume.");
+    if (frozen.carrier_liquid_volume_m3)
+    {
+        const auto& concentration = frozen.carrier_liquid_concentration_mol_per_m3;
+        if (!std::isfinite(*frozen.carrier_liquid_volume_m3) || *frozen.carrier_liquid_volume_m3 <= 0 ||
+            !concentration || concentration->size() != family.catalog().species().size() ||
+            !std::ranges::all_of(*concentration, [](double value) { return std::isfinite(value) && value >= 0; }))
+            throw std::invalid_argument(
+                "QBMM law input needs positive finite carrier liquid EOS volume and concentrations.");
+    }
+    if (const auto& dissolved = frozen.carrier_liquid_dissolved_moles;
+        dissolved &&
+        (!frozen.carrier_liquid_volume_m3 || dissolved->size() != family.catalog().species().size() ||
+            !std::ranges::all_of(*dissolved, [](double value) { return std::isfinite(value) && value >= 0; })))
+        throw std::invalid_argument("QBMM law input needs finite catalogued Dissolved moles on occupied liquid.");
     const double speed = std::hypot(frozen.drift_m_per_s[0], frozen.drift_m_per_s[1], frozen.drift_m_per_s[2]);
     const double fraction = frozen.phase_volume_m3 / frozen.bulk_volume_m3;
     if (!std::isfinite(speed) || !std::isfinite(fraction) || (frozen.phase_volume_m3 > 0 && fraction == 0))
@@ -57,7 +73,8 @@ struct QbmmFrozenLawState
         frozen.absolute_pressure_pa, absent ? std::nullopt : frozen.temperature_K, frozen.time_step_s, fraction,
         frozen.gas_volume_fraction, qbmm_phase_concentrations(frozen.family_moles, frozen.phase_volume_m3),
         std::move(frozen.carrier_liquid_concentration_mol_per_m3), frozen.carrier_liquid_temperature_K, speed,
-        family.fingerprint(), family.catalog().fingerprint(), family.population(), frozen.location};
+        family.fingerprint(), family.catalog().fingerprint(), family.population(), frozen.location, {}, {},
+        frozen.carrier_liquid_volume_m3, std::move(frozen.carrier_liquid_dissolved_moles)};
 }
 
 [[nodiscard]] inline QbmmNodeSlipInput make_qbmm_node_slip_input(const QbmmLawInputs& input, std::size_t atom,
@@ -89,7 +106,8 @@ struct QbmmFrozenLawState
         input.absolute_pressure_pa, input.temperature_K, input.time_step_s, input.phase_volume_fraction,
         input.gas_volume_fraction, input.phase_concentration_mol_per_m3, input.carrier_liquid_concentration_mol_per_m3,
         input.carrier_liquid_temperature_K, speed, input.family_fingerprint, input.catalog_fingerprint,
-        input.population, input.location, input.geometry->mass_kg_per_bubble[atom], input.geometry->diameter_m[atom]};
+        input.population, input.location, input.geometry->mass_kg_per_bubble[atom], input.geometry->diameter_m[atom],
+        input.carrier_liquid_volume_m3, input.carrier_liquid_dissolved_moles};
     return evaluate_qbmm_applicability(law, frozen);
 }
 } // namespace SimpleFluid::Reacting

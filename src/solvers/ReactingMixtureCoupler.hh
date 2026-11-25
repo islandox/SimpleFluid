@@ -81,6 +81,28 @@ struct MixtureQbmmLaw
     const std::function<std::vector<QbmmEventOperation>(const QbmmLawInputs&)> evaluate;
 };
 
+struct MixtureQbmmFamilyInput
+{
+    const QbmmPopulationSchema& family;
+    std::size_t phase;
+    const QbmmLawInputs& law_inputs;
+    std::span<const QbmmApplicabilityEvaluation> applicability; ///< Declared population laws in schema order.
+    bool events_allowed; ///< Families with only population-dependent source laws return an empty row at absence.
+};
+
+/** All bound families share this actual predecessor, including any absent family rows.
+ * The inputs are in stable population-name order and remain valid for the callback.
+ * Each row also identifies its native physical phase slot.
+ */
+struct MixtureQbmmJointContext
+{
+    std::span<const MixtureQbmmFamilyInput> families;
+    const CellSpeciesState& material;
+    std::size_t owned_cell;
+    const LowMachMixtureSolver::SourceStageMetadata& stage;
+    double time_step, accepted_time;
+};
+
 /** Integrated local allocation law. Its optional material slots use pressure-conditioned donor enthalpy.
  * A family without population-law declarations retains the existing integrated callback scope, including birth
  * from absence. With declarations, a callback at absence requires a contract that does not require a population.
@@ -91,6 +113,11 @@ struct MixtureQbmmProvider
     const std::shared_ptr<const InterphaseConfiguration> transfers;
     const std::function<std::vector<QbmmEventOperation>(const MixtureQbmmContext&)> evaluate;
     const std::vector<std::shared_ptr<const MixtureQbmmLaw>> laws{}; ///< Ordered, additionally supplied local laws.
+    /** Deterministic, MPI-free alternative to the per-family evaluators.
+     * Called once per owned cell and source evaluation.
+     * Return one event row per input family. All gross debits reserve the shared predecessor inventory.
+     */
+    const std::function<std::vector<std::vector<QbmmEventOperation>>(const MixtureQbmmJointContext&)> evaluate_joint{};
 };
 /** Exact local supplied events and their raw endpoint replay proof; aligned with physical phases. */
 struct MixturePopulationEventReceipt

@@ -464,6 +464,167 @@ struct SourceEngine
         sums.add_material(c, p, s, amount);
     }
 
+    QbmmCellView qbmm_predecessor(const QbmmPopulationSchema& family, const CellSpeciesState& material,
+        const Solver::TransportPhaseInventory& before, const Faces::RawAmounts& raw_material) const
+    {
+        const auto& catalog = options.mechanism->catalog();
+        const auto pre = qbmm_view(family, material, before);
+        require(std::ranges::equal(pre.species_moles, before.moles),
+            "An upstream material stage changed a QBMM family without a paired allocation.");
+        for (size_t s = 0; s < before.moles.size(); ++s)
+        {
+            const auto slot = Faces::raw_amount_slot(
+                catalog, material, catalog.species()[s].id, {SpeciesPhase::Dispersed, family.population()});
+            const auto& parts = raw_material.at(slot);
+            Sum change;
+            change += parts[0];
+            change += parts[1];
+            change += -static_cast<long double>(before.moles[s]);
+            require(change.value() == 0, "An upstream raw material stage changed a QBMM family.");
+        }
+        return pre;
+    }
+
+    struct QbmmRateState
+    {
+        Solver::CellState guess;
+        std::vector<double> phase_volumes;
+        double bulk_volume, gas_fraction;
+        ReactionLocation location;
+        std::optional<std::vector<double>> carrier_liquid_dissolved_moles;
+    };
+
+    QbmmRateState qbmm_rate_state(const Solver::SourceStageContext& context, size_t c,
+        const Solver::CellState& caloric_guess, const CellSpeciesState& material) const
+    {
+        auto guess = material_guess(caloric_guess, context.transport.cells[c], material);
+        auto phase_volumes = qbmm_phase_volumes(guess);
+        const double bulk_volume = context.transport.new_control_volumes.at(c);
+        const auto location = source_location(context, c);
+        if (uses_qbmm_kinetic_transport(flow->options().qbmm_model))
+            qbmm_native_law_detail::evaluate_kinetic_closure(
+                flow->options(), *flow->mesh(), guess, bulk_volume, phase_volumes, location);
+        const bool joint = options.qbmm_population && options.qbmm_population->evaluate_joint;
+        double gas_fraction;
+        if (joint)
+        {
+            // The frozen gas fraction must not depend on physical phase slots.
+            gas_fraction = qbmm_native_law_detail::kinetic_gas_fraction(guess, phase_volumes, bulk_volume);
+        }
+        else
+        {
+            double gas_volume = 0;
+            for (size_t p = 0; p < phase_volumes.size(); ++p)
+                if (guess.phases[p].thermodynamics->kind() == EOSKind::Gas)
+                    gas_volume += phase_volumes[p];
+            gas_fraction = gas_volume / bulk_volume;
+        }
+        std::optional<std::vector<double>> dissolved;
+        if (phase_volumes[options.liquid_phase] > 0)
+        {
+            const auto& catalog = options.mechanism->catalog();
+            dissolved.emplace(catalog.species().size());
+            for (size_t s = 0; s < dissolved->size(); ++s)
+            {
+                const auto species = catalog.species()[s].id;
+                if (catalog.allows(species, SpeciesPhase::Dissolved))
+                    (*dissolved)[s] = material.amount(catalog, species, SpeciesPhase::Dissolved);
+            }
+        }
+        return {std::move(guess), std::move(phase_volumes), bulk_volume, gas_fraction, location, std::move(dissolved)};
+    }
+
+    QbmmLawInputs qbmm_source_inputs(const QbmmPopulationSchema& family, size_t p, const QbmmCellView& pre,
+        const QbmmQuadrature& quadrature, const QbmmRateState& rate, double dt) const
+    {
+        std::optional<double> specific_volume, temperature, liquid_volume, liquid_temperature;
+        if (quadrature.status != InversionStatus::Absent)
+        {
+            const long double mass =
+                static_cast<long double>(family.scaled_mass(pre.species_moles)) * family.mass_scale_kg();
+            specific_volume = population_source_detail::narrow(rate.phase_volumes[p] / mass);
+            temperature = rate.guess.phases[p].temperature;
+        }
+        const auto& liquid = rate.guess.phases[options.liquid_phase];
+        const double physical_liquid_volume = rate.phase_volumes[options.liquid_phase];
+        if (physical_liquid_volume > 0)
+        {
+            liquid_volume = physical_liquid_volume;
+            liquid_temperature = liquid.temperature;
+        }
+        const auto drift = qbmm_native_law_detail::mean_drift_velocity(rate.guess, p);
+        return make_qbmm_law_inputs(family,
+            {quadrature, qbmm_geometry(family, pre, rate.bulk_volume, specific_volume), pre.species_moles,
+                rate.bulk_volume, rate.phase_volumes[p], rate.guess.phases[p].absolute_pressure, temperature, dt,
+                rate.gas_fraction, qbmm_phase_concentrations(liquid.moles, physical_liquid_volume), liquid_temperature,
+                {drift.component(0), drift.component(1), drift.component(2)}, rate.location, liquid_volume,
+                rate.carrier_liquid_dissolved_moles});
+    }
+
+    static void validate_qbmm_gate(const QbmmPopulationSchema& family, const QbmmApplicabilityEvaluation& evaluation)
+    {
+        if (!evaluation.gate_passed)
+            throw std::invalid_argument("QBMM family '" + family.population() + "' law '" +
+                                        evaluation.metadata.identity +
+                                        "' is outside its declared applicability or lacks a required input.");
+    }
+
+    struct JointEventRow
+    {
+        size_t phase;
+        std::vector<QbmmEventOperation> operations;
+    };
+
+    std::vector<JointEventRow> evaluate_joint_qbmm(const Solver::SourceStageContext& context, size_t c,
+        const QbmmRateState& rate, const CellSpeciesState& material, const Faces::RawAmounts& raw_material,
+        const QbmmStage& qbmm) const
+    {
+        const auto& transport = context.transport;
+        const auto& families = flow->options().qbmm_families;
+        std::vector<size_t> phases;
+        phases.reserve(families.size());
+        for (size_t p = 0; p < families.size(); ++p)
+            if (families[p])
+                phases.push_back(p);
+        std::ranges::sort(phases, {}, [&](size_t p) -> const std::string& { return families[p]->population(); });
+        std::vector<QbmmLawInputs> inputs;
+        std::vector<std::vector<QbmmApplicabilityEvaluation>> applicability(families.size());
+        std::vector<MixtureQbmmFamilyInput> rows;
+        inputs.reserve(phases.size());
+        rows.reserve(phases.size());
+        for (const size_t p : phases)
+        {
+            const auto& family = *families[p];
+            const auto pre = qbmm_predecessor(family, material, transport.cells[c].phases[p], raw_material);
+            const auto& quadrature = *qbmm.pre_material[c][p];
+            const auto& input =
+                inputs.emplace_back(qbmm_source_inputs(family, p, pre, quadrature, rate, transport.time_step));
+            const bool occupied = quadrature.status != InversionStatus::Absent;
+            bool scoped = false, allowed_at_absence = false;
+            for (const auto& law : family.closure_versions().laws)
+                if (!qbmm_is_transport_law(law))
+                {
+                    scoped = true;
+                    allowed_at_absence = allowed_at_absence || !law.requires_population;
+                    auto& observed = applicability[p].emplace_back(evaluate_qbmm_applicability(law, input));
+                    validate_qbmm_gate(family, observed);
+                }
+            rows.push_back({family, p, input, applicability[p], occupied || !scoped || allowed_at_absence});
+        }
+        auto operations = options.qbmm_population->evaluate_joint(
+            {rows, material, c, transport.stage, transport.time_step, transport.accepted_time});
+        require(operations.size() == rows.size(), "Joint QBMM evaluation must return one event row per bound family.");
+        std::vector<JointEventRow> events;
+        events.reserve(rows.size());
+        for (size_t i = 0; i < rows.size(); ++i)
+        {
+            require(rows[i].events_allowed || operations[i].empty(),
+                "Joint QBMM events at absence require a population law that allows absent families.");
+            events.push_back({rows[i].phase, std::move(operations[i])});
+        }
+        return events;
+    }
+
     FrozenMaterialSourceTail apply_qbmm(const Solver::SourceStageContext& context, size_t c,
         const Solver::CellState& caloric_guess, CellSpeciesState& material, Faces::RawAmounts& raw_material,
         Faces::LocalSourceAccumulator& sums, QbmmStage& qbmm) const
@@ -483,32 +644,33 @@ struct SourceEngine
             slots = &thermal_configuration->stages.back().material;
             tail.paired_amounts.resize(slots->size());
         }
-        Solver::CellState guess;
-        std::vector<double> phase_volumes;
-        std::vector<Faces::MolarTerm> terms;
-        for (size_t p = 0; p < families.size(); ++p)
+        const bool joint = options.qbmm_population && options.qbmm_population->evaluate_joint;
+        std::optional<QbmmRateState> rate;
+        std::vector<JointEventRow> joint_events;
+        if (joint)
         {
+            const auto joint_rate = qbmm_rate_state(context, c, caloric_guess, material);
+            joint_events = evaluate_joint_qbmm(context, c, joint_rate, material, raw_material, qbmm);
+        }
+        std::vector<Faces::MolarTerm> terms;
+        const size_t phase_count = joint ? joint_events.size() : families.size();
+        for (size_t i = 0; i < phase_count; ++i)
+        {
+            const size_t p = joint ? joint_events[i].phase : i;
             if (!families[p])
                 continue;
             const auto& family = *families[p];
             const auto& before = transported.phases[p];
-            const auto pre = qbmm_view(family, material, before);
-            require(std::ranges::equal(pre.species_moles, before.moles),
-                "An upstream material stage changed a QBMM family without a paired allocation.");
-            for (size_t s = 0; s < before.moles.size(); ++s)
-            {
-                const auto slot = Faces::raw_amount_slot(
-                    catalog, material, catalog.species()[s].id, {SpeciesPhase::Dispersed, family.population()});
-                const auto& parts = raw_material.at(slot);
-                Sum change;
-                change += parts[0];
-                change += parts[1];
-                change += -static_cast<long double>(before.moles[s]);
-                require(change.value() == 0, "An upstream raw material stage changed a QBMM family.");
-            }
-
+            const auto pre =
+                joint ? qbmm_view(family, material, before) : qbmm_predecessor(family, material, before, raw_material);
             QbmmEventBatch batch{family.fingerprint(), 0, transport.time_step, {}};
-            if (options.qbmm_population)
+            if (joint)
+            {
+                const auto& metadata = options.qbmm_population->metadata;
+                for (auto& operation : joint_events[i].operations)
+                    batch.events.push_back({metadata.identity, metadata.revision, std::move(operation)});
+            }
+            else if (options.qbmm_population)
             {
                 const auto& provider = *options.qbmm_population;
                 const auto& quadrature = *qbmm.pre_material[c][p];
@@ -523,48 +685,17 @@ struct SourceEngine
                 { return in_scope(law->metadata) && family.declares_law(law->metadata); };
                 if (integrated || std::ranges::any_of(provider.laws, selected))
                 {
-                    if (phase_volumes.empty())
-                    {
-                        guess = material_guess(caloric_guess, transported, material);
-                        phase_volumes = qbmm_phase_volumes(guess);
-                        if (uses_qbmm_kinetic_transport(flow->options().qbmm_model))
-                            qbmm_native_law_detail::evaluate_kinetic_closure(flow->options(), *flow->mesh(), guess,
-                                transport.new_control_volumes.at(c), phase_volumes, source_location(context, c));
-                    }
-                    const double bulk_volume = transport.new_control_volumes.at(c);
-                    std::optional<double> specific_volume, temperature;
-                    if (occupied)
-                    {
-                        const long double mass =
-                            static_cast<long double>(family.scaled_mass(pre.species_moles)) * family.mass_scale_kg();
-                        specific_volume = population_source_detail::narrow(phase_volumes[p] / mass);
-                        temperature = guess.phases[p].temperature;
-                    }
-                    double gas_volume = 0;
-                    for (size_t other = 0; other < phase_volumes.size(); ++other)
-                        if (guess.phases[other].thermodynamics->kind() == EOSKind::Gas)
-                            gas_volume += phase_volumes[other];
-                    const auto drift = qbmm_native_law_detail::mean_drift_velocity(guess, p);
-                    const auto inputs = make_qbmm_law_inputs(family,
-                        {quadrature, qbmm_geometry(family, pre, bulk_volume, specific_volume), pre.species_moles,
-                            bulk_volume, phase_volumes[p], guess.phases[p].absolute_pressure, temperature,
-                            transport.time_step, gas_volume / bulk_volume,
-                            qbmm_phase_concentrations(
-                                guess.phases[options.liquid_phase].moles, phase_volumes[options.liquid_phase]),
-                            phase_volumes[options.liquid_phase] > 0
-                                ? std::optional<double>(guess.phases[options.liquid_phase].temperature)
-                                : std::nullopt,
-                            {drift.component(0), drift.component(1), drift.component(2)}, source_location(context, c)});
+                    if (!rate)
+                        rate.emplace(qbmm_rate_state(context, c, caloric_guess, material));
+                    const auto inputs = qbmm_source_inputs(family, p, pre, quadrature, *rate, transport.time_step);
                     for (const auto& metadata : declared)
-                        if (in_scope(metadata) && metadata.gate == QbmmApplicabilityGate::RejectOutside &&
-                            !evaluate_qbmm_applicability(metadata, inputs).gate_passed)
-                            throw std::invalid_argument(
-                                "QBMM family '" + family.population() + "' law '" + metadata.identity +
-                                "' is outside its declared applicability or lacks a required input.");
+                        if (in_scope(metadata) && metadata.gate == QbmmApplicabilityGate::RejectOutside)
+                            validate_qbmm_gate(family, evaluate_qbmm_applicability(metadata, inputs));
                     if (integrated)
                     {
-                        auto operations = provider.evaluate({family, p, c, quadrature, material, phase_volumes,
-                            guess.phases, transport.stage, transport.time_step, transport.accepted_time, &inputs});
+                        auto operations = provider.evaluate(
+                            {family, p, c, quadrature, material, rate->phase_volumes, rate->guess.phases,
+                                transport.stage, transport.time_step, transport.accepted_time, &inputs});
                         for (auto& operation : operations)
                             batch.events.push_back(
                                 {provider.metadata.identity, provider.metadata.revision, std::move(operation)});
@@ -1335,6 +1466,8 @@ struct ReactingMixtureCoupler::Implementation
                             signature << ':' << metadata.size() << ':' << metadata;
                         }
                     }
+                    if (law.evaluate_joint)
+                        signature << ":joint-population-source-v1";
                 }
                 signature << ":planar:" << bool(options.planar_motion);
                 if (options.planar_motion)
@@ -1410,7 +1543,8 @@ struct ReactingMixtureCoupler::Implementation
         }
         const bool legacy_compatible =
             !options.planar_motion && !options.body_acceleration &&
-            (!options.qbmm_population || options.qbmm_population->laws.empty()) &&
+            (!options.qbmm_population ||
+                (options.qbmm_population->laws.empty() && !options.qbmm_population->evaluate_joint)) &&
             flow->options().qbmm_model.velocity == QbmmModelOptions::Velocity::SharedCarrier &&
             std::ranges::all_of(flow->options().qbmm_families,
                 [](const auto& family) { return !family || family->closure_versions().laws.empty(); });

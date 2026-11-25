@@ -42,14 +42,18 @@ std::shared_ptr<const InterphaseConfiguration> configure_qbmm_sources(
     if (!options.qbmm_population)
         return thermal;
     const auto& provider = *options.qbmm_population;
-    require((provider.evaluate || !provider.laws.empty()) && !provider.metadata.identity.empty() &&
-                provider.metadata.revision > 0 && provider.metadata.schema_fingerprint == catalog.fingerprint(),
+    require((provider.evaluate || !provider.laws.empty() || provider.evaluate_joint) &&
+                !provider.metadata.identity.empty() && provider.metadata.revision > 0 &&
+                provider.metadata.schema_fingerprint == catalog.fingerprint(),
         "QBMM provider needs a valid identity, revision, matching species catalog and local law.");
+    require(!provider.evaluate_joint || (!provider.evaluate && provider.laws.empty()),
+        "A joint QBMM provider owns all bound families and requires exclusive evaluation.");
     for (const auto& family : families)
         if (family)
         {
-            const bool selected = provider.evaluate || std::ranges::any_of(provider.laws, [&](const auto& law)
-                                                           { return law && family->declares_law(law->metadata); });
+            const bool selected = provider.evaluate || provider.evaluate_joint ||
+                                  std::ranges::any_of(provider.laws,
+                                      [&](const auto& law) { return law && family->declares_law(law->metadata); });
             require(family->catalog().fingerprint() == catalog.fingerprint() &&
                         (!selected || (family->closure_versions().source_identity == provider.metadata.identity &&
                                           family->closure_versions().source == provider.metadata.revision)),
@@ -75,12 +79,13 @@ std::shared_ptr<const InterphaseConfiguration> configure_qbmm_sources(
         if (family)
             for (const auto& declared : family->closure_versions().laws)
                 if (!qbmm_is_transport_law(declared))
-                    require(provider.evaluate || std::ranges::any_of(provider.laws,
-                                                     [&](const auto& law) { return law->metadata == declared; }),
+                    require(provider.evaluate || provider.evaluate_joint ||
+                                std::ranges::any_of(
+                                    provider.laws, [&](const auto& law) { return law->metadata == declared; }),
                         "A declared population law needs a matching evaluator or the integrated provider adapter.");
     if (!provider.transfers)
         return thermal;
-    const auto transfers = std::make_shared<const InterphaseConfiguration>(*provider.transfers);
+    const auto transfers = std::make_shared<InterphaseConfiguration>(*provider.transfers);
     require(transfers->stages.size() == 1 && transfers->stages[0].kind == InterphaseStageKind::Material &&
                 transfers->metadata.schema_fingerprint == catalog.fingerprint() &&
                 transfers->phase_enthalpy.size() == families.size(),
@@ -102,10 +107,23 @@ std::shared_ptr<const InterphaseConfiguration> configure_qbmm_sources(
         require(options.phases[other].population.empty(),
             "A QBMM material counterpart must match the unnamed chemical compartment in the Q1 transfer.");
     }
+    if (provider.evaluate_joint)
+    {
+        // A simultaneous joint stage uses the same thermal visitation order
+        // when the physical phase slots or supplied transfer slots are permuted.
+        const auto& roles = flow.options().phase_roles;
+        std::ranges::sort(transfers->stages.front().material, {}, [&](const MaterialTransferSlot& slot)
+            {
+                const auto& donor = roles[slot.donor];
+                const auto& recipient = roles[slot.recipient];
+                return std::tuple{slot.species, donor.role, std::string_view(donor.identity), recipient.role,
+                    std::string_view(recipient.identity)};
+            });
+    }
     if (!flow.state().cells.empty())
         validate_interphase_configuration(*transfers, flow.state().cells.front().phases);
     options.qbmm_population = std::make_shared<const MixtureQbmmProvider>(
-        MixtureQbmmProvider{provider.metadata, transfers, provider.evaluate, provider.laws});
+        MixtureQbmmProvider{provider.metadata, transfers, provider.evaluate, provider.laws, provider.evaluate_joint});
     if (!thermal)
         return transfers;
     auto combined = std::make_shared<InterphaseConfiguration>(*thermal);

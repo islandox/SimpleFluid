@@ -458,6 +458,19 @@ TEST_F(QbmmEventsTest, SuppliedSlipUsesFieldMagnitudeInclusiveBoundsAndPreserves
     EXPECT_FALSE(inputs.time_step_s); // Initialization needs no invented unit interval.
 }
 
+TEST_F(QbmmEventsTest, SuppliedSlipChecksTheEntireFamilyEvenWithANodeSelector)
+{
+    auto law = slip_metadata();
+    law.ranges = {{R::QbmmRangeVariable::DiameterM, 1., 1.5, std::nullopt}};
+    const R::QbmmLawInputs inputs{.quadrature = rate_quadrature(),
+        .geometry = R::QbmmGeometryView{.active_atoms = 2, .diameter_m = {1., 2.},
+            .min_diameter = 1., .max_diameter = 2.},
+        .mass_scale_kg = 1., .bulk_volume_m3 = 2., .absolute_pressure_pa = 100000.,
+        .phase_volume_fraction = .25, .node_diameter_m = 1.};
+    EXPECT_TRUE(R::evaluate_qbmm_applicability(law, inputs).gate_passed);
+    EXPECT_THROW((void) R::evaluate_qbmm_supplied_slip(law, inputs, {3, 4, 0}), std::invalid_argument);
+}
+
 TEST_F(QbmmEventsTest, ApplicabilityKeepsPhysicalLiquidConcentrationsSeparateAndExactAbsenceUndefined)
 {
     auto law = slip_metadata();

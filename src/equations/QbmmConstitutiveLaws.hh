@@ -168,6 +168,8 @@ struct QbmmLawInputs
     const std::string population{}; ///< Stable family identity; quadrature indices carry no material identity.
     const std::optional<ReactionLocation> location{}; ///< Source-donor centroid, cell identity and geometry epoch.
     const std::optional<double> node_mass_kg_per_bubble{}, node_diameter_m{};
+    const std::optional<double> carrier_liquid_volume_m3{};                    ///< Occupied physical liquid EOS volume.
+    const std::optional<std::vector<double>> carrier_liquid_dissolved_moles{}; ///< Original Dissolved mol/cell.
 };
 
 /** Instantaneous SI input for a single active atom. Concentration spans are borrowed for this call.
@@ -380,7 +382,7 @@ struct QbmmSlipEvaluation
         input.absolute_pressure_pa, input.temperature_K, input.time_step_s, input.phase_volume_fraction,
         input.gas_volume_fraction, input.phase_concentration_mol_per_m3, input.carrier_liquid_concentration_mol_per_m3,
         input.carrier_liquid_temperature_K, speed, input.family_fingerprint, input.catalog_fingerprint,
-        input.population, input.location};
+        input.population, input.location, {}, {}, input.carrier_liquid_volume_m3, input.carrier_liquid_dissolved_moles};
     auto applicability = evaluate_qbmm_applicability(metadata, frozen);
     if (!applicability.gate_passed)
         throw std::invalid_argument(

@@ -196,6 +196,21 @@ function(add_qbmm_restart_tests name target filter environment_prefix labels)
     endforeach()
 endfunction()
 
+foreach(geometry IN ITEMS Fixed Planar)
+    add_qbmm_restart_tests(QbmmFilm${geometry}Restart testReactingMixtureQbmmFilm
+        ReactingMixtureQbmmFilm.${geometry}PortableContinuation
+        SIMPLEFLUID_FILM "qbmm;film;reacting;restart;conservation;empty_rank")
+endforeach()
+foreach(ranks IN ITEMS 2 4)
+    set(test QbmmFilmContracts_${ranks}procs)
+    simplefluid_add_mpi_test(NAME "${test}" TARGET testReactingMixtureQbmmFilm PROCS ${ranks}
+        ARGS "--gtest_filter=ReactingMixtureQbmmFilm.*-*.*PortableContinuation"
+        LABELS "mpi;qbmm;film;reacting;ale;conservation;transaction;empty_rank" TIMEOUT 180)
+    if(TEST "${test}")
+        set_tests_properties("${test}" PROPERTIES ENVIRONMENT "SIMPLEFLUID_FILM_RANKS=${ranks}")
+    endif()
+endforeach()
+
 add_qbmm_restart_tests(QbmmPlanarRestart testLowMachQbmmPlanarALE
     LowMachQbmmPlanarALETest.PortableRestartContinuesFromOriginalReference SIMPLEFLUID_Q7A_RESTART "qbmm;ale;restart")
 add_qbmm_restart_tests(QbmmPlanarControllerRestart testReactingMixtureQbmmSources
