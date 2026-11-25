@@ -1,6 +1,8 @@
 #include "solvers/details/LowMachQbmmLinearTransport.hh"
 
+#include "FVM/ALEControlVolumeState.hh"
 #include "equations/CollectiveValidation.hh"
+#include "geometry/GeometryExecutionGuard.hh"
 #include "solvers/details/LowMachQbmmLawInputs.hh"
 
 #include <algorithm>
@@ -44,8 +46,81 @@ struct CellStencil
     std::vector<FaceStencil> traces;
 };
 
+struct CarrierRates
+{
+    const Flow::Traits::scalar_face_type& absolute;
+    std::optional<decltype(std::declval<const Overlap&>().read())> relative;
+
+    double local_value(LO face) const { return relative ? (*relative)(face, 0) : absolute.local_value(face); }
+};
+
+Vec3 planar_face_offset(const Mesh& mesh, LO face, LO cell)
+{
+    if (std::holds_alternative<Mesh::CartesianPtr>(mesh.variant()))
+    {
+        // Cartesian faces share the cell's transverse center. A half width
+        // preserves the offset even at a large coordinate origin.
+        const double sign = mesh.owner_cell(face) == cell ? 1. : -1.;
+        return mesh.face_normal(face) * (sign * mesh.cell_to_face_distance(face, cell));
+    }
+    return mesh.face_center_vector(face, cell);
+}
+
+class StageGeometry
+{
+    const Mesh& mesh;
+    const PlanarTransportGeometry* planar;
+    bool from_old;
+    double fraction;
+
+    double interpolate(double old_value, double new_value) const
+    {
+        return from_old ? std::lerp(old_value, new_value, fraction) : std::lerp(new_value, old_value, fraction);
+    }
+
+    Vec3 interpolate(const Vec3& old_offset, const Vec3& new_offset) const
+    {
+        return {interpolate(old_offset.x, new_offset.x), interpolate(old_offset.y, new_offset.y),
+            interpolate(old_offset.z, new_offset.z)};
+    }
+
+public:
+    StageGeometry(const Mesh& mesh_, const PlanarTransportGeometry* planar_, double dt, double remaining)
+        : mesh(mesh_), planar(planar_), from_old(remaining >= dt * .5),
+          fraction((from_old ? dt - remaining : remaining) / dt)
+    {
+    }
+
+    double volume(LO cell) const
+    {
+        return planar ? interpolate(planar->ale.old_cell_volumes()[cell], planar->ale.new_cell_volumes()[cell])
+                      : mesh.cell_volume(cell);
+    }
+
+    Vec3 cell_displacement(LO face, LO cell, LO neighbor, const Vec3& center, bool tvd_mc) const
+    {
+        if (planar)
+        {
+            const auto old = planar->old_faces[face].owner_to_neighbor;
+            return interpolate(mesh.owner_cell(face) == cell ? old : old * -1., mesh.cell_center_vector(face, cell));
+        }
+        return tvd_mc ? mesh.cell_center_vector(face, cell) : mesh.cell_centroid(neighbor) - center;
+    }
+
+    Vec3 face_offset(LO face, LO cell, const Vec3& center, bool tvd_mc) const
+    {
+        if (planar)
+        {
+            const auto& old = planar->old_faces[face];
+            return interpolate(mesh.owner_cell(face) == cell ? old.owner_to_face : old.neighbor_to_face,
+                planar_face_offset(mesh, face, cell));
+        }
+        return tvd_mc ? mesh.face_center_vector(face, cell) : mesh.face_centroid(face) - center;
+    }
+};
+
 std::vector<CellStencil> cell_stencils(
-    const Mesh& mesh, const Flow::Traits::scalar_face_type& flux, TraceLimiter limiter, bool tvd_mc)
+    const Mesh& mesh, const CarrierRates& flux, const StageGeometry& geometry, TraceLimiter limiter, bool tvd_mc)
 {
     std::vector<CellStencil> stencils(mesh.num_owned_cells());
     for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
@@ -60,7 +135,7 @@ std::vector<CellStencil> cell_stencils(
         const auto cell = static_cast<LO>(c);
         auto& stencil = stencils[c];
         const auto center = mesh.cell_centroid(cell);
-        stencil.volume = mesh.cell_volume(cell);
+        stencil.volume = geometry.volume(cell);
         require(std::isfinite(stencil.volume) && stencil.volume > 0, "Invalid QBMM linear bulk volume.");
 
         std::vector<Vec3> displacements;
@@ -71,10 +146,9 @@ std::vector<CellStencil> cell_stencils(
             const auto neighbor = mesh.opposite_or_periodic_neighbor_cell(face, cell);
             require(neighbor >= 0 && static_cast<size_t>(neighbor) < mesh.num_local_cells() && neighbor != cell,
                 "QBMM linear reconstruction requires the adjacent cell in its one-ring halo.");
-            const double neighbor_volume = mesh.cell_volume(neighbor);
+            const double neighbor_volume = geometry.volume(neighbor);
             require(std::isfinite(neighbor_volume) && neighbor_volume > 0, "Invalid QBMM linear neighbor volume.");
-            const auto displacement =
-                tvd_mc ? mesh.cell_center_vector(face, cell) : mesh.cell_centroid(neighbor) - center;
+            const auto displacement = geometry.cell_displacement(face, cell, neighbor, center, tvd_mc);
             displacements.push_back(displacement);
             stencil.neighbors.push_back({neighbor, neighbor_volume, displacement});
         }
@@ -94,7 +168,7 @@ std::vector<CellStencil> cell_stencils(
             auto& wanted = stencil.traces.emplace_back(FaceStencil{face, side, outward, {}, neighbor, {}, {}});
             if (outward > 0.)
                 stencil.outgoing_rate.add_product(outward, 1.);
-            wanted.offset = tvd_mc ? mesh.face_center_vector(face, cell) : mesh.face_centroid(face) - center;
+            wanted.offset = geometry.face_offset(face, cell, center, tvd_mc);
             const bool resolved = fit.weights(wanted.offset, wanted.weights);
             require(
                 resolved || outward <= 0, "QBMM linear one-ring geometry cannot reproduce this outgoing face offset.");
@@ -112,20 +186,35 @@ std::vector<CellStencil> cell_stencils(
     return stencils;
 }
 
-double local_substep_limit(const std::vector<CellStencil>& stencils, double cap)
+double local_substep_limit(const std::vector<CellStencil>& stencils, double cap, const PlanarTransportGeometry* planar)
 {
     double limit = std::numeric_limits<double>::infinity();
-    for (const auto& stencil : stencils)
+    for (size_t c = 0; c < stencils.size(); ++c)
     {
+        const auto& stencil = stencils[c];
         if (stencil.outgoing_rate.sign() == 0)
             continue;
-        FaceSum cap_volume;
-        cap_volume.add_product(cap, stencil.volume);
-        double bound = cap_volume.rounded(stencil.outgoing_rate);
+        FaceSum numerator, denominator;
+        if (planar && planar->ale.old_cell_volumes()[c] > planar->ale.new_cell_volumes()[c])
+        {
+            // On contraction the minimum volume is at the end of this substep.
+            // Rearrange h*rate <= cap*(V_start - h*(V_old - V_new)/dt).
+            const auto dt = planar->ale.time_step();
+            numerator.add_product(cap, stencil.volume, dt);
+            denominator.add_weighted(stencil.outgoing_rate, dt);
+            denominator.add_product(cap, planar->ale.old_cell_volumes()[c]);
+            denominator.add_product(-cap, planar->ale.new_cell_volumes()[c]);
+        }
+        else
+        {
+            numerator.add_product(cap, stencil.volume);
+            denominator = stencil.outgoing_rate;
+        }
+        double bound = numerator.rounded(denominator);
         if (std::isfinite(bound) && bound > 0)
         {
-            cap_volume.add_weighted(stencil.outgoing_rate, -bound);
-            if (cap_volume.sign() < 0)
+            numerator.add_weighted(denominator, -bound);
+            if (numerator.sign() < 0)
                 bound = std::nextafter(bound, 0.);
         }
         limit = std::min(limit, bound);
@@ -133,16 +222,20 @@ double local_substep_limit(const std::vector<CellStencil>& stencils, double cap)
     return limit;
 }
 
-double local_cfl(const std::vector<CellStencil>& stencils, double h, double cap)
+double local_cfl(const std::vector<CellStencil>& stencils, double h, double cap, const StageGeometry* end_geometry)
 {
     double maximum = 0;
-    for (const auto& stencil : stencils)
+    for (size_t c = 0; c < stencils.size(); ++c)
     {
+        const auto& stencil = stencils[c];
+        const double volume =
+            end_geometry ? std::min(stencil.volume, end_geometry->volume(static_cast<LO>(c))) : stencil.volume;
+        require(std::isfinite(volume) && volume > 0, "Invalid QBMM linear interval volume.");
         FaceSum swept, excess;
         swept.add_weighted(stencil.outgoing_rate, h);
         excess = swept;
-        excess.add_product(-cap, stencil.volume);
-        double fraction = swept.rounded(stencil.volume);
+        excess.add_product(-cap, volume);
+        double fraction = swept.rounded(volume);
         if (excess.sign() > 0)
             fraction = std::max(fraction, std::nextafter(cap, std::numeric_limits<double>::infinity()));
         maximum = std::max(maximum, fraction);
@@ -764,6 +857,8 @@ std::vector<LimitedTrace> limit_traces(const QbmmPopulationSchema& family, const
                 continue;
             auto& trace = traces[f];
             trace.thermal.reset();
+            // The precision test uses the same reference on either side of a face,
+            // including when the two stage volumes come from different MPI owners.
             const double reference_volume = std::min(stencil.volume, stencil.neighbors[face.neighbor].volume);
             trace.returned = tvd_mc && trace.block[H0] != 0 &&
                              return_material_packet(trace.block, h, outward, stencil.volume, reference_volume, dt);
@@ -920,7 +1015,7 @@ void stage_traces(const Flow::Options& options, const Flow::State& guess, const 
 }
 
 template<class Traces, class Packets>
-void stage_packets(const Mesh& mesh, const Flow::Options& options, const Flow::Traits::scalar_face_type& flux,
+void stage_packets(const Mesh& mesh, const Flow::Options& options, const CarrierRates& flux,
     const std::vector<size_t>& phases, const TraceColumns& columns, const Traces& traces, const Packets& packets,
     std::vector<FaceInterval>& intervals, FaceSum& caloric, FaceSum& energy, double h, bool tvd_mc,
     unsigned long long& returned_packets)
@@ -1134,10 +1229,28 @@ void complete_substep(const Flow::Options& options, const Flow::State& start, Fl
 }
 } // namespace
 
+std::vector<PlanarFaceGeometry> capture_planar_face_geometry(const Mesh& mesh)
+{
+    const auto execution = acquire_mesh_execution(mesh);
+    std::vector<PlanarFaceGeometry> faces(mesh.num_faces());
+    for (size_t f = 0; f < faces.size(); ++f)
+    {
+        const auto face = static_cast<LO>(f);
+        if (mesh.is_geometry_exterior_face(face))
+            continue;
+        const auto owner = mesh.owner_cell(face), neighbor = mesh.neighbor_cell(face);
+        if (owner < 0 || neighbor < 0)
+            continue; // Fringe faces have no owned row in the reconstruction.
+        faces[f] = {mesh.cell_center_vector(face, owner), planar_face_offset(mesh, face, owner),
+            planar_face_offset(mesh, face, neighbor)};
+    }
+    return faces;
+}
+
 TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options& options, const Flow::State& accepted,
     const Flow::State& thermodynamic_guess, Flow::State& candidate, const Flow::Traits::scalar_face_type& carrier_flux,
     const std::vector<std::vector<double>>& accepted_material_volumes, double dt, size_t corrector,
-    TraceLimiter limiter)
+    TraceLimiter limiter, const PlanarTransportGeometry* planar)
 {
     const auto& mesh = *grid;
     const auto owned_cells = mesh.owned_cell_map(), overlap_cells = mesh.overlap_cell_map();
@@ -1150,6 +1263,11 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
     const bool tvd_mc = slope_limiter == QbmmModelOptions::LinearSlopeLimiter::TvdMc;
     const auto validate = [&](const char* context, auto&& operation)
     { collective_detail::collective_local_validation(mesh, context, operation); };
+
+    collective_detail::require_uniform_value(mesh, int(planar != nullptr), "QBMM linear planar transport selection");
+    if (planar)
+        planar->ale.validate(mesh, dt);
+    CarrierRates transport_flux{carrier_flux, std::nullopt};
 
     TransportResult result;
     std::vector<size_t> phases;
@@ -1176,7 +1294,8 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
                     columns.block = FirstSpecies + options.qbmm_families[p]->catalog().species().size();
                 }
             require(!phases.empty(), "QBMM linear mode has no bound phase.");
-            stencils = cell_stencils(mesh, carrier_flux, limiter, tvd_mc);
+            if (!planar)
+                stencils = cell_stencils(mesh, transport_flux, StageGeometry(mesh, nullptr, dt, dt), limiter, tvd_mc);
             result.owned_flux.resize(np);
             result.integrated_faces.resize(nf);
             result.advected_material_volumes = accepted_material_volumes;
@@ -1219,7 +1338,7 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
             mesh, family.catalog().fingerprint(), "QBMM linear catalog fingerprint");
     }
     const Import cell_import(owned_cells, overlap_cells), face_import(owned_faces, overlap_faces);
-    std::optional<Overlap> stocks, packets;
+    std::optional<Overlap> stocks, packets, relative_carrier;
     std::optional<MultiVector> donor_traces, canonical_traces;
     validate("QBMM linear owner/ghost buffers",
         [&]
@@ -1229,6 +1348,38 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
             donor_traces.emplace(overlap_faces, phases.size() * sides * columns.width());
             canonical_traces.emplace(owned_faces, phases.size() * sides * columns.width());
         });
+    if (planar)
+    {
+        validate("QBMM linear planar carrier and geometry",
+            [&]
+            {
+                require(options.qbmm_model.velocity == QbmmModelOptions::Velocity::SharedCarrier,
+                    "QBMM linear planar transport requires a shared carrier.");
+                require(planar->old_faces.size() == mesh.num_faces(), "QBMM linear planar face geometry layout differs.");
+                const auto finite = [](const Vec3& value)
+                { return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z); };
+                require(std::ranges::all_of(planar->old_faces,
+                            [&](const PlanarFaceGeometry& face)
+                            {
+                                return finite(face.owner_to_neighbor) && finite(face.owner_to_face) &&
+                                       finite(face.neighbor_to_face);
+                            }),
+                    "QBMM linear planar face geometry is nonfinite.");
+                relative_carrier.emplace(face_import, owned_faces, overlap_faces, 1);
+                const auto values = relative_carrier->write();
+                for (size_t f = 0; f < nf; ++f)
+                {
+                    const auto face = static_cast<LO>(f);
+                    const double relative = carrier_flux.local_value(face) - planar->ale.face_mesh_fluxes()[f];
+                    require(std::isfinite(relative), "QBMM linear relative carrier flux is nonfinite.");
+                    require(!mesh.is_geometry_exterior_face(face) || (mesh.is_boundary_face(face) && relative == 0.),
+                        "QBMM linear planar transport requires impermeable physical walls.");
+                    values(face, 0) = relative == 0. ? 0. : relative;
+                }
+            });
+        relative_carrier->synchronize();
+        transport_flux.relative = relative_carrier->read();
+    }
 
     const auto maximum = [&](double value)
     {
@@ -1237,14 +1388,32 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
         return global;
     };
     double local_limit = 0, limit = 0;
-    validate("QBMM linear all-face CFL limit", [&] { local_limit = local_substep_limit(stencils, cap); });
-    Teuchos::reduceAll(comm, Teuchos::REDUCE_MIN, 1, &local_limit, &limit);
+    const auto update_substep_limit = [&]
+    {
+        validate("QBMM linear all-face CFL limit", [&] { local_limit = local_substep_limit(stencils, cap, planar); });
+        Teuchos::reduceAll(comm, Teuchos::REDUCE_MIN, 1, &local_limit, &limit);
+    };
+    const auto rebuild_stencils = [&](const StageGeometry& geometry)
+    {
+        validate("QBMM linear planar stage geometry",
+            [&]
+            {
+                const auto execution = acquire_mesh_execution(mesh);
+                stencils = cell_stencils(mesh, transport_flux, geometry, limiter, tvd_mc);
+            });
+    };
+    if (planar)
+        rebuild_stencils(StageGeometry(mesh, planar, dt, dt));
+    else
+        update_substep_limit();
 
     double remaining = dt;
     while (remaining > 0)
     {
         if (result.substeps >= max_substeps)
             throw std::runtime_error("QBMM linear transport exhausted its subcycle cap.");
+        if (planar)
+            update_substep_limit();
         double h = std::min(remaining, limit);
         for (;;)
         {
@@ -1252,7 +1421,12 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
             require(h > 0 && (h == remaining || remaining - h < remaining),
                 "QBMM linear subcycle has no representable time progress.");
             double local_used = 0;
-            validate("QBMM linear fractions actually used", [&] { local_used = local_cfl(stencils, h, cap); });
+            validate("QBMM linear fractions actually used",
+                [&]
+                {
+                    const StageGeometry end_geometry(mesh, planar, dt, remaining - h);
+                    local_used = local_cfl(stencils, h, cap, planar ? &end_geometry : nullptr);
+                });
             const double used = maximum(local_used);
             if (used <= cap)
             {
@@ -1273,6 +1447,10 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
             });
         for (int rk_stage = 0; rk_stage < 2; ++rk_stage)
         {
+            // The first Euler stock belongs to the end geometry. That stencil is also
+            // the start geometry for the next substep after the extensive RK average.
+            if (planar && rk_stage == 1)
+                rebuild_stencils(StageGeometry(mesh, planar, dt, remaining - h));
             validate("QBMM linear owned stage stocks",
                 [&] { stage_stocks(options, candidate, phases, columns.block, stocks->write()); });
             stocks->synchronize();
@@ -1299,7 +1477,7 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
             validate("QBMM linear canonical face packets",
                 [&]
                 {
-                    stage_packets(mesh, options, carrier_flux, phases, columns,
+                    stage_packets(mesh, options, transport_flux, phases, columns,
                         canonical_traces->getLocalViewHost(Tpetra::Access::ReadOnly), packets->write(), faces, caloric,
                         energy, h, tvd_mc, returned_packets);
                 });
@@ -1352,7 +1530,7 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
                     physical.material_volume.add_weighted(interval.direction[0][W], 1.);
                     physical.material_volume.add_weighted(interval.direction[1][W], 1.);
                     result.owned_flux[phases[a]][f] =
-                        face_receipt(interval, dt, carrier_flux.local_value(static_cast<LO>(f)));
+                        face_receipt(interval, dt, transport_flux.local_value(static_cast<LO>(f)));
                 }
             result.local_caloric_transport_magnitude = represented(caloric);
             result.local_energy_transport_magnitude = represented(energy);

@@ -1311,6 +1311,8 @@ struct ReactingMixtureCoupler::Implementation
                               << model.linear_cfl << ':' << model.maximum_linear_substeps;
                     if (model.linear_slope_limiter == QbmmModelOptions::LinearSlopeLimiter::TvdMc)
                         signature << ":tvd-mc:" << qbmm_linear_tvd_mc_revision;
+                    if (options.planar_motion)
+                        signature << ":planar-linear:" << qbmm_planar_linear_transport_revision;
                     if (options.body_acceleration)
                         signature << ":balanced-linear-pressure:" << Solver::balanced_linear_pressure_revision
                                   << ":forced-linear-thermal:" << Solver::forced_linear_thermal_revision;
@@ -1794,13 +1796,11 @@ void ReactingMixtureCoupler::commit(const Trial& trial)
                 "Reacting mixture controller generation exhausted.");
             candidate = trial.d->diagnostics;
         });
+    const Solver::ControllerRestartDiagnostics diagnostics{d->options.mechanism->reactions().size(), &candidate};
     if (d->motion)
-        d->flow->commit_ale(trial.d->flow, *d->motion, &*d->lease);
+        d->flow->commit_planar_impl(trial.d->flow, *d->motion, &*d->lease, &diagnostics);
     else
-    {
-        const Solver::ControllerRestartDiagnostics diagnostics{d->options.mechanism->reactions().size(), &candidate};
         d->flow->commit_fixed(trial.d->flow, &*d->lease, &diagnostics);
-    }
     d->diagnostics = std::move(candidate);
     ++d->generation;
 }

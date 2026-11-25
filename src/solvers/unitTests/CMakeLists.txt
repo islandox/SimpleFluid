@@ -189,6 +189,20 @@ add_qbmm_restart_tests(QbmmPlanarRestart testLowMachQbmmPlanarALE
 add_qbmm_restart_tests(QbmmPlanarControllerRestart testReactingMixtureQbmmSources
     ReactingMixtureQbmmSourcesTest.PlanarEventsUseLiveGeometryAndReplayAfterSingleOwnerFailure
     SIMPLEFLUID_Q7A_RESTART "qbmm;ale;restart")
+foreach(limiter IN ITEMS Realizability TvdMc)
+    add_qbmm_restart_tests(QbmmPlanarLinear${limiter}Restart testReactingMixtureQbmmSources
+        ReactingMixtureQbmmSourcesTest.PlanarLinear${limiter}PortableContinuation
+        SIMPLEFLUID_PLANAR_LINEAR_RESTART "qbmm;ale;restart;transaction;empty_rank")
+endforeach()
+foreach(ranks IN ITEMS 2 4)
+    set(test "QbmmPlanarLinearRestartContracts_${ranks}procs")
+    simplefluid_add_mpi_test(NAME "${test}" TARGET testReactingMixtureQbmmSources PROCS ${ranks}
+        ARGS "--gtest_filter=ReactingMixtureQbmmSourcesTest.PlanarLinear*PortableContinuation"
+        LABELS "mpi;qbmm;ale;restart;transaction;empty_rank" TIMEOUT 180)
+    if(TEST "${test}")
+        set_tests_properties("${test}" PROPERTIES ENVIRONMENT "SIMPLEFLUID_PLANAR_LINEAR_RESTART_RANKS=${ranks}")
+    endif()
+endforeach()
 add_qbmm_restart_tests(QbmmKineticControllerRestart testReactingMixtureQbmmSources
     ReactingMixtureQbmmSourcesTest.KineticTransportFeedsCoherentEventsThermalsCommitAndRestart
     SIMPLEFLUID_Q7B_RESTART "qbmm;kinetic;restart;transaction;conservation")
@@ -241,8 +255,25 @@ foreach(_linear_ranks IN ITEMS 2 4)
         endif()
     endforeach()
     simplefluid_add_mpi_test(NAME LowMachQbmmLinearTransport_${_linear_ranks}procs
-        TARGET testLowMachQbmmLinearTransport PROCS ${_linear_ranks} ARGS "--gtest_filter=-*.TvdMc*"
+        TARGET testLowMachQbmmLinearTransport PROCS ${_linear_ranks}
+        ARGS "--gtest_filter=-*.TvdMc*:QbmmMovingLinearTransport.*"
         LABELS "mpi;qbmm;low_mach;conservation;empty_rank" TIMEOUT 900)
+endforeach()
+
+foreach(ranks IN ITEMS 2 4)
+    set(test QbmmMovingLinearTransport_${ranks}procs)
+    simplefluid_add_mpi_test(NAME ${test} TARGET testLowMachQbmmLinearTransport PROCS ${ranks}
+        ARGS "--gtest_filter=QbmmMovingLinearTransport.*" LABELS "mpi;qbmm;ale;conservation;empty_rank" TIMEOUT 300)
+    if(TEST ${test})
+        set_tests_properties(${test} PROPERTIES ENVIRONMENT "SIMPLEFLUID_Q8C_EXPECTED_RANKS=${ranks}")
+    endif()
+    set(test QbmmMovingLinearPiston_${ranks}procs)
+    simplefluid_add_mpi_test(NAME ${test} TARGET testLowMachQbmmPlanarALE PROCS ${ranks}
+        ARGS "--gtest_filter=LowMachQbmmPlanarALETest.LinearClosedPiston*"
+        LABELS "mpi;qbmm;ale;conservation;empty_rank")
+    if(TEST ${test})
+        set_tests_properties(${test} PROPERTIES ENVIRONMENT "SIMPLEFLUID_QBMM_PLANAR_EXPECTED_RANKS=${ranks}")
+    endif()
 endforeach()
 
 foreach(_kinetic_ranks IN ITEMS 2 4)

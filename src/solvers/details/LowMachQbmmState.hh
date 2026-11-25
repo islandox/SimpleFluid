@@ -117,8 +117,24 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_capability(const Flow::Options& o
     };
     if (force)
         validate_force(*force);
-    require(!moving || (!kinetic && !linear && !force),
-        "Planar ALE requires implicit transport and absent body acceleration.");
+    if (moving)
+    {
+        require(!kinetic && !force, "Planar ALE excludes kinetic transport and supplied body acceleration.");
+        mesh.visit(
+            [](const auto& native)
+            {
+                using Native = std::remove_cvref_t<decltype(native)>;
+                require(std::is_same_v<Native, Flow::Mesh::Cartesian> ||
+                            std::is_same_v<Native, Flow::Mesh::Cylindrical> ||
+                            std::is_same_v<Native, Flow::Mesh::SemiStructured>,
+                    "Low-Mach planar ALE requires native orthogonal mapped geometry.");
+                if constexpr (requires { native.indexer().periodic_dimensions[0]; })
+                    for (size_t axis = 0; axis < 3; ++axis)
+                        require(!native.indexer().periodic_dimensions[axis], "Low-Mach planar ALE requires closed topology.");
+                if constexpr (requires { native.indexer().axial_periodic; })
+                    require(!native.indexer().axial_periodic, "Low-Mach planar ALE requires closed axial topology.");
+            });
+    }
     std::optional<Flow::Vector> declared_force;
     for (const auto& law : options.qbmm_node_slip_laws)
         if (law && law->required_body_acceleration_m_per_s2)
@@ -132,7 +148,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_capability(const Flow::Options& o
     if (!kinetic && !linear)
         return;
     mesh.visit(
-        [axial_kinetic](const auto& native)
+        [axial_kinetic, moving](const auto& native)
         {
             using Native = std::remove_cvref_t<decltype(native)>;
             if constexpr (std::is_same_v<Native, Flow::Mesh::Cartesian>)
@@ -151,7 +167,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_capability(const Flow::Options& o
             {
                 require(
                     !native.indexer().axial_periodic, "Semi-structured explicit QBMM requires closed axial topology.");
-                if (axial_kinetic)
+                if (axial_kinetic || moving)
                     qbmm_explicit_detail::validate_cylindrical_base(native);
             }
             else

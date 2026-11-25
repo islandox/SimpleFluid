@@ -10,9 +10,9 @@ namespace SimpleFluid::Reacting
  * KineticEuler admits fixed closed Cartesian meshes with node-dependent slip and optional body acceleration.
  * It also admits orthogonal native cylindrical meshes and polygonal disk or annulus extrusions with axial
  * node slip and axial body acceleration. Carrier velocities have Cartesian components in all three directions.
- * RealizableLinearSSPRK2 requires fixed closed orthogonal meshes with shared carrier. A supplied acceleration
- * requires Cartesian, native cylindrical, or a polygonal disk/annulus extrusion. The solver checks this additional
- * condition collectively when the controller or restart provides the acceleration, including on empty owners.
+ * RealizableLinearSSPRK2 requires closed orthogonal meshes with shared carrier. Prescribed planar ALE
+ * requires absent acceleration. On fixed geometry, supplied acceleration requires Cartesian, native cylindrical,
+ * or a polygonal disk/annulus extrusion. The solver checks this collectively, including on empty owners.
  * Native phase temperatures, prescribed drift and mesh motion have their own
  * configuration or state checks.
  */
@@ -30,7 +30,7 @@ struct QbmmModelOptions
     {
         NativeImplicit,
         KineticEuler,
-        RealizableLinearSSPRK2 ///< Limited linear block reconstruction on fixed orthogonal meshes.
+        RealizableLinearSSPRK2 ///< Limited linear block reconstruction on closed orthogonal meshes.
     };
     enum class LinearSlopeLimiter
     {
@@ -54,6 +54,7 @@ struct QbmmModelOptions
 
 inline constexpr int qbmm_linear_transport_revision = 1; ///< Legacy linear family restart revision.
 inline constexpr int qbmm_linear_tvd_mc_revision = 2;     ///< Tagged linear family restart with TVD-MC.
+inline constexpr int qbmm_planar_linear_transport_revision = 1; ///< Tagged moving-grid linear family restart.
 
 [[nodiscard]] constexpr bool uses_qbmm_kinetic_transport(const QbmmModelOptions& model) noexcept
 {

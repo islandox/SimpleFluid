@@ -1,4 +1,6 @@
 /** Independent finite-volume oracles for the realizable linear SSPRK2 transport. */
+#include "FVM/ALEControlVolumeState.hh"
+#include "QbmmCylindricalTestMesh.hh"
 #include "QbmmKineticTestSupport.hh"
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
@@ -95,10 +97,11 @@ struct Problem
             value.qbmm_shape[0]->H3, thermal.moles[0], thermal.moles[1], thermal.internal_energy, volumes[cell][0]};
     }
 
-    Kernel::TransportResult advance(double dt, Kernel::TraceLimiter limiter = Kernel::TraceLimiter::Outgoing)
+    Kernel::TransportResult advance(double dt, Kernel::TraceLimiter limiter = Kernel::TraceLimiter::Outgoing,
+        const Kernel::PlanarTransportGeometry* planar = nullptr)
     {
         auto candidate = state;
-        auto result = Kernel::transport(grid, options, state, state, candidate, flux, volumes, dt, 0, limiter);
+        auto result = Kernel::transport(grid, options, state, state, candidate, flux, volumes, dt, 0, limiter, planar);
         state = std::move(candidate);
         volumes = result.advected_material_volumes;
         for (auto& cell : state.cells)
@@ -1650,5 +1653,465 @@ TEST(LowMachQbmmLinearTransportTest, NativeGeometryAdmissionAndStationaryCommit)
     skewed.b[1] += .06;
     Problem unsupported(skewed.mesh());
     EXPECT_THROW(Flow(unsupported.grid, {unsupported.gas}, unsupported.options), std::exception);
+}
+
+enum class MovingColumn
+{
+    CartesianX,
+    CartesianY,
+    CartesianZ,
+    Sector,
+    Disk,
+    Annulus
+};
+
+Dimension column_axis(MovingColumn kind)
+{
+    if (kind == MovingColumn::CartesianX)
+        return Dimension::X;
+    return kind == MovingColumn::CartesianY ? Dimension::Y : Dimension::Z;
+}
+
+double coordinate(const Vec& point, Dimension axis)
+{
+    return axis == Dimension::X ? point.x : axis == Dimension::Y ? point.y : point.z;
+}
+
+SP<Flow::Mesh> column_mesh(MovingColumn kind, const ArrReal& axial)
+{
+    namespace Cylinder = Testing::QbmmCylinder;
+    if (kind == MovingColumn::Disk || kind == MovingColumn::Annulus)
+        return Cylinder::mesh(
+            kind == MovingColumn::Disk ? Cylinder::Geometry::PolygonalDisk : Cylinder::Geometry::PolygonalAnnulus, 1,
+            axial);
+    Flow::Mesh::DistributionOptions distribution{.allow_empty_partitions = true};
+    if (kind == MovingColumn::Sector)
+        return std::make_shared<Flow::Mesh>(
+            std::make_shared<Flow::Mesh::Cylindrical>(Vec3D<ArrReal>{ArrReal{1., 2.}, ArrReal{-.5, .5}, axial}),
+            distribution);
+    Vec3D<ArrReal> axes{ArrReal{0., 1.}, ArrReal{0., 1.}, ArrReal{0., 1.}};
+    axes[column_axis(kind)] = axial;
+    return std::make_shared<Flow::Mesh>(std::make_shared<Flow::Mesh::Cartesian>(axes), distribution);
+}
+
+Stock scaled(Stock stock, double factor)
+{
+    for (auto& x : stock)
+        x *= factor;
+    return stock;
+}
+
+// The interior absolute velocity is constant in physical space. Only the exterior
+// wall velocity follows the mesh. Central cells isolate exact translation from that wall.
+Kernel::TransportResult move_column(Problem& op, Dimension axis, double target, double dt, std::optional<double> speed,
+    const std::function<double(LO)>& prescribed_interior = {}, double* max_relative_gcl_error = nullptr)
+{
+    Flow::PlanarMotion motion(op.grid, {.axis = axis});
+    const auto old_face_geometry = Kernel::capture_planar_face_geometry(*op.grid);
+    motion.begin_trial(target, dt);
+    const auto ale = FVM::make_validated_planar_ale_control_volume_state(*op.grid, motion);
+    const Kernel::PlanarTransportGeometry planar{ale, old_face_geometry};
+    for (const auto face : op.flux.owned_face_ids())
+    {
+        const double projected_area = coordinate(op.grid->face_normal(face), axis) * op.grid->face_area(face);
+        double rate = ale.face_mesh_fluxes()[face];
+        if (speed && op.grid->is_interior_face(face))
+            rate = prescribed_interior ? prescribed_interior(face) : *speed * projected_area;
+        op.flux.set_owned_value(face, rate);
+    }
+    op.flux.sync_ghosts();
+    for (size_t i = 0; i < op.state.cells.size(); ++i)
+    {
+        const auto cell = static_cast<LO>(i);
+        double net_sweep = 0.;
+        for (const auto face : op.grid->faces(cell))
+            net_sweep += (op.grid->owner_cell(face) == cell ? 1. : -1.) * ale.face_mesh_fluxes()[face];
+        const double error = std::abs(dt * net_sweep - (ale.new_cell_volumes()[i] - ale.old_cell_volumes()[i])) /
+                             ale.old_cell_volumes()[i];
+        EXPECT_LE(error, 2e-14);
+        if (max_relative_gcl_error)
+            *max_relative_gcl_error = std::max(*max_relative_gcl_error, error);
+    }
+    auto result = op.advance(dt, Kernel::TraceLimiter::Outgoing, &planar);
+    for (const auto face : op.flux.owned_face_ids())
+        if (op.grid->is_geometry_exterior_face(face))
+        {
+            EXPECT_EQ(op.flux.local_value(face) - ale.face_mesh_fluxes()[face], 0.);
+            EXPECT_EQ(rates(result.owned_flux.at(0).at(op.flux.owned_row(face))), Stock{});
+        }
+    motion.accept_trial();
+    return result;
+}
+
+constexpr std::array moving_columns{MovingColumn::CartesianX, MovingColumn::CartesianY, MovingColumn::CartesianZ,
+    MovingColumn::Sector, MovingColumn::Disk, MovingColumn::Annulus};
+constexpr std::array moving_limiters{Model::LinearSlopeLimiter::RealizabilityOnly, Model::LinearSlopeLimiter::TvdMc};
+
+TEST(QbmmMovingLinearTransport, UniformPhysicalDensitiesSatisfyGclForBothDirectionsAndLimiters)
+{
+    double maximum_density_error = 0., maximum_gcl_error = 0.;
+    const Stock density = stock_from_atoms(.5, .125, -.25);
+    constexpr unsigned n = 32;
+    constexpr double dt = .0625;
+    for (const auto kind : moving_columns)
+        for (const auto limiter : moving_limiters)
+            for (const double target : {.9921875, 1.0078125})
+                for (const double speed : {0., .125})
+                {
+                    SCOPED_TRACE(testing::Message() << int(kind) << " limiter " << int(limiter) << " target " << target
+                                                    << " carrier speed " << speed);
+                    const auto axis = column_axis(kind);
+                    Problem op(column_mesh(kind, edges(n, 0., 1.)));
+                    op.options.qbmm_model.linear_slope_limiter = limiter;
+                    // Multiple substeps force both Euler geometry frames to move through the interval.
+                    op.options.qbmm_model.linear_cfl = .2;
+                    for (size_t i = 0; i < op.state.cells.size(); ++i)
+                        op.set(static_cast<LO>(i), scaled(density, op.grid->cell_volume(static_cast<LO>(i))));
+                    const auto before = op.totals();
+                    const auto result = move_column(op, axis, target, dt, speed, {}, &maximum_gcl_error);
+                    EXPECT_GT(result.substeps, 1);
+                    EXPECT_GT(result.maximum_cfl, 0.);
+                    EXPECT_LE(result.maximum_cfl, op.options.qbmm_model.linear_cfl);
+                    check_stock(op.totals(), before, 3e-13);
+                    int checked = 0;
+                    for (size_t i = 0; i < op.state.cells.size(); ++i)
+                    {
+                        const auto cell = static_cast<LO>(i);
+                        const double q = coordinate(op.grid->cell_centroid(cell), axis) / target;
+                        if (q > .375 && q < .625)
+                        {
+                            ++checked;
+                            const auto actual = scaled(op.get(cell), 1. / op.grid->cell_volume(cell));
+                            check_stock(actual, density, 3e-13);
+                            for (size_t k = 0; k < actual.size(); ++k)
+                                maximum_density_error =
+                                    std::max(maximum_density_error, std::abs(actual[k] - density[k]));
+                        }
+                    }
+                    EXPECT_GT(reduce(*op.grid, Teuchos::REDUCE_SUM, checked), 0);
+                    double peak_interior_rate = 0.;
+                    for (const auto face : op.flux.owned_face_ids())
+                        if (op.grid->is_interior_face(face))
+                        {
+                            const auto& packet = result.owned_flux.at(0).at(op.flux.owned_row(face));
+                            peak_interior_rate = std::max(peak_interior_rate, std::abs(packet.population_number_flux));
+                        }
+                    EXPECT_GT(reduce(*op.grid, Teuchos::REDUCE_MAX, peak_interior_rate), 0.);
+                    maximum_density_error = reduce(*op.grid, Teuchos::REDUCE_MAX, maximum_density_error);
+                    maximum_gcl_error = reduce(*op.grid, Teuchos::REDUCE_MAX, maximum_gcl_error);
+                }
+    std::ostringstream value;
+    value << std::setprecision(17) << maximum_density_error;
+    RecordProperty("maximum_uniform_density_error", value.str());
+    value.str("");
+    value << maximum_gcl_error;
+    RecordProperty("maximum_relative_gcl_error", value.str());
+}
+
+TEST(QbmmMovingLinearTransport, ComovingFacesRetainEveryStockAndAverageBothTiedPressureBranches)
+{
+    const Stock density = stock_from_atoms(.5, .125, -.25);
+    for (const auto kind : moving_columns)
+        for (const auto limiter : moving_limiters)
+            for (const double target : {.875, 1.125})
+            {
+                SCOPED_TRACE(testing::Message() << int(kind) << " limiter " << int(limiter) << " target " << target);
+                const auto axis = column_axis(kind);
+                Problem op(column_mesh(kind, {0., .5, 1.}));
+                op.options.qbmm_model.linear_slope_limiter = limiter;
+                const auto phase_pressure = [&](LO cell, double height)
+                { return coordinate(op.grid->cell_centroid(cell), axis) < .5 * height ? 7.5 : 8.5; };
+                StateSnapshot initial(op.state.cells.size());
+                for (size_t i = 0; i < initial.size(); ++i)
+                {
+                    const auto cell = static_cast<LO>(i);
+                    const double local_pressure = phase_pressure(cell, 1.);
+                    auto stock = scaled(density, op.grid->cell_volume(cell));
+                    stock[work] *= pressure / local_pressure;
+                    op.set(cell, stock);
+                    op.state.cells[i].mechanical_pressure = local_pressure - pressure;
+                    op.state.cells[i].phases[0].absolute_pressure = local_pressure;
+                    initial[i] = op.get(cell);
+                }
+                const auto result = move_column(op, axis, target, .125, std::nullopt);
+                EXPECT_EQ(result.substeps, 1);
+                EXPECT_EQ(result.maximum_cfl, 0.);
+                EXPECT_EQ(result.upstream_returned_packets, 0u);
+                for (size_t i = 0; i < initial.size(); ++i)
+                    EXPECT_EQ(op.get(static_cast<LO>(i)), initial[i]);
+                int unequal_ties = 0;
+                Flow::QbmmDirectionalFlux empty;
+                empty.species_molar_flux = {0., 0.};
+                for (const auto face : op.flux.owned_face_ids())
+                {
+                    const auto& packet = result.owned_flux.at(0).at(op.flux.owned_row(face));
+                    EXPECT_EQ(rates(packet), Stock{});
+                    const auto& kinetic = packet.kinetic.value();
+                    EXPECT_EQ(kinetic.forward, empty);
+                    EXPECT_EQ(kinetic.backward, empty);
+                    EXPECT_EQ(kinetic.pressure_rounding_flux, 0.);
+                    double expected = 0.;
+                    if (op.grid->is_interior_face(face))
+                    {
+                        const auto owner = op.grid->owner_cell(face), neighbor = op.grid->neighbor_cell(face);
+                        const double pa = phase_pressure(owner, target), pb = phase_pressure(neighbor, target);
+                        unequal_ties += pa != pb;
+                        // Equal concentrations on either side but different EOS pressures make
+                        // the two one-sided material-volume derivatives measurably different.
+                        const double theta_a = density[work] * pressure / pa, theta_b = density[work] * pressure / pb;
+                        expected = .25 * (theta_a + theta_b) * (1. + 1. / target);
+                    }
+                    EXPECT_NEAR(kinetic.theta, expected, 2e-14);
+                }
+                EXPECT_GT(reduce(*op.grid, Teuchos::REDUCE_SUM, unequal_ties), 0);
+            }
+}
+
+TEST(QbmmMovingLinearTransport, ClosedCirculationUsesBothStageVolumesOnEveryFace)
+{
+    const Stock density = stock_from_weights({.5, .125});
+    for (const double target : {.875, 1.125})
+        for (const auto limiter : moving_limiters)
+        {
+            SCOPED_TRACE(testing::Message() << "limiter " << int(limiter) << " target " << target);
+            Problem op(mesh({0., 1., 2.}, {0., 1., 2.}));
+            op.options.qbmm_model.linear_slope_limiter = limiter;
+            for (size_t c = 0; c < op.state.cells.size(); ++c)
+                op.set(static_cast<LO>(c), density);
+            // In each horizontal layer circulate one constant volume rate around a
+            // four-cell loop. Absolute throughflow at the lid equals its sweep.
+            // Net relative outflow is zero in each cell, keeping all stocks fixed.
+            const auto circulation = [&](LO face)
+            {
+                const auto p = op.grid->face_centroid(face), normal = op.grid->face_normal(face);
+                return .25 * (normal.x * (p.y < 1. ? 1. : -1.) + normal.y * (p.x < 1. ? -1. : 1.));
+            };
+            const auto result = move_column(op, Dimension::Z, target, .125, 0., circulation);
+            EXPECT_EQ(result.substeps, 1);
+            int closed_loop_faces = 0;
+            for (const auto face : op.flux.owned_face_ids())
+                if (op.grid->is_interior_face(face))
+                {
+                    ++closed_loop_faces;
+                    const double phi = circulation(face);
+                    EXPECT_EQ(std::abs(phi), .25);
+                    const auto& packet = result.owned_flux.at(0).at(op.flux.owned_row(face));
+                    // Half-weight each independently known density at V=1 and V=target.
+                    check_stock(rates(packet), scaled(density, .5 * phi * (1. + 1. / target)), 2e-14);
+                }
+            EXPECT_EQ(reduce(*op.grid, Teuchos::REDUCE_SUM, closed_loop_faces), 4);
+            for (size_t c = 0; c < op.state.cells.size(); ++c)
+            {
+                check_stock(op.get(static_cast<LO>(c)), density, 2e-14);
+                check_stock(scaled(op.get(static_cast<LO>(c)), 1. / op.grid->cell_volume(static_cast<LO>(c))),
+                    scaled(density, 1. / target), 2e-14);
+            }
+        }
+}
+
+TEST(QbmmMovingLinearTransport, TranslatedCartesianRampReproducesThePhysicalFaceAtBothStages)
+{
+    // At x=2^48 the spacing of doubles is 1/16. Edges three spacings apart are
+    // exact, while the true midpoints fall halfway between representable values.
+    constexpr double dx = 3. / 16., phi = .125, dt = .125, center_face = 5. * dx;
+    const auto density = [](double x) { return stock_from_weights({.5 + .125 * x, .25 + .0625 * x}); };
+    for (const double offset : {0., 0x1p48})
+        for (const auto limiter : moving_limiters)
+            for (const double height : {1., 1.125})
+            {
+                SCOPED_TRACE(
+                    testing::Message() << "offset " << offset << " limiter " << int(limiter) << " height " << height);
+                ArrReal x;
+                for (unsigned k = 0; k <= 10; ++k)
+                    x.push_back(offset + k * dx);
+                Problem op(mesh(x));
+                op.options.qbmm_model.linear_slope_limiter = limiter;
+                for (size_t i = 0; i < op.state.cells.size(); ++i)
+                {
+                    const auto cell = static_cast<LO>(i);
+                    const auto k = op.grid->cell_geometry_global_id(cell);
+                    op.set(cell, scaled(density((double(k) + .5) * dx), dx));
+                }
+                const auto carrier = [&](LO face) { return phi * op.grid->face_normal(face).x; };
+                const auto result = move_column(op, Dimension::Z, height, dt, 0., carrier);
+                EXPECT_EQ(result.substeps, 1);
+                // Stage 1 sees the analytic ramp at x_face. A uniform flux translates
+                // the extensive ramp by dt*phi in stage 1. Stage 2 divides that
+                // stock by its new bulk volume and reconstructs at the same x_face.
+                const auto first = density(center_face), second = density(center_face - dt * phi);
+                int checked = 0;
+                for (const auto face : op.flux.owned_face_ids())
+                    if (op.grid->is_interior_face(face) && op.grid->face_centroid(face).x == offset + center_face)
+                    {
+                        ++checked;
+                        const auto actual = rates(result.owned_flux.at(0).at(op.flux.owned_row(face)));
+                        const double oriented = carrier(face);
+                        for (size_t k = 0; k < actual.size(); ++k)
+                            EXPECT_NEAR(actual[k], .5 * oriented * (first[k] + second[k] / height), 2e-14)
+                                << channel_names[k];
+                    }
+                EXPECT_EQ(reduce(*op.grid, Teuchos::REDUCE_SUM, checked), 1);
+            }
+}
+
+TEST(QbmmMovingLinearTransport, SharpFrontAdvectsConservativelyWithBoundedMcDensities)
+{
+    constexpr unsigned n = 24;
+    constexpr double target = 1.0078125, dt = .03125, speed = -.125;
+    const auto low = stock_from_weights({.125, .25}), high = stock_from_weights({.5, 1.});
+    double maximum_bound_error = 0.;
+    for (const auto kind : {MovingColumn::CartesianZ, MovingColumn::Sector})
+        for (const auto limiter : moving_limiters)
+        {
+            SCOPED_TRACE(testing::Message() << int(kind) << " limiter " << int(limiter));
+            Problem op(column_mesh(kind, edges(n, 0., 1.)));
+            op.options.qbmm_model.linear_slope_limiter = limiter;
+            for (size_t i = 0; i < op.state.cells.size(); ++i)
+            {
+                const auto cell = static_cast<LO>(i);
+                op.set(cell, scaled(op.grid->cell_centroid(cell).z < .5 ? low : high, op.grid->cell_volume(cell)));
+            }
+            const auto before = op.totals();
+            const auto result = move_column(op, Dimension::Z, target, dt, speed);
+            EXPECT_EQ(result.substeps, 1);
+            check_stock(op.totals(), before, 3e-13);
+            int mixed = 0;
+            double local_bound_error = 0.;
+            for (size_t i = 0; i < op.state.cells.size(); ++i)
+            {
+                const auto cell = static_cast<LO>(i);
+                const double q = op.grid->cell_centroid(cell).z / target;
+                if (q <= .25 || q >= .75)
+                    continue;
+                const auto density = scaled(op.get(cell), 1. / op.grid->cell_volume(cell));
+                EXPECT_TRUE(R::invert_qbmm_moments({density[0], density[1], density[2], density[3]}).valid());
+                if (limiter == Model::LinearSlopeLimiter::TvdMc)
+                    for (size_t k = 0; k < density.size(); ++k)
+                    {
+                        const double lower = std::min(low[k], high[k]), upper = std::max(low[k], high[k]);
+                        EXPECT_GE(density[k], lower - 3e-13);
+                        EXPECT_LE(density[k], upper + 3e-13);
+                        local_bound_error = std::max({local_bound_error, lower - density[k], density[k] - upper});
+                    }
+                if (q < .5 && density[number] > low[number] + 1e-5 && density[number] < high[number] - 1e-5)
+                    ++mixed;
+            }
+            EXPECT_GT(reduce(*op.grid, Teuchos::REDUCE_SUM, mixed), 0);
+            maximum_bound_error =
+                std::max(maximum_bound_error, reduce(*op.grid, Teuchos::REDUCE_MAX, local_bound_error));
+        }
+    std::ostringstream value;
+    value << std::setprecision(17) << maximum_bound_error;
+    RecordProperty("maximum_sharp_front_bound_error", value.str());
+}
+
+// Exact cell integrals of two translated atom-count profiles and an independently
+// varying signed energy. Moles, H1, and W then follow from the specified composition and EOS.
+Stock exact_column_stock(double left, double right, double area, double displacement)
+{
+    const auto integral = [&](double exponent)
+    { return area * std::exp(exponent * (left - displacement)) * std::expm1(exponent * (right - left)) / exponent; };
+    return stock_from_atoms(.125 * integral(1.5), .25 * integral(.75), -.15 * integral(1.25) + .0625 * integral(.5));
+}
+
+TEST(QbmmMovingLinearTransport, SmoothPhysicalTranslationHasSecondOrderSpatialAccuracyForEveryChannel)
+{
+    constexpr double dt = .001, speed = -.375;
+    for (const auto kind : {MovingColumn::CartesianZ, MovingColumn::Sector})
+        for (const auto limiter : moving_limiters)
+            for (const double target : {.99975, 1.00025})
+            {
+                SCOPED_TRACE(testing::Message() << int(kind) << " limiter " << int(limiter) << " target " << target);
+                Stock previous{};
+                for (unsigned n : {16u, 32u, 64u})
+                {
+                    Problem op(column_mesh(kind, edges(n, 0., 1.)));
+                    op.options.qbmm_model.linear_slope_limiter = limiter;
+                    // Sector area is (2^2 - 1^2) / 2 times a one-radian angle.
+                    const double area = kind == MovingColumn::Sector ? 1.5 : 1.;
+                    for (size_t i = 0; i < op.state.cells.size(); ++i)
+                    {
+                        const auto cell = static_cast<LO>(i);
+                        const auto k = static_cast<unsigned>(op.grid->cell_centroid(cell).z * n);
+                        op.set(cell, exact_column_stock(double(k) / n, double(k + 1) / n, area, 0.));
+                    }
+                    const auto result = move_column(op, Dimension::Z, target, dt, speed);
+                    EXPECT_EQ(result.substeps, 1);
+                    Stock sums{};
+                    for (size_t i = 0; i < op.state.cells.size(); ++i)
+                    {
+                        const auto cell = static_cast<LO>(i);
+                        const auto k = static_cast<unsigned>(op.grid->cell_centroid(cell).z * n / target);
+                        if (k < n / 4 || k >= 3 * n / 4)
+                            continue;
+                        const auto exact = exact_column_stock(target * k / n, target * (k + 1) / n, area, dt * speed);
+                        const auto actual = op.get(cell);
+                        for (size_t j = 0; j < sums.size(); ++j)
+                            sums[j] += std::abs(actual[j] - exact[j]);
+                    }
+                    for (size_t j = 0; j < sums.size(); ++j)
+                    {
+                        SCOPED_TRACE(channel_names[j]);
+                        const double error = reduce(*op.grid, Teuchos::REDUCE_SUM, sums[j]) / (.5 * target * area);
+                        EXPECT_GT(error, 0.);
+                        if (n > 16)
+                        {
+                            const double order = std::log2(previous[j] / error);
+                            EXPECT_GT(order, 1.8);
+                            std::ostringstream value;
+                            value << std::setprecision(12) << order;
+                            RecordProperty(std::to_string(int(kind)) + "_" + std::to_string(int(limiter)) + "_" +
+                                               std::string(channel_names[j]) + "_" + std::to_string(n) +
+                                               (target < 1. ? "_compression" : "_expansion"),
+                                value.str());
+                        }
+                        previous[j] = error;
+                    }
+                }
+            }
+}
+
+TEST(QbmmMovingLinearTransport, TinyMcPacketRemainsWithItsDonorOnEveryPartition)
+{
+    const double weight = std::ldexp(1., -675);
+    const Stock seed = stock_from_weights({weight, 2. * weight});
+    for (const int donor : {0, 1})
+    {
+        Problem op(column_mesh(MovingColumn::CartesianX, {0., .5, 1.}));
+        op.options.qbmm_model.linear_slope_limiter = Model::LinearSlopeLimiter::TvdMc;
+        record_ownership(*op.grid, 2);
+        for (size_t i = 0; i < op.state.cells.size(); ++i)
+        {
+            const auto cell = static_cast<LO>(i);
+            op.set(cell, op.grid->cell_geometry_global_id(cell) == donor ? seed : Stock{});
+            op.state.cells[i].velocity = {.125, -.5, 1.};
+        }
+        const auto result = move_column(op, Dimension::X, donor == 0 ? .96875 : 1.03125, .125, 0.);
+        EXPECT_EQ(result.substeps, 1);
+        EXPECT_EQ(result.upstream_returned_packets, 2u);
+        EXPECT_EQ(op.totals(), seed);
+        int remote = 0;
+        for (const auto face : op.flux.owned_face_ids())
+        {
+            if (op.grid->is_interior_face(face))
+                remote += !op.grid->is_owned_cell(op.grid->neighbor_cell(face)) ||
+                          !op.grid->is_owned_cell(op.grid->owner_cell(face));
+            const auto& packet = result.owned_flux.at(0).at(op.flux.owned_row(face));
+            EXPECT_EQ(rates(packet), Stock{});
+            Flow::QbmmDirectionalFlux empty;
+            empty.species_molar_flux = {0., 0.};
+            EXPECT_EQ(packet.kinetic.value().forward, empty);
+            EXPECT_EQ(packet.kinetic.value().backward, empty);
+            EXPECT_EQ(packet.kinetic.value().theta, 0.);
+            EXPECT_EQ(packet.kinetic.value().pressure_rounding_flux, 0.);
+        }
+        EXPECT_EQ(reduce(*op.grid, Teuchos::REDUCE_SUM, remote), int(Tpetra::getDefaultComm()->getSize() > 1));
+        for (size_t i = 0; i < op.state.cells.size(); ++i)
+        {
+            const auto cell = static_cast<LO>(i);
+            EXPECT_EQ(op.get(cell), op.grid->cell_geometry_global_id(cell) == donor ? seed : Stock{});
+        }
+        RecordProperty("canonical_returns", int(result.upstream_returned_packets));
+    }
 }
 } // namespace

@@ -94,6 +94,17 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_material_ale_wi
         velocity, options, tolerance, &ale);
 }
 
+LowMachPressureEquation::Result LowMachPressureEquation::project_anchored_material_ale_with_eos(const ScalarField& rho,
+    double dt, std::span<const double> target, std::span<const double> susceptibility, const FaceField& fraction,
+    const FaceField& anchored_material_rate, const FaceField& reference_carrier_flux, const FaceField& predictor,
+    FaceField& corrected, ScalarField& pressure, VectorField& velocity, const FVM::ALEControlVolumeState& ale,
+    const LinearSolverOptions& options, double tolerance, CellPressureGradient cell_gradient)
+{
+    const MaterialAnchor anchor{anchored_material_rate, reference_carrier_flux};
+    return project_impl(rho, dt, target, susceptibility, true, &fraction, nullptr, predictor, corrected, pressure,
+        velocity, options, tolerance, &ale, cell_gradient, &anchor);
+}
+
 LowMachPressureEquation::Result LowMachPressureEquation::project_material_with_eos(const ScalarField& rho, double dt,
     std::span<const double> target, std::span<const double> susceptibility, const FaceField& fraction,
     const FaceField& slip, const FaceField& predictor, FaceField& corrected, ScalarField& pressure,
@@ -133,7 +144,7 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
                 tolerance <= 0 || target.size() != mesh.num_owned_cells() ||
                 (linearize_eos && susceptibility.size() != mesh.num_owned_cells()))
                 throw std::invalid_argument("Invalid low-Mach projection timestep/target/tolerance.");
-            if (material != bool(slip || anchor) || (slip && anchor) || (anchor && ale))
+            if (material != bool(slip || anchor) || (slip && anchor))
                 throw std::invalid_argument("Material projection needs a fraction and a compatible face flux law.");
             if (material)
             {
@@ -154,9 +165,14 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
                     if (!std::isfinite(theta) || theta < 0 || !std::isfinite(source) || !std::isfinite(reference) ||
                         (!anchor && theta == 0 && source != 0))
                         throw std::invalid_argument("Material face fraction or flux data is invalid.");
-                    if (mesh.is_geometry_exterior_face(face) && (source != 0 || reference != 0))
-                        throw std::invalid_argument(
-                            "Closed material projection requires zero boundary material or reference flux.");
+                    if (mesh.is_geometry_exterior_face(face))
+                    {
+                        const double wall_reference = anchor && ale ? ale->face_mesh_fluxes()[f] : 0.;
+                        if (source != 0 || reference != wall_reference)
+                            throw std::invalid_argument(
+                                "Closed material projection requires zero boundary slip/anchor and wall-matched "
+                                "absolute reference flux.");
+                    }
                 }
             }
             EquationValidation::require_mesh_match(mesh, rho, "LowMachPressureEquation");

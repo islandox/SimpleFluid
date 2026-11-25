@@ -389,8 +389,10 @@ std::shared_ptr<const LowMachMixtureSolver::QbmmPublication> LowMachMixtureSolve
     const bool forced =
         uses_qbmm_explicit_transport(d->options.qbmm_model) && trial.statistics.body_acceleration_m_per_s2.has_value();
     const bool axial_kinetic = qbmm_detail::uses_axial_kinetic_transport(d->options, *d->mesh);
+    const bool planar_linear = trial.ale_geometry && uses_qbmm_linear_transport(d->options.qbmm_model);
     const bool tvd_mc = d->options.qbmm_model.linear_slope_limiter == QbmmModelOptions::LinearSlopeLimiter::TvdMc;
-    if (forced || ((axial_kinetic || tvd_mc) && d->active_qbmm_controller && controller_diagnostics))
+    const bool retains_controller = planar_linear || ((axial_kinetic || tvd_mc) && controller_diagnostics);
+    if (forced || (retains_controller && d->active_qbmm_controller))
     {
         check(controller_diagnostics && controller_diagnostics->saved && d->active_qbmm_controller,
             "QBMM publication requires diagnostics from the active reacting controller.");

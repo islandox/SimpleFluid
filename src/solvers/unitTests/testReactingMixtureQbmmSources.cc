@@ -53,7 +53,8 @@ struct Fixture : Thermo::Fixture
         R::QbmmClosureVersions policies = {}, double liquid_stock = liquid_moles, bool kinetic = false,
         bool initialize_flow = true, FamilyTransport family_transport = FamilyTransport::NativeImplicit,
         std::optional<Flow::Vector> node_acceleration = {}, std::uint64_t slip_revision = 1,
-        SlopeLimiter limiter = SlopeLimiter::RealizabilityOnly)
+        SlopeLimiter limiter = SlopeLimiter::RealizabilityOnly,
+        const std::function<void(Flow::Options&)>& configure = {})
         : Thermo::Fixture(0, 0, convention)
     {
         Flow::Mesh::DistributionOptions partition;
@@ -99,6 +100,8 @@ struct Fixture : Thermo::Fixture
         if (bind_coarse)
             controls.qbmm_families[3] = std::make_shared<const R::QbmmPopulationSchema>(catalog, catalog->fingerprint(),
                 "coarse", controls.phase_roles[3], scale, std::vector<R::QbmmMassFraction>{{44, 1}, {709, 0}});
+        if (configure)
+            configure(controls);
         flow = std::make_shared<Flow>(mesh, std::vector{liquid, gas, gas, gas}, controls);
         mechanism = std::make_shared<const R::ReactionMechanism>(
             catalog, std::vector<R::ReactionDefinition>{}, gas->energy_convention());
@@ -2339,88 +2342,97 @@ TEST(ReactingMixtureQbmmSourcesTest, InclusiveKineticGasFractionUsesTheSameEndpo
     }
 }
 
-TEST(ReactingMixtureQbmmSourcesTest, PlanarEventsUseLiveGeometryAndReplayAfterSingleOwnerFailure)
+void expect_same_planar_endpoint(const Fixture& a, const Fixture& b)
 {
     using LO = Flow::Pack::local_ordinal_type;
+    const auto& left = a.flow->state();
+    const auto& right = b.flow->state();
+    EXPECT_EQ(left.time, right.time);
+    EXPECT_EQ(left.revision, right.revision);
+    EXPECT_DOUBLE_EQ(left.thermodynamic_pressure, right.thermodynamic_pressure);
+    ASSERT_EQ(left.cells.size(), right.cells.size());
+    for (size_t c = 0; c < left.cells.size(); ++c)
+    {
+        const LO cell = static_cast<LO>(c);
+        EXPECT_DOUBLE_EQ(a.mesh->cell_volume(cell), b.mesh->cell_volume(cell));
+        EXPECT_EQ(a.mesh->cell_centroid(cell), b.mesh->cell_centroid(cell));
+        EXPECT_EQ(left.cells[c].qbmm_shape, right.cells[c].qbmm_shape);
+        EXPECT_EQ(left.cells[c].phase_numbers, right.cells[c].phase_numbers);
+        EXPECT_EQ(left.cells[c].velocity, right.cells[c].velocity);
+        EXPECT_EQ(left.cells[c].mechanical_pressure, right.cells[c].mechanical_pressure);
+        EXPECT_EQ(left.cells[c].drift_velocity, right.cells[c].drift_velocity);
+        for (size_t p = 0; p < left.cells[c].phases.size(); ++p)
+        {
+            const auto& x = left.cells[c].phases[p];
+            const auto& y = right.cells[c].phases[p];
+            EXPECT_EQ(x.moles, y.moles);
+            EXPECT_DOUBLE_EQ(x.temperature, y.temperature);
+            EXPECT_DOUBLE_EQ(x.internal_energy, y.internal_energy);
+            EXPECT_DOUBLE_EQ(x.absolute_pressure, y.absolute_pressure);
+        }
+    }
+    ASSERT_EQ(a.mesh->num_faces(), b.mesh->num_faces());
+    for (size_t f = 0; f < a.mesh->num_faces(); ++f)
+        EXPECT_DOUBLE_EQ(a.flow->volume_flux().local_value(static_cast<LO>(f)),
+            b.flow->volume_flux().local_value(static_cast<LO>(f)));
+}
+
+struct PlanarEventObservations
+{
+    double target = 0;
+    int targets = 0, injected_failures = 0;
+    bool fail = false;
+    std::optional<std::uint64_t> failed_geometry_epoch;
+};
+
+R::ReactingMixtureOptions planar_event_options(Fixture& f, PlanarEventObservations& calls,
+    const char* target_identity = "Q7a coherent piston", std::uint64_t target_revision = 3)
+{
+    using LO = Flow::Pack::local_ordinal_type;
+    auto options = f.options(
+        [&](const R::MixtureQbmmContext& context)
+        {
+            if (!context.law_inputs || !context.law_inputs->location)
+                throw std::runtime_error("The coherent source must provide its live location.");
+            const auto& location = *context.law_inputs->location;
+            const LO cell = static_cast<LO>(context.owned_cell);
+            EXPECT_EQ(location.ownedCell, context.owned_cell);
+            EXPECT_EQ(location.geometryCellId, f.mesh->cell_geometry_global_id(cell));
+            EXPECT_EQ(location.geometryEpoch, f.mesh->geometry_epoch());
+            EXPECT_NEAR(location.centroid[2], calls.target / 2, 1e-14);
+            EXPECT_NEAR(context.law_inputs->bulk_volume_m3, calls.target, 1e-14);
+            EXPECT_DOUBLE_EQ(context.law_inputs->bulk_volume_m3, f.mesh->cell_volume(cell));
+            if (calls.fail)
+            {
+                ++calls.injected_failures;
+                calls.failed_geometry_epoch = location.geometryEpoch;
+                throw std::runtime_error("Manufactured source failure on the only owning rank.");
+            }
+            // The manufactured birth depends on both pieces of the live geometry.
+            const double count = context.law_inputs->bulk_volume_m3 * location.centroid[2] * .5;
+            return Ops{R::QbmmBirth{{{{count, 1}, from_liquid(count)}}}};
+        },
+        true);
+    options.planar_motion = std::make_shared<const R::MixturePlanarMotionProvider>(R::MixturePlanarMotionProvider{
+        f.mesh, {}, target_identity, target_revision, [&calls](double accepted_time, double step)
+        {
+            ++calls.targets;
+            calls.target = 1. + .05 * (accepted_time + step);
+            return calls.target;
+        }});
+    return options;
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, PlanarEventsUseLiveGeometryAndReplayAfterSingleOwnerFailure)
+{
     const char* writer = std::getenv("SIMPLEFLUID_Q7A_RESTART_WRITE");
     const char* reader = std::getenv("SIMPLEFLUID_Q7A_RESTART_READ");
     ASSERT_FALSE(writer && reader);
-    struct Observations
-    {
-        double target = 0;
-        int targets = 0, injected_failures = 0;
-        bool fail = false;
-    };
     constexpr double dt = .01;
-    const auto make_options = [&](Fixture& f, Observations& calls, const char* target_identity = "Q7a coherent piston")
-    {
-        auto options = f.options(
-            [&](const R::MixtureQbmmContext& context)
-            {
-                if (!context.law_inputs || !context.law_inputs->location)
-                    throw std::runtime_error("The coherent source must provide its live location.");
-                const auto& location = *context.law_inputs->location;
-                const LO cell = static_cast<LO>(context.owned_cell);
-                EXPECT_EQ(location.ownedCell, context.owned_cell);
-                EXPECT_EQ(location.geometryCellId, f.mesh->cell_geometry_global_id(cell));
-                EXPECT_EQ(location.geometryEpoch, f.mesh->geometry_epoch());
-                EXPECT_NEAR(location.centroid[2], calls.target / 2, 1e-14);
-                EXPECT_NEAR(context.law_inputs->bulk_volume_m3, calls.target, 1e-14);
-                EXPECT_DOUBLE_EQ(context.law_inputs->bulk_volume_m3, f.mesh->cell_volume(cell));
-                if (calls.fail)
-                {
-                    ++calls.injected_failures;
-                    throw std::runtime_error("Manufactured source failure on the only owning rank.");
-                }
-                // The manufactured birth depends on both pieces of the live geometry.
-                const double count = context.law_inputs->bulk_volume_m3 * location.centroid[2] * .5;
-                return Ops{R::QbmmBirth{{{{count, 1}, from_liquid(count)}}}};
-            },
-            true);
-        options.planar_motion = std::make_shared<const R::MixturePlanarMotionProvider>(
-            R::MixturePlanarMotionProvider{f.mesh, {}, target_identity, 3, [&calls](double accepted_time, double step)
-                {
-                    ++calls.targets;
-                    calls.target = 1. + .05 * (accepted_time + step);
-                    return calls.target;
-                }});
-        return options;
-    };
-    const auto expect_same = [](const Fixture& a, const Fixture& b)
-    {
-        const auto& left = a.flow->state();
-        const auto& right = b.flow->state();
-        EXPECT_EQ(left.time, right.time);
-        EXPECT_EQ(left.revision, right.revision);
-        EXPECT_DOUBLE_EQ(left.thermodynamic_pressure, right.thermodynamic_pressure);
-        ASSERT_EQ(left.cells.size(), right.cells.size());
-        for (size_t c = 0; c < left.cells.size(); ++c)
-        {
-            const LO cell = static_cast<LO>(c);
-            EXPECT_DOUBLE_EQ(a.mesh->cell_volume(cell), b.mesh->cell_volume(cell));
-            EXPECT_EQ(a.mesh->cell_centroid(cell), b.mesh->cell_centroid(cell));
-            EXPECT_EQ(left.cells[c].qbmm_shape, right.cells[c].qbmm_shape);
-            EXPECT_EQ(left.cells[c].phase_numbers, right.cells[c].phase_numbers);
-            EXPECT_EQ(left.cells[c].velocity, right.cells[c].velocity);
-            for (size_t p = 0; p < left.cells[c].phases.size(); ++p)
-            {
-                const auto& x = left.cells[c].phases[p];
-                const auto& y = right.cells[c].phases[p];
-                EXPECT_EQ(x.moles, y.moles);
-                EXPECT_DOUBLE_EQ(x.temperature, y.temperature);
-                EXPECT_DOUBLE_EQ(x.internal_energy, y.internal_energy);
-                EXPECT_DOUBLE_EQ(x.absolute_pressure, y.absolute_pressure);
-            }
-        }
-        ASSERT_EQ(a.mesh->num_faces(), b.mesh->num_faces());
-        for (size_t f = 0; f < a.mesh->num_faces(); ++f)
-            EXPECT_DOUBLE_EQ(a.flow->volume_flux().local_value(static_cast<LO>(f)),
-                b.flow->volume_flux().local_value(static_cast<LO>(f)));
-    };
 
     Fixture f;
-    Observations calls;
-    Coupler controller(f.flow, make_options(f, calls));
+    PlanarEventObservations calls;
+    Coupler controller(f.flow, planar_event_options(f, calls));
     const auto comm = f.mesh->owned_cell_map()->getComm();
     if (writer)
     {
@@ -2434,14 +2446,14 @@ TEST(ReactingMixtureQbmmSourcesTest, PlanarEventsUseLiveGeometryAndReplayAfterSi
     {
         controller.restore_qbmm_restart(RestartIO::read_restart(*comm, reader, ".next"));
         Fixture fresh;
-        Observations fresh_calls;
-        Coupler restored(fresh.flow, make_options(fresh, fresh_calls));
+        PlanarEventObservations fresh_calls;
+        Coupler restored(fresh.flow, planar_event_options(fresh, fresh_calls));
         restored.restore_qbmm_restart(RestartIO::read_restart(*comm, reader, ".first"));
         EXPECT_EQ(fresh_calls.targets, 0);
         EXPECT_EQ(fresh.law_calls, 0);
         restored.advance(dt);
         EXPECT_EQ(fresh_calls.targets, 1);
-        expect_same(f, fresh);
+        expect_same_planar_endpoint(f, fresh);
         return;
     }
 
@@ -2487,11 +2499,11 @@ TEST(ReactingMixtureQbmmSourcesTest, PlanarEventsUseLiveGeometryAndReplayAfterSi
     EXPECT_EQ(f.flow->state().time, dt);
     const auto archived = controller.serialize_qbmm_restart();
     Fixture fresh;
-    Observations fresh_calls;
-    Coupler restarted(fresh.flow, make_options(fresh, fresh_calls));
+    PlanarEventObservations fresh_calls;
+    Coupler restarted(fresh.flow, planar_event_options(fresh, fresh_calls));
     restarted.restore_qbmm_restart(archived);
     EXPECT_EQ((std::array{fresh_calls.targets, fresh.law_calls, fresh.constitutive_calls}), (std::array{0, 0, 0}));
-    expect_same(f, fresh);
+    expect_same_planar_endpoint(f, fresh);
     EXPECT_GE(restarted.diagnostics().correctors, 2);
     EXPECT_EQ(restarted.diagnostics().correctors, controller.diagnostics().correctors);
     EXPECT_EQ(restarted.diagnostics().flow.source_evaluations, controller.diagnostics().flow.source_evaluations);
@@ -2499,14 +2511,216 @@ TEST(ReactingMixtureQbmmSourcesTest, PlanarEventsUseLiveGeometryAndReplayAfterSi
     EXPECT_NEAR(restarted.diagnostics().population_births[1], expected_birth, 1e-13);
     EXPECT_EQ(restarted.diagnostics().population_births, controller.diagnostics().population_births);
     Fixture wrong;
-    Observations wrong_calls;
-    Coupler wrong_target(wrong.flow, make_options(wrong, wrong_calls, "different geometry target"));
+    PlanarEventObservations wrong_calls;
+    Coupler wrong_target(wrong.flow, planar_event_options(wrong, wrong_calls, "different geometry target"));
     EXPECT_THROW(wrong_target.restore_qbmm_restart(archived), std::exception);
     EXPECT_EQ(wrong.flow->state().time, 0);
     EXPECT_EQ(wrong_calls.targets, 0);
     controller.advance(dt);
     restarted.advance(dt);
-    expect_same(f, fresh);
+    expect_same_planar_endpoint(f, fresh);
+}
+
+struct PlanarLinearRestartFixture : Fixture
+{
+    PlanarEventObservations calls;
+    std::unique_ptr<Coupler> controller;
+
+    explicit PlanarLinearRestartFixture(SlopeLimiter limiter, const std::function<void(Flow::Options&)>& configure = {},
+        std::uint64_t target_revision = 3, std::uint64_t source_revision = 1)
+        : Fixture({{4, 1}}, false, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, false, true,
+              FamilyTransport::RealizableLinearSSPRK2, {}, 1, limiter, configure)
+    {
+        auto options = planar_event_options(*this, calls, "moving linear piston continuation", target_revision);
+        options.source_revision = source_revision;
+        controller = std::make_unique<Coupler>(flow, std::move(options));
+    }
+};
+
+void expect_same_planar_linear_endpoint(const PlanarLinearRestartFixture& a, const PlanarLinearRestartFixture& b)
+{
+    expect_same_planar_endpoint(a, b);
+    const auto& expected = a.controller->diagnostics();
+    const auto& actual = b.controller->diagnostics();
+    EXPECT_EQ(actual.correctors, expected.correctors);
+    EXPECT_EQ(actual.population_births, expected.population_births);
+    EXPECT_EQ(actual.flow.source_evaluations, expected.flow.source_evaluations);
+    EXPECT_EQ(actual.flow.pressure_work, expected.flow.pressure_work);
+    EXPECT_EQ(actual.flow.linear_substeps, expected.flow.linear_substeps);
+    EXPECT_EQ(actual.flow.linear_stages, expected.flow.linear_stages);
+    EXPECT_EQ(actual.flow.maximum_linear_cfl, expected.flow.maximum_linear_cfl);
+    EXPECT_EQ(actual.flow.maximum_linear_stage_residual, expected.flow.maximum_linear_stage_residual);
+    EXPECT_EQ(actual.flow.maximum_linear_step_residual, expected.flow.maximum_linear_step_residual);
+    EXPECT_EQ(actual.flow.linear_upstream_returned_packets, expected.flow.linear_upstream_returned_packets);
+}
+
+void check_planar_linear_restart_header(std::span<const std::byte> bytes)
+{
+    constexpr std::array<std::uint64_t, 3> words{0x5453524d4d425153ULL, 9, 7};
+    std::vector<std::byte> expected;
+    for (const auto value : words)
+        RestartIO::append_restart_word(expected, value);
+    ASSERT_GE(bytes.size(), expected.size());
+    EXPECT_TRUE(std::equal(expected.begin(), expected.end(), bytes.begin()));
+}
+
+void test_planar_linear_restart(SlopeLimiter limiter)
+{
+    constexpr double dt = .01;
+    const char* writer = std::getenv("SIMPLEFLUID_PLANAR_LINEAR_RESTART_WRITE");
+    const char* reader = std::getenv("SIMPLEFLUID_PLANAR_LINEAR_RESTART_READ");
+    const char* ranks = std::getenv("SIMPLEFLUID_PLANAR_LINEAR_RESTART_RANKS");
+    ASSERT_FALSE(writer && reader);
+    PlanarLinearRestartFixture original(limiter);
+    auto& controller = *original.controller;
+    const auto comm = original.mesh->owned_cell_map()->getComm();
+    if (ranks)
+        EXPECT_EQ(comm->getSize(), std::stoi(ranks));
+    const int empty = original.mesh->num_owned_cells() == 0;
+    int empty_total = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &empty, &empty_total);
+    EXPECT_EQ(empty_total, comm->getSize() - 1);
+    if (writer)
+    {
+        controller.advance(dt);
+        const auto first = controller.serialize_qbmm_restart();
+        check_planar_linear_restart_header(first);
+        RestartIO::write_restart(*comm, writer, ".first", first);
+        controller.advance(dt);
+        RestartIO::write_restart(*comm, writer, ".next", controller.serialize_qbmm_restart());
+        return;
+    }
+    if (reader)
+    {
+        controller.restore_qbmm_restart(RestartIO::read_restart(*comm, reader, ".next"));
+        const auto first = RestartIO::read_restart(*comm, reader, ".first");
+        check_planar_linear_restart_header(first);
+        PlanarLinearRestartFixture fresh(limiter);
+        fresh.controller->restore_qbmm_restart(first);
+        EXPECT_EQ(fresh.calls.targets, 0);
+        EXPECT_EQ(fresh.law_calls, 0);
+        fresh.controller->advance(dt);
+        EXPECT_EQ(fresh.calls.targets, 1);
+        expect_same_planar_linear_endpoint(original, fresh);
+        return;
+    }
+
+    const auto initial = controller.serialize_qbmm_restart();
+    check_planar_linear_restart_header(initial);
+    const auto initial_epoch = original.mesh->geometry_epoch();
+    const auto retained = controller.preview(dt);
+    const auto retained_report = controller.qbmm_report(retained);
+    const auto retained_epoch = retained.transport_snapshot().new_geometry_epoch;
+    EXPECT_EQ(original.mesh->geometry_epoch(), initial_epoch);
+    EXPECT_NE(retained_epoch, initial_epoch);
+    original.calls.fail = true;
+    EXPECT_THROW((void) controller.preview(2 * dt), std::exception);
+    original.calls.fail = false;
+    int failures = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &original.calls.injected_failures, &failures);
+    EXPECT_EQ(failures, 1);
+    EXPECT_EQ(original.mesh->geometry_epoch(), initial_epoch);
+    if (original.calls.failed_geometry_epoch)
+    {
+        EXPECT_NE(*original.calls.failed_geometry_epoch, initial_epoch);
+        EXPECT_NE(*original.calls.failed_geometry_epoch, retained_epoch);
+    }
+    EXPECT_EQ(controller.serialize_qbmm_restart(), initial);
+    EXPECT_EQ(controller.qbmm_report(retained).provenance.preview_id, retained_report.provenance.preview_id);
+
+    const std::array before_commit{original.calls.targets, original.law_calls, original.constitutive_calls};
+    controller.commit(retained);
+    EXPECT_EQ((std::array{original.calls.targets, original.law_calls, original.constitutive_calls}), before_commit);
+    const auto first = controller.serialize_qbmm_restart();
+    check_planar_linear_restart_header(first);
+    const auto owner_checkpoint = controller.checkpoint();
+    PlanarLinearRestartFixture fresh(limiter);
+    EXPECT_THROW(fresh.controller->restore(owner_checkpoint), std::exception);
+    fresh.controller->restore_qbmm_restart(first);
+    EXPECT_EQ(fresh.calls.targets, 0);
+    EXPECT_EQ(fresh.law_calls, 0);
+    EXPECT_EQ(fresh.constitutive_calls, 0);
+    expect_same_planar_linear_endpoint(original, fresh);
+    const auto report = fresh.controller->qbmm_report();
+    EXPECT_EQ(report.provenance.origin, Flow::QbmmStateOrigin::PortableRestart);
+    EXPECT_EQ(report.receipt_history, Flow::QbmmReceiptHistory::UnavailableAfterPortableRestart);
+    EXPECT_FALSE(report.interval);
+    EXPECT_EQ(report.linear_slope_limiter, limiter);
+    EXPECT_GT(report.linear_substeps, 0);
+    EXPECT_EQ(report.linear_stages, 2 * static_cast<std::uint64_t>(report.linear_substeps));
+    EXPECT_FALSE(report.body_acceleration_m_per_s2);
+    EXPECT_GT(fresh.controller->diagnostics().population_births.at(1), 0.);
+
+    const auto rejects_without_publication = [&](PlanarLinearRestartFixture& wrong, std::span<const std::byte> bytes)
+    {
+        const auto before = wrong.controller->serialize_qbmm_restart();
+        const auto epoch = wrong.mesh->geometry_epoch();
+        const std::array callbacks{wrong.calls.targets, wrong.law_calls, wrong.constitutive_calls};
+        EXPECT_THROW(wrong.controller->restore_qbmm_restart(bytes), std::exception);
+        EXPECT_EQ(wrong.controller->serialize_qbmm_restart(), before);
+        EXPECT_EQ(wrong.mesh->geometry_epoch(), epoch);
+        EXPECT_EQ((std::array{wrong.calls.targets, wrong.law_calls, wrong.constitutive_calls}), callbacks);
+    };
+    PlanarLinearRestartFixture wrong_limiter(
+        limiter == SlopeLimiter::TvdMc ? SlopeLimiter::RealizabilityOnly : SlopeLimiter::TvdMc);
+    rejects_without_publication(wrong_limiter, first);
+    PlanarLinearRestartFixture wrong_controls(limiter, [](auto& options) { ++options.maximum_pressure_iterations; });
+    rejects_without_publication(wrong_controls, first);
+    PlanarLinearRestartFixture wrong_cfl(limiter, [](auto& options) { options.qbmm_model.linear_cfl = .25; });
+    rejects_without_publication(wrong_cfl, first);
+    PlanarLinearRestartFixture wrong_cap(limiter, [](auto& options) { --options.qbmm_model.maximum_linear_substeps; });
+    rejects_without_publication(wrong_cap, first);
+    PlanarLinearRestartFixture wrong_target(limiter, {}, 4);
+    rejects_without_publication(wrong_target, first);
+    PlanarLinearRestartFixture wrong_source(limiter, {}, 3, 2);
+    rejects_without_publication(wrong_source, first);
+
+    // Recompute both checksums so only the accepted geometry check after staging can reject this shard.
+    constexpr size_t word_size = sizeof(std::uint64_t);
+    constexpr size_t accepted_geometry_offset = 5 * word_size;
+    auto wrong_shards = first;
+    wrong_shards.resize(wrong_shards.size() - 2 * word_size);
+    if (comm->getRank() == 0)
+        wrong_shards.at(accepted_geometry_offset) ^= std::byte{1};
+    RestartIO::append_restart_checksums(*comm, wrong_shards);
+    PlanarLinearRestartFixture wrong_geometry(limiter);
+    const auto compatible_preview = wrong_geometry.controller->preview(dt);
+    rejects_without_publication(wrong_geometry, wrong_shards);
+    const auto replay_callbacks = std::array{
+        wrong_geometry.calls.targets, wrong_geometry.law_calls, wrong_geometry.constitutive_calls};
+    wrong_geometry.controller->commit(compatible_preview);
+    EXPECT_EQ((std::array{wrong_geometry.calls.targets, wrong_geometry.law_calls, wrong_geometry.constitutive_calls}),
+        replay_callbacks);
+    expect_same_planar_linear_endpoint(original, wrong_geometry);
+    wrong_geometry.controller->restore_qbmm_restart(first);
+    expect_same_planar_linear_endpoint(original, wrong_geometry);
+
+    const auto next = controller.preview(dt);
+    if (original.calls.failed_geometry_epoch)
+        EXPECT_NE(next.transport_snapshot().new_geometry_epoch, *original.calls.failed_geometry_epoch);
+    controller.commit(next);
+    fresh.controller->advance(dt);
+    expect_same_planar_linear_endpoint(original, fresh);
+    controller.restore(owner_checkpoint);
+    EXPECT_EQ(original.flow->state().time, dt);
+    const auto restored_report = controller.qbmm_report();
+    EXPECT_EQ(restored_report.provenance.origin, Flow::QbmmStateOrigin::Checkpoint);
+    EXPECT_EQ(restored_report.receipt_history, Flow::QbmmReceiptHistory::Available);
+    ASSERT_TRUE(restored_report.interval);
+    EXPECT_EQ(restored_report.interval->preview_id, retained_report.provenance.preview_id);
+    EXPECT_THROW(controller.commit(next), std::exception);
+    controller.advance(dt);
+    expect_same_planar_linear_endpoint(original, fresh);
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, PlanarLinearRealizabilityPortableContinuation)
+{
+    test_planar_linear_restart(SlopeLimiter::RealizabilityOnly);
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, PlanarLinearTvdMcPortableContinuation)
+{
+    test_planar_linear_restart(SlopeLimiter::TvdMc);
 }
 
 TEST(ReactingMixtureQbmmSourcesTest, RankMixedControllerAndNativeAdvancementRejectBeforeCallbacks)
@@ -2826,5 +3040,54 @@ TEST(ReactingMixtureQbmmSourcesTest, ForcedKineticAcceptedControllerAndDiagnosti
     reattached.advance(dt);
     restored.advance(dt);
     expect_same_state(original.flow->state(), resumed.flow->state());
+}
+TEST(ReactingMixtureQbmmSourcesTest, MovingLinearCapabilityRejectsUnsupportedOptionsOnEveryRank)
+{
+    using Velocity = R::QbmmModelOptions::Velocity;
+    const auto motion = [](Fixture& f)
+    {
+        return std::make_shared<const R::MixturePlanarMotionProvider>(
+            R::MixturePlanarMotionProvider{f.mesh, {}, "moving explicit capability", 1,
+                [](double, double) -> double { throw std::logic_error("Unsupported motion must not be evaluated."); }});
+    };
+    for (const auto limiter : {SlopeLimiter::RealizabilityOnly, SlopeLimiter::TvdMc})
+    {
+        SCOPED_TRACE(int(limiter));
+        Fixture f({{4, 1}}, false, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, false,
+            true, FamilyTransport::RealizableLinearSSPRK2, {}, 1, limiter);
+        const auto checkpoint = f.flow->serialize_qbmm_restart();
+        const auto epoch = f.mesh->geometry_epoch();
+        auto options = f.options([](const auto&) { return Ops{}; });
+        options.planar_motion = motion(f);
+        for (const double gravity : {0., -9.81})
+        {
+            options.body_acceleration = Flow::Vector{0., 0., gravity};
+            EXPECT_THROW((void) Coupler(f.flow, options), std::exception);
+        }
+        EXPECT_EQ(f.flow->serialize_qbmm_restart(), checkpoint);
+        EXPECT_EQ(f.mesh->geometry_epoch(), epoch);
+
+        auto flow_options = f.flow->options();
+        const auto eos = std::vector{f.liquid, f.gas, f.gas, f.gas};
+        flow_options.qbmm_model.velocity = Velocity::SuppliedPhaseSlip;
+        EXPECT_THROW((void) Flow(f.mesh, eos, flow_options), std::exception);
+
+        Flow::Mesh::DistributionOptions partition;
+        partition.allow_empty_partitions = true;
+        auto periodic = std::make_shared<Flow::Mesh>(
+            std::make_shared<Meshes::OrthogonalCartesian3D>(
+                Vec3D<ArrReal>{ArrReal{0, .5, 1}, ArrReal{0, 1}, ArrReal{0, 1}}, Vec3D<bool>{true, false, false}),
+            partition);
+        EXPECT_THROW((void) Flow(periodic, eos, f.flow->options()), std::exception);
+    }
+
+    Fixture kinetic({{4, 1}}, false, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, true);
+    auto options = kinetic.options([](const auto&) { return Ops{}; });
+    options.planar_motion = motion(kinetic);
+    const auto checkpoint = kinetic.flow->serialize_qbmm_restart();
+    const auto epoch = kinetic.mesh->geometry_epoch();
+    EXPECT_THROW((void) Coupler(kinetic.flow, options), std::exception);
+    EXPECT_EQ(kinetic.flow->serialize_qbmm_restart(), checkpoint);
+    EXPECT_EQ(kinetic.mesh->geometry_epoch(), epoch);
 }
 } // namespace

@@ -96,6 +96,19 @@ private:
     template<class Mesh>
     SIMPLEFLUID_LOCAL static void swap_axis_update(Mesh& mesh, size_t axis, AxisUpdate& update) noexcept;
 
+    template<class Mesh> static std::uint64_t latest_epoch(const Mesh& mesh) noexcept
+    {
+        if constexpr (requires { mesh.d_geometry_state; })
+            return mesh.d_geometry_state.latest_epoch();
+        return 0;
+    }
+
+    template<class Mesh> static void restore_epoch(Mesh& mesh, std::uint64_t epoch) noexcept
+    {
+        if constexpr (requires { mesh.d_geometry_state; })
+            mesh.d_geometry_state.restore_epoch(epoch);
+    }
+
     template<class Mesh> static bool motion_available(const Mesh& mesh) noexcept
     {
         if constexpr (requires { mesh.supports_axial_motion(); })
@@ -276,7 +289,7 @@ private:
         Rollback = 2
     };
 
-    struct RestartUpdate
+    struct PreparedUpdate
     {
         Meshes::PlanarALEGeometryAccess::AxisUpdate axis;
         std::vector<real_t> previous_cell_volumes;
@@ -299,13 +312,17 @@ private:
     SIMPLEFLUID_LOCAL void validate_collective_trial(
         real_t surface_elevation, real_t time_step, bool enforce_displacement_limit = true) const;
     /** Stage previously accepted geometry from the reference map without a physical step or displacement cap. */
-    SIMPLEFLUID_LOCAL void stage_restart_geometry(real_t surface_elevation);
-    SIMPLEFLUID_LOCAL void swap_restart_axis_update() noexcept;
-    SIMPLEFLUID_LOCAL void begin_trial_impl(real_t surface_elevation, std::optional<real_t> time_step);
+    SIMPLEFLUID_LOCAL void stage_restart_geometry(real_t surface_elevation, bool preserve_accepted_epoch = false);
+    [[nodiscard]] SIMPLEFLUID_LOCAL Meshes::PlanarALEGeometryAccess::AxisUpdate prepare_axis_update(ArrReal edges) const;
+    SIMPLEFLUID_LOCAL void swap_prepared_axis_update() noexcept;
+    SIMPLEFLUID_LOCAL void begin_trial_impl(
+        real_t surface_elevation, std::optional<real_t> time_step, bool preserve_accepted_epoch = false);
     SIMPLEFLUID_LOCAL void validate_collective_transaction(TransactionAction action) const;
     SIMPLEFLUID_LOCAL void compute_trial_state(
         const std::vector<typename mesh_type::Vec3>& old_face_centroids, real_t time_step);
-    SIMPLEFLUID_LOCAL void rollback_impl();
+    SIMPLEFLUID_LOCAL void rollback_trial_preserving_epoch(std::uint64_t accepted_epoch);
+    SIMPLEFLUID_LOCAL void rollback_impl(std::optional<std::uint64_t> accepted_epoch = std::nullopt);
+    SIMPLEFLUID_LOCAL void restore_geometry_epoch(std::optional<std::uint64_t> accepted_epoch) noexcept;
     SIMPLEFLUID_LOCAL void reset_stationary_state();
     SIMPLEFLUID_LOCAL void reset_stationary_diagnostics() noexcept;
 
@@ -319,7 +336,7 @@ private:
     ArrReal d_deformation_weights;
     ArrReal d_pre_trial_axis_edges;
     std::array<ArrReal, 3> d_trial_geometry_edges;
-    std::optional<RestartUpdate> d_restart_update;
+    std::optional<PreparedUpdate> d_prepared_update;
     real_t d_reference_surface_elevation = {};
     real_t d_accepted_surface_elevation = {};
     std::uint64_t d_expected_geometry_epoch = 0;

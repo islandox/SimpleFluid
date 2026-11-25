@@ -2,6 +2,7 @@
  * @brief Independent material-volume projection, anchoring and collective transaction contracts.
  */
 #include "equations/LowMachPressureEquation.hh"
+#include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -409,6 +410,67 @@ TEST(LowMachPressureContractsTest, KineticZeroDerivativeRequiresEOSAnchoringAndR
     EXPECT_EQ(result.maximum_linearized_continuity_residual, 0.);
     for (const auto face : f.corrected.owned_face_ids())
         EXPECT_EQ(f.corrected.value(face), f.predictor.value(face));
+}
+
+TEST(LowMachPressureContractsTest, MovingAnchorProjectsRelativeMaterialAndKeepsAbsoluteWallRates)
+{
+    Fixture f;
+    S::PlanarALEMeshMotion<Pressure::Pack> motion(f.grid);
+    motion.begin_trial(5., 1.);
+    const auto ale = S::FVM::make_validated_planar_ale_control_volume_state(*f.grid, motion);
+    Pressure equation(f.grid);
+    Pressure::FaceField reference(f.grid, 0., "moving_reference_carrier");
+    const auto configure = [&](double derivative, double anchor, double pred, double target)
+    {
+        for (const auto face : f.theta.owned_face_ids())
+        {
+            const bool wall = f.grid->is_geometry_exterior_face(face);
+            const double swept = ale.face_mesh_fluxes()[face];
+            const double sign = wall ? 0. : f.orientation(face);
+            f.theta.set_owned_value(face, derivative);
+            f.slip.set_owned_value(face, sign * anchor);
+            reference.set_owned_value(face, wall ? swept : sign * .25);
+            f.predictor.set_owned_value(face, wall ? swept : sign * pred);
+        }
+        f.theta.sync_ghosts();
+        f.slip.sync_ghosts();
+        reference.sync_ghosts();
+        f.predictor.sync_ghosts();
+        for (size_t c = 0; c < f.target.size(); ++c)
+            f.target[c] = f.lower(static_cast<LO>(c)) ? target : -target;
+    };
+    const auto project = [&](Pressure::CellPressureGradient policy = Pressure::CellPressureGradient::HomogeneousNeumann)
+    {
+        return equation.project_anchored_material_ale_with_eos(f.rho, 1., f.target, f.chi, f.theta, f.slip,
+            reference, f.predictor, f.corrected, f.mechanical, f.velocity, ale, f.linear(), 1e-12, policy);
+    };
+    // J(phi) = .125 + .75*(phi - .25). J=.875 gives phi=1.25.
+    // Trial center distance is 2.5 m, giving mobility 1/(2*2.5) = .2.
+    configure(.75, .125, .5, .875);
+    const auto saved = f.snapshot();
+    EXPECT_THROW((void) project(Pressure::CellPressureGradient::Interior), std::exception);
+    f.unchanged(saved);
+    const auto result = project();
+    EXPECT_TRUE(result.linear.converged);
+    EXPECT_LE(result.maximum_continuity_residual, 1e-12);
+    for (const auto face : f.corrected.owned_face_ids())
+        if (f.grid->is_geometry_exterior_face(face))
+            EXPECT_EQ(f.corrected.value(face), ale.face_mesh_fluxes()[face]);
+        else
+            EXPECT_NEAR(f.corrected.value(face), 1.25 * f.orientation(face), 2e-12);
+
+    constexpr double tiny_anchor = 0x1p-104;
+    configure(0., tiny_anchor, .25, tiny_anchor);
+    f.reset_outputs();
+    const auto before = f.snapshot();
+    EXPECT_THROW((void) project(), std::exception);
+    f.unchanged(before);
+    std::ranges::fill(f.chi, .5);
+    const auto immobile = project();
+    EXPECT_EQ(immobile.maximum_continuity_residual, 0.);
+    for (const auto face : f.corrected.owned_face_ids())
+        EXPECT_EQ(f.corrected.value(face), f.predictor.value(face));
+    motion.rollback_trial();
 }
 
 TEST(LowMachPressureContractsTest, ZeroThetaWithPositiveSusceptibilityKeepsBareCarrierAndPressureResponse)

@@ -1,24 +1,26 @@
 /** Compiled implementation fragment; include inside SimpleFluid::Reacting after flow Implementation. */
-namespace
+struct LowMachMixtureSolver::PlanarMotionFrame
 {
-void validate_planar_mesh(const Solver::Mesh& mesh)
+    std::uint64_t epoch;
+    std::vector<double> old_volumes, new_volumes, swept_rates;
+    MeshMotionDiagnostics diagnostics;
+};
+
+LowMachMixtureSolver::PlanarMotionFrame LowMachMixtureSolver::capture_planar_motion_frame(const PlanarMotion& motion) const
 {
-    mesh.visit(
-        [&](const auto& native)
-        {
-            using Native = std::remove_cvref_t<decltype(native)>;
-            check(std::is_same_v<Native, Solver::Mesh::Cartesian> ||
-                      std::is_same_v<Native, Solver::Mesh::Cylindrical> ||
-                      std::is_same_v<Native, Solver::Mesh::SemiStructured>,
-                "Low-Mach planar ALE requires native orthogonal mapped geometry.");
-            if constexpr (requires { native.indexer().periodic_dimensions[0]; })
-                for (size_t axis = 0; axis < 3; ++axis)
-                    check(!native.indexer().periodic_dimensions[axis], "Low-Mach planar ALE requires closed topology.");
-            if constexpr (requires { native.indexer().axial_periodic; })
-                check(!native.indexer().axial_periodic, "Low-Mach planar ALE requires closed axial topology.");
-        });
+    PlanarMotionFrame frame{};
+    frame.epoch = mesh_geometry_epoch(*d->mesh);
+    if (uses_qbmm_linear_transport(d->options.qbmm_model))
+        collective_detail::collective_local_validation(*d->mesh, "Accepted planar motion history",
+            [&]
+            {
+                frame.old_volumes = motion.d_old_cell_volumes;
+                frame.new_volumes = motion.d_new_cell_volumes;
+                frame.swept_rates = motion.d_face_mesh_fluxes;
+                frame.diagnostics = motion.d_diagnostics;
+            });
+    return frame;
 }
-} // namespace
 
 std::shared_ptr<LowMachMixtureSolver::ALEGeometryCertificate> LowMachMixtureSolver::capture_accepted_geometry(
     const PlanarMotion& motion) const
@@ -33,8 +35,6 @@ std::shared_ptr<LowMachMixtureSolver::ALEGeometryCertificate> LowMachMixtureSolv
                       motion.mesh_ptr().get() == d->mesh.get() &&
                       (!d->accepted_planar_motion || d->accepted_planar_motion == motion.d_authority),
                 "Planar authority must be live, idle and bound to this exact current accepted mesh.");
-            if (!d->options.qbmm_families.empty())
-                validate_planar_mesh(mesh);
         });
     const auto snapshot = motion.snapshot(); // Collective exact native-axis/motion-lease proof, no EOS.
     std::shared_ptr<ALEGeometryCertificate> result;
@@ -68,12 +68,10 @@ std::shared_ptr<LowMachMixtureSolver::ALEGeometryCertificate> LowMachMixtureSolv
     return result;
 }
 
-void LowMachMixtureSolver::restore_accepted_after_motion(PlanarMotion& motion, std::span<const double> absolute_flux)
+void LowMachMixtureSolver::restore_accepted_after_motion(
+    PlanarMotion& motion, std::span<const double> absolute_flux, PlanarMotionFrame& accepted_frame)
 {
-    if (motion.has_active_trial())
-        motion.rollback_trial();
-    if (d->epoch != mesh_geometry_epoch(*d->mesh))
-        d->refresh_numeric_geometry();
+    rollback_planar_geometry(motion, accepted_frame);
     if (d->initialized)
         d->publish_fields(d->accepted);
     for (size_t f = 0; f < absolute_flux.size(); ++f)
@@ -126,7 +124,6 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_planar_impl(double dt,
                 "Planar QBMM source preview requires the reacting controller and an immutable source provider.");
             check(std::isfinite(dt) && dt > 0 && std::isfinite(target_surface),
                 "Planar preview needs a finite target and positive finite timestep.");
-            validate_planar_mesh(mesh);
             for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
             {
                 const LO face = static_cast<LO>(f);
@@ -141,18 +138,24 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_planar_impl(double dt,
     collective_detail::require_uniform_value(mesh, target_surface, "Prescribed planar target");
     auto certificate = capture_accepted_geometry(motion);
     std::vector<double> accepted_flux;
+    const bool linear = uses_qbmm_linear_transport(d->options.qbmm_model);
+    std::vector<qbmm_linear_detail::PlanarFaceGeometry> old_faces;
     collective_detail::collective_local_validation(mesh, "Planar accepted absolute flux receipt",
         [&]
         {
             accepted_flux.resize(mesh.num_owned_faces());
             for (size_t f = 0; f < accepted_flux.size(); ++f)
                 accepted_flux[f] = d->flux.local_value(static_cast<LO>(f));
+            if (linear)
+                old_faces = qbmm_linear_detail::capture_planar_face_geometry(mesh);
             certificate->target_surface = target_surface;
             certificate->time_step = dt;
         });
+    auto accepted_frame = capture_planar_motion_frame(motion);
+    Trial result;
     try
     {
-        motion.begin_trial(target_surface, dt);
+        motion.begin_trial_impl(target_surface, dt, linear);
         const auto ale = FVM::make_validated_planar_ale_control_volume_state(mesh, motion);
         collective_detail::collective_local_validation(mesh, "Planar accepted-old storage match",
             [&]
@@ -167,24 +170,33 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_planar_impl(double dt,
                 certificate->new_geometry_epoch = ale.new_geometry_epoch();
             });
         d->refresh_numeric_geometry();
-        auto result = preview_impl(dt, sources, std::move(provider), controller, &ale, coherent_qbmm);
+        const qbmm_linear_detail::PlanarTransportGeometry geometry{ale, old_faces};
+        result = preview_impl(
+            dt, sources, std::move(provider), controller, &ale, coherent_qbmm, linear ? &geometry : nullptr);
         result.ale_geometry = certificate;
-        restore_accepted_after_motion(motion, accepted_flux);
-        return result;
     }
     catch (...)
     {
         const auto failure = std::current_exception();
-        restore_accepted_after_motion(motion, accepted_flux);
+        restore_accepted_after_motion(motion, accepted_flux, accepted_frame);
         std::rethrow_exception(failure);
     }
+    restore_accepted_after_motion(motion, accepted_flux, accepted_frame);
+    return result;
 }
 
 void LowMachMixtureSolver::commit_ale(const Trial& trial, PlanarMotion& motion, const ControllerLease* controller)
 {
+    commit_planar_impl(trial, motion, controller, nullptr);
+}
+
+void LowMachMixtureSolver::commit_planar_impl(const Trial& trial, PlanarMotion& motion,
+    const ControllerLease* controller, const ControllerRestartDiagnostics* controller_diagnostics)
+{
     require_uniform_advancement(*d->mesh, AdvancementOperation::CommitPlanar);
     require_controller(controller);
     const auto& mesh = *d->mesh;
+    const bool linear = uses_qbmm_linear_transport(d->options.qbmm_model);
     State candidate;
     Diagnostics statistics;
     std::vector<double> candidate_flux, accepted_flux;
@@ -211,15 +223,16 @@ void LowMachMixtureSolver::commit_ale(const Trial& trial, PlanarMotion& motion, 
             candidate = trial.candidate;
             statistics = trial.statistics;
             candidate_flux = trial.face_flux;
-            publication = prepare_qbmm_publication(trial);
+            publication = prepare_qbmm_publication(trial, controller_diagnostics);
             accepted_flux.resize(mesh.num_owned_faces());
             for (size_t f = 0; f < accepted_flux.size(); ++f)
                 accepted_flux[f] = d->flux.local_value(static_cast<LO>(f));
         });
     collective_detail::require_uniform_value(mesh, trial.preview_id, "Planar collective trial selection");
+    auto accepted_frame = capture_planar_motion_frame(motion);
     try
     {
-        motion.begin_trial(certificate->target_surface, certificate->time_step);
+        motion.begin_trial_impl(certificate->target_surface, certificate->time_step, linear);
         const auto ale = FVM::make_validated_planar_ale_control_volume_state(mesh, motion);
         collective_detail::collective_local_validation(mesh, "Exact retained planar geometry restaging",
             [&]
@@ -239,7 +252,7 @@ void LowMachMixtureSolver::commit_ale(const Trial& trial, PlanarMotion& motion, 
     catch (...)
     {
         const auto failure = std::current_exception();
-        restore_accepted_after_motion(motion, accepted_flux);
+        restore_accepted_after_motion(motion, accepted_flux, accepted_frame);
         std::rethrow_exception(failure);
     }
     d->publish_staged_fields();
@@ -250,6 +263,7 @@ void LowMachMixtureSolver::commit_ale(const Trial& trial, PlanarMotion& motion, 
         d->qbmm_publication = std::move(publication);
         d->accepted_qbmm_controller = d->active_qbmm_controller;
         d->accepted_planar_motion = motion.d_authority;
+        d->explicit_family_force_recorded = linear;
         d->needs_restart_controller = false;
     }
     ++d->logical_geometry;
@@ -270,11 +284,26 @@ LowMachMixtureSolver::Checkpoint LowMachMixtureSolver::checkpoint(const PlanarMo
     return result;
 }
 
-void LowMachMixtureSolver::rollback_failed_planar_restore(PlanarMotion& motion)
+void LowMachMixtureSolver::rollback_planar_geometry(PlanarMotion& motion, PlanarMotionFrame& accepted_frame)
 {
-    if (motion.has_active_trial())
-        motion.rollback_trial();
-    if (d->epoch != mesh_geometry_epoch(*d->mesh))
+    const bool active = motion.has_active_trial();
+    const bool linear = uses_qbmm_linear_transport(d->options.qbmm_model);
+    if (active)
+    {
+        if (linear)
+            motion.rollback_trial_preserving_epoch(accepted_frame.epoch);
+        else
+            motion.rollback_trial();
+    }
+    if (linear)
+    {
+        motion.d_old_cell_volumes = std::move(accepted_frame.old_volumes);
+        motion.d_new_cell_volumes = std::move(accepted_frame.new_volumes);
+        motion.d_face_mesh_fluxes = std::move(accepted_frame.swept_rates);
+        motion.d_diagnostics = accepted_frame.diagnostics;
+    }
+    // A failed refresh can leave some trial caches rebuilt before it updates d->epoch.
+    if (active || d->epoch != mesh_geometry_epoch(*d->mesh))
         d->refresh_numeric_geometry();
 }
 
@@ -282,6 +311,7 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, PlanarMotion& motion
 {
     require_controller(controller);
     const auto& mesh = *d->mesh;
+    const bool linear = uses_qbmm_linear_transport(d->options.qbmm_model);
     State candidate;
     Diagnostics statistics;
     std::shared_ptr<const QbmmPublication> publication;
@@ -327,9 +357,10 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, PlanarMotion& motion
         mesh, saved.qbmm_controller_signature.value_or(0), "Planar checkpoint controller signature");
     collective_detail::require_uniform_value(
         mesh, int(saved.qbmm_legacy_default_only), "Planar checkpoint legacy configuration restriction");
+    auto accepted_frame = capture_planar_motion_frame(motion);
     try
     {
-        motion.stage_restart_geometry(saved.ale_geometry->source.surface_elevation());
+        motion.stage_restart_geometry(saved.ale_geometry->source.surface_elevation(), linear);
         collective_detail::collective_local_validation(mesh, "Planar checkpoint storage geometry",
             [&]
             {
@@ -345,7 +376,7 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, PlanarMotion& motion
     catch (...)
     {
         const auto failure = std::current_exception();
-        rollback_failed_planar_restore(motion);
+        rollback_planar_geometry(motion, accepted_frame);
         std::rethrow_exception(failure);
     }
     d->publish_staged_fields();
@@ -357,6 +388,7 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, PlanarMotion& motion
     d->count_only_force_provenance_recorded = d->options.qbmm_families.empty();
     d->needs_restart_controller = saved.qbmm_controller_signature.has_value();
     d->qbmm_legacy_default_only = saved.qbmm_legacy_default_only;
+    d->explicit_family_force_recorded = saved.explicit_family_force_recorded;
     if (!d->options.qbmm_families.empty())
         d->accepted_planar_motion = motion.d_authority;
     ++d->logical_geometry;

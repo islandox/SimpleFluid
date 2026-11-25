@@ -1374,7 +1374,7 @@ TEST(LowMachQbmmStateTest, DeferredModelRequestsRejectCollectivelyBeforeAdvance)
     EXPECT_NO_THROW(supported->initialize(f.initial()));
 }
 
-TEST(LowMachQbmmStateTest, RealizableLinearRequiresFixedSharedCarrierAndUniformControls)
+TEST(LowMachQbmmStateTest, RealizableLinearRequiresSharedCarrierAndUniformControls)
 {
     Fixture f;
     using Model = R::QbmmModelOptions;
@@ -1413,8 +1413,10 @@ TEST(LowMachQbmmStateTest, RealizableLinearRequiresFixedSharedCarrierAndUniformC
     EXPECT_EQ(earlier.diagnostics().linear_stages, 2u);
     EXPECT_EQ(earlier.diagnostics().maximum_linear_cfl, 0.);
     Flow::PlanarMotion motion(f.mesh);
-    EXPECT_THROW((void) flow->preview_ale(.01, motion, 1.001), std::exception);
+    const auto epoch = f.mesh->geometry_epoch();
+    EXPECT_NO_THROW((void) flow->preview_ale(.01, motion, 1.001));
     EXPECT_FALSE(motion.has_active_trial());
+    EXPECT_EQ(f.mesh->geometry_epoch(), epoch);
     int calls = 0;
     auto forced = restart_controller_options(f, calls);
     // A forced controller requires an identity for the fixture's opaque liquid EOS.

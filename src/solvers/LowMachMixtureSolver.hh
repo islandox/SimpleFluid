@@ -28,6 +28,10 @@
 namespace SimpleFluid::Reacting
 {
 class ReactingMixtureCoupler;
+namespace qbmm_linear_detail
+{
+struct PlanarTransportGeometry;
+}
 namespace low_mach_faces
 {
 class SIMPLEFLUID_SOLVERS_LOCAL LowMachFaceTransportAdapter;
@@ -38,6 +42,7 @@ struct Receipt;
 class SIMPLEFLUID_SOLVERS_EXPORT LowMachMixtureSolver
 {
     struct SIMPLEFLUID_SOLVERS_LOCAL ALEGeometryCertificate;
+    struct SIMPLEFLUID_SOLVERS_LOCAL PlanarMotionFrame;
     struct SIMPLEFLUID_SOLVERS_LOCAL QbmmPublication;
     friend class ReactingMixtureCoupler;
 
@@ -838,15 +843,17 @@ private:
         double target_surface, std::shared_ptr<const SourceStageProvider> provider, const ControllerLease* controller);
     SIMPLEFLUID_SOLVERS_LOCAL Trial preview_impl(double time_step, const std::vector<CellSources>& fixed_sources,
         std::shared_ptr<const SourceStageProvider> provider, const ControllerLease* controller,
-        const FVM::ALEControlVolumeState* ale = nullptr, bool coherent_qbmm = false);
+        const FVM::ALEControlVolumeState* ale = nullptr, bool coherent_qbmm = false,
+        const qbmm_linear_detail::PlanarTransportGeometry* linear_geometry = nullptr);
     SIMPLEFLUID_SOLVERS_LOCAL Trial preview_planar_impl(double time_step, PlanarMotion& motion, double target_surface,
         const std::vector<CellSources>& fixed_sources, std::shared_ptr<const SourceStageProvider> provider,
         const ControllerLease* controller, bool coherent_qbmm = false);
     SIMPLEFLUID_SOLVERS_LOCAL std::shared_ptr<ALEGeometryCertificate> capture_accepted_geometry(
         const PlanarMotion& motion) const;
+    SIMPLEFLUID_SOLVERS_LOCAL PlanarMotionFrame capture_planar_motion_frame(const PlanarMotion& motion) const;
     SIMPLEFLUID_SOLVERS_LOCAL void restore_accepted_after_motion(
-        PlanarMotion& motion, std::span<const double> absolute_flux);
-    SIMPLEFLUID_SOLVERS_LOCAL void rollback_failed_planar_restore(PlanarMotion& motion);
+        PlanarMotion& motion, std::span<const double> absolute_flux, PlanarMotionFrame& accepted_frame);
+    SIMPLEFLUID_SOLVERS_LOCAL void rollback_planar_geometry(PlanarMotion& motion, PlanarMotionFrame& accepted_frame);
     SIMPLEFLUID_SOLVERS_LOCAL ControllerLease acquire_controller_for(std::string_view signature,
         bool legacy_compatible = true, std::optional<Vector> body_acceleration = {},
         const PlanarMotion* motion = nullptr, const ControllerRestartDiagnostics* restart = nullptr);
@@ -854,6 +861,8 @@ private:
     SIMPLEFLUID_SOLVERS_LOCAL void release_controller(std::uint64_t id) noexcept;
     SIMPLEFLUID_SOLVERS_LOCAL void commit_fixed(const Trial& trial, const ControllerLease* controller,
         const ControllerRestartDiagnostics* controller_diagnostics = nullptr);
+    SIMPLEFLUID_SOLVERS_LOCAL void commit_planar_impl(const Trial& trial, PlanarMotion& motion,
+        const ControllerLease* controller, const ControllerRestartDiagnostics* controller_diagnostics);
     SIMPLEFLUID_SOLVERS_LOCAL QbmmReport qbmm_report_impl(const Trial* trial) const;
     SIMPLEFLUID_SOLVERS_LOCAL void finalize_qbmm_balances(
         Trial& trial, std::optional<std::span<const SpeciesSourceLedger>> chemistry = std::nullopt) const;

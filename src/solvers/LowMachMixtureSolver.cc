@@ -2041,7 +2041,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_with_qbmm_sources(
 
 LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const std::vector<CellSources>& fixed_sources,
     std::shared_ptr<const SourceStageProvider> provider, const ControllerLease* controller,
-    const FVM::ALEControlVolumeState* ale, bool coherent_qbmm)
+    const FVM::ALEControlVolumeState* ale, bool coherent_qbmm,
+    const qbmm_linear_detail::PlanarTransportGeometry* linear_geometry)
 {
     std::vector<CellSources> sources;
     const auto& mesh = *d->mesh;
@@ -2062,6 +2063,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
         [&]
         {
             qbmm_detail::validate_capability(d->options, mesh, ale != nullptr, force);
+            check(bool(linear_geometry) == (ale && linear),
+                "Moving linear QBMM requires both accepted and trial geometry for stage reconstruction.");
             check(!forced_explicit_family || (coherent_qbmm && d->active_qbmm_controller),
                 "Explicit QBMM body acceleration requires the matching reacting controller.");
             check(!coherent_qbmm || acceleration_components(force) == d->active_body_acceleration,
@@ -2272,7 +2275,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 auto transported =
                     linear ? qbmm_linear_detail::transport(d->mesh, d->options, accepted, thermodynamic_guess, trial,
                                  d->trial_flux, old_volumes, dt, corrector,
-                                 forced_explicit_family ? TraceLimiter::AllIncident : TraceLimiter::Outgoing)
+                                 forced_explicit_family ? TraceLimiter::AllIncident : TraceLimiter::Outgoing,
+                                 linear_geometry)
                            : qbmm_kinetic_detail::transport(d->mesh, d->options, accepted, thermodynamic_guess, trial,
                                  d->trial_flux, old_volumes, dt, corrector);
                 qbmm_face_flux = std::move(transported.owned_flux);
@@ -3342,7 +3346,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             for (auto& field : drift_momentum)
                 field->sync_ghosts();
             FaceField theta_mesh_correction(d->mesh, 0., "theta_dependent_mesh_volume_correction");
-            if (ale)
+            if (ale && !explicit_family)
             {
                 for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
                     theta_mesh_correction.set_owned_value(static_cast<LO>(f),
@@ -3357,7 +3361,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     for (size_t c = 0; c < nc; ++c)
                     {
                         const LO cell = static_cast<LO>(c);
-                        const double volume = mesh.cell_volume(cell);
+                        const double volume = ale ? ale->new_cell_volumes()[c] : mesh.cell_volume(cell);
                         trial.cells[c] = thermal[c].cell;
                         if (thermal_batch)
                         {
@@ -3375,10 +3379,13 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         {
                             const double old_material =
                                 std::accumulate(old_volumes[c].begin(), old_volumes[c].end(), 0.);
-                            // Unsimplified identity retains actual accepted occupancy/GCL operands.
-                            // With accepted occupancy and exact GCL this is S + D[(theta-1)*w].
-                            target[c] += (old_material - volume) / dt +
-                                         FVM::cell_flux_balance(mesh, theta_mesh_correction, cell);
+                            // Wadv = Wold - dt*div(J0) uses relative material flux. At
+                            // the anchor, target - div(J0) is (Wfinal - Vnew)/dt.
+                            const double storage = (old_material - volume) / dt;
+                            if (explicit_family)
+                                target[c] += storage;
+                            else
+                                target[c] += storage + FVM::cell_flux_balance(mesh, theta_mesh_correction, cell);
                         }
                         occupancy = std::max(occupancy, std::abs(thermal[c].volume - volume) / volume);
                         local_work += thermal[c].work;
@@ -3606,6 +3613,11 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 });
             const auto projected = [&]
             {
+                if (explicit_family && ale)
+                    return d->pressure->project_anchored_material_ale_with_eos(d->rho, dt, target,
+                        volume_susceptibility, carrier_fraction, material_pressure_rate, d->trial_flux, predictor,
+                        d->trial_flux, d->mechanical_pressure, d->u, *ale, d->options.linear,
+                        d->options.continuity_tolerance, cell_gradient);
                 if (explicit_family)
                     return d->pressure->project_kinetic_material_with_eos(d->rho, dt, target, volume_susceptibility,
                         carrier_fraction, material_pressure_rate, d->trial_flux, predictor, d->trial_flux,

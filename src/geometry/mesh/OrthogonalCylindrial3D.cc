@@ -186,7 +186,7 @@ OrthogonalCylindrial3D::OrthogonalCylindrial3D(
 void OrthogonalCylindrial3D::replace_axial_edges_fixed_topology(Arr<real_t> edges)
 {
     require_geometry_writable();
-    if (d_geometry_state.epoch == std::numeric_limits<std::uint64_t>::max())
+    if (d_geometry_state.latest_epoch() == std::numeric_limits<std::uint64_t>::max())
     {
         throw std::overflow_error("OrthogonalCylindrial3D geometry epoch overflow.");
     }
@@ -207,7 +207,7 @@ void OrthogonalCylindrial3D::replace_axial_edges_fixed_topology(Arr<real_t> edge
     d_cell_widths[AXIAL] = std::move(widths);
     d_face_area_magnitudes[R_FACE][AXIAL] = std::move(radial_face_widths);
     d_face_area_magnitudes[THETA_FACE][AXIAL] = std::move(theta_face_widths);
-    ++d_geometry_state.epoch;
+    d_geometry_state.advance_epoch();
 }
 
 /**

@@ -136,7 +136,7 @@ SemiStructuredXY_Z::SemiStructuredXY_Z(
 void SemiStructuredXY_Z::replace_axial_edges_fixed_topology(Arr<real_t> edges)
 {
     require_geometry_writable();
-    if (d_geometry_state.epoch == std::numeric_limits<std::uint64_t>::max())
+    if (d_geometry_state.latest_epoch() == std::numeric_limits<std::uint64_t>::max())
     {
         throw std::overflow_error("SemiStructuredXY_Z geometry epoch overflow.");
     }
@@ -153,7 +153,7 @@ void SemiStructuredXY_Z::replace_axial_edges_fixed_topology(Arr<real_t> edges)
     d_z_edges = std::move(edges);
     d_z_widths = std::move(widths);
     d_z_midpoints = std::move(midpoints);
-    ++d_geometry_state.epoch;
+    d_geometry_state.advance_epoch();
 }
 
 /**

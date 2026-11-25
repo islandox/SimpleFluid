@@ -317,12 +317,12 @@ fraction and an energy-balanced timestep give no empirical validity range for a 
 | Selection | Baseline contract and gate |
 | --- | --- |
 | Native mesh and boundaries | Closed, supported orthogonal native geometry with common pressure and equilibrium temperature. Prescribed fixed-topology planar ALE supports Cartesian X/Y/Z, cylindrical axial Z on a nonperiodic sector, and `SemiStructuredXY_Z` axial Z. Moving geometry requires nonperiodic topology, zero mixture viscosity and native slip walls. General remap, AMR and open-reservoir face transport are outside this capability. |
-| Velocity and order | `NativeImplicit` admits `SharedCarrier` (default) and `SuppliedPhaseSlip`. Fixed closed Cartesian meshes and qualified cylinders admit `NodeDependentSlip` with `KineticEuler`. Cylindrical kinetic drift is axial. Fixed closed orthogonal Cartesian, native cylindrical and cylindrical `SemiStructuredXY_Z` meshes admit `SharedCarrier` with `RealizableLinearSSPRK2` and optional `TvdMc` slope limiting. The scalar background uses transient backward Euler and upwind. Independent phase momentum, steady assembly, BDF2 and ordinary scalar high-order limiters reject. |
+| Velocity and order | `NativeImplicit` admits `SharedCarrier` (default) and `SuppliedPhaseSlip`. Fixed closed Cartesian meshes and qualified cylinders admit `NodeDependentSlip` with `KineticEuler`. Cylindrical kinetic drift is axial. Closed orthogonal Cartesian, native cylindrical and cylindrical `SemiStructuredXY_Z` meshes admit `SharedCarrier` with `RealizableLinearSSPRK2` and either linear slope limiter. Prescribed planar motion is supported with this pairing and absent acceleration. The scalar background uses transient backward Euler and upwind. Independent phase momentum, steady assembly, BDF2 and ordinary scalar high-order limiters reject. |
 | Gravity and applicability | Fixed native implicit transport, fixed closed Cartesian kinetic Euler, and fixed shared-carrier SSPRK2 on Cartesian or qualified cylindrical meshes admit optional SI acceleration. Fixed cylindrical kinetic Euler admits optional axial acceleration. A supplied zero vector selects the forced policy. Planar ALE requires absent acceleration. Applicability ranges come from the supplied laws. |
 | Family schema | One named fixed-composition family per dispersed gas phase; catalog, family stamp, reference scale and phase ordering agree on all ranks. Variable composition, cross-family coalescence and unmigrated count-only state reject. |
 | Local material and topology | Constructive paired birth, growth, shrinkage, disappearance, coalescence and breakup; transfers may involve the liquid carrier or a declared external reservoir. Declaring either direction of a family-to-background-gas material slot rejects. Generic chemistry, face transport and interphase laws can act on unbound compartments. A legacy number law must name only unbound populations. Selective or unpaired family material returned by a law rejects the preview. |
 | Thermal and pool closures | Common temperature and pressure, zero surface tension. Separate phase or node temperatures, bulk-gas conversion and capillary/surface-energy closures reject. A separate background gas may carry its own inventory. |
-| Transactions and restart | All owners use a common numerical configuration and controller selection. Commit publishes one retained trial. Rejection preserves accepted canonical state, histories and other compatible previews. Fixed-grid restart supports versions 1–5 under their original modes, version 7 for unforced Cartesian kinetic Euler, version 8 for unforced realizable linear SSPRK2 with the default limiter, and tagged version 9 for forced explicit, axial kinetic and TVD-MC SSPRK2 payloads. Moving restart uses version 6 and binds the original and accepted geometry, motion controls, partition, target policy and supplied physics. |
+| Transactions and restart | All owners use a common numerical configuration and controller selection. Commit publishes one retained trial. Rejection preserves accepted canonical state, histories and other compatible previews. Fixed-grid restart supports versions 1–5 under their original modes, version 7 for unforced Cartesian kinetic Euler, version 8 for unforced realizable linear SSPRK2 with the default limiter, and tagged version 9 for forced explicit, axial kinetic and TVD-MC SSPRK2 payloads. Moving implicit restart uses version 6. Moving linear restart uses version 9 tag 7. Both bind the original and accepted geometry, motion controls, partition, target policy and supplied physics. |
 
 The release suite follows circulating polydisperse gas across partition faces into exact vacuum,
 combines it with population events, unrelated mole-changing chemistry and heat, and checks the
@@ -1180,8 +1180,8 @@ Set `QbmmModelOptions::linear_slope_limiter` to `LinearSlopeLimiter::TvdMc` with
 `RealizableLinearSSPRK2`. The default is `RealizabilityOnly`. Every owner must supply the
 same valid option, including an owner with no cells. The option applies to the closed
 Cartesian, native cylindrical sector and seam annulus, and qualified cylindrical
-`SemiStructuredXY_Z` disk and annulus. These meshes support absent or supplied gravity.
-Planar ALE requires `NativeImplicit` and absent acceleration.
+`SemiStructuredXY_Z` disk and annulus. These fixed meshes support absent or supplied gravity.
+The moving-grid extension uses the prescribed planar contract below.
 
 For an active donor channel, let \(\Delta=c_d-c_u\) and \(b=\nabla c_u\cdot d_{ud}\),
 using the displacement from the donor center to the adjacent center. The
@@ -1262,3 +1262,116 @@ and 224 legacy v9 shards.
 GCC Debug with debug symbols disabled passed 303 serial CTests, both ELF export checks,
 45 CTests at two ranks and 46 CTests at four ranks, with zero skips. The MPI totals
 include the dedicated legacy circulation runs.
+
+## Upstream adaptation #1b for prescribed planar SSPRK(2,2)
+
+Unforced `RealizableLinearSSPRK2` with `SharedCarrier` supports the Q7a
+prescribed planar geometry with either `RealizabilityOnly` or `TvdMc`. The
+qualified geometries are Cartesian X/Y/Z, the native cylindrical walled sector
+in Z, and cylindrical `SemiStructuredXY_Z` disk and annulus extrusions in Z.
+Motion requires nonperiodic topology, zero mixture viscosity and native slip
+walls. A supplied body acceleration, including zero, rejects. Moving kinetic
+Euler, supplied phase slip with linear transport, and the Interior pressure
+gradient policy also reject. Background phases retain their two-volume,
+backward-Euler upwind transport.
+
+The certified swept rates \(w_f\) and old and new bulk volumes satisfy
+\(D_c w = (V_c^{n+1}-V_c^n)/\Delta t\). Family transport freezes
+\(\phi_f^{\rm rel} = \phi_f^{\rm abs}- w_f\) per corrector. Equality of the
+absolute and swept rates gives exactly zero relative carrier flux. The two
+rates coincide on each closed boundary and all relative family transfers vanish
+there, including at the moving lid.
+
+For a common subinterval \([\tau_a,\tau_b]\) of the step, let
+\(h=(\tau_b-\tau_a)\Delta t\) and \(V_c(\tau)=\operatorname{lerp}(V_c^n,V_c^{n+1},\tau)\).
+The first Euler update uses \(V(\tau_a)\) and its cell and face centers. The
+second uses \(V(\tau_b)\) and its centers. Both updates act on extensive stocks.
+The second Euler result is averaged with the initial stock to obtain the
+accepted substep stock at \(V(\tau_b)\). The face transfers and pressure
+derivatives use \(h(F^{(1)}+F^{(2)})/2\). All outgoing faces count against the
+same donor budget
+\[
+\frac{ h \sum_f [\sigma_{cf}\phi_f^{\rm rel}]_+ }
+{\min\bigl(V_c(\tau_a), V_c(\tau_b)\bigr)} \leq \texttt{linear\_cfl} \leq \tfrac12.
+\]
+The stage reconstructions use the physical centroid offsets of the same
+interpolated layer geometry. The MC cap, signed specific-energy bounds and
+realizability certificates apply to each stage. The whole-packet upstream
+return uses the smaller incident bulk volume at that stage for the same
+decision on both sides of a partition face.
+
+Let \(J_0\) be the time-averaged relative material-volume flux of the transported
+state at its absolute carrier reference \(\phi_0\), summed over bound and
+background phases. Each material block satisfies
+\(W^{\rm adv}=W^n-\Delta t D_c J_0\) with its own face packets. The projection
+uses the relative material rate
+\(J(\phi)=J_0+\theta(\phi^{\rm abs}-\phi_0^{\rm abs})\). The derivative \(\theta\)
+uses the half-branch value at a donor tie and yields nonnegative interior
+pressure mobility. A zero interior mobility still requires positive EOS
+susceptibility on every cell. The relative continuity equation on the
+certified trial geometry is
+\[
+D_c J(\phi) =
+\frac{\sum_p(W^{\rm final}_{p,c}-W^{\rm adv}_{p,c})}{\Delta t}
++\frac{\sum_p W^n_{p,c}-V_c^{n+1}}{\Delta t}.
+\]
+At the anchor this equation reduces to the trial occupancy residual. The
+nonlinear corrector recomputes physical face transport and EOS occupancy,
+with the full continuity residual checked before acceptance. Pressure updates
+interior absolute carrier flux and preserves its exact wall value. Local
+sources run on the trial geometry. Each phase pays
+\(-p^{\rm abs}(W^{\rm final}-W^{\rm adv})\) once. In a closed uniform ideal-gas
+piston this gives \(n c_v(T_1-T_0)=-p_1(V_1-V_0)\) for either direction of
+motion.
+
+Moving linear preview and failed restaging restore the exact accepted geometry
+and cache epoch together with the accepted absolute carrier flux. The mesh
+keeps the highest epoch it has issued, so a rejected geometry's epoch cannot
+identify a later trial. The solver retains compatible earlier previews and
+publishes accepted fields, histories and geometry together on commit.
+
+Tag **7** of portable version **9** (`PlanarLinear`) combines the Q7a reference
+and accepted geometry, motion options, target authority and last wall interval
+with the linear algorithm revision, limiter, CFL and substep cap, returned
+packet count, advancement controls and controller provenance. Coupled images
+retain accepted aggregate diagnostics. The portable image uses the same
+partition-local restart interface and receipt availability as Q7a. The
+reader checks the Q7a EOS schema and validates the restored state with the
+receiving EOS providers. Existing v5–v8 and v9 tags 3–6 retain their layouts.
+
+### Moving linear qualification
+
+The GCC Debug numerical oracles ran at one, two and four ranks. Cartesian
+X/Y/Z, the native cylindrical sector, and both polygonal extrusions exercised
+both limiters under expansion and compression. The maximum relative GCL defect
+was \(7.85\times10^{-17}\) and the maximum uniform interior density error was
+\(4.44\times10^{-16}\). Co-moving cases preserved every extensive stock
+exactly, with zero material transfer and independently evaluated tie derivatives
+on interior faces. The Cartesian circulation test also checked every face's
+nonzero transport against the independent stage-volume average.
+
+The ideal-gas piston oracles checked exact relative wall impermeability,
+absolute carrier continuity and the single-charge work law. Maximum analytic
+errors were \(4.37\times10^{-11}\) Pa in pressure, \(1.14\times10^{-13}\) K
+in temperature and \(2.23\times10^{-11}\) J in work. A two-cell piston
+exercised nonzero interior relative transport. A rank-local failure after an
+accepted nonzero step restored the full prior motion interval. A translated
+Cartesian affine ramp at a coordinate offset of \(2^{48}\) exercised native
+reconstruction distances in both Runge–Kutta stages.
+
+The sharp-front bound defect in the interior was
+\(1.11\times10^{-16}\). Observed smooth-interior convergence orders over all
+eight channels and both limiters were 2.012–2.088 in expansion and 1.966–2.121
+in compression on Cartesian and native cylindrical columns.
+
+The moving TVD-MC precision oracle returned exactly two canonical packets in
+each donor direction, including transfers across a partition face and owners
+with no cells. The coherent reacting and thermal restart oracles compared
+uninterrupted, owner-checkpoint and separate-process runs. They also checked
+limiter, advancement controls, motion, geometry and controller mismatches. A
+checksum-valid single-owner geometry mismatch after staging preserved an
+earlier preview, which could then commit without replaying callbacks.
+
+The legacy byte comparison matched all 315 partition-local shards produced at
+one, two and four ranks against the pre-change executable. It covered versions
+5–8 and version 9 tags 3–6, including 28 tag-6 shards.
