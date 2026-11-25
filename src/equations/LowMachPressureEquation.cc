@@ -199,6 +199,7 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
         });
     collective_detail::require_uniform_value(mesh, options.max_iterations, "Pressure linear iteration limit");
     collective_detail::require_uniform_value(mesh, options.tolerance, "Pressure linear tolerance");
+    collective_detail::require_uniform_value(mesh, options.absolute_tolerance, "Pressure absolute linear tolerance");
     collective_detail::require_uniform_value(mesh, options.verbosity, "Pressure linear verbosity");
     collective_detail::require_uniform_value(mesh, int(options.backend), "Pressure linear backend");
     collective_detail::require_uniform_value(mesh, int(options.preconditioner), "Pressure preconditioner");

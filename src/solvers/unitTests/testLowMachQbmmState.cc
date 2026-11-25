@@ -1576,6 +1576,10 @@ TEST(LowMachQbmmStateTest, LinearSolverOptionsMustAgreeOnEveryOwner)
         options.linear.preconditioner =
             comm->getSize() == 1 ? static_cast<LinearPreconditioner>(-1) : LinearPreconditioner::Jacobi;
     EXPECT_THROW((void) Flow(f.mesh, f.eos, options), std::exception);
+    options = f.options;
+    if (last)
+        options.linear.absolute_tolerance = 1e-10;
+    EXPECT_THROW((void) Flow(f.mesh, f.eos, options), std::exception);
 }
 
 void bind_native_laws(Fixture& fixture, std::vector<R::QbmmLawMetadata> laws)

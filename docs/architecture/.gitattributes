@@ -1,0 +1,2 @@
+# Preserve the QBMM specification's Markdown hard breaks and recorded hash.
+/qbmm_reacting_bubbles.md whitespace=-blank-at-eol,-blank-at-eof

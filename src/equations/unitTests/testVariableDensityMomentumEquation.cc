@@ -451,7 +451,7 @@ TEST(VariableDensityMomentumTest, MalformedAndRankAsymmetricLinearPoliciesReject
     rejects(invalid);
     if (comm->getSize() > 1)
     {
-        for (int choice = 0; choice < 6; ++choice)
+        for (int choice = 0; choice < 7; ++choice)
         {
             SCOPED_TRACE(choice);
             LinearSolverOptions selected;
@@ -469,6 +469,8 @@ TEST(VariableDensityMomentumTest, MalformedAndRankAsymmetricLinearPoliciesReject
                     selected.verbosity = 0;
                 if (choice == 5)
                     selected.reuse_preconditioner = true;
+                if (choice == 6)
+                    selected.absolute_tolerance = 1e-10;
             }
             rejects(selected);
         }

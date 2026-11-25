@@ -90,6 +90,11 @@ non-Laplacian deviatoric stress terms require a supplied contribution when used.
 Pressure work uses the phase-volume trial and the same transported volume packet
 as the continuity budget.
 
+Kinetic QBMM preserves a represented common temperature when each phase's
+stored energy and advected volume exactly match its EOS at the trial pressure.
+This exact check preserves stationary states through the shifted-reference
+caloric solve.
+
 ## Componentwise transport consistency
 
 Each native scalar transport uses backward Euler, first-order upwind advection,
@@ -99,6 +104,12 @@ exactly empty receiving cell: a tiny physical arrival can be lost beside much
 larger inventories elsewhere while its incoming material-volume packet remains
 positive. Species, signed phase internal energy and population counts therefore
 also pass an independent local extensive balance before any source callback.
+
+Grouped multi-RHS transport and the optional absolute linear residual bound
+apply to Low-Mach configurations without QBMM. A QBMM configuration uses
+scalar transport for unbound phases, its selected family operator for bound
+phases, and the relative linear tolerance recorded by the portable restart
+contract.
 
 For returned amount `q`, donor concentration `C = q/V_new`, and the actual
 owner-oriented face packets `F = phi*C_upwind`, the cell defect is

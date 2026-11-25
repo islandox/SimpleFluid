@@ -178,6 +178,7 @@ void audit_transport(Fixture& f, bool require_motion)
 {
     const auto before = f.flow->state();
     const auto trial = f.flow->preview(dt);
+    EXPECT_EQ(trial.diagnostics().transport_multi_rhs.operator_groups, 0U);
     const auto& snapshot = trial.transport_snapshot();
     const auto receipts = trial.owned_phase_transport();
     const auto comm = f.mesh->owned_cell_map()->getComm();

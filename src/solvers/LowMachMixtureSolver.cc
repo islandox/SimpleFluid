@@ -436,15 +436,9 @@ struct CaloricCell
     double volume = 0, derivative = 0, work = 0, roundoff = 0, work_magnitude = 0, pressure_operands = 0;
     std::optional<PressureConditionedThermalEvaluation> conditioned;
 };
-enum class ThermalSeed
-{
-    Bisect,
-    ExactEnthalpy,
-    ExactCylindricalKineticState
-};
 // U_new+p_new*V_new = U_adv+source+p_new*V_adv owns actual phase-volume work once.
 CaloricCell recover_enthalpy(const Solver::CellState& transported, std::span<const double> advected_volumes, double p0,
-    const Solver::Options& options, ThermalSeed seed_policy, const FrozenInterphasePlan* conditioned_plan = nullptr,
+    const Solver::Options& options, bool check_exact_enthalpy_seed, const FrozenInterphasePlan* conditioned_plan = nullptr,
     std::span<const double> advected_energy = {})
 {
     CaloricCell result{transported, std::vector<double>(transported.phases.size()), 0, 0, 0};
@@ -519,7 +513,7 @@ CaloricCell recover_enthalpy(const Solver::CellState& transported, std::span<con
         const double minimum = enthalpy(lo), maximum = enthalpy(hi);
         check(std::isfinite(minimum) && std::isfinite(maximum), "Low-Mach enthalpy bounds are nonfinite.");
         const double seed = selected == count ? occupied_temperature : transported.phases[selected].temperature;
-        if (seed_policy == ThermalSeed::ExactCylindricalKineticState && selected == count && seed >= lo && seed <= hi)
+        if (uses_qbmm_kinetic_transport(options.qbmm_model) && selected == count && seed >= lo && seed <= hi)
         {
             // At a valid EOS endpoint, m*h and m*e + p*(m/rho) can round to opposite sides of the
             // enthalpy bound. First test the defining U and V equalities in every physical phase.
@@ -542,7 +536,7 @@ CaloricCell recover_enthalpy(const Solver::CellState& transported, std::span<con
         if (target < minimum || target > maximum)
             throw CaloricRangeError("Low-Mach phase enthalpy is outside supplied caloric validity bounds.");
         // Preserve an already represented enthalpy root during forced explicit transport.
-        if (seed_policy != ThermalSeed::Bisect && seed >= lo && seed <= hi && enthalpy(seed) == target)
+        if (check_exact_enthalpy_seed && seed >= lo && seed <= hi && enthalpy(seed) == target)
             return seed;
         if (target == minimum)
             return lo;
@@ -847,7 +841,11 @@ struct LowMachMixtureSolver::Implementation
                             law = std::make_shared<const QbmmNodeSlipLaw>(*law);
                 planar_owner = std::make_shared<const ALEGeometryCertificate::OwnerIdentity>();
                 if (!options.qbmm_families.empty())
+                {
                     BelosLinearSolver<Pack>::validate_options(options.linear);
+                    check(options.linear.absolute_tolerance == 0,
+                        "Native QBMM requires the historical relative-only linear tolerance.");
+                }
                 for (size_t f = 0; f < mesh->num_faces(); ++f)
                 {
                     const auto face = static_cast<LO>(f);
@@ -874,6 +872,8 @@ struct LowMachMixtureSolver::Implementation
             *mesh, options.linear.max_batch_width, "Low-Mach linear max batch width");
         collective_detail::require_uniform_value(
             *mesh, static_cast<int>(options.linear.multi_rhs_policy), "Low-Mach linear multi-RHS policy");
+        collective_detail::require_uniform_value(
+            *mesh, options.linear.absolute_tolerance, "Low-Mach absolute linear tolerance");
         collective_detail::require_uniform_value(*mesh, options.minimum_pressure, "Low-Mach minimum pressure");
         collective_detail::require_uniform_value(*mesh, options.maximum_pressure, "Low-Mach maximum pressure");
         collective_detail::require_uniform_value(*mesh, options.maximum_correctors, "Low-Mach maximum correctors");
@@ -1365,9 +1365,6 @@ struct LowMachMixtureSolver::Implementation
         entries.reserve(np * (ns + 2));
         for (std::size_t a = 0; a < np; ++a)
         {
-            // Bound families own their moments, species, energy and canonical face flux together.
-            if (!options.qbmm_families.empty() && options.qbmm_families[a])
-                continue;
             const auto carrier = carrier_for_phase(a);
             FVM::TransportOperatorKey key;
             key.mesh_identity = mesh.get();
@@ -2043,10 +2040,6 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
     const bool explicit_family = kinetic || linear;
     const auto force = provider ? provider->body_acceleration : std::nullopt;
     const bool forced_explicit_family = explicit_family && force.has_value();
-    const auto seed_policy = !forced_explicit_family ? ThermalSeed::Bisect
-                             : qbmm_detail::uses_axial_kinetic_transport(d->options, mesh)
-                                 ? ThermalSeed::ExactCylindricalKineticState
-                                 : ThermalSeed::ExactEnthalpy;
     require_controller(controller);
     collective_detail::require_uniform_value(mesh, dt, "Low-Mach mixture timestep");
     collective_detail::require_uniform_value(mesh, int(ale != nullptr), "Low-Mach ALE transport selection");
@@ -2172,6 +2165,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
     bool rounded_hydrostatic_rest = column_axis.has_value();
     const size_t nc = accepted.cells.size(), np = d->eos.size(), ns = d->eos.front()->catalog().species().size();
     const auto& qbmm_families = d->options.qbmm_families;
+    // QBMM restart controls describe scalar transport for unbound carriers and a dedicated family operator.
+    const bool use_multi_rhs_transport = d->options.use_multi_rhs_transport && qbmm_families.empty();
     TransportSnapshot last_transport;
     std::vector<PhaseFaceTransport> last_phase_transport;
     std::vector<QbmmKineticLawReceipt> last_kinetic_law_receipts;
@@ -2234,12 +2229,11 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             double local_caloric_transport = 0, local_energy_transport = 0;
             std::vector<std::vector<double>> adv_volumes(nc, std::vector<double>(np));
             const auto is_qbmm_bound = [&](size_t a) { return !qbmm_families.empty() && qbmm_families[a]; };
-            std::vector<std::unique_ptr<ScalarField>> transported_species(
-                d->options.use_multi_rhs_transport && qbmm_families.empty() ? 0 : np * ns);
+            std::vector<std::unique_ptr<ScalarField>> transported_species(use_multi_rhs_transport ? 0 : np * ns);
             std::vector<Implementation::CarrierSpeciesSlot> species_slots;
             const auto species_donor_concentration = [&](size_t a, size_t s, LO donor) -> double
             {
-                if (d->options.use_multi_rhs_transport && !is_qbmm_bound(a))
+                if (use_multi_rhs_transport)
                 {
                     const auto& slot = species_slots[a * ns + s];
                     return d->transport_workspaces[slot.group_index].conc_overlap->getData(slot.column_index)[donor];
@@ -2330,7 +2324,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     });
                 phase_flux[a]->sync_ghosts();
             }
-            if (d->options.use_multi_rhs_transport)
+            if (use_multi_rhs_transport)
             {
                 d->transport_all_carriers(accepted, trial, phase_flux, dt, iteration, result, species_slots,
                     local_caloric_transport, local_energy_transport, ale);
@@ -2340,7 +2334,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 const bool qbmm_bound = is_qbmm_bound(a);
                 if (explicit_family && qbmm_bound)
                     continue;
-                if (qbmm_bound || !d->options.use_multi_rhs_transport)
+                if (!use_multi_rhs_transport)
                 {
                     if (qbmm_bound)
                         qbmm_face_flux[a] = d->transport_qbmm(accepted, trial, a, *phase_flux[a], dt, result, ale);
@@ -3063,7 +3057,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                 try
                                 {
                                     thermal[c] = recover_enthalpy(trial.cells[c], adv_volumes[c], candidate, d->options,
-                                        seed_policy, thermal_batch ? &thermal_batch->cells[c] : nullptr,
+                                        forced_explicit_family, thermal_batch ? &thermal_batch->cells[c] : nullptr,
                                         advected_energy[c]);
                                 }
                                 catch (const CaloricRangeError&)
@@ -3095,7 +3089,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             try
                             {
                                 thermal[c] =
-                                    recover_enthalpy(trial.cells[c], adv_volumes[c], p0, d->options, seed_policy,
+                                    recover_enthalpy(trial.cells[c], adv_volumes[c], p0, d->options, forced_explicit_family,
                                         thermal_batch ? &thermal_batch->cells[c] : nullptr, advected_energy[c]);
                                 local_volume += thermal[c].volume;
                                 local_derivative += thermal[c].derivative;

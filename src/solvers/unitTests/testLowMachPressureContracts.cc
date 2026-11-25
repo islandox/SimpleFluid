@@ -506,13 +506,13 @@ TEST(LowMachPressureContractsTest, OneRankMalformedLinearPoliciesPreserveAllFiel
     }
 }
 
-TEST(LowMachPressureContractsTest, AllSixDivergentLinearControlsRejectIncludingAnEmptyOwnerAndReplay)
+TEST(LowMachPressureContractsTest, DivergentLinearControlsRejectIncludingAnEmptyOwnerAndReplay)
 {
     Fixture fixture;
     const auto comm = fixture.grid->owned_cell_map()->getComm();
     if (comm->getSize() == 1)
         GTEST_SKIP() << "Rank-divergent controls require MPI; malformed controls execute in serial.";
-    for (int choice = 0; choice < 6; ++choice)
+    for (int choice = 0; choice < 7; ++choice)
     {
         SCOPED_TRACE(choice);
         auto selected = fixture.linear();
@@ -533,6 +533,8 @@ TEST(LowMachPressureContractsTest, AllSixDivergentLinearControlsRejectIncludingA
             }
             if (choice == 5)
                 selected.reuse_preconditioner = true;
+            if (choice == 6)
+                selected.absolute_tolerance = 1e-10;
         }
         fixture.reset_outputs(true);
         const auto saved = fixture.snapshot();

@@ -100,6 +100,7 @@ LinearSolveSummary VariableDensityMomentumEquation<Pack, MeshType>::advance(cons
     collective_detail::require_uniform_value(*d_mesh, int(treatment), "Variable-density momentum correction policy");
     collective_detail::require_uniform_value(*d_mesh, linear.max_iterations, "Momentum linear iteration limit");
     collective_detail::require_uniform_value(*d_mesh, linear.tolerance, "Momentum linear tolerance");
+    collective_detail::require_uniform_value(*d_mesh, linear.absolute_tolerance, "Momentum absolute linear tolerance");
     collective_detail::require_uniform_value(*d_mesh, linear.verbosity, "Momentum linear verbosity");
     collective_detail::require_uniform_value(*d_mesh, int(linear.backend), "Momentum linear backend");
     collective_detail::require_uniform_value(*d_mesh, int(linear.preconditioner), "Momentum preconditioner");
