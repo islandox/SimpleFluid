@@ -41,6 +41,13 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
   endif()
   simplefluid_configure_test_executable(${TEST_NAME})
+  if(TEST_NAME MATCHES "^test(LowMachQbmmKineticTransport|QbmmKineticGravity|QbmmLinearGravityCirculation)$")
+    simplefluid_discover_tests(${TEST_NAME}
+      TEST_FILTER "QbmmCylindricalKinetic*.*"
+      XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q8d/$<CONFIG>"
+      PROPERTIES LABELS "qbmm\\;kinetic\\;low_mach\\;conservation"
+        TIMEOUT 900 ENVIRONMENT "SIMPLEFLUID_Q8D_EXPECTED_RANKS=1")
+  endif()
   if(TEST_NAME STREQUAL "testVerificationCases")
     simplefluid_discover_tests(
       ${TEST_NAME}
@@ -62,15 +69,18 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       PROPERTIES LABELS "qbmm\\;low_mach\\;conservation")
   elseif(TEST_NAME MATCHES "^testLowMachQbmmKinetic(Transport)?$")
     simplefluid_discover_tests(${TEST_NAME}
+      TEST_FILTER "-QbmmCylindricalKinetic*.*"
       XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q7b/$<CONFIG>"
       PROPERTIES LABELS "qbmm\\;kinetic\\;low_mach\\;conservation")
   elseif(TEST_NAME MATCHES "^testQbmmLinearGravity(Circulation)?$")
     simplefluid_discover_tests(${TEST_NAME}
+      TEST_FILTER "-QbmmCylindricalKinetic*.*"
       XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q8c/$<CONFIG>"
       PROPERTIES LABELS "qbmm\\;gravity\\;low_mach\\;conservation"
         TIMEOUT 900 ENVIRONMENT "SIMPLEFLUID_Q8C_EXPECTED_RANKS=1")
   elseif(TEST_NAME STREQUAL "testQbmmKineticGravity")
     simplefluid_discover_tests(${TEST_NAME}
+      TEST_FILTER "-QbmmCylindricalKinetic*.*"
       XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q8b/$<CONFIG>"
       PROPERTIES LABELS "qbmm\\;kinetic\\;low_mach\\;conservation")
   elseif(TEST_NAME STREQUAL "testQbmmApplicationBenchmarks")
@@ -186,6 +196,14 @@ add_qbmm_restart_tests(QbmmLinearControllerRestart testReactingMixtureQbmmSource
     ReactingMixtureQbmmSourcesTest.LinearTransportFeedsCoherentEventsThermalsCommitAndRestart
     SIMPLEFLUID_Q7C_RESTART "qbmm;restart;transaction;conservation")
 
+add_qbmm_restart_tests(QbmmCylindricalKineticRestart testLowMachQbmmCylindricalRestart
+    LowMachQbmmCylindricalRestartTest.PortableContinuation SIMPLEFLUID_Q8D_RESTART "qbmm;kinetic;gravity;restart;transaction")
+foreach(ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME QbmmCylindricalKineticRestartContracts_${ranks}procs TARGET testLowMachQbmmCylindricalRestart
+        PROCS ${ranks} ARGS "--gtest_filter=LowMachQbmmCylindricalRestartTest.*-*.PortableContinuation"
+        LABELS "mpi;qbmm;kinetic;restart;transaction")
+endforeach()
+
 foreach(kind IN ITEMS Forced ZeroForce)
     add_qbmm_restart_tests(Qbmm${kind}KineticRestart testReactingMixtureQbmmSources
         ReactingMixtureQbmmSourcesTest.${kind}KineticTaggedRestart
@@ -199,6 +217,7 @@ foreach(_linear_ranks IN ITEMS 2 4)
     foreach(_gravity_case IN ITEMS QbmmLinearGravity QbmmLinearGravityCirculation)
         set(_test "${_gravity_case}_${_linear_ranks}procs")
         simplefluid_add_mpi_test(NAME ${_test} TARGET test${_gravity_case} PROCS ${_linear_ranks}
+            ARGS "--gtest_filter=-QbmmCylindricalKinetic*.*"
             LABELS "mpi;qbmm;gravity;low_mach;conservation" TIMEOUT 900)
         if(TEST ${_test})
             set_tests_properties(${_test} PROPERTIES ENVIRONMENT "SIMPLEFLUID_Q8C_EXPECTED_RANKS=${_linear_ranks}")
@@ -213,7 +232,21 @@ foreach(_kinetic_ranks IN ITEMS 2 4)
     foreach(_kinetic_case IN ITEMS LowMachQbmmKinetic LowMachQbmmKineticTransport QbmmKineticGravity)
         simplefluid_add_mpi_test(NAME ${_kinetic_case}_${_kinetic_ranks}procs
             TARGET test${_kinetic_case} PROCS ${_kinetic_ranks}
+            ARGS "--gtest_filter=-QbmmCylindricalKinetic*.*"
             LABELS "mpi;qbmm;kinetic;low_mach;conservation;transaction;empty_rank" TIMEOUT 180)
+    endforeach()
+endforeach()
+
+set(_q8d_suites QbmmCylindricalKineticMetric QbmmCylindricalKinetic QbmmCylindricalKineticHeat)
+set(_q8d_targets testLowMachQbmmKineticTransport testQbmmKineticGravity testQbmmLinearGravityCirculation)
+foreach(suite target IN ZIP_LISTS _q8d_suites _q8d_targets)
+    foreach(ranks IN ITEMS 2 4)
+        set(name "${suite}_${ranks}procs")
+        simplefluid_add_mpi_test(NAME ${name} TARGET ${target} PROCS ${ranks}
+            ARGS "--gtest_filter=${suite}.*" LABELS "mpi;qbmm;kinetic;conservation" TIMEOUT 900)
+        if(TEST ${name})
+            set_tests_properties(${name} PROPERTIES ENVIRONMENT "SIMPLEFLUID_Q8D_EXPECTED_RANKS=${ranks}")
+        endif()
     endforeach()
 endforeach()
 

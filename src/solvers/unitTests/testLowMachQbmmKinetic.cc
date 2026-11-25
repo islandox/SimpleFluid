@@ -1,5 +1,7 @@
 /** Native kinetic integration, physical ledgers, and rollback across actual empty owners. */
 #include "QbmmKineticTestSupport.hh"
+#include "geometry/mesh/OrthogonalCylindrial3D.hh"
+#include "solvers/ReactingMixtureCoupler.hh"
 #include "utils/testing_environment.hh"
 
 #include <cmath>
@@ -520,6 +522,120 @@ TEST(LowMachQbmmKineticTest, RejectsUnsupportedModePairsAndUnqualifiedPhysicsWit
     EXPECT_EQ(f.node_calls, calls);
     f.flow.commit(earlier);
     EXPECT_DOUBLE_EQ(f.flow.state().time, f.dt);
+}
+
+TEST(LowMachQbmmKineticTest, CylindricalAxisGuardsRejectCollectivelyAndPreserveEarlierPreview)
+{
+    // Only one owner has a cell and calls the node law, including at four ranks.
+    const auto grid = std::make_shared<Flow::Mesh>(
+        std::make_shared<Flow::Mesh::Cylindrical>(Vec3D<ArrReal>{ArrReal{1., 2.}, {0., .5}, {0., 1.}}),
+        Flow::Mesh::DistributionOptions{.allow_empty_partitions = true});
+    record_ownership(*grid, 1);
+    const auto species = catalog();
+    const R::ThermodynamicBounds bounds{1., 4., 2., 8.};
+    const auto gas =
+        R::make_ideal_gas_mixture(species, {{2., 2., 3.}}, bounds, R::EnergyConvention::IncludesFormationEnergy, 1.);
+    const double tiny = std::numeric_limits<double>::denorm_min();
+    std::array<double, 3> slip{0., 0., .125};
+    int invalid_evaluations = 0;
+    const auto opts = options(
+        species,
+        [&](const R::QbmmNodeSlipInput&)
+        {
+            if (slip[0] != 0. || slip[1] != 0.)
+                ++invalid_evaluations;
+            return slip;
+        },
+        bounds);
+    auto flow = std::make_shared<Flow>(grid, std::vector{gas}, opts);
+    Flow::State initial;
+    initial.thermodynamic_pressure = 4.;
+    initial.qbmm_families = {Flow::qbmm_family_stamp(*opts.qbmm_families[0])};
+    initial.cells.resize(grid->num_owned_cells());
+    for (size_t c = 0; c < initial.cells.size(); ++c)
+    {
+        const double mass = 2. * grid->cell_volume(static_cast<LO>(c));
+        set_stock(initial.cells[c], gas, {mass, mass, mass, mass}, 4., 2., 3.);
+    }
+    slip[0] = tiny;
+    EXPECT_THROW(flow->initialize(initial), std::exception);
+    EXPECT_FALSE(flow->initialized());
+    EXPECT_EQ(reduce(*grid, Teuchos::REDUCE_SUM, invalid_evaluations), 1);
+    slip[0] = 0.;
+    flow->initialize(initial);
+
+    const auto earlier = flow->preview(.125);
+    const auto before = flow->serialize_qbmm_restart();
+    const auto preview_id = flow->qbmm_report(earlier).provenance.preview_id;
+    const auto packets = flow->qbmm_report(earlier).interval->local_face_transport;
+    auto count_only_options = opts;
+    count_only_options.qbmm_model = {};
+    count_only_options.qbmm_node_slip_laws.clear();
+    count_only_options.qbmm_families.clear();
+    Flow count_only(grid, {gas}, count_only_options);
+    auto legacy = initial;
+    legacy.qbmm_families.clear();
+    Flow::QbmmInitialization shapes;
+    for (auto& cell : legacy.cells)
+    {
+        cell.qbmm_shape.clear();
+        shapes.cells.push_back({Flow::QbmmMonodisperse{}});
+    }
+    count_only.initialize(std::move(legacy));
+    const auto saved = count_only.checkpoint();
+    slip[1] = -tiny;
+    EXPECT_THROW(static_cast<void>(flow->preview(.25)), std::exception);
+    EXPECT_EQ(reduce(*grid, Teuchos::REDUCE_SUM, invalid_evaluations), 2);
+    EXPECT_THROW(flow->initialize(initial), std::exception);
+    EXPECT_THROW(flow->restore_qbmm_checkpoint(count_only, saved, shapes), std::exception);
+    slip[1] = 0.;
+
+    R::ReactingMixtureOptions controls;
+    controls.mechanism = std::make_shared<const R::ReactionMechanism>(
+        species, std::vector<R::ReactionDefinition>{}, gas->energy_convention());
+    controls.phases = {{R::SpeciesPhase::Dispersed, "kinetic bubbles", {}}};
+    for (const auto transverse : {Flow::Vector{tiny, 0., -1.}, Flow::Vector{0., -tiny, 0.}})
+    {
+        auto dependency = opts;
+        const auto& law = *opts.qbmm_node_slip_laws.front();
+        dependency.qbmm_node_slip_laws.front() =
+            std::make_shared<const R::QbmmNodeSlipLaw>(R::QbmmNodeSlipLaw{law.metadata, law.evaluate, transverse});
+        EXPECT_THROW((void) Flow(grid, {gas}, dependency), std::exception);
+
+        // On a distributed mesh only the last rank (an empty owner) supplies the transverse component.
+        controls.body_acceleration =
+            grid->owned_cell_map()->getComm()->getRank() + 1 == grid->owned_cell_map()->getComm()->getSize()
+                ? transverse
+                : Flow::Vector{0., 0., transverse.z};
+        EXPECT_THROW((void) R::ReactingMixtureCoupler(flow, controls), std::exception);
+    }
+    for (const bool pooling : {false, true})
+    {
+        auto incompatible = opts;
+        if (pooling)
+            incompatible.qbmm_model.bulk_gas_conversion = true;
+        else
+        {
+            incompatible.qbmm_model.family_transport = Model::FamilyTransport::RealizableLinearSSPRK2;
+            incompatible.qbmm_model.velocity = Model::Velocity::SuppliedPhaseSlip;
+            incompatible.qbmm_node_slip_laws.clear();
+        }
+        EXPECT_THROW((void) Flow(grid, {gas}, incompatible), std::exception);
+    }
+    controls.body_acceleration = Flow::Vector{0., 0., -1.};
+    controls.planar_motion = std::make_shared<const R::MixturePlanarMotionProvider>(
+        R::MixturePlanarMotionProvider{grid, {}, "fixed cylinder moving lid", 1, [](double, double) { return 1.; }});
+    EXPECT_THROW((void) R::ReactingMixtureCoupler(flow, controls), std::exception);
+
+    EXPECT_EQ(flow->serialize_qbmm_restart(), before);
+    const auto retained = flow->qbmm_report(earlier);
+    EXPECT_EQ(retained.provenance.preview_id, preview_id);
+    EXPECT_EQ(retained.interval->local_face_transport, packets);
+    flow->commit(earlier);
+    EXPECT_EQ(flow->state().time, .125);
+    flow->restore_qbmm_checkpoint(count_only, saved, shapes);
+    EXPECT_EQ(flow->qbmm_report().provenance.origin, Flow::QbmmStateOrigin::CountOnlyMigration);
+    EXPECT_EQ(flow->state().time, initial.time);
 }
 
 TEST(LowMachQbmmKineticTest, SingleOwnerCompressionFailurePreservesAnEarlierCommittableTrial)

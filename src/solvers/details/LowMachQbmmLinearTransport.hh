@@ -10,9 +10,6 @@ namespace SimpleFluid::Reacting::qbmm_linear_detail
 using qbmm_explicit_detail::Flow;
 using qbmm_explicit_detail::TransportResult;
 
-/** Validate the full immutable XY base of a polygonal disk or annulus. */
-SIMPLEFLUID_SOLVERS_LOCAL void validate_cylindrical_base(const Flow::Mesh::SemiStructured& mesh);
-
 enum class TraceLimiter
 {
     Outgoing,

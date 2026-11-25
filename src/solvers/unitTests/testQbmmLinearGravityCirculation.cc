@@ -1,4 +1,5 @@
 /** Heated, closed circulation in two native cylindrical meshes, with a passive bulk gas and inert bubble family. */
+#include "QbmmCylindricalTestMesh.hh"
 #include "equations/CollectiveValidation.hh"
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
@@ -46,11 +47,8 @@ constexpr double horizon = 1. / 8, timestep = 1. / 64;
 constexpr unsigned sector_wedges = 4, polygon_sides = 8;
 constexpr size_t phases = 3, family = 1;
 
-enum class Geometry
-{
-    AnnularSector,
-    PolygonalAnnulus
-};
+namespace Cylinder = SimpleFluid::Testing::QbmmCylinder;
+using Geometry = Cylinder::Geometry;
 
 ArrReal edges(unsigned count, double start, double end)
 {
@@ -99,6 +97,7 @@ struct Vessel
     Geometry geometry;
     unsigned count;
     double acceleration, heating;
+    bool kinetic;
     std::shared_ptr<Flow::Mesh> mesh;
     std::shared_ptr<const R::SpeciesCatalog> catalog;
     std::shared_ptr<Flow> flow;
@@ -106,8 +105,9 @@ struct Vessel
     std::vector<double> hydrostatic_head;
     mutable std::vector<std::optional<FourierSample>> fourier_samples;
 
-    Vessel(Geometry kind, unsigned resolution, double g, double heat_sign)
-        : geometry(kind), count(resolution), acceleration(g), heating(heat_sign), mesh(make_mesh(kind, resolution)),
+    Vessel(Geometry kind, unsigned resolution, double g, double heat_sign, bool kinetic_method = false)
+        : geometry(kind), count(resolution), acceleration(g), heating(heat_sign), kinetic(kinetic_method),
+          mesh(kinetic ? Cylinder::mesh(kind, resolution, edges(resolution, 0., height)) : make_mesh(kind, resolution)),
           wall_area(mesh->num_owned_cells()), hydrostatic_head(count), fourier_samples(mesh->num_owned_faces())
     {
         const auto reduced = initialize_wall_areas();
@@ -150,9 +150,22 @@ struct Vessel
         options.qbmm_eos_law_identities = {
             R::ThermalLawIdentity{"Q8c constant-density liquid", 1, catalog->fingerprint()}, std::nullopt,
             std::nullopt};
+        R::QbmmClosureVersions versions;
+        if (kinetic)
+        {
+            options.qbmm_model.family_transport = FamilyTransport::KineticEuler;
+            options.qbmm_model.velocity = R::QbmmModelOptions::Velocity::NodeDependentSlip;
+            const R::QbmmLawMetadata law{
+                "heated vessel axial slip", 1, R::QbmmLawKind::NodeSlip, "mass-dependent axial transport", "m/s"};
+            versions.laws.push_back(law);
+            options.qbmm_node_slip_laws = {nullptr,
+                std::make_shared<const R::QbmmNodeSlipLaw>(R::QbmmNodeSlipLaw{law, [](const auto& atom)
+                    { return std::array{0., 0., atom.mass_kg_per_bubble < 2. * mass_scale ? .015625 : .03125}; }}),
+                nullptr};
+        }
         const auto population = std::make_shared<const R::QbmmPopulationSchema>(catalog, catalog->fingerprint(),
             "two sizes", options.phase_roles[family], mass_scale,
-            std::vector<R::QbmmMassFraction>{{45, 0.}, {46, 1.}, {47, 0.}});
+            std::vector<R::QbmmMassFraction>{{45, 0.}, {46, 1.}, {47, 0.}}, versions);
         options.qbmm_families = {nullptr, population, nullptr};
         flow = std::make_shared<Flow>(mesh, std::vector{liquid, gas, gas}, options);
         Flow::State initial;
@@ -184,24 +197,32 @@ struct Vessel
 
     double volume() const
     {
-        const double angle = geometry == Geometry::AnnularSector
-                                 ? sector_angle
+        const double angle = Cylinder::native(geometry)
+                                 ? Cylinder::span(geometry)
                                  : polygon_sides * std::sin(2. * std::numbers::pi / polygon_sides);
-        return .5 * angle * (outer * outer - inner * inner) * height;
+        const double r0 = Cylinder::inner_radius(geometry);
+        return .5 * angle * (outer * outer - r0 * r0) * height;
     }
 
     std::array<double, 2> wall_areas() const
     {
-        const double circumference_per_radius = geometry == Geometry::AnnularSector
-                                                    ? sector_angle
+        const double circumference_per_radius = Cylinder::native(geometry)
+                                                    ? Cylinder::span(geometry)
                                                     : 2. * polygon_sides * std::sin(std::numbers::pi / polygon_sides);
+        if (geometry == Geometry::PolygonalDisk)
+            return {.5 * circumference_per_radius * outer * height, .5 * circumference_per_radius * outer * height};
         return {circumference_per_radius * inner * height, circumference_per_radius * outer * height};
     }
 
     std::array<double, 2> wall_powers(size_t c) const
     {
         const auto areas = wall_areas();
-        const double power = heating * wall_power_per_volume * volume();
+        // Equal-area half annuli receive different wall flux densities, giving the
+        // two neighbors across the actual theta seam a resolved thermal contrast.
+        const double variation = kinetic && geometry == Geometry::NativeAnnulus
+                                     ? (mesh->cell_centroid(static_cast<LO>(c)).y > 0. ? 1.25 : .75)
+                                     : 1.;
+        const double power = heating * wall_power_per_volume * volume() * variation;
         return {power * wall_area[c][0] / areas[0], -power * wall_area[c][1] / areas[1]};
     }
 
@@ -238,7 +259,8 @@ struct Vessel
                     const double alignment = normal.dot(center) / std::hypot(center.x, center.y);
                     if (normal.z != 0. || std::abs(alignment) < .5)
                         continue; // End caps and native sector's azimuthal walls.
-                    const size_t wall = alignment < 0. ? 0 : 1;
+                    const size_t wall =
+                        geometry == Geometry::PolygonalDisk ? size_t(center.x < 0.) : size_t(alignment > 0.);
                     const double area = mesh->face_area(id);
                     wall_area.at(mesh->owner_cell(id))[wall] += area;
                     local[wall] += area;
@@ -331,7 +353,15 @@ Inventory inventory(const Vessel& vessel, const Flow::State& state)
             local.energy += phase.internal_energy;
         }
         for (size_t d = 0; d < local.momentum.size(); ++d)
+        {
             local.momentum[d] += mass * cell.velocity.component(d);
+            if (vessel.kinetic && d == 2)
+            {
+                const double n = *cell.phase_numbers[family], m = moles(cell.phases[family]) / mass_scale;
+                const double coarse = (m - n) / 3.;
+                local.momentum[d] += mass_scale * (.015625 * (n - coarse) + .03125 * 4. * coarse);
+            }
+        }
     }
     return {vessel.sum(local.species), vessel.sum(local.population), vessel.sum(local.momentum),
         vessel.sum(std::array{local.energy})[0]};
@@ -341,7 +371,7 @@ struct Metrics
 {
     double pressure_work = 0., fourier_exchange = 0., maximum_pair_defect = 0., maximum_occupancy = 0.;
     double maximum_continuity = 0., maximum_solver_residual = 0., maximum_linear_cfl = 0.;
-    double maximum_momentum_defect = 0.;
+    double maximum_momentum_defect = 0., seam_fourier_exchange = 0., partition_seam_fourier_exchange = 0.;
     double maximum_frozen_fourier_discrepancy = 0., maximum_recovered_fourier_discrepancy = 0.;
     double maximum_recovered_fourier_discrepancy_ulps = 0., maximum_relative_recovered_fourier_discrepancy = 0.;
     std::array<double, 2> wall_joules{};
@@ -421,10 +451,20 @@ void check_step(const Vessel& vessel, Controller& controller, double dt, Metrics
     const auto after = inventory(vessel, trial.state());
     const auto& diagnostics = trial.diagnostics().flow;
     const auto& controls = vessel.flow->options();
-    EXPECT_EQ(diagnostics.family_transport, FamilyTransport::RealizableLinearSSPRK2);
-    EXPECT_GE(diagnostics.linear_substeps, 1);
-    EXPECT_EQ(diagnostics.linear_stages, 2 * static_cast<std::uint64_t>(diagnostics.linear_substeps));
-    EXPECT_LE(diagnostics.maximum_linear_cfl, controls.qbmm_model.linear_cfl);
+    if (vessel.kinetic)
+    {
+        EXPECT_EQ(diagnostics.family_transport, FamilyTransport::KineticEuler);
+        EXPECT_GE(diagnostics.kinetic_substeps, 1);
+        EXPECT_GT(diagnostics.maximum_kinetic_cfl, 0.);
+        EXPECT_LE(diagnostics.maximum_kinetic_cfl, controls.qbmm_model.kinetic_cfl);
+    }
+    else
+    {
+        EXPECT_EQ(diagnostics.family_transport, FamilyTransport::RealizableLinearSSPRK2);
+        EXPECT_GE(diagnostics.linear_substeps, 1);
+        EXPECT_EQ(diagnostics.linear_stages, 2 * static_cast<std::uint64_t>(diagnostics.linear_substeps));
+        EXPECT_LE(diagnostics.maximum_linear_cfl, controls.qbmm_model.linear_cfl);
+    }
     EXPECT_GE(diagnostics.source_evaluations, 2);
     EXPECT_LE(diagnostics.source_evaluations, controls.maximum_correctors);
     EXPECT_TRUE(diagnostics.pressure_linear.converged);
@@ -577,6 +617,28 @@ void check_step(const Vessel& vessel, Controller& controller, double dt, Metrics
         metrics.fourier_exchange += std::abs(left[f]);
     }
     compare_fourier_temperatures(vessel, trial, left, time, dt, metrics);
+    if (vessel.kinetic && vessel.geometry == Geometry::NativeAnnulus)
+    {
+        std::array<double, 2> exchange{};
+        for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
+        {
+            const auto face = static_cast<LO>(f);
+            const auto x = mesh.face_centroid(face);
+            if (mesh.is_geometry_exterior_face(face) || x.x <= 0. || std::abs(x.y) > 1e-12 ||
+                std::abs(mesh.face_normal(face).y) < .99)
+                continue;
+            const auto l = mesh.owner_cell(face), r = mesh.neighbor_cell(face);
+            EXPECT_LT(mesh.cell_centroid(l).y * mesh.cell_centroid(r).y, 0.);
+            const auto gid = mesh.face_geometry_global_id(face);
+            const double joules = std::abs(left.at(gid));
+            exchange[0] += joules;
+            if (!mesh.is_owned_cell(l) || !mesh.is_owned_cell(r))
+                exchange[1] += joules;
+        }
+        const auto totals = vessel.sum(exchange);
+        metrics.seam_fourier_exchange += totals[0];
+        metrics.partition_seam_fourier_exchange += totals[1];
+    }
     const double expected = vessel.heating * wall_power_per_volume * vessel.volume() * dt;
     EXPECT_NEAR(budget[0], expected, 2e-12 * std::abs(expected));
     EXPECT_NEAR(budget[1], -expected, 2e-12 * std::abs(expected));
@@ -917,6 +979,49 @@ void circulation_cases(Geometry geometry)
             "temporal_finest_pressure_dipole_change", short_step.pressure_dipole, quarter_step.pressure_dipole, .20);
         sensitivity("temporal_finest_area_change", short_step.area, quarter_step.area, .01);
         sensitivity("temporal_finest_d32_change", short_step.d32, quarter_step.d32, .01);
+    }
+}
+
+TEST(QbmmCylindricalKineticHeat, HeatedClosedVessels)
+{
+    for (const auto kind : Cylinder::geometries)
+    {
+        const std::string name = Cylinder::names[static_cast<size_t>(kind)];
+        SCOPED_TRACE(name);
+        Vessel vessel(kind, 2, gravity, 1., true);
+        Controller controller(vessel.flow, vessel.controller_options());
+        Metrics metrics;
+        for (int step = 0; step < 2; ++step)
+            check_step(vessel, controller, timestep, metrics);
+        EXPECT_GT(metrics.fourier_exchange, 0.);
+        EXPECT_EQ(metrics.maximum_pair_defect, 0.);
+        EXPECT_GT(std::abs(metrics.pressure_work), 0.);
+        if (kind == Geometry::NativeAnnulus)
+        {
+            EXPECT_GT(metrics.seam_fourier_exchange, 1e-6);
+            if (vessel.mesh->owned_cell_map()->getComm()->getSize() > 1)
+                EXPECT_NEAR(metrics.partition_seam_fourier_exchange, metrics.seam_fourier_exchange, 1e-12);
+        }
+        EXPECT_GT(metrics.wall_joules[0], 0.);
+        EXPECT_LT(metrics.wall_joules[1], 0.);
+        const std::array values{std::pair{"hot_wall_J", metrics.wall_joules[0]},
+            std::pair{"cold_wall_J", metrics.wall_joules[1]}, std::pair{"Fourier_exchange_J", metrics.fourier_exchange},
+            std::pair{"maximum_Fourier_pair_defect_J", metrics.maximum_pair_defect},
+            std::pair{"seam_Fourier_exchange_J", metrics.seam_fourier_exchange},
+            std::pair{"partition_seam_Fourier_exchange_J", metrics.partition_seam_fourier_exchange},
+            std::pair{"pressure_work_J", metrics.pressure_work},
+            std::pair{"maximum_occupancy", metrics.maximum_occupancy},
+            std::pair{"maximum_continuity", metrics.maximum_continuity},
+            std::pair{"maximum_residual", metrics.maximum_solver_residual},
+            std::pair{"maximum_momentum_defect_kg_m_s", metrics.maximum_momentum_defect}};
+        for (const auto& [label, value] : values)
+        {
+            std::ostringstream formatted;
+            formatted << std::setprecision(17) << value;
+            testing::Test::RecordProperty(name + "_" + label, formatted.str());
+            if (vessel.mesh->owned_cell_map()->getComm()->getRank() == 0)
+                std::cout << "Q8d " << name << '_' << label << '=' << formatted.str() << '\n';
+        }
     }
 }
 

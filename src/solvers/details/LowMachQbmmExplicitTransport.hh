@@ -110,6 +110,26 @@ struct SIMPLEFLUID_SOLVERS_LOCAL StageThermal
     double material_mass = 0, density = 0, volume = 0, caloric_specific = 0;
 };
 
+/** The one-ring span must reproduce offsets on transporting sides of a face. */
+class SIMPLEFLUID_SOLVERS_LOCAL FaceOffsetFit
+{
+    struct Sample
+    {
+        Mesh::Vec3 displacement, basis;
+        double distance;
+    };
+    std::vector<Sample> samples;
+
+public:
+    explicit FaceOffsetFit(std::span<const Mesh::Vec3> displacements);
+    bool weights(const Mesh::Vec3& offset, std::vector<double>& result) const;
+};
+
+/** Validate the immutable XY topology and walls of a polygonal disk or annulus. */
+SIMPLEFLUID_SOLVERS_LOCAL void validate_cylindrical_base(const Mesh::SemiStructured& mesh);
+/** Check the live metrics and incidence used by axial kinetic transport and pressure projection. */
+SIMPLEFLUID_SOLVERS_LOCAL void validate_axial_kinetic_geometry(const Mesh& mesh);
+
 SIMPLEFLUID_SOLVERS_LOCAL void require(bool valid, const char* message);
 SIMPLEFLUID_SOLVERS_LOCAL Product product(
     std::initializer_list<double> numerator, std::initializer_list<double> denominator = {});
@@ -127,3 +147,21 @@ SIMPLEFLUID_SOLVERS_LOCAL void validate_closed_balances(const Mesh& mesh, const 
     const Flow::State& accepted, const Flow::State& candidate, const std::vector<size_t>& phases, size_t packet_columns,
     const std::vector<std::vector<double>>& accepted_volumes, const TransportResult& result);
 } // namespace SimpleFluid::Reacting::qbmm_explicit_detail
+
+namespace SimpleFluid::Reacting::qbmm_detail
+{
+SIMPLEFLUID_SOLVERS_LOCAL inline bool uses_axial_kinetic_transport(
+    const LowMachMixtureSolver::Options& options, const LowMachMixtureSolver::Mesh& mesh)
+{
+    using Mesh = LowMachMixtureSolver::Mesh;
+    return uses_qbmm_kinetic_transport(options.qbmm_model) &&
+           (std::holds_alternative<Mesh::CylindricalPtr>(mesh.variant()) ||
+               std::holds_alternative<Mesh::SemiStructuredPtr>(mesh.variant()));
+}
+
+SIMPLEFLUID_SOLVERS_LOCAL inline void require_axial(const LowMachMixtureSolver::Vector& vector, const char* message)
+{
+    if (vector.x != 0. || vector.y != 0. || !std::isfinite(vector.z))
+        throw std::invalid_argument(message);
+}
+} // namespace SimpleFluid::Reacting::qbmm_detail

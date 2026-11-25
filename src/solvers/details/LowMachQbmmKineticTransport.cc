@@ -1,6 +1,7 @@
 #include "solvers/details/LowMachQbmmKineticTransport.hh"
 #include "equations/CollectiveValidation.hh"
 #include "solvers/details/LowMachQbmmLawInputs.hh"
+#include "solvers/details/LowMachQbmmState.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -105,7 +106,7 @@ void stage_traces(const Mesh& mesh, const Flow::Options& options, const Flow::St
             require(quadrature.valid(), "QBMM kinetic donor reconstruction failed.");
             auto& law = law_traces[c * phases.size() + a];
             law.closure = qbmm_native_law_detail::evaluate_node_slip(
-                options, donor, phase, bulk_volume, volumes, location, &law.observations);
+                options, mesh, donor, phase, bulk_volume, volumes, location, &law.observations);
             require(law.closure.active_atoms == quadrature.active_atoms, "QBMM kinetic donor atom layout differs.");
             trace(cell, column + BulkVolume) = bulk_volume;
             trace(cell, column + Rank) = quadrature.active_atoms;
@@ -133,6 +134,33 @@ size_t outgoing_column(size_t family, size_t direction, size_t atom)
 double active_speed(double speed, size_t direction)
 {
     return std::max(0., direction == 0 ? speed : -speed);
+}
+
+struct UnresolvedOffset
+{
+    LO face;
+    size_t side;
+};
+
+std::vector<UnresolvedOffset> unresolved_offsets(const Mesh& mesh)
+{
+    std::vector<UnresolvedOffset> unresolved;
+    std::vector<Mesh::Vec3> displacements;
+    std::vector<double> weights;
+    for (size_t c = 0; c < mesh.num_owned_cells(); ++c)
+    {
+        const auto cell = static_cast<LO>(c);
+        const auto center = mesh.cell_centroid(cell);
+        displacements.clear();
+        for (const auto face : mesh.faces(cell))
+            if (!mesh.is_geometry_exterior_face(face))
+                displacements.push_back(mesh.cell_center_vector(face, cell));
+        const FaceOffsetFit fit(displacements);
+        for (const auto face : mesh.faces(cell))
+            if (!mesh.is_geometry_exterior_face(face) && !fit.weights(mesh.face_centroid(face) - center, weights))
+                unresolved.push_back({face, mesh.owner_cell(face) == cell ? 0u : 1u});
+    }
+    return unresolved;
 }
 
 template<class Trace, class Speeds>
@@ -493,6 +521,7 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
     FaceSum caloric, energy;
     const double cap = options.qbmm_model.kinetic_cfl;
     const int max_substeps = options.qbmm_model.maximum_kinetic_substeps;
+    std::vector<UnresolvedOffset> unresolved;
     collective_detail::collective_local_validation(mesh, "QBMM kinetic transport setup",
         [&]
         {
@@ -501,6 +530,11 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
                 "QBMM kinetic owned-cell layout differs.");
             require(std::isfinite(dt) && dt > 0 && std::isfinite(cap) && cap > 0 && cap <= 1 && max_substeps > 0,
                 "Invalid QBMM kinetic interval or CFL policy.");
+            if (qbmm_detail::uses_axial_kinetic_transport(options, mesh))
+            {
+                qbmm_detail::validate_capability(options, mesh, false, {}, false);
+                unresolved = unresolved_offsets(mesh);
+            }
             for (size_t p = 0; p < nphase; ++p)
                 if (options.qbmm_families[p])
                 {
@@ -579,7 +613,16 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
         const auto speed = speeds->read();
         double local_limit = std::numeric_limits<double>::infinity();
         collective_detail::collective_local_validation(mesh, "QBMM kinetic all-face owner reserved rates",
-            [&] { local_limit = reserve(mesh, speed, phases.size(), cap); });
+            [&]
+            {
+                for (const auto& offset : unresolved)
+                    for (size_t a = 0; a < phases.size(); ++a)
+                        for (size_t i = 0; i < nodes; ++i)
+                            require(
+                                active_speed(speed(offset.face, outgoing_column(a, offset.side, i)), offset.side) == 0.,
+                                "QBMM kinetic one-ring geometry cannot reproduce this outgoing face offset.");
+                local_limit = reserve(mesh, speed, phases.size(), cap);
+            });
         // The minimum of cap / max_local(sum |q| / V) is the same limit as
         // the global maximum outgoing rate. Reducing the reciprocal bound
         // keeps an otherwise representable duration when q/V overflows.

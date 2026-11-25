@@ -17,8 +17,8 @@ namespace
 // and node laws, and retains endpoint node velocities, drift and interval diagnostics.
 // Version 8 binds the realizable linear SSPRK2 policy and retains interval and
 // controller diagnostics. Only the accepted step boundary is archived.
-// Version 9 explicitly tags the forced fixed kinetic and SSPRK2 payloads. Pressure and thermal revisions,
-// SI acceleration, physical laws, advancement controls and controller binding precede the method's endpoint payload.
+// Version 9 tags forced Cartesian kinetic, forced SSPRK2 and axial kinetic payloads. The axial tag
+// records ordered maps and distinguishes absent acceleration from supplied zero acceleration.
 constexpr std::uint64_t qbmm_restart_magic = 0x5453524d4d425153ULL;
 constexpr std::uint64_t qbmm_fixed_restart_version = 5;
 constexpr std::uint64_t qbmm_planar_restart_version = 6;
@@ -31,8 +31,14 @@ enum class RestartPayload : std::uint64_t
     FixedImplicit = 1,
     PlanarImplicit = 2,
     FixedKinetic = 3,
-    FixedLinear = 4
+    FixedLinear = 4,
+    FixedAxialKinetic = 5
 };
+
+bool is_kinetic_payload(RestartPayload payload)
+{
+    return payload == RestartPayload::FixedKinetic || payload == RestartPayload::FixedAxialKinetic;
+}
 
 constexpr size_t restart_word_size = sizeof(std::uint64_t);
 static_assert(sizeof(double) == restart_word_size && std::numeric_limits<double>::is_iec559);
@@ -152,7 +158,8 @@ RestartPayload decode_restart_payload(std::uint64_t version, RestartReader& read
             std::uint64_t tag = 0;
             reader(tag);
             check(tag == static_cast<std::uint64_t>(RestartPayload::FixedKinetic) ||
-                      tag == static_cast<std::uint64_t>(RestartPayload::FixedLinear),
+                      tag == static_cast<std::uint64_t>(RestartPayload::FixedLinear) ||
+                      tag == static_cast<std::uint64_t>(RestartPayload::FixedAxialKinetic),
                 "Unknown v9 QBMM payload type.");
             return static_cast<RestartPayload>(tag);
         }
@@ -161,10 +168,12 @@ RestartPayload decode_restart_payload(std::uint64_t version, RestartReader& read
     }
 }
 
-RestartPayload configured_restart_payload(const Solver::Options& options, bool motion)
+RestartPayload configured_restart_payload(const Solver::Options& options, const Solver::Mesh& mesh, bool motion)
 {
     if (motion)
         return RestartPayload::PlanarImplicit;
+    if (qbmm_detail::uses_axial_kinetic_transport(options, mesh))
+        return RestartPayload::FixedAxialKinetic;
     if (uses_qbmm_kinetic_transport(options.qbmm_model))
         return RestartPayload::FixedKinetic;
     if (uses_qbmm_linear_transport(options.qbmm_model))
@@ -452,11 +461,13 @@ std::uint64_t restart_advance_controls(const Solver::Options& options)
 }
 
 std::uint64_t restart_forced_physical_fingerprint(const Solver::Options& options,
-    std::span<const std::shared_ptr<const MixtureThermodynamics>> eos, QbmmModelOptions::FamilyTransport transport)
+    std::span<const std::shared_ptr<const MixtureThermodynamics>> eos, QbmmModelOptions::FamilyTransport transport,
+    bool axial_kinetic)
 {
     RestartHash hash;
-    hash.string(transport == QbmmModelOptions::FamilyTransport::KineticEuler ? "forced-kinetic-physical-providers-v1"
-                                                                             : "forced-linear-physical-providers-v1");
+    hash.string(axial_kinetic                                                  ? "axial-kinetic-physical-providers-v1"
+                : transport == QbmmModelOptions::FamilyTransport::KineticEuler ? "forced-kinetic-physical-providers-v1"
+                                                                               : "forced-linear-physical-providers-v1");
     hash.word(restart_schema_fingerprint(options, eos));
     hash.word(eos.front()->catalog().fingerprint());
     const std::optional<ThermalLawIdentity> no_identity;
@@ -476,7 +487,7 @@ std::uint64_t restart_forced_physical_fingerprint(const Solver::Options& options
         const auto& supplied =
             options.qbmm_eos_law_identities.empty() ? no_identity : options.qbmm_eos_law_identities[phase];
         check((ideal && !ideal->has_supplied_transport) || supplied,
-            "Forced explicit QBMM requires a declared identity for each supplied EOS or EOS transport law.");
+            "Tagged QBMM restart requires a declared identity for each supplied EOS or EOS transport law.");
         hash.word(ideal.has_value());
         if (ideal)
         {
@@ -493,7 +504,7 @@ std::uint64_t restart_forced_physical_fingerprint(const Solver::Options& options
         append_identity(supplied);
     }
     check(!options.mixture_dynamic_viscosity || options.qbmm_mixture_viscosity_identity,
-        "Forced explicit QBMM requires a declared identity for its supplied mixture viscosity law.");
+        "Tagged QBMM restart requires a declared identity for its supplied mixture viscosity law.");
     append_identity(options.qbmm_mixture_viscosity_identity);
     return hash.value;
 }
@@ -504,6 +515,19 @@ std::uint64_t restart_force_binding(
     RestartHash hash;
     hash.word(signature);
     hash.vector(acceleration);
+    hash.word(physical_fingerprint);
+    return hash.value;
+}
+
+std::uint64_t restart_axial_binding(
+    std::optional<std::uint64_t> signature, std::optional<Solver::Vector> force, std::uint64_t physical_fingerprint)
+{
+    RestartHash hash;
+    hash.word(signature.has_value());
+    hash.word(signature.value_or(0));
+    hash.word(force.has_value());
+    if (force)
+        hash.vector(*force);
     hash.word(physical_fingerprint);
     return hash.value;
 }
@@ -576,7 +600,7 @@ void restart_diagnostics(
         io(value.maximum_shape_source_residual);
     if (version >= 3)
         io(value.maximum_shape_transport_residual);
-    if (type == RestartPayload::FixedKinetic)
+    if (is_kinetic_payload(type))
         io(value.kinetic_substeps, value.maximum_kinetic_cfl);
     if (type == RestartPayload::FixedLinear)
         io(value.linear_substeps, value.linear_stages, value.maximum_linear_cfl, value.maximum_linear_stage_residual,
@@ -914,7 +938,7 @@ void validate_restart_physics(const Solver::Mesh& mesh, const Solver::Options& o
         if (planar)
             (void) effective_mixture_viscosity(options, cell.phases, phase_volumes, true);
         if (initialize_kinetic)
-            qbmm_native_law_detail::evaluate_kinetic_closure(options, cell, volume, phase_volumes,
+            qbmm_native_law_detail::evaluate_kinetic_closure(options, mesh, cell, volume, phase_volumes,
                 qbmm_native_law_detail::kinetic_location(mesh, static_cast<LO>(c)));
         if (retained_kinetic)
             qbmm_native_law_detail::validate_archived_node_slip_gates(options, cell, volume);
@@ -988,21 +1012,26 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
     const bool kinetic = uses_qbmm_kinetic_transport(d->options.qbmm_model);
     const bool linear = uses_qbmm_linear_transport(d->options.qbmm_model);
     const bool explicit_family = kinetic || linear;
-    const auto type = configured_restart_payload(d->options, motion != nullptr);
+    const auto type = configured_restart_payload(d->options, mesh, motion != nullptr);
+    const bool axial_kinetic = type == RestartPayload::FixedAxialKinetic;
     const auto force = d->controller_active && !d->has_forced_family_provenance()
                            ? acceleration_vector(d->active_body_acceleration)
                            : d->diagnostics.body_acceleration_m_per_s2;
-    const auto version = explicit_family && force ? qbmm_tagged_restart_version
-                         : motion                 ? qbmm_planar_restart_version
-                         : kinetic                ? qbmm_kinetic_restart_version
-                         : linear                 ? qbmm_linear_restart_version
-                                                  : qbmm_fixed_restart_version;
+    const bool tagged = axial_kinetic || (explicit_family && force);
+    const auto version = tagged    ? qbmm_tagged_restart_version
+                         : motion  ? qbmm_planar_restart_version
+                         : kinetic ? qbmm_kinetic_restart_version
+                         : linear  ? qbmm_linear_restart_version
+                                   : qbmm_fixed_restart_version;
     collective_detail::require_uniform_value(mesh, version, "QBMM restart encoding version");
+    collective_detail::require_uniform_value(mesh, static_cast<std::uint64_t>(type), "QBMM restart payload type");
     RestartWriter writer;
     std::uint64_t checksum = 0, model = 0, motion_configuration = 0, controller_history = 0;
     std::uint64_t physical_fingerprint = 0;
+    std::uint64_t axial_binding = 0;
     double surface = 0;
-    const auto signature = d->checkpoint_controller();
+    const auto signature =
+        axial_kinetic && d->diagnostics.kinetic_substeps > 0 ? d->accepted_qbmm_controller : d->checkpoint_controller();
     const auto wall_interval = d->qbmm_publication ? d->qbmm_publication->planar_wall_interval : std::nullopt;
     const auto forced_interval = d->qbmm_publication ? d->qbmm_publication->forced_family_interval : std::nullopt;
     if (motion)
@@ -1037,13 +1066,17 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
             const auto& catalog = d->eos.front()->catalog();
             qbmm_detail::validate_capability(d->options, mesh, motion != nullptr, force);
             writer(qbmm_restart_magic, version);
-            if (version == qbmm_tagged_restart_version)
+            if (tagged)
             {
-                check(signature.has_value(), "Forced explicit QBMM restart requires a bound reacting controller.");
-                physical_fingerprint =
-                    restart_forced_physical_fingerprint(d->options, d->eos, d->options.qbmm_model.family_transport);
-                validate_forced_family_impulses(*force, d->diagnostics, state, forced_interval);
-                writer(static_cast<std::uint64_t>(type), force.has_value(), *force,
+                check(!force || signature, "Forced explicit QBMM restart requires a bound reacting controller.");
+                physical_fingerprint = restart_forced_physical_fingerprint(
+                    d->options, d->eos, d->options.qbmm_model.family_transport, axial_kinetic);
+                if (force)
+                    validate_forced_family_impulses(*force, d->diagnostics, state, forced_interval);
+                else
+                    check(!d->diagnostics.impulse_parts && !forced_interval,
+                        "QBMM restart body impulse requires supplied acceleration.");
+                writer(static_cast<std::uint64_t>(type), force.has_value(), force.value_or(Vector{}),
                     kinetic ? balanced_kinetic_pressure_revision : balanced_linear_pressure_revision,
                     kinetic ? forced_kinetic_thermal_revision : forced_linear_thermal_revision,
                     restart_advance_controls(d->options), physical_fingerprint,
@@ -1056,6 +1089,8 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
                 }
             }
             writer(restart_partition_fingerprint(mesh));
+            if (axial_kinetic)
+                writer(restart_ordered_maps_fingerprint(mesh));
             if (motion)
                 writer(motion_configuration, restart_ordered_maps_fingerprint(mesh), surface);
             writer(restart_schema_fingerprint(d->options, d->eos), catalog.fingerprint(),
@@ -1063,7 +1098,12 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
                 static_cast<std::uint64_t>(mesh.num_owned_cells()), static_cast<std::uint64_t>(mesh.num_owned_faces()),
                 state.thermodynamic_pressure, state.time, state.revision, d->trial_nonce);
             writer(signature.has_value(), signature.value_or(0));
-            if (version == qbmm_tagged_restart_version)
+            if (axial_kinetic)
+            {
+                axial_binding = restart_axial_binding(signature, force, physical_fingerprint);
+                writer(axial_binding);
+            }
+            else if (tagged)
                 writer(restart_force_binding(*signature, *force, physical_fingerprint));
             writer(model, d->qbmm_legacy_default_only);
             if (kinetic)
@@ -1079,7 +1119,7 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
             }
             for (const auto& cell : state.cells)
             {
-                qbmm_native_law_detail::validate_kinetic_closure(d->options, cell);
+                qbmm_native_law_detail::validate_kinetic_closure(d->options, mesh, cell);
                 check(!kinetic || cell.qbmm_kinetic_eos_volumes.size() == cell.phases.size(),
                     "Kinetic QBMM restart EOS traces differ from the physical phase layout.");
                 writer(cell.velocity, cell.mechanical_pressure);
@@ -1135,10 +1175,12 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
                 const auto* retained = explicit_family && d->qbmm_publication
                                            ? d->qbmm_publication->controller_diagnostics.get()
                                            : nullptr;
-                const auto* saved = live && version != qbmm_tagged_restart_version ? live : retained;
+                const auto* saved = live && !tagged ? live : retained;
                 const bool has_history = saved && saved->correctors > 0;
-                check(version != qbmm_tagged_restart_version || has_history == forced_interval.has_value(),
+                check(!force || !tagged || has_history == forced_interval.has_value(),
                     "Forced explicit QBMM restart controller history differs from its impulse interval.");
+                check(!axial_kinetic || has_history == (signature.has_value() && d->diagnostics.kinetic_substeps > 0),
+                    "Axial kinetic QBMM restart controller history differs from its accepted controller provenance.");
                 writer(has_history);
                 if (has_history)
                     restart_controller_diagnostics(writer, *saved, d->eos.size(),
@@ -1164,11 +1206,13 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
     {
         collective_detail::require_uniform_value(mesh, controller_history, "QBMM restart controller diagnostics");
     }
-    if (version == qbmm_tagged_restart_version)
+    if (tagged)
     {
-        collective_detail::require_uniform_value(
-            mesh, physical_fingerprint, "Forced explicit physical provider binding");
-        require_uniform_forced_family_history(mesh, *force, d->diagnostics, forced_interval);
+        collective_detail::require_uniform_value(mesh, physical_fingerprint, "Tagged QBMM physical provider binding");
+        if (axial_kinetic)
+            collective_detail::require_uniform_value(mesh, axial_binding, "Axial kinetic QBMM controller binding");
+        if (force)
+            require_uniform_forced_family_history(mesh, *force, d->diagnostics, forced_interval);
     }
     if (kinetic)
         require_uniform_restart_kinetic_diagnostics(mesh, d->diagnostics);
@@ -1204,6 +1248,8 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
     const bool kinetic = uses_qbmm_kinetic_transport(d->options.qbmm_model);
     const bool linear = uses_qbmm_linear_transport(d->options.qbmm_model);
     const bool explicit_family = kinetic || linear;
+    const auto configured_type = configured_restart_payload(d->options, mesh, motion != nullptr);
+    const bool axial_kinetic = configured_type == RestartPayload::FixedAxialKinetic;
     State candidate;
     Diagnostics statistics;
     statistics.family_transport = d->options.qbmm_model.family_transport;
@@ -1213,6 +1259,7 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
     std::uint64_t version = 0, model = 0, saved_generation = 0, checksum = 0, image_checksum = 0;
     std::uint64_t accepted_geometry = 0, motion_configuration = 0, controller_history = 0;
     std::uint64_t physical_fingerprint = 0;
+    std::uint64_t axial_binding = 0;
     double surface = 0, old_cap = 0;
     std::optional<PlanarWallInterval> wall_interval;
     std::optional<ForcedFamilyInterval> forced_interval;
@@ -1246,22 +1293,28 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
             reader.expect(qbmm_restart_magic, "Invalid QBMM restart signature.");
             reader(version);
             const auto type = decode_restart_payload(version, reader);
-            check(type == configured_restart_payload(d->options, motion != nullptr),
+            check(type == configured_type,
                 "QBMM restart payload is incompatible with the receiving geometry or transport mode.");
             if (version == qbmm_tagged_restart_version)
             {
-                reader.expect(1, "Forced explicit QBMM restart lacks its supplied acceleration.");
-                reader(statistics.body_acceleration_m_per_s2.emplace());
+                bool has_force = false;
+                Vector force{};
+                reader(has_force, force);
+                check(has_force || (axial_kinetic && force == Vector{}),
+                    "QBMM restart has an invalid supplied acceleration record.");
+                if (has_force)
+                    statistics.body_acceleration_m_per_s2 = force;
                 reader.expect(kinetic ? balanced_kinetic_pressure_revision : balanced_linear_pressure_revision,
                     "QBMM restart pressure algorithm differs.");
                 reader.expect(kinetic ? forced_kinetic_thermal_revision : forced_linear_thermal_revision,
                     "QBMM restart thermal algorithm differs.");
                 reader.expect(restart_advance_controls(d->options), "QBMM restart advancement controls differ.");
-                physical_fingerprint =
-                    restart_forced_physical_fingerprint(d->options, d->eos, d->options.qbmm_model.family_transport);
-                reader.expect(physical_fingerprint, "Forced explicit QBMM restart physical provider binding differs.");
+                physical_fingerprint = restart_forced_physical_fingerprint(
+                    d->options, d->eos, d->options.qbmm_model.family_transport, axial_kinetic);
+                reader.expect(physical_fingerprint, "Tagged QBMM restart physical provider binding differs.");
                 bool has_impulses = false;
                 reader(has_impulses);
+                check(!has_impulses || has_force, "QBMM restart body impulse requires supplied acceleration.");
                 if (has_impulses)
                 {
                     auto& parts = statistics.impulse_parts.emplace();
@@ -1291,6 +1344,8 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
             }
             else
                 reader.expect(restart_partition_fingerprint(mesh), "QBMM restart mesh geometry or partition differs.");
+            if (axial_kinetic)
+                reader.expect(restart_ordered_maps_fingerprint(mesh), "QBMM restart ordered native maps differ.");
             reader.expect(restart_schema_fingerprint(d->options, d->eos), "QBMM restart phase or EOS schema differs.");
             const auto& catalog = d->eos.front()->catalog();
             const auto phases = d->eos.size(), species = catalog.species().size();
@@ -1311,7 +1366,23 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
                 if (coupled)
                     controller_signature = signature;
             }
-            if (version == qbmm_tagged_restart_version)
+            if (axial_kinetic)
+            {
+                const auto& force = statistics.body_acceleration_m_per_s2;
+                check(!force || controller_signature,
+                    "Forced axial kinetic QBMM restart lacks its controller signature.");
+                // require_controller has authenticated the lease. Only the controller that owns the
+                // accepted history can explicitly replace it with compatible standalone axial state.
+                const bool standalone_rollback = !controller_signature && !force && controller &&
+                                                 controller->reacting_source_authority && d->active_qbmm_controller &&
+                                                 d->active_qbmm_controller == d->accepted_qbmm_controller;
+                check(!d->accepted_qbmm_controller || controller_signature == d->accepted_qbmm_controller ||
+                          standalone_rollback,
+                    "Axial kinetic QBMM restart controller signature differs from the accepted configuration.");
+                axial_binding = restart_axial_binding(controller_signature, force, physical_fingerprint);
+                reader.expect(axial_binding, "Axial kinetic QBMM restart force and controller binding differs.");
+            }
+            else if (version == qbmm_tagged_restart_version)
             {
                 check(controller_signature.has_value(), "Forced explicit QBMM restart lacks its controller signature.");
                 check(!d->has_forced_family_provenance() || controller_signature == d->accepted_qbmm_controller,
@@ -1347,7 +1418,8 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
             }
             check(!legacy_default_only || !d->controller_active || d->active_legacy_compatible,
                 "Legacy QBMM restart requires default force and constitutive-law configuration.");
-            check((!motion && !d->controller_active) || d->active_qbmm_controller == controller_signature,
+            check((!motion && !d->controller_active) || (axial_kinetic && !controller_signature) ||
+                      d->active_qbmm_controller == controller_signature,
                 "QBMM restart target has a different or unrecorded coupled source configuration.");
             candidate.qbmm_families.resize(phases);
             for (auto& stamp : candidate.qbmm_families)
@@ -1440,7 +1512,7 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
                 }
             }
             restart_diagnostics(reader, statistics, phases, species, version, type);
-            if (version == qbmm_tagged_restart_version)
+            if (statistics.body_acceleration_m_per_s2)
                 validate_forced_family_impulses(
                     *statistics.body_acceleration_m_per_s2, statistics, candidate, forced_interval);
             auto metadata = std::make_shared<QbmmPublication>();
@@ -1474,8 +1546,11 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
                 const auto before = reader.remaining_size();
                 bool has_history = false;
                 reader(has_history);
-                check(version != qbmm_tagged_restart_version || has_history == forced_interval.has_value(),
+                check(!statistics.body_acceleration_m_per_s2 || has_history == forced_interval.has_value(),
                     "Forced explicit QBMM restart controller history differs from its impulse interval.");
+                check(!axial_kinetic ||
+                          has_history == (controller_signature.has_value() && statistics.kinetic_substeps > 0),
+                    "Axial kinetic QBMM restart controller history differs from its accepted controller provenance.");
                 if (has_history)
                 {
                     check(controller_signature && (explicit_family || restored),
@@ -1501,7 +1576,7 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
             {
                 validate_restart_kinetic_diagnostics(d->options, statistics);
                 for (const auto& cell : candidate.cells)
-                    qbmm_native_law_detail::validate_kinetic_closure(d->options, cell);
+                    qbmm_native_law_detail::validate_kinetic_closure(d->options, mesh, cell);
             }
             if (linear)
                 validate_restart_linear_diagnostics(d->options.qbmm_model, statistics);
@@ -1520,12 +1595,16 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
     require_uniform_restart_configuration(
         mesh, d->options, d->eos, candidate, controller_signature, model, legacy_default_only);
     collective_detail::require_uniform_value(mesh, version, "QBMM restart archive version");
+    collective_detail::require_uniform_value(
+        mesh, static_cast<std::uint64_t>(configured_type), "QBMM restart payload type");
     if (version == qbmm_tagged_restart_version)
     {
-        collective_detail::require_uniform_value(
-            mesh, physical_fingerprint, "Forced explicit physical provider binding");
-        require_uniform_forced_family_history(
-            mesh, *statistics.body_acceleration_m_per_s2, statistics, forced_interval);
+        collective_detail::require_uniform_value(mesh, physical_fingerprint, "Tagged QBMM physical provider binding");
+        if (axial_kinetic)
+            collective_detail::require_uniform_value(mesh, axial_binding, "Axial kinetic QBMM controller binding");
+        if (statistics.body_acceleration_m_per_s2)
+            require_uniform_forced_family_history(
+                mesh, *statistics.body_acceleration_m_per_s2, statistics, forced_interval);
     }
     require_uniform_restart_fourier_uncertainty(mesh, statistics);
     collective_detail::require_uniform_value(mesh, image_checksum, "QBMM restart image checksum");
@@ -1620,10 +1699,12 @@ void LowMachMixtureSolver::restore_qbmm_checkpoint(const LowMachMixtureSolver& p
             check(saved.count_only_body_acceleration == d->active_body_acceleration,
                 "QBMM migration requires the same physical body acceleration, including its opt-in state.");
             const auto transport = d->options.qbmm_model.family_transport;
-            if (saved.count_only_body_acceleration && uses_qbmm_explicit_transport(d->options.qbmm_model))
-                check(restart_forced_physical_fingerprint(d->options, d->eos, transport) ==
-                          restart_forced_physical_fingerprint(prior.options, prior.eos, transport),
-                    "Forced explicit QBMM migration requires matching physical provider bindings.");
+            const bool axial_kinetic = qbmm_detail::uses_axial_kinetic_transport(d->options, mesh);
+            if (axial_kinetic ||
+                (saved.count_only_body_acceleration && uses_qbmm_explicit_transport(d->options.qbmm_model)))
+                check(restart_forced_physical_fingerprint(d->options, d->eos, transport, axial_kinetic) ==
+                          restart_forced_physical_fingerprint(prior.options, prior.eos, transport, axial_kinetic),
+                    "Explicit QBMM migration requires matching physical provider bindings.");
             qbmm_detail::validate_capability(
                 d->options, mesh, false, acceleration_vector(saved.count_only_body_acceleration));
             check(saved.generation != 0 && saved.generation <= prior.trial_nonce &&

@@ -246,9 +246,10 @@ source substeps while advancing callback time; it does not invent a trajectory.
 `ReactingMixtureOptions::face_transport` is an ordered list of explicit physical
 phase contacts. Each entry supplies immutable identity, revision and catalog
 fingerprint, and enables a diffusion law, a Fourier law, or both. Conductivity in
-an EOS alone does not enable heat transport. The initial face adapter supports
-closed, nonperiodic native meshes; compact native periodic metadata rejects
-before user laws or imports. Physical boundary face packets are zero.
+an EOS alone does not enable heat transport. The face adapter supports closed, nonperiodic native meshes. A Fourier-only stage
+also admits the interior azimuthal seam of a fixed native annulus with axial QBMM
+kinetic transport. The canonical face owner evaluates that contact once and the
+two incident cells receive opposite energy increments. Physical boundary face packets are zero.
 
 A diffusion law supplies catalog-ordered molar conductances `K_i` in m3/s,
 selected primary species and an explicitly selected finite counter-species in

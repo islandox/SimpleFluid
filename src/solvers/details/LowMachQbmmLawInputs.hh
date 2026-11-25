@@ -5,7 +5,7 @@
 
 #include "equations/QbmmLawInputs.hh"
 #include "equations/details/LowMachScaledFaceSum.hh"
-#include "solvers/LowMachMixtureSolver.hh"
+#include "solvers/details/LowMachQbmmExplicitTransport.hh"
 
 #include <numeric>
 
@@ -191,8 +191,9 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_node_slip_gate(
 
 /** Evaluate on owned thermodynamic donor traces. The callback sees instantaneous physical inputs only. */
 SIMPLEFLUID_SOLVERS_LOCAL inline Flow::QbmmKineticClosure evaluate_node_slip(const Flow::Options& options,
-    const Flow::CellState& cell, std::size_t phase, double bulk_volume_m3, std::span<const double> recovered_volumes,
-    std::optional<ReactionLocation> location = {}, NodeSlipObservations* observations = nullptr)
+    const Flow::Mesh& mesh, const Flow::CellState& cell, std::size_t phase, double bulk_volume_m3,
+    std::span<const double> recovered_volumes, std::optional<ReactionLocation> location = {},
+    NodeSlipObservations* observations = nullptr)
 {
     const auto& family = *options.qbmm_families.at(phase);
     const auto& law = *options.qbmm_node_slip_laws.at(phase);
@@ -212,6 +213,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline Flow::QbmmKineticClosure evaluate_node_slip(con
     const double occupied_volume = recovered_volumes[phase];
     const auto inputs =
         make_kinetic_law_inputs(family, cell, phase, bulk_volume_m3, recovered_volumes, view, quadrature, location);
+    const bool axial = qbmm_detail::uses_axial_kinetic_transport(options, mesh);
     for (std::size_t i = 0; i < closure.active_atoms; ++i)
     {
         validate_node_slip_gate(family, evaluate_qbmm_node_slip_applicability(law.metadata, inputs, i, std::nullopt));
@@ -219,6 +221,8 @@ SIMPLEFLUID_SOLVERS_LOCAL inline Flow::QbmmKineticClosure evaluate_node_slip(con
             make_qbmm_node_slip_input(inputs, i, occupied_volume, law.required_body_acceleration_m_per_s2));
         auto& retained = closure.node_velocities[i];
         retained = {velocity[0], velocity[1], velocity[2]};
+        if (axial)
+            qbmm_detail::require_axial(retained, "Cylindrical kinetic QBMM requires axial node slip.");
         auto applicability = evaluate_qbmm_node_slip_applicability(law.metadata, inputs, i, kinetic_speed(retained));
         validate_node_slip_gate(family, applicability);
         if (observations)
@@ -256,28 +260,30 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_node_slip_interval(const Flow::Op
     }
 }
 
-SIMPLEFLUID_SOLVERS_LOCAL inline void evaluate_kinetic_closure(const Flow::Options& options, Flow::CellState& cell,
-    double bulk_volume_m3, std::span<const double> recovered_volumes, std::optional<ReactionLocation> location = {})
+SIMPLEFLUID_SOLVERS_LOCAL inline void evaluate_kinetic_closure(const Flow::Options& options, const Flow::Mesh& mesh,
+    Flow::CellState& cell, double bulk_volume_m3, std::span<const double> recovered_volumes,
+    std::optional<ReactionLocation> location = {})
 {
     if (!uses_qbmm_kinetic_transport(options.qbmm_model))
         return;
     std::vector<std::optional<Flow::QbmmKineticClosure>> closures(options.qbmm_families.size());
     for (std::size_t a = 0; a < closures.size(); ++a)
         if (options.qbmm_families[a])
-            closures[a] = evaluate_node_slip(options, cell, a, bulk_volume_m3, recovered_volumes, location);
+            closures[a] = evaluate_node_slip(options, mesh, cell, a, bulk_volume_m3, recovered_volumes, location);
     cell.qbmm_kinetic_eos_volumes.assign(recovered_volumes.begin(), recovered_volumes.end());
     cell.qbmm_kinetic_closure = std::move(closures);
 }
 
 /** Check a retained endpoint using canonical moments and recorded velocities only. */
 SIMPLEFLUID_SOLVERS_LOCAL inline void validate_kinetic_closure(
-    const Flow::Options& options, const Flow::CellState& cell)
+    const Flow::Options& options, const Flow::Mesh& mesh, const Flow::CellState& cell)
 {
     const auto& closures = cell.qbmm_kinetic_closure;
     const auto& families = options.qbmm_families;
     if (closures.size() != (uses_qbmm_kinetic_transport(options.qbmm_model) ? families.size() : 0) ||
         cell.qbmm_kinetic_eos_volumes.size() != closures.size())
         throw std::invalid_argument("Kinetic QBMM endpoint closure layout differs from the configured integrator.");
+    const bool axial = qbmm_detail::uses_axial_kinetic_transport(options, mesh);
     for (std::size_t a = 0; a < closures.size(); ++a)
     {
         const double volume = cell.qbmm_kinetic_eos_volumes[a];
@@ -288,6 +294,9 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_kinetic_closure(
             throw std::invalid_argument("Kinetic QBMM endpoint closure must match the bound family slots.");
         if (!closures[a])
             continue;
+        if (axial)
+            for (const auto& node : closures[a]->node_velocities)
+                qbmm_detail::require_axial(node, "Cylindrical kinetic QBMM requires axial retained node slip.");
         const auto& family = *families[a];
         const auto quadrature = invert_qbmm_moments(qbmm_cell_moments(family, kinetic_cell_view(family, cell, a)));
         if (kinetic_drift_momentum(family, quadrature, *closures[a]) != closures[a]->drift_momentum)

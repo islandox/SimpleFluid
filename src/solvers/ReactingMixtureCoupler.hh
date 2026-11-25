@@ -168,7 +168,8 @@ struct ReactingMixtureOptions
         interphase; ///< Frozen material amounts before explicit number law.
     std::shared_ptr<const MixtureQbmmProvider> qbmm_population;
     /** Uniform fixed-grid acceleration in m/s². Each acceleration-dependent node-slip law must bind this vector.
-     * For fixed shared-carrier SSPRK2, an engaged vector (including zero) selects balanced pressure and v9.
+     * Fixed explicit family transport selects balanced pressure for any engaged vector, including zero.
+     * Cylindrical kinetic transport requires exactly zero transverse components.
      */
     std::optional<LowMachMixtureSolver::Vector> body_acceleration;
 };

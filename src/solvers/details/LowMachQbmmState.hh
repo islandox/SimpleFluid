@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "solvers/LowMachMixtureSolver.hh"
+#include "solvers/details/LowMachQbmmExplicitTransport.hh"
 #include "solvers/details/LowMachSourceStage.hh"
 #include <algorithm>
 #include <array>
@@ -92,6 +93,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_capability(const Flow::Options& o
 {
     const auto& model = options.qbmm_model;
     const bool kinetic = uses_qbmm_kinetic_transport(model), linear = uses_qbmm_linear_transport(model);
+    const bool axial_kinetic = uses_axial_kinetic_transport(options, mesh);
     using Velocity = QbmmModelOptions::Velocity;
     require((kinetic && model.velocity == Velocity::NodeDependentSlip) ||
                 (linear && model.velocity == Velocity::SharedCarrier) ||
@@ -102,13 +104,15 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_capability(const Flow::Options& o
         "Native QBMM requires fixed family composition and within-family population events.");
     require(!model.capillarity && !model.independent_node_temperatures,
         "Native QBMM requires common pressure and temperature with zero surface tension.");
-    const auto validate_finite_force = [](const Flow::Vector& acceleration)
+    const auto validate_force = [axial_kinetic](const Flow::Vector& acceleration)
     {
         require(std::isfinite(acceleration.x) && std::isfinite(acceleration.y) && std::isfinite(acceleration.z),
             "Supplied body acceleration must be finite in every component.");
+        if (axial_kinetic)
+            require_axial(acceleration, "Cylindrical kinetic QBMM requires axial body acceleration.");
     };
     if (force)
-        validate_finite_force(*force);
+        validate_force(*force);
     require(!moving || (!kinetic && !linear && !force),
         "Planar ALE requires implicit transport and absent body acceleration.");
     std::optional<Flow::Vector> declared_force;
@@ -116,7 +120,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_capability(const Flow::Options& o
         if (law && law->required_body_acceleration_m_per_s2)
         {
             const auto& dependency = law->required_body_acceleration_m_per_s2;
-            validate_finite_force(*dependency);
+            validate_force(*dependency);
             require((!declared_force || declared_force == dependency) && (!force_known || force == dependency),
                 "QBMM node-slip acceleration dependencies must match the supplied body acceleration.");
             declared_force = dependency;
@@ -124,7 +128,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_capability(const Flow::Options& o
     if (!kinetic && !linear)
         return;
     mesh.visit(
-        [linear](const auto& native)
+        [axial_kinetic](const auto& native)
         {
             using Native = std::remove_cvref_t<decltype(native)>;
             if constexpr (std::is_same_v<Native, Flow::Mesh::Cartesian>)
@@ -134,13 +138,26 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_capability(const Flow::Options& o
                         "Explicit QBMM requires closed Cartesian topology.");
             }
             else if constexpr (std::is_same_v<Native, Flow::Mesh::Cylindrical>)
-                require(linear, "Kinetic QBMM requires native Cartesian geometry.");
+            {
+                require(!native.indexer().periodic_dimensions[Native::R] &&
+                            !native.indexer().periodic_dimensions[Native::AXIAL],
+                    "Explicit cylindrical QBMM requires closed radial and axial topology.");
+            }
             else if constexpr (std::is_same_v<Native, Flow::Mesh::SemiStructured>)
-                require(linear && !native.indexer().axial_periodic,
-                    "Semi-structured explicit QBMM requires realizable linear transport and closed axial topology.");
+            {
+                require(
+                    !native.indexer().axial_periodic, "Semi-structured explicit QBMM requires closed axial topology.");
+                if (axial_kinetic)
+                    qbmm_explicit_detail::validate_cylindrical_base(native);
+            }
             else
                 require(false, "Explicit QBMM requires a supported native orthogonal mesh.");
         });
+    if (axial_kinetic)
+    {
+        qbmm_explicit_detail::validate_axial_kinetic_geometry(mesh);
+        return;
+    }
     for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
     {
         const auto face = static_cast<Flow::Pack::local_ordinal_type>(f);

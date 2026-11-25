@@ -12,7 +12,8 @@ with node-dependent slip on a fixed, closed Cartesian mesh. Q7c adds common-bloc
 reconstruction and SSPRK(2,2) for shared-carrier families on fixed orthogonal meshes.
 Q8a couples Fourier contacts inside the thermal corrector. Q8b admits supplied uniform
 acceleration for fixed closed Cartesian kinetic families. Q8c extends fixed shared-carrier
-SSPRK(2,2) to gravity on Cartesian and qualified cylindrical meshes.
+SSPRK(2,2) to gravity on Cartesian and qualified cylindrical meshes. Q8d extends fixed-grid
+kinetic transport to closed cylindrical vessels with axial node drift and optional axial gravity.
 
 ## Source alignment
 
@@ -314,8 +315,8 @@ fraction and an energy-balanced timestep give no empirical validity range for a 
 | Selection | Baseline contract and gate |
 | --- | --- |
 | Native mesh and boundaries | Closed, supported orthogonal native geometry with common pressure and equilibrium temperature. Prescribed fixed-topology planar ALE supports Cartesian X/Y/Z, cylindrical axial Z on a nonperiodic sector, and `SemiStructuredXY_Z` axial Z. Moving geometry requires nonperiodic topology, zero mixture viscosity and native slip walls. General remap, AMR and open-reservoir face transport are outside this capability. |
-| Velocity and order | `NativeImplicit` admits `SharedCarrier` (default) and `SuppliedPhaseSlip`. Fixed closed Cartesian meshes also admit `NodeDependentSlip` with `KineticEuler`. Fixed closed orthogonal Cartesian, native cylindrical and cylindrical `SemiStructuredXY_Z` meshes admit `SharedCarrier` with `RealizableLinearSSPRK2`. The scalar background uses transient backward Euler and upwind. Independent phase momentum, steady assembly, BDF2 and ordinary scalar high-order limiters reject. |
-| Gravity and applicability | Fixed native implicit transport, fixed closed Cartesian kinetic Euler, and fixed shared-carrier SSPRK2 on Cartesian or qualified cylindrical meshes admit optional SI acceleration. A supplied zero vector selects the forced policy. Planar ALE requires absent acceleration. Applicability ranges come from the supplied laws. |
+| Velocity and order | `NativeImplicit` admits `SharedCarrier` (default) and `SuppliedPhaseSlip`. Fixed closed Cartesian meshes and qualified cylinders admit `NodeDependentSlip` with `KineticEuler`. Cylindrical kinetic drift is axial. Fixed closed orthogonal Cartesian, native cylindrical and cylindrical `SemiStructuredXY_Z` meshes admit `SharedCarrier` with `RealizableLinearSSPRK2`. The scalar background uses transient backward Euler and upwind. Independent phase momentum, steady assembly, BDF2 and ordinary scalar high-order limiters reject. |
+| Gravity and applicability | Fixed native implicit transport, fixed closed Cartesian kinetic Euler, and fixed shared-carrier SSPRK2 on Cartesian or qualified cylindrical meshes admit optional SI acceleration. Fixed cylindrical kinetic Euler admits optional axial acceleration. A supplied zero vector selects the forced policy. Planar ALE requires absent acceleration. Applicability ranges come from the supplied laws. |
 | Family schema | One named fixed-composition family per dispersed gas phase; catalog, family stamp, reference scale and phase ordering agree on all ranks. Variable composition, cross-family coalescence and unmigrated count-only state reject. |
 | Local material and topology | Constructive paired birth, growth, shrinkage, disappearance, coalescence and breakup; transfers may involve the liquid carrier or a declared external reservoir. Declaring either direction of a family-to-background-gas material slot rejects. Generic chemistry, face transport and interphase laws can act on unbound compartments. A legacy number law must name only unbound populations. Selective or unpaired family material returned by a law rejects the preview. |
 | Thermal and pool closures | Common temperature and pressure, zero surface tension. Separate phase or node temperatures, bulk-gas conversion and capillary/surface-energy closures reject. A separate background gas may carry its own inventory. |
@@ -673,8 +674,8 @@ A fresh native flow can restore an image from a reacting controller and report i
 Attaching the matching controller restores its accepted diagnostics before the next preview.
 The archive binds the endpoint EOS volumes used for applicability and the corresponding
 retained velocities. Hard instantaneous ranges are checked on these operands during restore.
-Earlier portable versions require their original model selections. Kinetic transport rejects
-moving and cylindrical meshes, SSPRK2, BDF2, separate temperatures, variable composition,
+Earlier portable versions require their original model selections. The v7 kinetic image requires
+a fixed Cartesian mesh. Kinetic transport rejects moving meshes, SSPRK2, BDF2, separate temperatures, variable composition,
 bulk-gas conversion and capillarity.
 
 ### Q8b fixed Cartesian kinetic gravity
@@ -746,7 +747,7 @@ CFL and substep policy. It retains the v7 endpoint node velocities, drift moment
 EOS volumes, accepted face rates and interval summaries. A receiving flow can report
 the accepted endpoint before attachment. Continuation requires the matching controller.
 Owner checkpoints retain raw interval receipts. Portable history exposes only the saved
-summaries. Unforced kinetic and linear archives, planar archives, and fixed implicit archives keep their
+summaries. Unforced Cartesian kinetic, unforced linear, planar and fixed implicit archives keep their
 original wire versions and decoders.
 
 For a built-in ideal gas, v9 binds the gas constant and every species' heat capacity,
@@ -959,8 +960,8 @@ supply. A small transverse rate can then reverse without adding or removing a co
 a large radial or axial packet. Only actual outflow contributes to the donor withdrawal or
 CFL. Both donors supply pressure derivatives at an exact tie. A nontransporting, unresolved
 offset uses its cell-center trace. The v8 method retains its outgoing-face limiter.
-The combination requires shared carrier, fixed geometry and disabled bulk-gas conversion. The cylindrical
-kinetic, supplied-slip SSPRK2, and moving-gravity combinations reject.
+The SSPRK2 combination requires shared carrier, fixed geometry and disabled bulk-gas conversion.
+Supplied-slip SSPRK2 and moving gravity reject.
 
 Pressure reconstruction uses the Q8b edge residual with the actual center displacement in
 Cartesian coordinates, including across the seam. The scalar area and center distance set the
@@ -1050,3 +1051,123 @@ At one, two and four ranks, forced and supplied-zero tag-4 shards resumed in a f
 with the uninterrupted state, face fluxes and stage diagnostics. Owner checkpoints retained
 the interval receipts. In the one-cell MPI case, a damaged shard on an empty owner rejected
 collectively, and the controller could still commit its earlier valid preview.
+
+
+## Q8d axial kinetic transport in a closed cylindrical vessel
+
+`KineticEuler` with `NodeDependentSlip` admits a fixed native walled sector, a full native
+annulus with a periodic azimuthal seam, and an orthogonal polygonal disk or annulus extruded
+in Z with `SemiStructuredXY_Z`. The disk may include the center axis. Each participating
+cell has positive volume and a complete neighbor halo. The polygonal base follows the
+closed-wall tests described in Q8c. Physical end caps and side walls have exactly zero
+transfer, including the upper end cap when all occupied nodes rise.
+
+Velocities are expressed in Cartesian components. Every evaluated or restored node must have
+exactly zero x and y slip. In a mixed layout, unbound background phases retain their
+ordinary implicit transport and phase-drift contract. The same axial condition applies to a supplied body acceleration and
+any acceleration dependency declared by a node law. A nonzero transverse component rejects
+collectively before publication. The carrier can have radial, azimuthal and axial motion.
+For a curved radial face, the scalar area is \(r\,\Delta\theta\,\Delta z\) and the
+owner-oriented area vector points along the midpoint normal. Axial slip therefore contributes
+exactly zero to the normal rate on radial and azimuthal faces. The frozen carrier rate can
+still move material across either face, including an interior azimuthal seam joining two
+partitions. An active outgoing atom requires the donor's one-ring displacement stencil to
+reproduce the cell-to-face offset.
+
+All dimensions share the kinetic all-face donor CFL and substep schedule. The momentum solve
+uses the directional mass rates, donor drift-momentum flux and the change in stored endpoint
+drift momentum. A supplied axial acceleration selects the Q8b balanced cell and face pressure
+predictors, including the interior cell stencil. The reacting controller applies one post-material
+mixture body impulse per candidate interval. Supplying a zero vector selects this policy and
+records force presence even though the body impulse vanishes.
+
+At rest under axial gravity, all cells at a given height must agree on the stored pressure.
+For each axial layer the solver reduces the minimum and maximum density over its owners.
+It integrates both limiting trapezoidal head profiles and checks whether one pressure datum
+rounds to every stored level on both profiles. This accounts for rounding in the masses of
+cells with curved volumes. Finer mechanical pressure, resolved lateral or vertical pressure
+perturbations, nonzero motion and material changes continue through the driven predictor.
+During unconditioned thermal recovery an occupied common-temperature seed can be retained
+when each phase exactly reproduces its stored internal energy and advected EOS volume.
+
+A Fourier-only stage can exchange heat across the periodic face of a native annulus on
+this kinetic path. The canonical owner evaluates one contact, and the two incident cells
+book equal and opposite joules. The geometry checks match both cells to the native seam
+and verify coverage across the owned face maps.
+
+Portable v9 payload **5** identifies fixed cylindrical kinetic transport for absent, zero and
+nonzero axial acceleration. It binds the force presence and vector, physical EOS and law
+revisions, advancement controls, controller provenance, geometry and ordered partition maps.
+The reader validates the stored node velocities and reconstructed drift before publication.
+An owner checkpoint retains the interval receipts. A portable continuation recovers the
+endpoint and marks the previous raw interval receipts unavailable. Payloads 3 and 4 retain
+the Q8b forced Cartesian kinetic and Q8c forced linear contracts, respectively.
+
+### Q8d numerical qualification
+
+The hydrostatic controls advance three steps with zero node slip. They cover constant and
+stratified density, both gravity signs and an absent-force stratified column. The control
+with a flat initial pressure accelerates axially with the sign of gravity. A resolved
+pressure perturbation drives the carrier in both axial and transverse directions.
+For the axial face oracle the donor has two bubbles of scaled mass 1 and one of mass 3.
+With prescribed speeds \(s\) and \(2s\), the four rates across the face are
+\((4,8,20,56)sA/V\). The test calculates the cap areas, cell volumes and center distances
+from each vessel's dimensions.
+
+| Geometry | Maximum rest edge defect (Pa) | Maximum absolute moment-rate error | Maximum pressure center-distance error (m) |
+| --- | ---: | ---: | ---: |
+| Native walled sector | 0 | 0 | 2.78e-16 |
+| Native azimuthal annulus | 4.44e-16 | 3.55e-15 | 1.78e-15 |
+| Polygonal disk through the axis | 4.44e-16 | 3.55e-15 | 4.44e-16 |
+| Polygonal annulus | 4.44e-16 | 0 | 6.11e-16 |
+
+The maxima include serial, MPI-2 and MPI-4. The largest rest speed and face rate were both
+zero. Each circulating plume runs four steps of 1/64 s. The table gives the final fine and
+coarse number centroids, gas mass centroid and liquid volume returning across the middle
+plane. Entries within each cell are ordered as **unforced / axial gravity**.
+
+| Vessel | Fine centroid (m) | Coarse centroid (m) | Gas mass centroid (m) | Returning liquid (m³) |
+| --- | ---: | ---: | ---: | ---: |
+| Native walled sector | 0.50537 / 0.50412 | 0.51270 / 0.51159 | 0.50977 / 0.50860 | 0.001256 / 0.002540 |
+| Native azimuthal annulus | 0.50493 / 0.50386 | 0.51198 / 0.51092 | 0.50916 / 0.50810 | 0.005278 / 0.014816 |
+| Polygonal disk | 0.50487 / 0.50381 | 0.51192 / 0.51087 | 0.50910 / 0.50804 | 0.007323 / 0.019279 |
+| Polygonal annulus | 0.50499 / 0.50392 | 0.51203 / 0.51097 | 0.50921 / 0.50815 | 0.004566 / 0.012999 |
+
+In the native annulus the two plume cases each produced material transfer on 128 radial
+and 256 azimuthal face-steps. At two and four ranks, 32 of those azimuthal face-steps
+crossed the partitioned seam. Both top-layer inventories agreed with cumulative inflow
+through the axial plane below them. With gravity the top layer retained 0.68555 kg of gas,
+and the bottom-minus-top pressure reached 11.0375 Pa. A separate counterflow replay
+reconstructed the directional mass and drift-momentum packets, carrier convection and
+endpoint drift change over four or five substeps. The maximum all-face atom CFL was 0.01
+for a limit of 0.01. The native annulus accumulated 0.060697 kg m/s in absolute cellwise
+drift-momentum changes and a single net axial body impulse of −4.12334 kg m/s.
+
+The heated kinetic control runs two steps of 1/64 s. Each Fourier contact canceled exactly
+in the two incident cells. The largest momentum budget defect was 1.50e-12 kg m/s.
+In the native annulus 0.0503661 J of Fourier exchange crossed the azimuthal seam. The table
+gives integrated wall energy, total internal Fourier exchange magnitude, and pressure work
+replayed using face-advected and endpoint EOS volumes.
+
+| Heated vessel | Hot / cold wall energy (J) | Internal Fourier exchange (J) | Pressure work (J) |
+| --- | ---: | ---: | ---: |
+| Native walled sector | +150 / −150 | 0.65612 | −0.0059325 |
+| Native azimuthal annulus | +942.478 / −942.478 | 4.32043 | −0.0373578 |
+| Polygonal disk | +1131.37 / −1131.37 | 1.56638 | −0.0441661 |
+| Polygonal annulus | +848.528 / −848.528 | 4.33340 | −0.0335204 |
+
+Each topology resumed on the original partition from an owner checkpoint and in a new
+process with absent, nonzero axial and explicitly zero acceleration. The writer and reader
+checked the next endpoint, face rates and kinetic diagnostics. A checksum-valid transverse
+stored velocity rejected before publication. Separate tests exercised single-owner law
+failure, empty ranks, controller detachment and reattachment, and rollback to an earlier
+standalone interval. The earlier valid preview remained committable after rejected trials.
+
+The legacy writer reproduced 119 reference shards byte for byte at one, two and four ranks:
+7 v5, 28 v6, 14 v7, 14 v8, 28 forced Cartesian kinetic v9 and 28 forced linear v9. The two
+v9 counts each include nonzero and explicitly zero acceleration.
+
+GCC Debug qualification passed 610 serial entries, the ELF export-boundary check, 60 entries
+at two MPI ranks and 59 at four MPI ranks, with zero skips. The existing Q8c MPI-2 circulation
+entry reached its 900 s timeout in the concurrent run and passed in 825.34 s when run alone
+with the same binary, inputs and timeout.

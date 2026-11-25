@@ -1,9 +1,11 @@
 /** Exact controls for the same synchronized kinetic operator used by the native corrector. */
+#include "QbmmCylindricalTestMesh.hh"
 #include "QbmmKineticTestSupport.hh"
 #include "solvers/details/LowMachQbmmKineticTransport.hh"
 #include "utils/testing_environment.hh"
 
 #include <cmath>
+#include <iostream>
 #include <limits>
 
 namespace
@@ -139,6 +141,141 @@ TEST(LowMachQbmmKineticTransportTest, TwoSizeColumnHasAnalyticUpwardMomentRates)
             }
         });
     record_maximum(*grid, "maximum_analytic_moment_rate_error", error);
+}
+
+TEST(QbmmCylindricalKineticMetric, AnalyticMomentRatesAndSideMetrics)
+{
+    namespace C = SimpleFluid::Testing::QbmmCylinder;
+    constexpr double dz = .25, speed = .125;
+    for (const auto kind : C::geometries)
+    {
+        const std::string prefix = C::names[static_cast<size_t>(kind)];
+        SCOPED_TRACE(prefix);
+        const auto grid = C::mesh(kind, 2, {0., dz, 2. * dz});
+        const double angle = C::span(kind) / C::wedges(kind);
+        const double shape_factor = C::native(kind) ? angle : std::sin(angle);
+        const double r0 = C::inner_radius(kind), middle = .5 * (r0 + 2.);
+        // Sector centroid lies inward of the circular midpoint. Polygon centroids
+        // have an additional chord contraction. Classify rings by their known bisector.
+        const double centroid_scale = C::native(kind) ? std::sin(.5 * angle) / (.5 * angle) : std::cos(.5 * angle);
+        // Centroid radius follows from the first moment of an annular wedge.
+        // A polygonal strip is the difference of two triangles on the same bisector.
+        const auto centroid_radius = [&](double low, double high)
+        { return centroid_scale * (2. / 3.) * (high * high + high * low + low * low) / (high + low); };
+        const auto cap_area = [&](Flow::Vector center)
+        {
+            const bool inner_ring = std::hypot(center.x, center.y) < middle * centroid_scale;
+            const double low = inner_ring ? r0 : middle, high = inner_ring ? middle : 2.;
+            return .5 * shape_factor * (high * high - low * low);
+        };
+        Operator op(grid, 128.);
+        const auto opts = options(
+            op.species, [](const auto& node)
+            { return std::array{0., 0., node.mass_kg_per_bubble < 2. ? speed : 2. * speed}; }, op.bounds);
+        op.fill(
+            opts, [](auto x) { return x.z < dz ? R::QbmmMomentBlock{3., 5., 11., 29.} : R::QbmmMomentBlock{}; },
+            [](auto) { return 1.; });
+        for (size_t c = 0; c < grid->num_owned_cells(); ++c)
+        {
+            const auto id = static_cast<LO>(c);
+            EXPECT_NEAR(grid->cell_volume(id), dz * cap_area(grid->cell_centroid(id)), 2e-14);
+        }
+        Flow::State endpoint;
+        const auto result = op.advance(opts, endpoint, .125);
+        EXPECT_EQ(result.substeps, 1);
+        int axial = 0, radial = 0, angular = 0;
+        double max_error = 0., max_distance_error = 0.;
+        op.interior_flux(result,
+            [&](auto face, const auto& packet, auto a)
+            {
+                const auto center = grid->face_centroid(face);
+                const R::QbmmMomentBlock rates{packet.population_number_flux, packet.derived_mass_flux,
+                    packet.shape_flux.H2, packet.shape_flux.H3};
+                constexpr R::QbmmMomentBlock coefficients{4., 8., 20., 56.};
+                double signed_area = 0., volume = 1., distance = dz;
+                const auto separation =
+                    grid->cell_centroid(grid->neighbor_cell(face)) - grid->cell_centroid(grid->owner_cell(face));
+                EXPECT_GT(a.dot(separation), 0.);
+                if (center.z == dz)
+                {
+                    EXPECT_EQ(a.x, 0.);
+                    EXPECT_EQ(a.y, 0.);
+                    ++axial;
+                    const double area = cap_area(center);
+                    EXPECT_NEAR(std::abs(a.z), area, 2e-14);
+                    signed_area = std::copysign(area, a.z);
+                    volume = area * dz;
+                }
+                else
+                {
+                    EXPECT_EQ(a.z, 0.);
+                    const double radius = std::hypot(center.x, center.y);
+                    const double alignment = (a.x * center.x + a.y * center.y) / (radius * grid->face_area(face));
+                    if (std::abs(alignment) > .5)
+                    {
+                        ++radial;
+                        distance = centroid_radius(middle, 2.) - centroid_radius(r0, middle);
+                        const double width = C::native(kind) ? angle : 2. * std::sin(.5 * angle);
+                        EXPECT_NEAR(grid->face_area(face), middle * width * dz, 2e-14);
+                        EXPECT_NEAR(std::abs(alignment), 1., 2e-14);
+                    }
+                    else
+                    {
+                        ++angular;
+                        const double rc = radius < middle ? centroid_radius(r0, middle) : centroid_radius(middle, 2.);
+                        distance = 2. * rc * std::sin(.5 * angle);
+                        EXPECT_NEAR(alignment, 0., 2e-14);
+                        EXPECT_NEAR(grid->face_area(face), (2. - middle) * dz, 2e-14);
+                    }
+                }
+                const double measured = grid->face_cell_center_distance(face);
+                EXPECT_NEAR(measured, distance, 2e-14);
+                max_distance_error = std::max(max_distance_error, std::abs(measured - distance));
+                for (size_t k = 0; k < rates.size(); ++k)
+                {
+                    const double expected = coefficients[k] * speed * signed_area / volume;
+                    EXPECT_NEAR(rates[k], expected, 2e-13);
+                    max_error = std::max(max_error, std::abs(rates[k] - expected));
+                }
+            });
+        EXPECT_EQ(reduce(*grid, Teuchos::REDUCE_SUM, axial), 2 * C::wedges(kind));
+        EXPECT_GT(reduce(*grid, Teuchos::REDUCE_SUM, angular), 0);
+        EXPECT_EQ(reduce(*grid, Teuchos::REDUCE_SUM, radial), 2 * C::wedges(kind));
+        const auto metric_error = reduce(*grid, Teuchos::REDUCE_MAX, max_distance_error);
+        std::ostringstream distance_value;
+        distance_value << std::setprecision(17) << metric_error;
+        ::testing::Test::RecordProperty(prefix + "_maximum_pressure_distance_error_m", distance_value.str());
+        if (grid->owned_cell_map()->getComm()->getRank() == 0)
+            std::cout << "Q8d " << prefix << "_maximum_pressure_distance_error_m=" << distance_value.str() << '\n';
+        const auto error = reduce(*grid, Teuchos::REDUCE_MAX, max_error);
+        const auto key = prefix + "_maximum_moment_rate_error";
+        std::ostringstream formatted;
+        formatted << std::setprecision(17) << error;
+        ::testing::Test::RecordProperty(key, formatted.str());
+        if (grid->owned_cell_map()->getComm()->getRank() == 0)
+            std::cout << "Q8d " << key << '=' << formatted.str() << '\n';
+    }
+}
+
+TEST(LowMachQbmmKineticTransportTest, CylindricalUnresolvedOffsetRejectsOnlyWhenMaterialCrosses)
+{
+    // A single radial shell with two equal angular cells is orthogonal. Their
+    // only interior displacement is tangential, while the face centroid has a radial offset.
+    const auto grid = std::make_shared<Flow::Mesh>(
+        std::make_shared<Flow::Mesh::Cylindrical>(Vec3D<ArrReal>{ArrReal{1., 2.}, {0., .25, .5}, {0., 1.}}),
+        Flow::Mesh::DistributionOptions{.allow_empty_partitions = true});
+    Operator op(grid);
+    const auto opts = options(op.species, [](const auto&) { return std::array{0., 0., .125}; }, op.bounds);
+    op.fill(opts, [](auto) { return R::QbmmMomentBlock{2., 2., 2., 2.}; }, [](auto) { return 1.; });
+    Flow::State endpoint;
+    EXPECT_NO_THROW((void) op.advance(opts, endpoint, .01));
+    for (const double rate : {.01, -.01})
+    {
+        for (const auto face : op.carrier.owned_face_ids())
+            if (grid->is_interior_face(face))
+                op.carrier.set_owned_value(face, rate);
+        EXPECT_THROW((void) op.advance(opts, endpoint, .01), std::exception);
+    }
 }
 
 TEST(LowMachQbmmKineticTransportTest, CancellingKineticFamiliesRetainExactSpeciesWeightedMassRemainder)

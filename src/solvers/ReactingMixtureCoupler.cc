@@ -248,7 +248,7 @@ struct SourceEngine
                 }
             }
             if (kinetic)
-                qbmm_native_law_detail::evaluate_kinetic_closure(flow->options(), cell,
+                qbmm_native_law_detail::evaluate_kinetic_closure(flow->options(), *flow->mesh(), cell,
                     transport.new_control_volumes.at(c), kinetic_volumes, source_location(context, c));
             const auto initial = species(cell);
             for (size_t p = 0; p < np; ++p)
@@ -448,7 +448,7 @@ struct SourceEngine
             // trace of this stage's actual material and publish just the closure to its callback.
             auto rate_state = guess;
             const auto volumes = qbmm_phase_volumes(rate_state);
-            qbmm_native_law_detail::evaluate_kinetic_closure(flow->options(), rate_state,
+            qbmm_native_law_detail::evaluate_kinetic_closure(flow->options(), *flow->mesh(), rate_state,
                 context.transport.new_control_volumes.at(c), volumes, source_location(context, c));
             guess.qbmm_kinetic_closure = std::move(rate_state.qbmm_kinetic_closure);
             guess.qbmm_kinetic_eos_volumes = std::move(rate_state.qbmm_kinetic_eos_volumes);
@@ -528,7 +528,7 @@ struct SourceEngine
                         guess = material_guess(caloric_guess, transported, material);
                         phase_volumes = qbmm_phase_volumes(guess);
                         if (uses_qbmm_kinetic_transport(flow->options().qbmm_model))
-                            qbmm_native_law_detail::evaluate_kinetic_closure(flow->options(), guess,
+                            qbmm_native_law_detail::evaluate_kinetic_closure(flow->options(), *flow->mesh(), guess,
                                 transport.new_control_volumes.at(c), phase_volumes, source_location(context, c));
                     }
                     const double bulk_volume = transport.new_control_volumes.at(c);
@@ -1370,6 +1370,9 @@ struct ReactingMixtureCoupler::Implementation
                             bindings[p].push_back({compartment(options.phases[p], s), options.phases[p].population});
                 });
             // Collective constructors run only after all phase/source/ordered-stage metadata agrees.
+            const auto* cylinder = std::get_if<Solver::Mesh::CylindricalPtr>(&mesh.variant());
+            const bool fixed_kinetic_seam = cylinder && (*cylinder)->is_theta_periodic() && !options.planar_motion &&
+                                            qbmm_detail::uses_axial_kinetic_transport(flow->options(), mesh);
             for (const auto& face : options.face_transport)
             {
                 std::shared_ptr<FaceStageStorage> storage;
@@ -1384,7 +1387,9 @@ struct ReactingMixtureCoupler::Implementation
                     });
                 storage->value = ::new (static_cast<void*>(storage->memory)) Faces::LowMachFaceTransportAdapter(
                     flow->mesh(), catalog_alias, std::move(prepared_options), std::move(prepared_bindings),
-                    flow->options().thermal_mode);
+                    flow->options().thermal_mode,
+                    fixed_kinetic_seam && face.fourier && !face.diffusion ? Faces::FaceTopology::ClosedAzimuthalFourier
+                                                                          : Faces::FaceTopology::NonPeriodic);
                 // Aliasing does not allocate; the reserved vector preserves this exact immutable stage association.
                 engine->face_stages.emplace_back(storage, storage->value);
             }

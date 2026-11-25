@@ -90,11 +90,16 @@ private:
     const LowMachFaceTransportAdapter* producer_ = nullptr;
 };
 
+enum class FaceTopology
+{
+    NonPeriodic,
+    ClosedAzimuthalFourier ///< Fixed native cylindrical kinetic carrier, with a canonical azimuthal seam.
+};
+
 /** Same physical carrier, zero-net-mixture-mass barycentric diffusion: momentum
  * packets are exactly zero by declaration, not donor-velocity cancellation.
- * Initial boundary contract is nonperiodic no flux. Compact native periodic
- * metadata (including canonical-interior seams) rejects before imports/laws;
- * boundary-face periodic pairs also reject. No periodic support is implied.
+ * Physical exterior faces carry no flux. The reacting controller can admit a
+ * native cylindrical azimuthal seam as a canonical interior Fourier contact.
  * Every pure local stage is fenced before the following import/reduction.
  * Each canonical owned face is evaluated once and imported to incident ranks.
  * All owned primary/counter donors over all faces are jointly reserved before credits.
@@ -104,7 +109,8 @@ class SIMPLEFLUID_SOLVERS_LOCAL LowMachFaceTransportAdapter
 {
 public:
     LowMachFaceTransportAdapter(std::shared_ptr<const Mesh> mesh, std::shared_ptr<const SpeciesCatalog> catalog,
-        Options options, PhaseBindings compartments, std::optional<PhaseThermalMode> thermal_mode = std::nullopt);
+        Options options, PhaseBindings compartments, std::optional<PhaseThermalMode> thermal_mode = std::nullopt,
+        FaceTopology topology = FaceTopology::NonPeriodic);
     Receipt preview(const Flow::SourceStageContext& context, std::span<const CellSpeciesState> post_chemistry) const;
     /** Explicit prepared T/p/EOS guesses, e.g. arriving-phase T recovered from transported U by SourceEngine.
      * Donor composition STILL comes only from post_chemistry, never these cells' moles.
@@ -126,6 +132,7 @@ private:
     Options options_;
     PhaseBindings compartments_;
     std::optional<PhaseThermalMode> thermal_mode_;
+    FaceTopology topology_;
     Teuchos::RCP<const Pack::map_type> owned_cells_, overlap_cells_, owned_faces_, overlap_faces_;
     std::unique_ptr<Pack::import_type> cell_import_, face_import_;
 };

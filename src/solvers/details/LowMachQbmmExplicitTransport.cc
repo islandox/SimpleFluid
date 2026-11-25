@@ -1,5 +1,6 @@
 #include "solvers/details/LowMachQbmmExplicitTransport.hh"
 
+#include "FVM/details/OperatorDetails.hh"
 #include "equations/CollectiveValidation.hh"
 #include "solvers/details/LowMachQbmmLawInputs.hh"
 
@@ -8,6 +9,7 @@
 #include <limits>
 #include <numeric>
 #include <stdexcept>
+#include <utility>
 
 namespace SimpleFluid::Reacting::qbmm_explicit_detail
 {
@@ -15,6 +17,302 @@ void require(bool valid, const char* message)
 {
     if (!valid)
         throw std::invalid_argument(message);
+}
+
+namespace
+{
+using Vec3 = Mesh::Vec3;
+
+double length(const Vec3& vector)
+{
+    return std::hypot(vector.x, vector.y, vector.z);
+}
+
+bool finite(const Vec3& vector)
+{
+    return std::isfinite(vector.x) && std::isfinite(vector.y) && std::isfinite(vector.z);
+}
+
+constexpr auto invalid_base_index = Mesh::SemiStructured::Topology::invalid_ordinal;
+
+double xy_cross(const Vec3& a, const Vec3& b)
+{
+    return std::fma(a.x, b.y, -a.y * b.x);
+}
+
+double xy_length(const Vec3& a)
+{
+    return std::hypot(a.x, a.y);
+}
+
+struct CircularBoundary
+{
+    std::vector<Vec3> corners;
+    Vec3 center;
+    double scale, coordinate_roundoff;
+    int orientation;
+};
+
+CircularBoundary circular_boundary(const std::vector<Vec3>& points)
+{
+    const auto& origin = points.front();
+    double scale = 0., magnitude = 0.;
+    for (const auto& point : points)
+    {
+        scale = std::max(scale, xy_length(point - origin));
+        magnitude = std::max({magnitude, std::abs(point.x), std::abs(point.y)});
+    }
+    require(scale > 0. && std::isfinite(scale), "Cylindrical QBMM requires a finite polygonal wall.");
+    // Compare local shapes in units of their diameter. Input rounding also depends on the absolute
+    // coordinate magnitude when a small vessel is translated far from the origin.
+    const double coordinate_roundoff = 16 * std::numeric_limits<double>::epsilon() * std::max(magnitude, scale);
+    const double roundoff = coordinate_roundoff / scale;
+    std::vector<Vec3> local;
+    local.reserve(points.size());
+    for (const auto& point : points)
+        local.push_back((point - origin) / scale);
+    std::vector<size_t> corners;
+    for (size_t i = 0; i < local.size(); ++i)
+    {
+        const auto before = local[i] - local[(i + local.size() - 1) % local.size()];
+        const auto after = local[(i + 1) % local.size()] - local[i];
+        if (before.dot(after) <= 0. ||
+            std::abs(xy_cross(before, after)) > roundoff * (xy_length(before) + xy_length(after)))
+            corners.push_back(i);
+    }
+    require(corners.size() >= 3, "Cylindrical QBMM requires at least three distinct circular wall corners.");
+
+    // Use long chords for the circumcenter so clustered angular samples do not determine the fit.
+    const auto& first = local[corners.front()];
+    const auto longest = *std::ranges::max_element(corners, {},
+        [&](size_t i)
+        {
+            const auto offset = local[i] - first;
+            return offset.dot(offset);
+        });
+    const auto u = local[longest] - first;
+    const auto widest =
+        *std::ranges::max_element(corners, {}, [&](size_t i) { return std::abs(xy_cross(u, local[i] - first)); });
+    const auto v = local[widest] - first;
+    const double determinant = xy_cross(u, v);
+    require(std::abs(determinant) > 4 * roundoff, "Cylindrical QBMM wall curvature is unresolved.");
+    const double u2 = u.dot(u), v2 = v.dot(v);
+    const auto center = first + Vec3{u2 * v.y - v2 * u.y, v2 * u.x - u2 * v.x, 0.} / (2 * determinant);
+    const double radius = xy_length(first - center);
+    const double radial_roundoff = 8 * roundoff;
+    const int orientation = xy_cross(first - center, local[corners[1]] - center) > 0. ? 1 : -1;
+    CircularBoundary ring{{}, origin + center * scale, scale, radial_roundoff * scale, orientation};
+    ring.corners.reserve(corners.size());
+    size_t positive_axis_crossings = 0;
+    for (size_t k = 0; k < corners.size(); ++k)
+    {
+        const size_t i = corners[k], j = corners[(k + 1) % corners.size()];
+        const auto a = local[i] - center, b = local[j] - center;
+        require(std::abs(xy_length(a) - radius) <= radial_roundoff && orientation * xy_cross(a, b) > 0.,
+            "Cylindrical QBMM walls must follow ordered circular facets about their center.");
+        positive_axis_crossings += orientation > 0 ? a.y <= 0. && b.y > 0. : a.y > 0. && b.y <= 0.;
+        ring.corners.push_back(points[i]);
+        // Check all omitted subdivisions against the complete chord, including their order.
+        const auto chord = local[j] - local[i];
+        const double length = xy_length(chord);
+        const auto tangent = chord / length;
+        double preceding = 0.;
+        for (size_t s = (i + 1) % points.size(); s != j; s = (s + 1) % points.size())
+        {
+            const auto offset = local[s] - local[i];
+            const double along = tangent.dot(offset);
+            require(along > preceding && along < length && std::abs(xy_cross(tangent, offset)) <= roundoff,
+                "Cylindrical QBMM wall subdivisions must follow their circular facet in order.");
+            preceding = along;
+        }
+    }
+    require(positive_axis_crossings == 1, "Cylindrical QBMM requires simple circular wall cycles.");
+    return ring;
+}
+
+void validate_annular_boundaries(const CircularBoundary& outer, const CircularBoundary& inner)
+{
+    require(xy_length(outer.center - inner.center) <= outer.coordinate_roundoff + inner.coordinate_roundoff,
+        "Cylindrical QBMM annular walls must be concentric.");
+    const auto angle = [&](const Vec3& point)
+    {
+        const auto offset = point - outer.center;
+        return std::atan2(offset.y, offset.x);
+    };
+    // In a convex outer cycle, only the edge crossed by the ray from the center can exclude the point.
+    auto corners = outer.corners;
+    std::ranges::rotate(corners, std::ranges::min_element(corners, {}, angle));
+    for (const auto& point : inner.corners)
+    {
+        const auto next = std::ranges::upper_bound(corners, angle(point), {}, angle);
+        const auto& b = next == corners.end() ? corners.front() : *next;
+        const auto& a = next == corners.begin() ? corners.back() : *(next - 1);
+        require(xy_cross((b - a) / outer.scale, (point - a) / outer.scale) > 0.,
+            "Cylindrical QBMM annular inner walls must lie strictly inside the outer wall.");
+    }
+}
+
+} // namespace
+
+void validate_cylindrical_base(const Flow::Mesh::SemiStructured& mesh)
+{
+    const auto& topology = mesh.topology();
+    std::vector<bool> visited(mesh.xy_cell_nodes().size());
+    require(!visited.empty(), "Cylindrical QBMM requires a nonempty polygonal base.");
+    std::vector<unsigned> connected{0};
+    visited[0] = true;
+    for (size_t row = 0; row < connected.size(); ++row)
+        for (const auto face : topology.cell_side_faces(connected[row]))
+        {
+            const auto& side = topology.side_face(face);
+            const auto other = side.owner == connected[row] ? side.neighbor : side.owner;
+            if (other != invalid_base_index && !visited[other])
+            {
+                visited[other] = true;
+                connected.push_back(other);
+            }
+        }
+    require(connected.size() == visited.size(), "Cylindrical QBMM requires an edge-connected polygonal base.");
+
+    std::vector<unsigned> next(mesh.xy_nodes().size(), invalid_base_index), previous = next;
+    for (const auto& side : topology.side_faces())
+        if (side.neighbor == invalid_base_index)
+        {
+            const auto [a, b] = side.nodes;
+            require(next[a] == invalid_base_index && previous[b] == invalid_base_index,
+                "Cylindrical QBMM requires disjoint polygonal wall cycles.");
+            next[a] = b;
+            previous[b] = a;
+        }
+    std::optional<CircularBoundary> outer, inner;
+    for (size_t i = 0; i < next.size(); ++i)
+    {
+        if (next[i] == invalid_base_index)
+            continue;
+        std::vector<Vec3> points;
+        auto node = static_cast<unsigned>(i);
+        do
+        {
+            require(next[node] != invalid_base_index, "Cylindrical QBMM requires closed polygonal wall cycles.");
+            const auto& point = mesh.xy_nodes()[node];
+            points.push_back({point.x, point.y, 0.});
+            node = std::exchange(next[node], invalid_base_index);
+        } while (node != i);
+        auto ring = circular_boundary(points);
+        auto& slot = ring.orientation > 0 ? outer : inner;
+        require(!slot, "Cylindrical QBMM accepts one polygonal outer wall and at most one inner wall.");
+        slot = std::move(ring);
+    }
+    require(outer.has_value(), "Cylindrical QBMM requires a polygonal outer wall.");
+    if (inner)
+        validate_annular_boundaries(*outer, *inner);
+}
+
+void validate_axial_kinetic_geometry(const Mesh& mesh)
+{
+    constexpr double roundoff = 64 * eps;
+    const auto local = [&](LO cell) { return cell >= 0 && static_cast<size_t>(cell) < mesh.num_local_cells(); };
+    const auto owned = [&](LO cell) { return cell >= 0 && static_cast<size_t>(cell) < mesh.num_owned_cells(); };
+    const auto valid_offset = [&](LO face, LO cell, const Vec3& face_center)
+    {
+        const double distance = mesh.cell_to_face_distance(face, cell);
+        const double length_from_centers = length(face_center - mesh.cell_centroid(cell));
+        return std::isfinite(distance) && std::isfinite(length_from_centers) &&
+               (length_from_centers == 0. ? distance == 0.
+                                          : distance > 0. && std::abs(distance / length_from_centers - 1.) <= roundoff);
+    };
+    for (size_t c = 0; c < mesh.num_local_cells(); ++c)
+    {
+        const auto cell = static_cast<LO>(c);
+        const double volume = mesh.cell_volume(cell);
+        require(std::isfinite(volume) && volume > 0 && finite(mesh.cell_centroid(cell)),
+            "Cylindrical kinetic QBMM requires finite cell centers and positive volumes.");
+    }
+    for (size_t f = 0; f < mesh.num_faces(); ++f)
+    {
+        const auto face = static_cast<LO>(f);
+        const auto owner = mesh.owner_cell(face), neighbor = mesh.neighbor_cell(face);
+        if (f >= mesh.num_owned_faces() && !owned(owner) && !owned(neighbor))
+            continue;
+        const bool wall = mesh.is_geometry_exterior_face(face);
+        require(local(owner) && (wall ? mesh.is_boundary_face(face)
+                                      : !mesh.is_boundary_face(face) && local(neighbor) && neighbor != owner &&
+                                            mesh.opposite_or_periodic_neighbor_cell(face, owner) == neighbor),
+            "Cylindrical kinetic QBMM requires physical walls and a complete adjacent cell halo.");
+
+        const double area = mesh.face_area(face);
+        const auto normal = mesh.face_normal(face);
+        const auto area_vector = mesh.face_area_vector(face);
+        const auto center = mesh.face_centroid(face);
+        require(std::isfinite(area) && area > 0 && finite(area_vector) && finite(center) &&
+                    std::abs(length(normal) - 1.) <= roundoff,
+            "Cylindrical kinetic QBMM requires finite face centroids and positive scalar and vector areas.");
+        for (size_t axis = 0; axis < dimensions; ++axis)
+            require(std::abs(area_vector.component(axis) / area - normal.component(axis)) <= roundoff,
+                "Cylindrical kinetic QBMM face area vector disagrees with its scalar area and normal.");
+        // The side measure can be curved. Its Cartesian axial component is exactly zero.
+        require(normal.z == 0. ? area_vector.z == 0.
+                               : normal.x == 0. && normal.y == 0. && area_vector.x == 0. && area_vector.y == 0. &&
+                                     std::abs(area_vector.z) == area,
+            "Cylindrical kinetic QBMM requires axial caps and side faces with zero axial projection.");
+        require(valid_offset(face, owner, center) && (wall || valid_offset(face, neighbor, center)),
+            "Cylindrical kinetic QBMM requires consistent finite cell-to-face distances.");
+        if (wall)
+            continue;
+
+        const auto displacement = mesh.cell_center_vector(face, owner);
+        const double center_distance = length(displacement);
+        const double pressure_distance = mesh.face_cell_center_distance(face);
+        require(std::isfinite(center_distance) && center_distance > 0 && std::isfinite(pressure_distance) &&
+                    pressure_distance > 0 && std::abs(pressure_distance / center_distance - 1.) <= roundoff &&
+                    (displacement / center_distance).dot(normal) >= 1. - 1e-10,
+            "Cylindrical kinetic QBMM requires positive pressure distances and orthogonal owner-oriented faces.");
+    }
+}
+
+FaceOffsetFit::FaceOffsetFit(std::span<const Vec3> displacements)
+{
+    std::array<std::array<real_t, dimensions>, dimensions> matrix{};
+    samples.reserve(displacements.size());
+    for (const auto& displacement : displacements)
+    {
+        const double distance = length(displacement);
+        require(std::isfinite(distance) && distance > 0, "Unresolved QBMM cell-center displacement.");
+        const auto direction = displacement / distance;
+        for (size_t i = 0; i < dimensions; ++i)
+            for (size_t j = 0; j < dimensions; ++j)
+                matrix[i][j] += direction.component(i) * direction.component(j);
+        samples.push_back({displacement, direction, distance});
+    }
+    for (auto& sample : samples)
+    {
+        auto local_matrix = matrix;
+        sample.basis = FVM::detail::solve_3x3(local_matrix, sample.basis);
+    }
+}
+
+bool FaceOffsetFit::weights(const Vec3& offset, std::vector<double>& result) const
+{
+    const double distance = length(offset);
+    require(std::isfinite(distance), "Invalid QBMM cell-to-face displacement.");
+    result.clear();
+    if (distance == 0)
+        return true;
+    result.reserve(samples.size());
+    for (const auto& sample : samples)
+        result.push_back(
+            finite_rate(sample.basis.dot(offset / sample.distance), "Unrepresentable QBMM linear stencil weight."));
+    // The pseudoinverse can fit a rank-deficient one-ring only in its resolved directions.
+    bool resolved = true;
+    for (size_t i = 0; i < dimensions; ++i)
+    {
+        FaceSum defect;
+        defect.add_product(-offset.component(i), 1.);
+        for (size_t k = 0; k < samples.size(); ++k)
+            defect.add_product(result[k], samples[k].displacement.component(i));
+        resolved &= std::abs(defect.rounded(distance)) <= 4096 * eps;
+    }
+    return resolved;
 }
 
 void Product::multiply(double value)

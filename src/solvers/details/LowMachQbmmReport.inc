@@ -385,15 +385,21 @@ std::shared_ptr<const LowMachMixtureSolver::QbmmPublication> LowMachMixtureSolve
     publication->balances = trial.qbmm_balances;
     publication->history = QbmmReceiptHistory::Available;
     publication->interval = qbmm_interval(trial);
-    if (uses_qbmm_explicit_transport(d->options.qbmm_model) && trial.statistics.body_acceleration_m_per_s2)
+    const bool forced =
+        uses_qbmm_explicit_transport(d->options.qbmm_model) && trial.statistics.body_acceleration_m_per_s2.has_value();
+    const bool axial_kinetic = qbmm_detail::uses_axial_kinetic_transport(d->options, *d->mesh);
+    if (forced || (axial_kinetic && d->active_qbmm_controller && controller_diagnostics))
     {
         check(controller_diagnostics && controller_diagnostics->saved && d->active_qbmm_controller,
-            "Forced explicit QBMM publication requires diagnostics from the active reacting controller.");
+            "QBMM publication requires diagnostics from the active reacting controller.");
         const auto& prepared = *controller_diagnostics->saved;
         check(prepared.correctors == trial.statistics.correctors &&
                   prepared.reaction_extents.size() == controller_diagnostics->reaction_count,
-            "Forced explicit QBMM controller diagnostics differ from the accepted interval.");
+            "QBMM controller diagnostics differ from the accepted interval.");
         publication->controller_diagnostics = std::make_shared<const ReactingMixtureCoupler::Diagnostics>(prepared);
+    }
+    if (forced)
+    {
         auto& interval = publication->forced_family_interval.emplace();
         interval.old_time = trial.transport.accepted_time;
         interval.time_step = trial.transport.time_step;
@@ -544,7 +550,7 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                 std::array<FaceSum, 3> drift_momentum, absolute_momentum;
                 cell.families.resize(families.size());
                 if (uses_qbmm_kinetic_transport(d->options.qbmm_model))
-                    qbmm_native_law_detail::validate_kinetic_closure(d->options, state.cells[c]);
+                    qbmm_native_law_detail::validate_kinetic_closure(d->options, mesh, state.cells[c]);
                 for (std::size_t a = 0; a < families.size(); ++a)
                 {
                     const auto& phase = state.cells[c].phases[a];

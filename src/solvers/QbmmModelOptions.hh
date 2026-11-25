@@ -8,6 +8,8 @@ namespace SimpleFluid::Reacting
 {
 /** The implicit integrator admits shared carrier and supplied phase slip on fixed meshes and supported planar ALE.
  * KineticEuler admits fixed closed Cartesian meshes with node-dependent slip and optional body acceleration.
+ * It also admits orthogonal native cylindrical meshes and polygonal disk or annulus extrusions with axial
+ * node slip and axial body acceleration. Carrier velocities have Cartesian components in all three directions.
  * RealizableLinearSSPRK2 requires fixed closed orthogonal meshes with shared carrier. A supplied acceleration
  * requires Cartesian, native cylindrical, or a polygonal disk/annulus extrusion. The solver checks this additional
  * condition collectively when the controller or restart provides the acceleration, including on empty owners.
@@ -21,7 +23,7 @@ struct QbmmModelOptions
         SharedCarrier, ///< Exactly zero drift on every physical phase.
         ZeroSlip = SharedCarrier,
         SuppliedPhaseSlip, ///< Immutable per-cell phase drift; all family atoms share its velocity, m/s.
-        NodeDependentSlip, ///< Fixed Cartesian kinetic transport with one immutable law per family.
+        NodeDependentSlip, ///< Fixed kinetic transport with one immutable law per family.
         IndependentPhaseMomentum
     };
     enum class FamilyTransport

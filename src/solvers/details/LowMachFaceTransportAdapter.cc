@@ -15,6 +15,7 @@
 #include <set>
 #include <sstream>
 #include <tuple>
+#include <utility>
 #include <variant>
 
 namespace SimpleFluid::Reacting::low_mach_faces
@@ -121,6 +122,42 @@ void require_nonperiodic_native_topology(const Mesh& mesh)
     require(!mesh.visit([](const auto& geometry) { return has_native_periodicity(geometry); }),
         "Mixture face transport requires nonperiodic topology; native periodic seams are unsupported.");
 }
+
+std::size_t validate_cylindrical_seam(const Mesh& mesh, const Mesh::Cylindrical& cylinder)
+{
+    const auto& indexer = cylinder.indexer();
+    const auto local = [&](LO cell) { return cell >= 0 && static_cast<std::size_t>(cell) < mesh.num_local_cells(); };
+    const auto owned = [&](LO cell) { return local(cell) && mesh.is_owned_cell(cell); };
+    std::set<GO> seam_faces;
+    std::size_t owned_seam_faces = 0;
+    for (std::size_t f = 0; f < mesh.num_faces(); ++f)
+    {
+        const auto face = static_cast<LO>(f);
+        const auto identity = mesh.face_geometry_global_id(face);
+        require(std::in_range<std::size_t>(identity) && static_cast<std::size_t>(identity) < indexer.total_faces(),
+            "Cylindrical Fourier contact has an invalid canonical face identity.");
+        const auto native = indexer.face_id(static_cast<std::size_t>(identity));
+        if (native.orientation != Mesh::Cylindrical::THETA_FACE || native.j != 0)
+            continue;
+        const auto owner = mesh.owner_cell(face), neighbor = mesh.neighbor_cell(face);
+        const bool own_face = mesh.is_owned_face(face);
+        if (!own_face && !owned(owner) && !owned(neighbor))
+            continue;
+        require(seam_faces.insert(identity).second && !mesh.is_geometry_exterior_face(face) &&
+                    !mesh.is_boundary_face(face) && local(owner) && local(neighbor) && owner != neighbor &&
+                    own_face == owned(owner) && mesh.opposite_or_periodic_neighbor_cell(face, owner) == neighbor &&
+                    mesh.opposite_or_periodic_neighbor_cell(face, neighbor) == owner,
+            "Cylindrical Fourier contact requires one owned canonical seam face and its adjacent halo cell.");
+        require(
+            std::cmp_equal(mesh.cell_geometry_global_id(owner), indexer.cell_ordinal(cylinder.owner_cell(native))) &&
+                std::cmp_equal(
+                    mesh.cell_geometry_global_id(neighbor), indexer.cell_ordinal(cylinder.neighbor_cell(native))),
+            "Cylindrical Fourier contact seam cells differ from the canonical native pair.");
+        owned_seam_faces += own_face;
+    }
+    return owned_seam_faces;
+}
+
 CellSpeciesState zero_like(const CellSpeciesState& state)
 {
     auto result = state;
@@ -133,13 +170,14 @@ CellSpeciesState zero_like(const CellSpeciesState& state)
 
 LowMachFaceTransportAdapter::LowMachFaceTransportAdapter(std::shared_ptr<const Mesh> mesh,
     std::shared_ptr<const SpeciesCatalog> catalog, Options options, PhaseBindings compartments,
-    std::optional<PhaseThermalMode> thermal_mode)
+    std::optional<PhaseThermalMode> thermal_mode, FaceTopology topology)
     : mesh_(std::move(mesh)), catalog_(std::move(catalog)), options_(std::move(options)),
-      compartments_(std::move(compartments)), thermal_mode_(thermal_mode)
+      compartments_(std::move(compartments)), thermal_mode_(thermal_mode), topology_(topology)
 {
     if (!mesh_)
         throw std::invalid_argument("Face adapter requires a communicator-bearing mesh.");
     std::string signature;
+    std::size_t local_seam_faces = 0, expected_seam_faces = 0;
     collective_detail::collective_local_validation(*mesh_, "Face adapter immutable configuration",
         [&]
         {
@@ -211,7 +249,22 @@ LowMachFaceTransportAdapter::LowMachFaceTransportAdapter(std::shared_ptr<const M
                 text << ':' << h.identity.size() << ':' << h.identity << ':' << h.revision << ':'
                      << h.schema_fingerprint;
             }
-            require_nonperiodic_native_topology(*mesh_);
+            if (topology_ == FaceTopology::ClosedAzimuthalFourier)
+            {
+                using Cylinder = Mesh::Cylindrical;
+                const auto* cylinder = std::get_if<Mesh::CylindricalPtr>(&mesh_->variant());
+                require(cylinder && (*cylinder)->is_theta_periodic() && options_.fourier && !options_.diffusion &&
+                            thermal_mode_ == PhaseThermalMode::Equilibrium &&
+                            !(*cylinder)->indexer().periodic_dimensions[Cylinder::R] &&
+                            !(*cylinder)->indexer().periodic_dimensions[Cylinder::AXIAL],
+                    "Azimuthal seam contact requires a native closed cylinder and a Fourier-only equilibrium stage.");
+                local_seam_faces = validate_cylindrical_seam(*mesh_, **cylinder);
+                const auto& dimensions = (*cylinder)->num_cells_per_dimension();
+                expected_seam_faces = static_cast<std::size_t>(dimensions[Cylinder::R]) * dimensions[Cylinder::AXIAL];
+            }
+            else
+                require_nonperiodic_native_topology(*mesh_);
+            text << ':' << static_cast<int>(topology_);
             signature = text.str();
             owned_cells_ = mesh_->owned_cell_map();
             overlap_cells_ = mesh_->overlap_cell_map();
@@ -222,6 +275,18 @@ LowMachFaceTransportAdapter::LowMachFaceTransportAdapter(std::shared_ptr<const M
                 "Face adapter requires native field maps.");
         });
     uniform_text(*mesh_, signature);
+    if (topology_ == FaceTopology::ClosedAzimuthalFourier)
+    {
+        std::size_t global_seam_faces = 0;
+        Teuchos::reduceAll(*owned_faces_->getComm(), Teuchos::REDUCE_SUM, 1, &local_seam_faces, &global_seam_faces);
+        const bool unique = owned_faces_->isOneToOne();
+        collective_detail::collective_local_validation(*mesh_, "Cylindrical Fourier seam coverage",
+            [&]
+            {
+                require(global_seam_faces == expected_seam_faces && unique,
+                    "Cylindrical Fourier contact does not have unique global coverage of the azimuthal seam.");
+            });
+    }
     // Import construction and import calls are collective library seams, never inside a pure-local fence.
     cell_import_ = std::make_unique<Pack::import_type>(owned_cells_, overlap_cells_);
     face_import_ = std::make_unique<Pack::import_type>(owned_faces_, overlap_faces_);
@@ -286,7 +351,11 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
                         mesh_->owned_face_map().getRawPtr() == owned_faces_.getRawPtr() &&
                         mesh_->overlap_face_map().getRawPtr() == overlap_faces_.getRawPtr(),
                 "Face stage field maps changed.");
-            require_nonperiodic_native_topology(*mesh_);
+            if (topology_ == FaceTopology::ClosedAzimuthalFourier)
+                require(context.transport.old_geometry_epoch == context.transport.new_geometry_epoch,
+                    "Azimuthal seam Fourier contact requires fixed geometry.");
+            else
+                require_nonperiodic_native_topology(*mesh_);
             result.producer_ = this;
             result.stamp = stamp(context);
             result.physical_phase = physical;
