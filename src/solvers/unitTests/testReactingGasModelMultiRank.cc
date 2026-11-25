@@ -19,6 +19,7 @@
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_CommHelpers.hpp>
+#include <Teuchos_DefaultSerialComm.hpp>
 
 #include <array>
 #include <cmath>
@@ -134,6 +135,7 @@ TEST(ReactingGasModelMultiRankTest, CompositeTransportLeaseFailureIsCollectiveAn
     parameters.molar_one[0] = 1e-6;
     parameters.diffusivity_two = [](const auto& c)
     { return gas_diffusivity_with_transport_guard_probe(c.environment.temperature); };
+    parameters.controls.population_advection_scheme = SimpleFluid::PopulationAdvectionScheme::ImplicitUpwind;
     auto options = GeneralGas::options(parameters);
     Model model(mesh, options);
     Scalar temperature(mesh, 300., "temperature"), pressure(mesh, 0., "pressure"), power(mesh, 0., "power");
@@ -381,6 +383,7 @@ TEST(ReactingGasModelMultiRankTest, TransportSolverPolicyIsCollective)
     selected.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
     selected.controls.constant_slip_velocity = 10;
     selected.controls.free_surface_patches = {"zmax"};
+    selected.controls.population_advection_scheme = SimpleFluid::PopulationAdvectionScheme::ImplicitUpwind;
     auto options = GeneralGas::options(selected);
     ReactingModelType model(mesh, options);
     const auto original = model.transport_linear_solver_options();
@@ -1171,6 +1174,7 @@ TEST(ReactingGasModelMultiRankTest, ZeroAuxiliaryTransportMatchesFullAndResumesC
     p.reservoir_mol_per_joule[0] = 2e-7;
     p.nucleate_supplied_gas = true;
     p.micro_decay_time = .01;
+    p.controls.population_advection_scheme = SimpleFluid::PopulationAdvectionScheme::ImplicitUpwind;
     GeneralGas::Fixture<Mesh> full(mesh, p), fresh(mesh, p);
     if (comm->getRank() == 0)
     {
@@ -1213,6 +1217,7 @@ TEST(ReactingGasModelMultiRankTest, ZeroAuxiliaryPolicyRetainsPopulatedInventori
     p.dissolved_one = 1e-5;
     p.number_density[1] = 1e7;
     p.molar_one[1] = 1e-6;
+    p.controls.population_advection_scheme = SimpleFluid::PopulationAdvectionScheme::ImplicitUpwind;
     GeneralGas::Fixture<Mesh> f(mesh, p);
     f.initialize();
     const double initial = f.model.global_species_moles(GeneralGas::one);
@@ -1278,6 +1283,7 @@ TEST(ReactingGasModelMultiRankTest, BatchedMultiRhsParityAndEmptyOwnerRankUnderA
 
     auto p = GeneralGas::populated();
     p.controls.transport_solver_tolerance = 1.0e-12;
+    p.controls.population_advection_scheme = SimpleFluid::PopulationAdvectionScheme::ImplicitUpwind;
     auto opt_s = GeneralGas::options(p);
     opt_s.batched_species_transport = false;
     auto opt_b = GeneralGas::options(p);
@@ -1386,6 +1392,7 @@ TEST(ReactingGasModelMultiRankTest, BatchedMultiRhsParityAndEmptyOwnerRankUnderA
     EXPECT_EQ(total_empty, comm->getSize() - 1);
 
     auto ep = GeneralGas::populated();
+    ep.controls.population_advection_scheme = SimpleFluid::PopulationAdvectionScheme::ImplicitUpwind;
     auto eopt_s = GeneralGas::options(ep);
     eopt_s.solution_transport = SimpleFluid::ReactingTransportMode::NoAdvection;
     eopt_s.batched_species_transport = false;
@@ -1416,4 +1423,136 @@ TEST(ReactingGasModelMultiRankTest, BatchedMultiRhsParityAndEmptyOwnerRankUnderA
     }
     expect_same_on_all_ranks(*one_cell, empty_b.last_statistics().transport_linear.solves);
     expect_same_on_all_ranks(*one_cell, empty_b.last_statistics().transport_multi_rhs.active_columns);
+}
+
+TEST(ReactingGasModelMultiRankTest, ExplicitSspRk2McMpiPartitionInvarianceAndEmptyOwnerRank)
+{
+    using Composite = SimpleFluid::Meshes::MultiRegionMesh;
+    const auto make_cart = [](const Teuchos::RCP<const Teuchos::Comm<int>>& comm_in)
+    {
+        const SimpleFluid::ArrReal x_left{0.0, 0.1, 0.2, 0.3, 0.4};
+        const SimpleFluid::ArrReal x_right{0.4, 0.5, 0.6, 0.7, 0.8};
+        const SimpleFluid::ArrReal y{0.0, 0.1};
+        const SimpleFluid::ArrReal z{0.0, 0.1, 0.2};
+        auto geom = std::make_shared<Composite>(
+            std::vector<Composite::Region>{
+                SimpleFluid::Meshes::cartesian_region("left", {{x_left, y, z}}),
+                SimpleFluid::Meshes::cartesian_region("right", {{x_right, y, z}})},
+            std::vector<Composite::Interface>{SimpleFluid::Meshes::StructuredPatchInterface{{0, 1}, {1, 0}}},
+            comm_in, SimpleFluid::Meshes::InterfaceTolerance{}, Composite::BoundaryNamePolicy::MergeMatchingNames);
+        Mesh::DistributionOptions d;
+        d.allow_empty_partitions = true;
+        return std::make_shared<Mesh>(geom, d);
+    };
+
+    const auto world = Tpetra::getDefaultComm();
+    if (world->getSize() < 2)
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+
+    auto dist_mesh = make_cart(world);
+    const auto self_comm = Teuchos::rcp(new Teuchos::SerialComm<int>());
+    auto serial_mesh = make_cart(self_comm);
+
+    const auto run_case = [](const SimpleFluid::SP<Mesh>& m)
+    {
+        GeneralGas::Parameters p;
+        p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+        p.controls.constant_slip_velocity = 0.2;
+        p.controls.free_surface_patches = {"zmax"};
+        auto opt = GeneralGas::options(p);
+        ReactingModelType model(m, opt);
+
+        FieldType temp(m, 300.0, "temperature"), pres(m, 0.0, "pressure");
+        VelocityFieldType vel(m, Mesh::Vec3{0.5, 0.0, 0.0}, "velocity");
+        FaceFieldType flux(m, 0.0, "flux");
+        for (const auto face : flux.owned_face_ids())
+        {
+            if (!m->is_boundary_face(face))
+                flux.set_owned_value(face, 0.5 * m->face_area_vector(face).x);
+        }
+        flux.sync_ghosts();
+        auto mat = make_water_properties(m);
+        model.initialize_state(0.0, temp, pres, vel, mat);
+
+        const auto& catalog = opt.reaction_mechanism->catalog();
+        std::vector<SimpleFluid::Reacting::CellSpeciesState> states;
+        std::vector<std::vector<double>> numbers;
+        for (std::size_t row = 0; row < m->num_owned_cells(); ++row)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(row);
+            auto st = model.cell_species_state(cell);
+            const auto c = m->cell_centroid(cell);
+            const double vol = m->cell_volume(cell);
+            double n_cell = 0.0;
+            if (c.x < 0.3 && c.z < 0.1)
+            {
+                n_cell = 1.0e14 * vol;
+                st.set_amount(catalog, GeneralGas::one, GeneralGas::Phase::Dispersed, 2.0e-3 * vol, "micro");
+            }
+            else if (c.x >= 0.3 && c.x < 0.4 && c.z < 0.1)
+            {
+                // Sub-gate trace packet near partition boundary exercises MPI-symmetric return gate.
+                n_cell = 1.0e-202 * vol;
+                st.set_amount(catalog, GeneralGas::one, GeneralGas::Phase::Dispersed, 2.0e-220 * vol, "micro");
+            }
+            states.push_back(std::move(st));
+            numbers.push_back({n_cell, 0.0});
+        }
+        model.initialize_species(states, numbers);
+        const auto cp = model.snapshot();
+        model.advance(0.1, 0.1, temp, pres, vel, flux, mat);
+
+        std::map<long long, std::pair<double, double>> by_gid;
+        const auto& n_f = model.population_number_field("micro");
+        const auto& m_f = model.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, "micro");
+        for (std::size_t row = 0; row < m->num_owned_cells(); ++row)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(row);
+            by_gid[static_cast<long long>(m->cell_geometry_global_id(cell))] = {n_f.value(cell), m_f.value(cell)};
+        }
+        return std::tuple{by_gid, model.last_statistics().transport_multi_rhs, GeneralGas::history(model).inventory_error,
+            GeneralGas::step_escape(model, GeneralGas::one, true), GeneralGas::number_escape(model, "micro"), cp};
+    };
+
+    const auto [dist_cells, dist_stats, dist_err, dist_esc_m, dist_esc_n, cp] = run_case(dist_mesh);
+    const auto [ser_cells, ser_stats, ser_err, ser_esc_m, ser_esc_n, ser_cp] = run_case(serial_mesh);
+    (void) cp;
+    (void) ser_cp;
+
+    expect_same_on_all_ranks(*dist_mesh, dist_stats.explicit_substeps);
+    expect_same_on_all_ranks(*dist_mesh, dist_stats.max_cfl);
+    expect_same_on_all_ranks(*dist_mesh, dist_stats.upstream_returned_packets);
+    EXPECT_GE(dist_stats.explicit_substeps, 2u);
+    EXPECT_GT(dist_stats.upstream_returned_packets, 0u);
+    EXPECT_EQ(dist_stats.explicit_substeps, ser_stats.explicit_substeps);
+    EXPECT_EQ(dist_stats.upstream_returned_packets, ser_stats.upstream_returned_packets);
+    EXPECT_NEAR(dist_err, 0.0, 1.0e-13);
+    EXPECT_NEAR(dist_esc_m, ser_esc_m, std::max(1.0e-15, std::abs(ser_esc_m) * 1.0e-12));
+    EXPECT_NEAR(dist_esc_n, ser_esc_n, std::max(1.0e-2, std::abs(ser_esc_n) * 1.0e-12));
+    for (const auto& [gid, vals] : dist_cells)
+    {
+        const auto& exp = ser_cells.at(gid);
+        EXPECT_NEAR(vals.first, exp.first, std::max(1.0e-25, std::abs(exp.first) * 1.0e-12)) << "gid=" << gid;
+        EXPECT_NEAR(vals.second, exp.second, std::max(1.0e-25, std::abs(exp.second) * 1.0e-12)) << "gid=" << gid;
+    }
+
+    // Empty-owner rank check on 1-cell distributed mesh under default ExplicitSspRk2Mc.
+    Mesh::DistributionOptions d;
+    d.partition = static_cast<std::size_t>(world->getRank());
+    d.partitions = static_cast<std::size_t>(world->getSize());
+    d.allow_empty_partitions = true;
+    auto one_cell = std::make_shared<Mesh>(
+        std::make_shared<Mesh::Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}}}),
+        d);
+    auto ep = GeneralGas::populated();
+    ReactingModelType empty_m(one_cell, GeneralGas::options(ep));
+    FieldType e_temp(one_cell, 300.0, "temperature"), e_pres(one_cell, 0.0, "pressure");
+    VelocityFieldType e_vel(one_cell, Mesh::Vec3{0.0, 0.0, 0.0}, "velocity");
+    FaceFieldType e_flux(one_cell, 0.0, "flux");
+    auto e_mat = make_water_properties(one_cell);
+    empty_m.initialize_state(0.0, e_temp, e_pres, e_vel, e_mat);
+    ASSERT_NO_THROW(empty_m.advance(0.01, 0.01, e_temp, e_pres, e_vel, e_flux, e_mat));
+    expect_same_on_all_ranks(*one_cell, empty_m.last_statistics().transport_multi_rhs.explicit_substeps);
+    expect_same_on_all_ranks(*one_cell, empty_m.last_statistics().transport_multi_rhs.upstream_returned_packets);
+    EXPECT_NEAR(GeneralGas::history(empty_m).inventory_error, 0.0, 1.0e-13);
 }

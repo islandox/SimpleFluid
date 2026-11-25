@@ -655,6 +655,17 @@ TEST(ReactingGasPropertiesTest, TransportToleranceIsOptionalValidatedAndParsed)
     }
 }
 
+TEST(ReactingGasPropertiesTest, PopulationAdvectionSchemeDefaultsAndValidation)
+{
+    SimpleFluid::ReactingGasOptions options;
+    EXPECT_EQ(options.population_advection_scheme, SimpleFluid::PopulationAdvectionScheme::ExplicitSspRk2Mc);
+    EXPECT_NO_THROW(SimpleFluid::validate_reacting_gas_options(options));
+    options.population_advection_scheme = SimpleFluid::PopulationAdvectionScheme::ImplicitUpwind;
+    EXPECT_NO_THROW(SimpleFluid::validate_reacting_gas_options(options));
+    options.population_advection_scheme = static_cast<SimpleFluid::PopulationAdvectionScheme>(99);
+    EXPECT_THROW(SimpleFluid::validate_reacting_gas_options(options), std::invalid_argument);
+}
+
 } // namespace
 
 

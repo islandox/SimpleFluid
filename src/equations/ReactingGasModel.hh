@@ -74,6 +74,9 @@ struct ReactingTransportMultiRhsStatistics
     double residual_check_seconds = 0.0;
     double pack_unpack_seconds = 0.0;
     double consistency_repair_seconds = 0.0;
+    std::size_t explicit_substeps = 0;
+    double max_cfl = 0.0;
+    std::size_t upstream_returned_packets = 0;
 };
 
 /** @brief Envelope of coefficients evaluated for active large populations. */
@@ -595,6 +598,15 @@ private:
         const Reacting::ReactionContext& chemistry,
         const std::vector<BubbleGasPhysics::PopulationCondition>& populations, double duration, double liquid_density,
         double liquid_viscosity) const;
+    struct ExplicitPopulationTarget
+    {
+        field_type* field = nullptr;
+        field_type* escape = nullptr;
+        bool is_population_number = false;
+    };
+    SIMPLEFLUID_EQUATIONS_LOCAL void transport_population_explicit(std::size_t population_index,
+        std::span<const ExplicitPopulationTarget> targets, scalar_type time_step,
+        const face_flux_field_type& transport_flux, const FVM::ALEControlVolumeState* ale);
     SIMPLEFLUID_EQUATIONS_LOCAL void append_species_fields(std::vector<field_type*>& fields);
     SIMPLEFLUID_EQUATIONS_LOCAL void append_species_fields(std::vector<const field_type*>& fields) const;
     // Scratch storage is not accepted physical state. Numeric operators are
@@ -621,6 +633,11 @@ private:
             std::vector<std::unique_ptr<field_type>> old_fields;
             std::vector<std::unique_ptr<field_type>> escape_fields;
         };
+        struct ExplicitPopulationWorkspace
+        {
+            std::vector<std::unique_ptr<field_type>> stage_fields;
+            std::vector<std::unique_ptr<velocity_field_type>> gradients;
+        };
         face_flux_field_type flux;
         field_type old_values, storage, diffusion, solution;
         face_flux_field_type zero_flux;
@@ -632,6 +649,8 @@ private:
         std::array<FVM::detail::StoredTransportSymbolicPlan<Pack>, 4> symbolic_plans;
         std::vector<std::unique_ptr<face_flux_field_type>> population_fluxes;
         std::vector<std::unique_ptr<MultiGroupWorkspace>> multi_groups;
+        std::unique_ptr<field_type> min_volume_field;
+        std::vector<ExplicitPopulationWorkspace> explicit_populations;
         std::uint64_t stage_epoch = 0;
     };
 

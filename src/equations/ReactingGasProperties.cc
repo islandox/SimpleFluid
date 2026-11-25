@@ -216,6 +216,9 @@ void validate_reacting_gas_options(const ReactingGasOptions& options)
         options.pressure_mode != ReactingPressureMode::PrescribedHistory &&
         options.pressure_mode != ReactingPressureMode::Reconstructed)
         throw std::invalid_argument("Unknown/retired reacting pressure mode; inertial is unsupported.");
+    if (options.population_advection_scheme != PopulationAdvectionScheme::ImplicitUpwind &&
+        options.population_advection_scheme != PopulationAdvectionScheme::ExplicitSspRk2Mc)
+        throw std::invalid_argument("Unknown reacting population advection scheme.");
     if (options.mode == ReactingGasMode::Disabled && !options.reaction_mechanism)
         return;
 

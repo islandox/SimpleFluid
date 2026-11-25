@@ -234,7 +234,8 @@ TEST(ReactingGasModelTest, TransportSolverPolicyRejectsInvalidOptions)
 TEST(ReactingGasModelTest, BiCGStabGaussSeidelTransportMatchesDefault)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
-    const auto options = GeneralGas::options(GeneralGas::populated());
+    auto options = GeneralGas::options(GeneralGas::populated());
+    options.population_advection_scheme = SimpleFluid::PopulationAdvectionScheme::ImplicitUpwind;
     ReactingModelType reference(mesh, options);
     FieldType temperature(mesh, 300.0, "temperature");
     FieldType pressure(mesh, 0.0, "pressure");
@@ -290,6 +291,7 @@ TEST(ReactingGasModelTest, TransportWorkspaceMatchesFreshAssemblyAcrossStages)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
     auto options = GeneralGas::options(GeneralGas::populated());
+    options.population_advection_scheme = SimpleFluid::PopulationAdvectionScheme::ImplicitUpwind;
     ReactingModelType model(mesh, options);
     ReactingModelType fresh(mesh, options);
     FieldType temperature(mesh, 300.0, "temperature");
@@ -1194,6 +1196,7 @@ TEST(ReactingGasModelTest, MovingTopRelativeEscapeIsExactForStationaryExpansionA
     {
         SCOPED_TRACE(target);
         auto p = GeneralGas::populated();
+        p.controls.population_advection_scheme = SimpleFluid::PopulationAdvectionScheme::ImplicitUpwind;
         GeneralGas::Fixture<ALEMeshType> f(make_ale_single_cell_column(), p);
         f.initialize();
         const auto checkpoint = f.model.snapshot();
@@ -1280,6 +1283,7 @@ TEST(ReactingGasModelTest, FreeSurfaceEscapeAccumulatesGlobally)
     p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
     p.controls.constant_slip_velocity = 10;
     p.controls.free_surface_patches = {"zmax"};
+    p.controls.population_advection_scheme = SimpleFluid::PopulationAdvectionScheme::ImplicitUpwind;
     GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
     f.initialize();
     const auto start = f.model.snapshot();
@@ -1394,6 +1398,7 @@ TEST(ReactingGasModelTest, EscapeRateFieldsAreBoundaryLocalized)
     p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
     p.controls.constant_slip_velocity = 1;
     p.controls.free_surface_patches = {"zmax"};
+    p.controls.population_advection_scheme = SimpleFluid::PopulationAdvectionScheme::ImplicitUpwind;
     GeneralGas::Fixture<Mesh> f(
         SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(1, 1, 2)), p);
     f.initialize();
@@ -1908,7 +1913,8 @@ TEST(ReactingGasModelTest, CompositeTransportLeaseMatchesExplicitReference)
     if (mesh->owned_cell_map()->getComm()->getSize() != 1)
         GTEST_SKIP() << "The independent explicit geometry oracle uses one rank.";
     auto explicit_mesh = std::make_shared<ALEMeshType>(SimpleFluid::test::explicit_reference(*composite));
-    const auto options = GeneralGas::options(GeneralGas::populated());
+    auto options = GeneralGas::options(GeneralGas::populated());
+    options.population_advection_scheme = SimpleFluid::PopulationAdvectionScheme::ImplicitUpwind;
     const auto advance = [&](const SimpleFluid::SP<ALEMeshType>& selected)
     {
         ALEReactingModelType model(selected, options);
@@ -2299,6 +2305,7 @@ TEST(ReactingGasModelTest, BatchedMultiRhsMatchesScalarReferenceAcrossSolversAnd
     auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(2, 2, 3, 0.25));
     auto p = GeneralGas::populated();
     p.controls.transport_solver_tolerance = 1.0e-12;
+    p.controls.population_advection_scheme = SimpleFluid::PopulationAdvectionScheme::ImplicitUpwind;
 
     auto scalar_options = GeneralGas::options(p);
     scalar_options.batched_species_transport = false;
@@ -2479,6 +2486,7 @@ TEST(ReactingGasModelTest, OperatorGroupSplitsNoAdvectionDissolvedAndKeepsResolv
     p.dissolved_one = 0.2;
     p.dissolved_two = 0.1;
     p.controls.transport_solver_tolerance = 1.0e-12;
+    p.controls.population_advection_scheme = SimpleFluid::PopulationAdvectionScheme::ImplicitUpwind;
 
     auto opt_s = GeneralGas::options(p);
     opt_s.solution_transport = SimpleFluid::ReactingTransportMode::NoAdvection;
@@ -2774,6 +2782,7 @@ TEST(ReactingGasModelTest, BatchedAbsoluteToleranceRefinementAndZeroToActiveChem
         p.number_density[1] = 1.0e-2;
         p.molar_one[1] = 1.0e-14;
         p.molar_two[1] = 1.0e-14;
+        p.controls.population_advection_scheme = SimpleFluid::PopulationAdvectionScheme::ImplicitUpwind;
         auto opt_s = GeneralGas::options(p);
         opt_s.batched_species_transport = false;
         auto opt_b = GeneralGas::options(p);
@@ -2874,6 +2883,427 @@ TEST(ReactingGasModelTest, BatchedAbsoluteToleranceRefinementAndZeroToActiveChem
             }
         }
     }
+}
+
+TEST(ReactingGasModelTest, ExplicitSspRk2McSharpFrontAndMcLimiter)
+{
+    SimpleFluid::ArrReal x;
+    for (int i = 0; i <= 16; ++i)
+        x.push_back(0.1 * i);
+    const SimpleFluid::ArrReal y{0.0, 0.1};
+    const SimpleFluid::ArrReal z{0.0, 0.1};
+    auto mesh = std::make_shared<ALEMeshType>(
+        std::make_shared<ALEMeshType::Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{x, y, z}}));
+
+    GeneralGas::Parameters p;
+    p.dissolved_one = 0.0;
+    p.number_density[0] = 0.0;
+    p.molar_one[0] = 0.0;
+    p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ZeroSlip;
+    auto opt = GeneralGas::options(p);
+    opt.population_advection_scheme = SimpleFluid::PopulationAdvectionScheme::ExplicitSspRk2Mc;
+    ALEReactingModelType model(mesh, opt);
+
+    ALEFieldType temperature(mesh, 300.0, "temperature"), pressure(mesh, 0.0, "pressure");
+    ALEVelocityFieldType velocity(mesh, Mesh::Vec3{0.8, 0.0, 0.0}, "velocity");
+    ALEFaceFieldType flux(mesh, 0.0, "flux");
+    for (const auto face : flux.owned_face_ids())
+    {
+        if (!mesh->is_boundary_face(face))
+            flux.set_value(face, 0.8 * mesh->face_area_vector(face).x);
+    }
+    auto mat = make_ale_water_properties(mesh);
+    model.initialize_state(0.0, temperature, pressure, velocity, mat);
+
+    const auto& catalog = opt.reaction_mechanism->catalog();
+    std::vector<SimpleFluid::Reacting::CellSpeciesState> states;
+    std::vector<std::vector<double>> numbers;
+    double init_m1 = 0.0, init_m2 = 0.0, init_n = 0.0;
+    for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        auto st = model.cell_species_state(cell);
+        const double vol = mesh->cell_volume(cell);
+        const double cx = mesh->cell_centroid(cell).x;
+        double n_cell = 0.0;
+        if (cx >= 0.1 && cx <= 0.3)
+        {
+            const double m1 = 2.0e-3 * vol;
+            const double m2 = 0.5e-3 * vol;
+            n_cell = 1.0e14 * vol;
+            st.set_amount(catalog, GeneralGas::one, GeneralGas::Phase::Dispersed, m1, "micro");
+            st.set_amount(catalog, GeneralGas::two, GeneralGas::Phase::Dispersed, m2, "micro");
+            init_m1 += m1;
+            init_m2 += m2;
+            init_n += n_cell;
+        }
+        states.push_back(std::move(st));
+        numbers.push_back({n_cell, 0.0});
+    }
+    model.initialize_species(states, numbers);
+
+    // CFL = 0.8 * 0.1 / 0.1 = 0.8 > 0.45 => triggers SSP-RK2 substepping (explicit_substeps >= 2).
+    model.advance(0.1, 0.1, temperature, pressure, velocity, flux, mat);
+    const auto& stats = model.last_statistics();
+    EXPECT_EQ(stats.transport_linear.solves, 1); // Only Liquid/Dissolved/Resolved carrier solves run linearly.
+    EXPECT_GE(stats.transport_multi_rhs.explicit_substeps, 2u);
+    EXPECT_NEAR(stats.transport_multi_rhs.max_cfl, 0.8, 1.0e-12);
+
+    const auto& n_field = model.population_number_field("micro");
+    const auto& m1_field = model.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, "micro");
+    const auto& m2_field = model.species_field(GeneralGas::two, GeneralGas::Phase::Dispersed, "micro");
+    double final_m1 = 0.0, final_m2 = 0.0, final_n = 0.0;
+    for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        const double vol = mesh->cell_volume(cell);
+        const double cx = mesh->cell_centroid(cell).x;
+        const double n = n_field.value(cell);
+        const double m1 = m1_field.value(cell);
+        const double m2 = m2_field.value(cell);
+        EXPECT_GE(n, 0.0);
+        EXPECT_GE(m1, 0.0);
+        EXPECT_GE(m2, 0.0);
+        EXPECT_EQ(n > 0.0, m1 > 0.0);
+        EXPECT_EQ(n > 0.0, m2 > 0.0);
+        if (n > 0.0)
+        {
+            EXPECT_NEAR(m1 / n, 2.0e-17, 2.0e-17 * 1.0e-11);
+            EXPECT_NEAR(m2 / n, 0.5e-17, 0.5e-17 * 1.0e-11);
+        }
+        // Sharp front: distant cells well ahead of the wave (cx > 0.6) remain exact 0.0 (no Krylov tail).
+        if (cx > 0.6)
+        {
+            EXPECT_DOUBLE_EQ(n, 0.0);
+            EXPECT_DOUBLE_EQ(m1, 0.0);
+            EXPECT_DOUBLE_EQ(m2, 0.0);
+        }
+        final_m1 += m1 * vol;
+        final_m2 += m2 * vol;
+        final_n += n * vol;
+    }
+    EXPECT_NEAR(final_m1, init_m1, init_m1 * 1.0e-13);
+    EXPECT_NEAR(final_m2, init_m2, init_m2 * 1.0e-13);
+    EXPECT_NEAR(final_n, init_n, init_n * 1.0e-13);
+    EXPECT_NEAR(GeneralGas::history(model).inventory_error, 0.0, 1.0e-13);
+
+    // Globally active, locally zero bystander species ("two") at cx >= 1.2 must not degrade MC limiting on "one"
+    // around the cx in [0.1, 0.3] sharp front.
+    {
+        const auto run_front = [&](bool seed_bystander_far_downstream)
+        {
+            ALEReactingModelType m(mesh, opt);
+            m.initialize_state(0.0, temperature, pressure, velocity, mat);
+            std::vector<SimpleFluid::Reacting::CellSpeciesState> s_vec;
+            std::vector<std::vector<double>> n_vec;
+            for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+                auto st = m.cell_species_state(cell);
+                const double vol = mesh->cell_volume(cell);
+                const double cx = mesh->cell_centroid(cell).x;
+                double n_cell = 0.0;
+                if (cx >= 0.1 && cx <= 0.3)
+                {
+                    n_cell = 1.0e14 * vol;
+                    st.set_amount(catalog, GeneralGas::one, GeneralGas::Phase::Dispersed, 2.0e-3 * vol, "micro");
+                }
+                else if (seed_bystander_far_downstream && cx >= 1.2 && cx <= 1.3)
+                {
+                    st.set_amount(catalog, GeneralGas::two, GeneralGas::Phase::Dispersed, 0.5e-3 * vol, "micro");
+                    n_cell = 1.0e14 * vol;
+                }
+                s_vec.push_back(std::move(st));
+                n_vec.push_back({n_cell, 0.0});
+            }
+            m.initialize_species(s_vec, n_vec);
+            m.advance(0.1, 0.1, temperature, pressure, velocity, flux, mat);
+            std::vector<double> profile;
+            const auto& f1 = m.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, "micro");
+            for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+                if (mesh->cell_centroid(cell).x < 0.7)
+                    profile.push_back(f1.value(cell));
+            }
+            return profile;
+        };
+        const auto baseline = run_front(false);
+        const auto with_bystander = run_front(true);
+        ASSERT_EQ(baseline.size(), with_bystander.size());
+        for (std::size_t i = 0; i < baseline.size(); ++i)
+        {
+            EXPECT_DOUBLE_EQ(with_bystander[i], baseline[i]);
+        }
+    }
+
+    // Non-finite flux must be rejected cleanly before CFL reduction / ceil cast.
+    {
+        auto bad_flux = ALEFaceFieldType(mesh, 0.0, "bad_flux");
+        for (const auto face : bad_flux.owned_face_ids())
+        {
+            if (!mesh->is_boundary_face(face))
+            {
+                bad_flux.set_value(face, std::numeric_limits<double>::quiet_NaN());
+                break;
+            }
+        }
+        EXPECT_THROW(model.advance(0.1, 0.1, temperature, pressure, velocity, bad_flux, mat), std::exception);
+    }
+}
+
+TEST(ReactingGasModelTest, ExplicitSspRk2McPositivityAndRatioOnStretched3DMesh)
+{
+    // Stretched 3D non-uniform grid with factor-of-8 jump in dz and heterogeneous M/N ratios.
+    const SimpleFluid::ArrReal x{0.0, 0.05, 0.15, 0.20};
+    const SimpleFluid::ArrReal y{0.0, 0.04, 0.12};
+    const SimpleFluid::ArrReal z{0.0, 0.01, 0.02, 0.06, 0.14, 0.22};
+    auto mesh = std::make_shared<ALEMeshType>(
+        std::make_shared<ALEMeshType::Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{x, y, z}}));
+
+    GeneralGas::Parameters p;
+    p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    p.controls.constant_slip_velocity = 0.02;
+    auto opt = GeneralGas::options(p);
+
+    ALEFieldType temperature(mesh, 300.0, "temperature"), pressure(mesh, 0.0, "pressure");
+    ALEVelocityFieldType velocity(mesh, Mesh::Vec3{0.03, -0.02, 0.05}, "velocity");
+    ALEFaceFieldType flux(mesh, 0.0, "flux");
+    for (const auto face : flux.owned_face_ids())
+    {
+        if (!mesh->is_boundary_face(face))
+        {
+            const auto area = mesh->face_area_vector(face);
+            flux.set_value(face, 0.03 * area.x - 0.02 * area.y + 0.05 * area.z);
+        }
+    }
+    auto mat = make_ale_water_properties(mesh);
+
+    const auto& catalog = opt.reaction_mechanism->catalog();
+    const auto run_stretched = [&](bool heterogeneous_ratio)
+    {
+        ALEReactingModelType m(mesh, opt);
+        m.initialize_state(0.0, temperature, pressure, velocity, mat);
+        std::vector<SimpleFluid::Reacting::CellSpeciesState> states;
+        std::vector<std::vector<double>> numbers;
+        double min_ratio = 1.0e100, max_ratio = 0.0, init_m1 = 0.0;
+        for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            auto st = m.cell_species_state(cell);
+            const double vol = mesh->cell_volume(cell);
+            const auto c = mesh->cell_centroid(cell);
+            double n_cell = 0.0;
+            if (c.z < 0.05)
+            {
+                const double ratio = heterogeneous_ratio ? ((c.x < 0.1) ? 1.0e-18 : 3.0e-18) : 2.0e-18;
+                n_cell = 5.0e14 * vol;
+                const double m1 = ratio * n_cell;
+                st.set_amount(catalog, GeneralGas::one, GeneralGas::Phase::Dispersed, m1, "micro");
+                min_ratio = std::min(min_ratio, ratio);
+                max_ratio = std::max(max_ratio, ratio);
+                init_m1 += m1;
+            }
+            states.push_back(std::move(st));
+            numbers.push_back({n_cell, 0.0});
+        }
+        m.initialize_species(states, numbers);
+
+        m.advance(0.2, 0.2, temperature, pressure, velocity, flux, mat);
+        EXPECT_GT(m.last_statistics().transport_multi_rhs.explicit_substeps, 1u);
+
+        const auto& n_field = m.population_number_field("micro");
+        const auto& m1_field = m.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, "micro");
+        double final_m1 = 0.0;
+        for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            const double n = n_field.value(cell);
+            const double m1 = m1_field.value(cell);
+            EXPECT_GE(n, 0.0);
+            EXPECT_GE(m1, 0.0);
+            EXPECT_EQ(n > 0.0, m1 > 0.0);
+            if (n > 0.0)
+            {
+                const double ratio = m1 / n;
+                if (heterogeneous_ratio)
+                {
+                    EXPECT_GE(ratio, 0.5 * min_ratio);
+                    EXPECT_LE(ratio, 1.5 * max_ratio);
+                }
+                else
+                {
+                    EXPECT_NEAR(ratio, min_ratio, min_ratio * 1.0e-12);
+                }
+            }
+            final_m1 += m1 * mesh->cell_volume(cell);
+        }
+        EXPECT_NEAR(final_m1, init_m1, init_m1 * 1.0e-12);
+        EXPECT_NEAR(GeneralGas::history(m).inventory_error, 0.0, 1.0e-13);
+    };
+    run_stretched(false);
+    run_stretched(true);
+}
+
+TEST(ReactingGasModelTest, ExplicitSspRk2McUpstreamReturnGateConservesTinyPacketsWithoutUnderflow)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 1, 1, 0.25));
+    GeneralGas::Parameters p;
+    auto opt = GeneralGas::options(p);
+    ReactingModelType model(mesh, opt);
+
+    FieldType temperature(mesh, 300.0, "temperature"), pressure(mesh, 0.0, "pressure");
+    VelocityFieldType velocity(mesh, Mesh::Vec3{0.1, 0.0, 0.0}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    for (const auto face : flux.owned_face_ids())
+    {
+        if (!mesh->is_boundary_face(face))
+            flux.set_value(face, 0.1 * mesh->face_area_vector(face).x);
+    }
+    auto mat = make_water_properties(mesh);
+    model.initialize_state(0.0, temperature, pressure, velocity, mat);
+
+    // Seed ultra-tiny positive stock below the 1e-200 return gate adjacent to empty cells.
+    const auto& catalog = opt.reaction_mechanism->catalog();
+    std::vector<SimpleFluid::Reacting::CellSpeciesState> states;
+    std::vector<std::vector<double>> numbers;
+    constexpr double tiny_n = 1.0e-201;
+    constexpr double tiny_m = 1.0e-219;
+    double init_n = 0.0, init_m = 0.0;
+    for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        auto st = model.cell_species_state(cell);
+        double n_cell = 0.0;
+        if (mesh->cell_centroid(cell).x < 0.25)
+        {
+            n_cell = tiny_n;
+            st.set_amount(catalog, GeneralGas::one, GeneralGas::Phase::Dispersed, tiny_m, "micro");
+            init_n += n_cell;
+            init_m += tiny_m;
+        }
+        states.push_back(std::move(st));
+        numbers.push_back({n_cell, 0.0});
+    }
+    model.initialize_species(states, numbers);
+
+    ASSERT_NO_THROW(model.advance(0.01, 0.01, temperature, pressure, velocity, flux, mat));
+    EXPECT_GT(model.last_statistics().transport_multi_rhs.upstream_returned_packets, 0u);
+
+    const auto& n_field = model.population_number_field("micro");
+    const auto& m_field = model.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, "micro");
+    double final_n = 0.0, final_m = 0.0;
+    for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        const double vol = mesh->cell_volume(cell);
+        const double n = n_field.value(cell);
+        const double m = m_field.value(cell);
+        EXPECT_EQ(n > 0.0, m > 0.0);
+        if (mesh->cell_centroid(cell).x >= 0.25)
+        {
+            EXPECT_DOUBLE_EQ(n, 0.0);
+            EXPECT_DOUBLE_EQ(m, 0.0);
+        }
+        final_n += n * vol;
+        final_m += m * vol;
+    }
+    EXPECT_DOUBLE_EQ(final_n, init_n);
+    EXPECT_DOUBLE_EQ(final_m, init_m);
+}
+
+TEST(ReactingGasModelTest, ExplicitSspRk2McAleGclAndBatchedToggleParity)
+{
+    // Contraction with stationary fluid (F_abs = 0 => F_rel = -F_mesh > 0 at zmax) preserves c == const (GCL).
+    {
+        auto p = GeneralGas::populated();
+        p.controls.free_surface_patches = {"zmax"};
+        p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ZeroSlip;
+        GeneralGas::Fixture<ALEMeshType> f(make_ale_single_cell_column(), p);
+        f.initialize();
+        const double init_n = f.model.population_number_field("micro").value(0);
+        const double init_m = f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, "micro").value(0);
+        ALEMotionType motion(f.grid);
+        constexpr double dt = 0.25;
+        motion.begin_trial(0.8, dt);
+        const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*f.grid, motion);
+        ALEFaceFieldType absolute(f.grid, 0.0, "abs"), relative(f.grid, 0.0, "rel");
+        SimpleFluid::FVM::mesh_relative_face_fluxes(absolute, ale, relative);
+        f.model.refresh_geometry();
+        f.model.advance(dt, dt, f.temperature, f.pressure, f.velocity, relative, f.material, &ale);
+        EXPECT_NEAR(f.model.population_number_field("micro").value(0), init_n, init_n * 1.0e-13);
+        EXPECT_NEAR(f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, "micro").value(0), init_m,
+            init_m * 1.0e-13);
+        EXPECT_NEAR(GeneralGas::history(f.model).inventory_error, 0.0, 1.0e-13);
+    }
+
+    // Closed expansion (F_rel = 0 everywhere) preserves extensive inventory Q and dilutes c = c0 * V0 / V1.
+    {
+        auto p = GeneralGas::populated();
+        p.controls.free_surface_patches = {};
+        p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ZeroSlip;
+        GeneralGas::Fixture<ALEMeshType> f(make_ale_single_cell_column(), p);
+        f.initialize();
+        const double init_n = f.model.population_number_field("micro").value(0);
+        const double init_m = f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, "micro").value(0);
+        ALEMotionType motion(f.grid);
+        constexpr double dt = 0.25;
+        motion.begin_trial(1.25, dt);
+        const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*f.grid, motion);
+        ALEFaceFieldType relative(f.grid, 0.0, "rel");
+        f.model.refresh_geometry();
+        f.model.advance(dt, dt, f.temperature, f.pressure, f.velocity, relative, f.material, &ale);
+        EXPECT_NEAR(f.model.population_number_field("micro").value(0), init_n / 1.25, init_n * 1.0e-13);
+        EXPECT_NEAR(f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, "micro").value(0),
+            init_m / 1.25, init_m * 1.0e-13);
+        EXPECT_NEAR(GeneralGas::history(f.model).inventory_error, 0.0, 1.0e-13);
+    }
+
+    // Compare batched=true vs batched=false on ExplicitSspRk2Mc with free-surface escape and rollback.
+    auto p = GeneralGas::populated();
+    p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    p.controls.constant_slip_velocity = 0.4;
+    p.controls.free_surface_patches = {"zmax"};
+    p.controls.batched_species_transport = true;
+    GeneralGas::Fixture<ALEMeshType> batched(make_ale_single_cell_column(), p);
+    p.controls.batched_species_transport = false;
+    GeneralGas::Fixture<ALEMeshType> scalar(make_ale_single_cell_column(), p);
+    batched.initialize();
+    scalar.initialize();
+    const auto cp = batched.model.snapshot();
+    ALEMotionType motion_b(batched.grid), motion_s(scalar.grid);
+    constexpr double dt = 0.25;
+    motion_b.begin_trial(1.15, dt);
+    motion_s.begin_trial(1.15, dt);
+    const auto ale_b = SimpleFluid::FVM::make_ale_control_volume_state(*batched.grid, motion_b);
+    const auto ale_s = SimpleFluid::FVM::make_ale_control_volume_state(*scalar.grid, motion_s);
+    ALEFaceFieldType abs_b(batched.grid, 0.0, "abs"), rel_b(batched.grid, 0.0, "rel");
+    ALEFaceFieldType abs_s(scalar.grid, 0.0, "abs"), rel_s(scalar.grid, 0.0, "rel");
+    SimpleFluid::FVM::mesh_relative_face_fluxes(abs_b, ale_b, rel_b);
+    SimpleFluid::FVM::mesh_relative_face_fluxes(abs_s, ale_s, rel_s);
+    batched.model.refresh_geometry();
+    scalar.model.refresh_geometry();
+    batched.model.advance(dt, dt, batched.temperature, batched.pressure, batched.velocity, rel_b, batched.material, &ale_b);
+    scalar.model.advance(dt, dt, scalar.temperature, scalar.pressure, scalar.velocity, rel_s, scalar.material, &ale_s);
+
+    EXPECT_DOUBLE_EQ(batched.model.population_number_field("micro").value(0),
+        scalar.model.population_number_field("micro").value(0));
+    EXPECT_DOUBLE_EQ(batched.model.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, "micro").value(0),
+        scalar.model.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, "micro").value(0));
+    EXPECT_DOUBLE_EQ(GeneralGas::step_escape(batched.model, GeneralGas::one, true),
+        GeneralGas::step_escape(scalar.model, GeneralGas::one, true));
+    EXPECT_DOUBLE_EQ(GeneralGas::number_escape(batched.model, "micro"),
+        GeneralGas::number_escape(scalar.model, "micro"));
+    EXPECT_NEAR(GeneralGas::history(batched.model).inventory_error, 0.0, 1.0e-13);
+
+    batched.model.restore(cp);
+    motion_b.rollback_trial();
+    motion_b.begin_trial(1.15, dt);
+    batched.model.refresh_geometry();
+    const auto ale_b2 = SimpleFluid::FVM::make_ale_control_volume_state(*batched.grid, motion_b);
+    batched.model.advance(dt, dt, batched.temperature, batched.pressure, batched.velocity, rel_b, batched.material, &ale_b2);
+    EXPECT_DOUBLE_EQ(batched.model.population_number_field("micro").value(0),
+        scalar.model.population_number_field("micro").value(0));
 }
 
 } // namespace

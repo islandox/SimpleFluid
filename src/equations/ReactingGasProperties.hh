@@ -62,6 +62,15 @@ enum class BubbleTransportMode
 };
 
 /**
+ * @brief Time integration and limiter scheme for dispersed bubble populations.
+ */
+enum class PopulationAdvectionScheme
+{
+    ImplicitUpwind,  ///< First-order Backward Euler upwind FV linear solves.
+    ExplicitSspRk2Mc ///< Explicit substepped SSP-RK2 with population-shared MC limiter and upstream return gate.
+};
+
+/**
  * @brief Switch used by thresholded conversion and source terms.
  */
 enum class ReactingHeavisideMode
@@ -205,6 +214,7 @@ struct ReactingGasOptions
     std::vector<std::string> free_surface_patches; ///< Patches through which bubbles may escape.
     real_t transport_solver_tolerance = 1.0e-10; ///< Relative FV solve tolerance; default preserves existing behavior.
     bool batched_species_transport = true; ///< Use CarrierTransportPlan multi-RHS FV transport; false selects scalar reference path.
+    PopulationAdvectionScheme population_advection_scheme = PopulationAdvectionScheme::ExplicitSspRk2Mc;
 };
 
 /**

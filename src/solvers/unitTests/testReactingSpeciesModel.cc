@@ -596,6 +596,7 @@ TEST(ReactingSpeciesModelTest, RankAsymmetricMicroAdvectionUsesFrozenCountsBefor
     selected.surface_tension = .07;
     selected.rise_velocity_mode = S::BubbleRiseVelocityMode::ConstantSlip;
     selected.constant_slip_velocity = .1;
+    selected.population_advection_scheme = S::PopulationAdvectionScheme::ImplicitUpwind;
     Fixture fixture(selected, 2);
     const auto& catalog = selected.reaction_mechanism->catalog();
     constexpr double radius = 1e-5, dt = .125, carrier_rate = .25;

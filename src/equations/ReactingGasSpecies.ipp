@@ -171,6 +171,7 @@ inline std::uint64_t configuration_signature(const ReactingGasOptions& options)
         number(bounds.maximum_pressure);
     }
     integer(options.batched_species_transport ? 1ULL : 0ULL);
+    integer(static_cast<std::uint64_t>(options.population_advection_scheme));
     return signature;
 }
 inline Reacting::CellSpeciesState zero_like(const Reacting::CellSpeciesState& state)
@@ -1103,9 +1104,28 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                 }
             });
 
-        if (d_options.batched_species_transport)
+        const bool explicit_populations =
+            (d_options.population_advection_scheme == PopulationAdvectionScheme::ExplicitSspRk2Mc);
+        const auto record_number_escape = [&](std::size_t p, const field_type& escape_field)
         {
-            prepare_transport_flux(workspace.liquid_clamped_flux, liquid_flux, nullptr, axis);
+            collective_detail::collective_local_validation(*d_mesh, "Population number boundary packet",
+                [&]
+                {
+                    detail::CompensatedSum<long double> escaped;
+                    for (std::size_t owned = 0; owned < volumes.size(); ++owned)
+                    {
+                        const auto cell = static_cast<local_ordinal_type>(owned);
+                        const double rate = escape_field.value(cell);
+                        require(
+                            std::isfinite(rate) && rate >= 0, "Population escape rate must be finite/nonnegative.");
+                        escaped += static_cast<long double>(rate) * volumes[owned] * dt;
+                    }
+                    local_number_escape[p] = narrow(escaped.value());
+                    require(local_number_escape[p] >= 0, "Population escaped number must be nonnegative.");
+                });
+        };
+        if (d_options.batched_species_transport || explicit_populations)
+        {
             if (workspace.population_fluxes.size() < d_options.population_ids.size())
             {
                 const std::size_t prev = workspace.population_fluxes.size();
@@ -1122,6 +1142,11 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                 prepare_transport_flux(
                     *workspace.population_fluxes[p], liquid_flux, d_population_slip_fields[p].get(), axis);
             }
+        }
+
+        if (d_options.batched_species_transport)
+        {
+            prepare_transport_flux(workspace.liquid_clamped_flux, liquid_flux, nullptr, axis);
 
             ++workspace.stage_epoch;
             const std::uint64_t stage_epoch = workspace.stage_epoch;
@@ -1243,49 +1268,52 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                     &workspace.zero_flux);
             }
 
-            for (std::size_t p = 0; p < num_pops; ++p)
+            if (!explicit_populations)
             {
-                const auto& id = d_options.population_ids[p];
-                const FVM::CarrierId pop_carrier{FVM::CarrierKind::Population, id};
-                FVM::TransportOperatorKey pop_key = base_key;
-                pop_key.storage_weight = {&workspace.unit_weight, 1};
-                pop_key.advection_weight = {&workspace.unit_weight, 1};
-                pop_key.advection_flux = {workspace.population_fluxes[p].get(), stage_epoch};
-
-                add_entry(
-                    FVM::TransportColumn{pop_carrier, FVM::QuantityKind::PopulationNumber, std::nullopt,
-                        std::string("number"), policy, 0},
-                    pop_key,
-                    BatchedColumnTarget{.field = &mutable_population_number(id),
-                        .escape_target = &d_escape_number_rate,
-                        .work_lane = 1,
-                        .species_index = p,
-                        .liquid_weighted = false,
-                        .is_population_number = true,
-                        .record_escape = true,
-                        .escape_phase = P::Dispersed,
-                        .escape_population = id,
-                        .accumulate_liquid_packet = false,
-                        .allow_negative = false},
-                    workspace.population_fluxes[p].get());
-                for (auto& species : d_species_fields)
+                for (std::size_t p = 0; p < num_pops; ++p)
                 {
-                    const auto species_idx = catalog.index(species.id);
+                    const auto& id = d_options.population_ids[p];
+                    const FVM::CarrierId pop_carrier{FVM::CarrierKind::Population, id};
+                    FVM::TransportOperatorKey pop_key = base_key;
+                    pop_key.storage_weight = {&workspace.unit_weight, 1};
+                    pop_key.advection_weight = {&workspace.unit_weight, 1};
+                    pop_key.advection_flux = {workspace.population_fluxes[p].get(), stage_epoch};
+
                     add_entry(
-                        FVM::TransportColumn{pop_carrier, FVM::QuantityKind::SpeciesMoles, species.id, id, policy, 0},
+                        FVM::TransportColumn{pop_carrier, FVM::QuantityKind::PopulationNumber, std::nullopt,
+                            std::string("number"), policy, 0},
                         pop_key,
-                        BatchedColumnTarget{.field = species.populations[p].get(),
-                            .escape_target = species.escape.get(),
-                            .work_lane = 2,
-                            .species_index = species_idx,
+                        BatchedColumnTarget{.field = &mutable_population_number(id),
+                            .escape_target = &d_escape_number_rate,
+                            .work_lane = 1,
+                            .species_index = p,
                             .liquid_weighted = false,
-                            .is_population_number = false,
+                            .is_population_number = true,
                             .record_escape = true,
                             .escape_phase = P::Dispersed,
                             .escape_population = id,
                             .accumulate_liquid_packet = false,
                             .allow_negative = false},
                         workspace.population_fluxes[p].get());
+                    for (auto& species : d_species_fields)
+                    {
+                        const auto species_idx = catalog.index(species.id);
+                        add_entry(
+                            FVM::TransportColumn{pop_carrier, FVM::QuantityKind::SpeciesMoles, species.id, id, policy, 0},
+                            pop_key,
+                            BatchedColumnTarget{.field = species.populations[p].get(),
+                                .escape_target = species.escape.get(),
+                                .work_lane = 2,
+                                .species_index = species_idx,
+                                .liquid_weighted = false,
+                                .is_population_number = false,
+                                .record_escape = true,
+                                .escape_phase = P::Dispersed,
+                                .escape_population = id,
+                                .accumulate_liquid_packet = false,
+                                .allow_negative = false},
+                            workspace.population_fluxes[p].get());
+                    }
                 }
             }
 
@@ -1297,22 +1325,7 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
             {
                 if (target.is_population_number)
                 {
-                    const std::size_t p = target.species_index;
-                    collective_detail::collective_local_validation(*d_mesh, "Population number boundary packet",
-                        [&]
-                        {
-                            detail::CompensatedSum<long double> escaped;
-                            for (std::size_t owned = 0; owned < volumes.size(); ++owned)
-                            {
-                                const auto cell = static_cast<local_ordinal_type>(owned);
-                                const double rate = escape_field.value(cell);
-                                require(std::isfinite(rate) && rate >= 0,
-                                    "Population escape rate must be finite/nonnegative.");
-                                escaped += static_cast<long double>(rate) * volumes[owned] * dt;
-                            }
-                            local_number_escape[p] = narrow(escaped.value());
-                            require(local_number_escape[p] >= 0, "Population escaped number must be nonnegative.");
-                        });
+                    record_number_escape(target.species_index, escape_field);
                     return;
                 }
                 if (target.record_escape)
@@ -1396,33 +1409,41 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                 // Advecting resolved interfaces are owned by the VoF phase-flux backend.
                 transport_one(*species.phases[3], *species.escape, workspace.zero_flux, nullptr, false, false, 3, false);
             }
+            if (!explicit_populations)
+            {
+                for (std::size_t p = 0; p < d_options.population_ids.size(); ++p)
+                {
+                    const auto& id = d_options.population_ids[p];
+                    auto& slip = *d_population_slip_fields[p];
+                    slip.sync_ghosts();
+                    workspace.operator_ready[1] = false;
+                    transport_one(
+                        mutable_population_number(id), d_escape_number_rate, liquid_flux, &slip, false, false, 1, false);
+                    record_number_escape(p, d_escape_number_rate);
+                    for (auto& species : d_species_fields)
+                    {
+                        transport_one(*species.populations[p], *species.escape, liquid_flux, &slip, false, false, 1, true);
+                        record_escape(species.id, P::Dispersed, id, *species.escape);
+                    }
+                }
+            }
+        }
+        if (explicit_populations)
+        {
             for (std::size_t p = 0; p < d_options.population_ids.size(); ++p)
             {
                 const auto& id = d_options.population_ids[p];
-                auto& slip = *d_population_slip_fields[p];
-                slip.sync_ghosts();
-                workspace.operator_ready[1] = false;
-                transport_one(
-                    mutable_population_number(id), d_escape_number_rate, liquid_flux, &slip, false, false, 1, false);
-                // Capture this actual number solve before the next population reuses its escape scratch.
-                collective_detail::collective_local_validation(*d_mesh, "Population number boundary packet",
-                    [&]
-                    {
-                        detail::CompensatedSum<long double> escaped;
-                        for (std::size_t owned = 0; owned < volumes.size(); ++owned)
-                        {
-                            const auto cell = static_cast<local_ordinal_type>(owned);
-                            const double rate = d_escape_number_rate.value(cell);
-                            require(std::isfinite(rate) && rate >= 0,
-                                "Population escape rate must be finite/nonnegative.");
-                            escaped += static_cast<long double>(rate) * volumes[owned] * dt;
-                        }
-                        local_number_escape[p] = narrow(escaped.value());
-                        require(local_number_escape[p] >= 0, "Population escaped number must be nonnegative.");
-                    });
+                std::vector<ExplicitPopulationTarget> pop_targets;
+                pop_targets.reserve(1 + d_species_fields.size());
+                pop_targets.push_back({&mutable_population_number(id), &d_escape_number_rate, true});
                 for (auto& species : d_species_fields)
                 {
-                    transport_one(*species.populations[p], *species.escape, liquid_flux, &slip, false, false, 1, true);
+                    pop_targets.push_back({species.populations[p].get(), species.escape.get(), false});
+                }
+                transport_population_explicit(p, pop_targets, dt, *workspace.population_fluxes[p], ale);
+                record_number_escape(p, d_escape_number_rate);
+                for (auto& species : d_species_fields)
+                {
                     record_escape(species.id, P::Dispersed, id, *species.escape);
                 }
             }

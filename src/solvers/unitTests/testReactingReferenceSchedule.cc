@@ -279,6 +279,7 @@ TEST(ReactingReferenceScheduleTest, PopulationEscapeUsesIndependentNumberFluxAnd
         return input;
     };
     selected.population_process = {};
+    selected.population_advection_scheme = PopulationAdvectionScheme::ImplicitUpwind;
     ReactingGasModel<Pack, Mesh> gas(f.grid, selected);
     gas.initialize_state(
         0, f.flow->temperature(), f.flow->pressure(), f.flow->velocity(), f.flow->material_properties());
@@ -331,6 +332,40 @@ TEST(ReactingReferenceScheduleTest, PopulationEscapeUsesIndependentNumberFluxAnd
     int empty = f.grid->num_owned_cells() == 0, total_empty = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &empty, &total_empty);
     EXPECT_EQ(total_empty, std::max(0, comm->getSize() - 2));
+
+    // Verify ExplicitSspRk2Mc collectively rejects non-finite population flux before CFL substepping.
+    auto explicit_opt = selected;
+    explicit_opt.population_advection_scheme = PopulationAdvectionScheme::ExplicitSspRk2Mc;
+    ReactingGasModel<Pack, Mesh> explicit_gas(f.grid, explicit_opt);
+    explicit_gas.initialize_state(
+        0, f.flow->temperature(), f.flow->pressure(), f.flow->velocity(), f.flow->material_properties());
+    ScalarFaceFieldStored<Pack, Mesh> bad_carrier(f.grid, 0.0, "bad_carrier");
+    if (comm->getRank() == 0)
+    {
+        for (const auto face : bad_carrier.owned_face_ids())
+        {
+            if (!f.grid->is_boundary_face(face))
+            {
+                bad_carrier.set_owned_value(face, std::numeric_limits<double>::quiet_NaN());
+                break;
+            }
+        }
+    }
+    bad_carrier.sync_ghosts();
+    try
+    {
+        explicit_gas.advance(.1, .1, f.flow->temperature(), f.flow->pressure(), f.flow->velocity(),
+            bad_carrier, f.flow->material_properties());
+        FAIL() << "Expected nonfinite population flux exception.";
+    }
+    catch (const std::invalid_argument&)
+    {
+        EXPECT_GT(f.grid->num_owned_cells(), 0u);
+    }
+    catch (const std::runtime_error&)
+    {
+        EXPECT_EQ(f.grid->num_owned_cells(), 0u);
+    }
 }
 
 } // namespace

@@ -20,6 +20,7 @@
 
 #include "FVM/CellOperators.hh"
 #include "FVM/TransportSystem.hh"
+#include "FVM/details/StoredScalarGradientKernel.hh"
 #include "geometry/GeometryExecutionGuard.hh"
 #include "utils/CompensatedSum.hh"
 
@@ -1973,6 +1974,544 @@ void ReactingGasModel<Pack, MeshType>::invalidate_transport_operator()
         // Number/moles may share an operator only within the next stage.
         d_transport_workspace->operator_ready.fill(false);
     }
+}
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+void ReactingGasModel<Pack, MeshType>::transport_population_explicit(std::size_t population_index,
+    std::span<const ExplicitPopulationTarget> targets, scalar_type dt, const face_flux_field_type& flux,
+    const FVM::ALEControlVolumeState* ale)
+{
+    const std::size_t ncols = targets.size();
+    for (std::size_t k = 0; k < ncols; ++k)
+    {
+        targets[k].escape->put_scalar(scalar_type{});
+    }
+    if (ncols == 0 || dt <= scalar_type{})
+    {
+        return;
+    }
+
+    const std::size_t owned_cells = d_mesh->num_owned_cells();
+    const auto comm = d_mesh->owned_cell_map()->getComm();
+
+    if (ale != nullptr)
+    {
+        ale->validate(*d_mesh, static_cast<real_t>(dt));
+    }
+    d_transport_geometry_cache.refresh();
+    const auto& geometry = d_transport_geometry_cache.assembly_geometry();
+
+    std::vector<scalar_type> local_max_abs(ncols, scalar_type{});
+    std::vector<scalar_type> global_max_abs(ncols, scalar_type{});
+    collective_detail::collective_local_validation(*d_mesh, "Reacting explicit population input inventory",
+        [&]
+        {
+            for (std::size_t k = 0; k < ncols; ++k)
+            {
+                const auto field_values = targets[k].field->owned_read_view();
+                for (std::size_t owned = 0; owned < owned_cells; ++owned)
+                {
+                    const auto val = field_values(owned, 0);
+                    if (!std::isfinite(val) || val < scalar_type{})
+                    {
+                        throw std::invalid_argument("Reacting explicit population input inventory is invalid.");
+                    }
+                    local_max_abs[k] = std::max(local_max_abs[k], std::abs(val));
+                }
+            }
+        });
+    Teuchos::reduceAll(
+        *comm, Teuchos::REDUCE_MAX, static_cast<int>(ncols), local_max_abs.data(), global_max_abs.data());
+
+    std::vector<std::size_t> active_cols;
+    active_cols.reserve(ncols);
+    for (std::size_t k = 0; k < ncols; ++k)
+    {
+        if (global_max_abs[k] > scalar_type{})
+        {
+            active_cols.push_back(k);
+        }
+        else
+        {
+            targets[k].field->put_scalar(scalar_type{});
+            ++d_last_statistics.transport_work.at(targets[k].is_population_number ? 1 : 2).skipped;
+        }
+    }
+
+    auto& multi_diag = d_last_statistics.transport_multi_rhs;
+    multi_diag.transported_columns += ncols;
+    multi_diag.active_columns += active_cols.size();
+
+    if (active_cols.empty())
+    {
+        return;
+    }
+
+    const std::size_t na = active_cols.size();
+    std::size_t num_active_idx = std::numeric_limits<std::size_t>::max();
+    for (std::size_t a = 0; a < na; ++a)
+    {
+        if (targets[active_cols[a]].is_population_number)
+        {
+            num_active_idx = a;
+            break;
+        }
+    }
+
+    std::vector<double> old_vol(owned_cells);
+    std::vector<double> new_vol(owned_cells);
+    collective_detail::collective_local_validation(*d_mesh, "Reacting explicit population volumes",
+        [&]
+        {
+            for (std::size_t owned = 0; owned < owned_cells; ++owned)
+            {
+                old_vol[owned] = ale ? static_cast<double>(ale->old_cell_volumes()[owned])
+                                     : static_cast<double>(geometry.volumes[owned]);
+                new_vol[owned] = ale ? static_cast<double>(ale->new_cell_volumes()[owned])
+                                     : static_cast<double>(geometry.volumes[owned]);
+                if (!std::isfinite(old_vol[owned]) || !(old_vol[owned] > 0.0) || !std::isfinite(new_vol[owned]) ||
+                    !(new_vol[owned] > 0.0))
+                {
+                    throw std::invalid_argument("Reacting explicit population transport requires positive cell volumes.");
+                }
+            }
+        });
+
+    auto& workspace = *d_transport_workspace;
+    if (!workspace.min_volume_field ||
+        !workspace.min_volume_field->owned_data().getMap()->isSameAs(*d_mesh->owned_cell_map()))
+    {
+        workspace.min_volume_field = std::make_unique<field_type>(d_mesh, 0.0, "reacting_explicit_min_volume");
+    }
+    {
+        auto vmin_write = workspace.min_volume_field->owned_write_view();
+        for (std::size_t owned = 0; owned < owned_cells; ++owned)
+        {
+            vmin_write(owned, 0) = std::min(old_vol[owned], new_vol[owned]);
+        }
+    }
+    workspace.min_volume_field->sync_ghosts();
+    const auto vmin_view = workspace.min_volume_field->local_read_view();
+
+    auto is_free_surface = [&](local_ordinal_type face_lid)
+    {
+        if (!d_mesh->is_boundary_face(face_lid))
+        {
+            return false;
+        }
+        const auto& name = d_mesh->boundary_batch_name(d_mesh->boundary_id(face_lid));
+        return std::ranges::find(d_options.free_surface_patches, name) != d_options.free_surface_patches.end();
+    };
+
+    const auto flux_view = flux.local_read_view();
+    double local_max_cfl = 0.0;
+    collective_detail::collective_local_validation(*d_mesh, "Reacting explicit population flux and CFL",
+        [&]
+        {
+            for (std::size_t owned = 0; owned < owned_cells; ++owned)
+            {
+                double outflow_sum = 0.0;
+                const std::size_t begin = geometry.face_offsets[owned];
+                const std::size_t end = geometry.face_offsets[owned + 1];
+                for (std::size_t f_idx = begin; f_idx < end; ++f_idx)
+                {
+                    const auto& face = geometry.faces[f_idx];
+                    if (face.interior)
+                    {
+                        const double raw_flux = static_cast<double>(flux_view(face.face_lid, 0));
+                        if (!std::isfinite(raw_flux))
+                        {
+                            throw std::invalid_argument(
+                                "Reacting explicit population transport received a nonfinite interior flux.");
+                        }
+                        const double f_out = (face.owned_orientation ? 1.0 : -1.0) * raw_flux;
+                        if (f_out > 0.0)
+                        {
+                            outflow_sum += f_out;
+                        }
+                    }
+                    else if (face.boundary && is_free_surface(face.face_lid))
+                    {
+                        const double raw_flux = static_cast<double>(flux_view(face.face_lid, 0));
+                        if (!std::isfinite(raw_flux))
+                        {
+                            throw std::invalid_argument(
+                                "Reacting explicit population transport received a nonfinite free-surface flux.");
+                        }
+                        if (raw_flux > 0.0)
+                        {
+                            outflow_sum += raw_flux;
+                        }
+                    }
+                }
+                const double vmin = std::min(old_vol[owned], new_vol[owned]);
+                const double cfl = static_cast<double>(dt) * outflow_sum / vmin;
+                if (!std::isfinite(cfl))
+                {
+                    throw std::runtime_error(
+                        "Reacting explicit population transport produced a nonfinite Courant number.");
+                }
+                local_max_cfl = std::max(local_max_cfl, cfl);
+            }
+        });
+
+    double global_max_cfl = 0.0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_max_cfl, &global_max_cfl);
+    constexpr double cfl_limit = 0.45;
+    if (!std::isfinite(global_max_cfl) ||
+        global_max_cfl / cfl_limit > static_cast<double>(std::numeric_limits<std::size_t>::max() / 2))
+    {
+        throw std::runtime_error(
+            "Reacting explicit population Courant number exceeds representable explicit substep count.");
+    }
+    const std::size_t n_sub =
+        (global_max_cfl > cfl_limit) ? static_cast<std::size_t>(std::ceil(global_max_cfl / cfl_limit)) : 1u;
+    const double dt_sub = static_cast<double>(dt) / static_cast<double>(n_sub);
+
+    multi_diag.explicit_substeps += n_sub;
+    multi_diag.max_cfl = std::max(multi_diag.max_cfl, global_max_cfl);
+
+    if (workspace.explicit_populations.size() <= population_index)
+    {
+        workspace.explicit_populations.resize(population_index + 1);
+    }
+    auto& pws = workspace.explicit_populations[population_index];
+    if (pws.stage_fields.size() < na)
+    {
+        pws.stage_fields.resize(na);
+    }
+    if (pws.gradients.size() < na)
+    {
+        pws.gradients.resize(na);
+    }
+    for (std::size_t a = 0; a < na; ++a)
+    {
+        if (!pws.stage_fields[a] || !pws.stage_fields[a]->owned_data().getMap()->isSameAs(*d_mesh->owned_cell_map()))
+        {
+            pws.stage_fields[a] = std::make_unique<field_type>(
+                d_mesh, 0.0, "reacting_pop_stage_" + std::to_string(population_index) + "_" + std::to_string(a));
+        }
+        if (!pws.gradients[a] || !pws.gradients[a]->owned_data().getMap()->isSameAs(*d_mesh->owned_cell_map()))
+        {
+            pws.gradients[a] = std::make_unique<velocity_field_type>(
+                d_mesh, "reacting_pop_grad_" + std::to_string(population_index) + "_" + std::to_string(a));
+        }
+    }
+
+    std::vector<double> q_m(owned_cells * na, 0.0);
+    std::vector<double> q_1(owned_cells * na, 0.0);
+    std::vector<double> net_flux_1(owned_cells * na, 0.0);
+    std::vector<double> net_flux_2(owned_cells * na, 0.0);
+    std::vector<double> esc_1(owned_cells * na, 0.0);
+    std::vector<double> esc_2(owned_cells * na, 0.0);
+    std::vector<double> escaped_total(owned_cells * na, 0.0);
+    std::vector<double> v_next(owned_cells, 0.0);
+    std::vector<double> packet(na, 0.0);
+
+    for (std::size_t a = 0; a < na; ++a)
+    {
+        const auto src = targets[active_cols[a]].field->owned_read_view();
+        auto dst = pws.stage_fields[a]->owned_write_view();
+        for (std::size_t owned = 0; owned < owned_cells; ++owned)
+        {
+            const double val = static_cast<double>(src(owned, 0));
+            dst(owned, 0) = val;
+            q_m[owned * na + a] = old_vol[owned] * val;
+        }
+    }
+
+    std::size_t local_returned_packets = 0;
+
+    // Conservative representability & pairing gate for a candidate face packet over dt_sub.
+    constexpr double count_packet_floor = 1.0e-200;
+    constexpr double total_moles_packet_floor = 1.0e-200;
+    constexpr double species_packet_floor = 1.0e-220;
+    const auto should_return_packet = [&](std::span<const double> pkt, double v_ref, double escape_denom) -> bool
+    {
+        double n_pkt = 0.0;
+        double m_sum = 0.0;
+        bool any_pos = false;
+        for (std::size_t a = 0; a < na; ++a)
+        {
+            const double val = pkt[a];
+            if (!(val > 0.0))
+            {
+                continue;
+            }
+            any_pos = true;
+            if (a == num_active_idx)
+            {
+                n_pkt = val;
+                if (val < count_packet_floor)
+                {
+                    return true;
+                }
+            }
+            else
+            {
+                m_sum += val;
+                if (val < species_packet_floor)
+                {
+                    return true;
+                }
+            }
+            const double conc = val / v_ref;
+            if (!std::isfinite(conc) ||
+                static_cast<double>(static_cast<long double>(conc) * static_cast<long double>(v_ref)) == 0.0)
+            {
+                return true;
+            }
+            if (escape_denom > 0.0)
+            {
+                const double rate = val / escape_denom;
+                if (!std::isfinite(rate) || rate == 0.0 ||
+                    static_cast<double>(static_cast<long double>(rate) * static_cast<long double>(escape_denom)) == 0.0)
+                {
+                    return true;
+                }
+            }
+        }
+        if (!any_pos)
+        {
+            return false;
+        }
+        if (num_active_idx != std::numeric_limits<std::size_t>::max())
+        {
+            if ((m_sum > 0.0) != (n_pkt > 0.0))
+            {
+                return true;
+            }
+        }
+        if (m_sum > 0.0 && m_sum < total_moles_packet_floor)
+        {
+            return true;
+        }
+        return false;
+    };
+
+    const auto& stencils = d_transport_geometry_cache.interior_stencils();
+    const auto evaluate_stage = [&](std::vector<double>& net_flux, std::vector<double>& esc_step)
+    {
+        for (std::size_t a = 0; a < na; ++a)
+        {
+            pws.stage_fields[a]->sync_ghosts();
+            const auto local_values = pws.stage_fields[a]->local_read_view();
+            auto grad_write = pws.gradients[a]->owned_write_view();
+            for (std::size_t owned = 0; owned < stencils.size(); ++owned)
+            {
+                const auto cell_lid = static_cast<local_ordinal_type>(owned);
+                const auto gradient =
+                    FVM::detail::apply_stored_scalar_gradient<vec3<scalar_type>>(stencils[owned], local_values, cell_lid);
+                grad_write(cell_lid, 0) = gradient.x;
+                grad_write(cell_lid, 1) = gradient.y;
+                grad_write(cell_lid, 2) = gradient.z;
+            }
+            pws.gradients[a]->sync_ghosts();
+        }
+        std::fill(net_flux.begin(), net_flux.end(), 0.0);
+        std::fill(esc_step.begin(), esc_step.end(), 0.0);
+
+        using scalar_read_view_t = decltype(pws.stage_fields[0]->local_read_view());
+        using vec_read_view_t = decltype(pws.gradients[0]->local_read_view());
+        std::vector<scalar_read_view_t> c_views;
+        std::vector<vec_read_view_t> g_views;
+        c_views.reserve(na);
+        g_views.reserve(na);
+        for (std::size_t a = 0; a < na; ++a)
+        {
+            c_views.push_back(pws.stage_fields[a]->local_read_view());
+            g_views.push_back(pws.gradients[a]->local_read_view());
+        }
+
+        for (std::size_t owned = 0; owned < owned_cells; ++owned)
+        {
+            const auto cell = static_cast<local_ordinal_type>(owned);
+            const std::size_t begin = geometry.face_offsets[owned];
+            const std::size_t end = geometry.face_offsets[owned + 1];
+            for (std::size_t f_idx = begin; f_idx < end; ++f_idx)
+            {
+                const auto& face = geometry.faces[f_idx];
+                if (face.interior)
+                {
+                    const double f_out =
+                        (face.owned_orientation ? 1.0 : -1.0) * static_cast<double>(flux_view(face.face_lid, 0));
+                    if (f_out == 0.0)
+                    {
+                        continue;
+                    }
+                    const bool cell_is_upwind = (f_out > 0.0);
+                    const local_ordinal_type u = cell_is_upwind ? cell : face.other;
+                    const local_ordinal_type d = cell_is_upwind ? face.other : cell;
+                    const auto d_vec_raw = d_mesh->cell_center_vector(face.face_lid, cell);
+                    const auto d_ud = cell_is_upwind ? d_vec_raw : (d_vec_raw * scalar_type{-1});
+
+                    double phi_pop = 2.0;
+                    for (std::size_t a = 0; a < na; ++a)
+                    {
+                        const double c_u = static_cast<double>(c_views[a](u, 0));
+                        const double c_d = static_cast<double>(c_views[a](d, 0));
+                        if (c_u <= 0.0)
+                        {
+                            if (c_d > 0.0)
+                            {
+                                phi_pop = 0.0;
+                                break;
+                            }
+                            continue;
+                        }
+                        const double dp = c_d - c_u;
+                        if (dp == 0.0)
+                        {
+                            continue;
+                        }
+                        const double gx = static_cast<double>(g_views[a](u, 0));
+                        const double gy = static_cast<double>(g_views[a](u, 1));
+                        const double gz = static_cast<double>(g_views[a](u, 2));
+                        const double dm = 2.0 * (gx * d_ud.x + gy * d_ud.y + gz * d_ud.z) - dp;
+                        const double r = dm / dp;
+                        if (r <= 0.0)
+                        {
+                            phi_pop = 0.0;
+                            continue;
+                        }
+                        double phi = std::min({2.0 * r, 0.5 * (1.0 + r), 2.0});
+                        if (dp > 0.0)
+                        {
+                            phi = std::min(phi, (2.0 * c_u) / dp);
+                        }
+                        phi_pop = std::min(phi_pop, std::max(0.0, phi));
+                    }
+                    const double theta = 0.5 * phi_pop;
+                    const double scale = dt_sub * std::abs(f_out);
+                    for (std::size_t a = 0; a < na; ++a)
+                    {
+                        const double c_u = static_cast<double>(c_views[a](u, 0));
+                        const double c_d = static_cast<double>(c_views[a](d, 0));
+                        const double c_face = (1.0 - theta) * c_u + theta * c_d;
+                        packet[a] = scale * std::max(0.0, c_face);
+                    }
+                    const double v_ref = std::min(
+                        static_cast<double>(vmin_view(u, 0)), static_cast<double>(vmin_view(d, 0)));
+                    if (should_return_packet(packet, v_ref, 0.0))
+                    {
+                        if (cell_is_upwind)
+                        {
+                            ++local_returned_packets;
+                        }
+                        continue;
+                    }
+                    const double sign = cell_is_upwind ? -1.0 : 1.0;
+                    for (std::size_t a = 0; a < na; ++a)
+                    {
+                        net_flux[owned * na + a] += sign * packet[a];
+                    }
+                }
+                else if (face.boundary && is_free_surface(face.face_lid))
+                {
+                    const double f_out = static_cast<double>(flux_view(face.face_lid, 0));
+                    if (f_out <= 0.0)
+                    {
+                        continue;
+                    }
+                    const double scale = dt_sub * f_out;
+                    for (std::size_t a = 0; a < na; ++a)
+                    {
+                        packet[a] = scale * std::max(0.0, static_cast<double>(c_views[a](cell, 0)));
+                    }
+                    const double v_ref = static_cast<double>(vmin_view(cell, 0));
+                    const double escape_denom = new_vol[owned] * static_cast<double>(dt);
+                    if (should_return_packet(packet, v_ref, escape_denom))
+                    {
+                        ++local_returned_packets;
+                        continue;
+                    }
+                    for (std::size_t a = 0; a < na; ++a)
+                    {
+                        net_flux[owned * na + a] -= packet[a];
+                        esc_step[owned * na + a] += packet[a];
+                    }
+                }
+            }
+        }
+    };
+
+    for (std::size_t m = 0; m < n_sub; ++m)
+    {
+        const double tau_next =
+            (m + 1 == n_sub) ? 1.0 : static_cast<double>(m + 1) / static_cast<double>(n_sub);
+        for (std::size_t owned = 0; owned < owned_cells; ++owned)
+        {
+            v_next[owned] = std::lerp(old_vol[owned], new_vol[owned], tau_next);
+        }
+
+        evaluate_stage(net_flux_1, esc_1);
+        for (std::size_t a = 0; a < na; ++a)
+        {
+            auto dst = pws.stage_fields[a]->owned_write_view();
+            for (std::size_t owned = 0; owned < owned_cells; ++owned)
+            {
+                const std::size_t idx = owned * na + a;
+                const double q1 = q_m[idx] + net_flux_1[idx];
+                q_1[idx] = q1;
+                dst(owned, 0) = q1 / v_next[owned];
+            }
+        }
+
+        evaluate_stage(net_flux_2, esc_2);
+        for (std::size_t a = 0; a < na; ++a)
+        {
+            auto dst = pws.stage_fields[a]->owned_write_view();
+            for (std::size_t owned = 0; owned < owned_cells; ++owned)
+            {
+                const std::size_t idx = owned * na + a;
+                const double q2 = q_1[idx] + net_flux_2[idx];
+                const double q_next = 0.5 * q_m[idx] + 0.5 * q2;
+                q_m[idx] = q_next;
+                escaped_total[idx] += 0.5 * esc_1[idx] + 0.5 * esc_2[idx];
+                dst(owned, 0) = q_next / v_next[owned];
+            }
+        }
+    }
+
+    collective_detail::collective_local_validation(*d_mesh, "Reacting explicit population state publication",
+        [&]
+        {
+            for (std::size_t a = 0; a < na; ++a)
+            {
+                auto field_dst = targets[active_cols[a]].field->owned_write_view();
+                auto esc_dst = targets[active_cols[a]].escape->owned_write_view();
+                const double dt_double = static_cast<double>(dt);
+                for (std::size_t owned = 0; owned < owned_cells; ++owned)
+                {
+                    const std::size_t idx = owned * na + a;
+                    const double q_final = q_m[idx];
+                    if (!std::isfinite(q_final) || q_final < 0.0)
+                    {
+                        throw std::runtime_error(
+                            "Reacting explicit population transport produced a negative or nonfinite inventory.");
+                    }
+                    const double c_final = q_final / new_vol[owned];
+                    const double e_final = escaped_total[idx] / (new_vol[owned] * dt_double);
+                    if (!std::isfinite(c_final) || !std::isfinite(e_final))
+                    {
+                        throw std::runtime_error(
+                            "Reacting explicit population transport produced a nonfinite field or escape rate.");
+                    }
+                    field_dst(owned, 0) = c_final;
+                    esc_dst(owned, 0) = e_final;
+                }
+            }
+        });
+
+    for (std::size_t a = 0; a < na; ++a)
+    {
+        targets[active_cols[a]].field->sync_ghosts();
+    }
+
+    unsigned long long local_ret = static_cast<unsigned long long>(local_returned_packets);
+    unsigned long long global_ret = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_ret, &global_ret);
+    multi_diag.upstream_returned_packets += static_cast<std::size_t>(global_ret);
 }
 
 } // namespace SimpleFluid
