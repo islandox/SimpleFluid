@@ -39,6 +39,7 @@ struct SIMPLEFLUID_SOLVERS_LOCAL TransportResult
     double maximum_species_residual = 0, maximum_population_residual = 0;
     double maximum_shape_residual = 0, maximum_energy_residual = 0;
     double maximum_stage_residual = 0, maximum_step_residual = 0;
+    std::uint64_t upstream_returned_packets = 0;
     double local_caloric_transport_magnitude = 0, local_energy_transport_magnitude = 0;
 };
 

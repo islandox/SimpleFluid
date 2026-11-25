@@ -1309,6 +1309,8 @@ struct ReactingMixtureCoupler::Implementation
                     const auto& model = flow->options().qbmm_model;
                     signature << ":realizable-linear-ssprk2:" << qbmm_linear_transport_revision << ':'
                               << model.linear_cfl << ':' << model.maximum_linear_substeps;
+                    if (model.linear_slope_limiter == QbmmModelOptions::LinearSlopeLimiter::TvdMc)
+                        signature << ":tvd-mc:" << qbmm_linear_tvd_mc_revision;
                     if (options.body_acceleration)
                         signature << ":balanced-linear-pressure:" << Solver::balanced_linear_pressure_revision
                                   << ":forced-linear-thermal:" << Solver::forced_linear_thermal_revision;

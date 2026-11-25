@@ -27,6 +27,7 @@ using Kind = R::QbmmEventKind;
 using Phase = R::SpeciesPhase;
 using Shape = R::QbmmShapeState;
 using FamilyTransport = R::QbmmModelOptions::FamilyTransport;
+using SlopeLimiter = R::QbmmModelOptions::LinearSlopeLimiter;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
 constexpr double scale = 1. / 128;      // kg/bubble. The pure family species weighs 1 kg/mol.
@@ -51,7 +52,8 @@ struct Fixture : Thermo::Fixture
         R::EnergyConvention convention = R::EnergyConvention::IncludesFormationEnergy,
         R::QbmmClosureVersions policies = {}, double liquid_stock = liquid_moles, bool kinetic = false,
         bool initialize_flow = true, FamilyTransport family_transport = FamilyTransport::NativeImplicit,
-        std::optional<Flow::Vector> node_acceleration = {}, std::uint64_t slip_revision = 1)
+        std::optional<Flow::Vector> node_acceleration = {}, std::uint64_t slip_revision = 1,
+        SlopeLimiter limiter = SlopeLimiter::RealizabilityOnly)
         : Thermo::Fixture(0, 0, convention)
     {
         Flow::Mesh::DistributionOptions partition;
@@ -68,6 +70,7 @@ struct Fixture : Thermo::Fixture
         controls.phase_roles = {{Flow::PhaseRole::BulkLiquid, "liquid"}, {Flow::PhaseRole::DispersedGas, "vapor"},
             {Flow::PhaseRole::BulkGas, "inert"}, {Flow::PhaseRole::DispersedGas, "coarse"}};
         controls.qbmm_model.family_transport = family_transport;
+        controls.qbmm_model.linear_slope_limiter = limiter;
         if (kinetic || family_transport == FamilyTransport::RealizableLinearSSPRK2)
             controls.qbmm_eos_law_identities = {
                 R::ThermalLawIdentity{"conditioned constant liquid", 1, catalog->fingerprint()}, std::nullopt,
@@ -1095,7 +1098,8 @@ void expect_same_state(const Flow::State& actual, const Flow::State& expected)
     }
 }
 
-void exercise_coherent_transport(FamilyTransport family_transport, std::optional<Flow::Vector> gravity = {})
+void exercise_coherent_transport(FamilyTransport family_transport, std::optional<Flow::Vector> gravity = {},
+    SlopeLimiter limiter = SlopeLimiter::RealizabilityOnly)
 {
     using LO = Flow::Pack::local_ordinal_type;
     constexpr double dt = .01;
@@ -1107,13 +1111,15 @@ void exercise_coherent_transport(FamilyTransport family_transport, std::optional
         restart_env = gravity ? "SIMPLEFLUID_Q8B_RESTART" : "SIMPLEFLUID_Q7B_RESTART";
     if (linear)
         restart_env = gravity ? "SIMPLEFLUID_Q8C_RESTART" : "SIMPLEFLUID_Q7C_RESTART";
+    if (limiter == SlopeLimiter::TvdMc)
+        restart_env = "SIMPLEFLUID_TVD_MC_RESTART";
     const auto environment_value = [&](const char* suffix)
     { return restart_env.empty() ? nullptr : std::getenv((restart_env + suffix).c_str()); };
     const char* writer = environment_value("_WRITE");
     const char* reader = environment_value("_READ");
     ASSERT_FALSE(writer && reader);
     Fixture f({{4, 1}, {4, 2}}, true, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, kinetic,
-        !reader, family_transport);
+        !reader, family_transport, {}, 1, limiter);
     std::vector<R::QbmmMomentBlock> law_moments(f.mesh->num_owned_cells());
     std::vector<std::array<double, 2>> law_nodes(f.mesh->num_owned_cells());
     bool fail_source = false;
@@ -1160,7 +1166,7 @@ void exercise_coherent_transport(FamilyTransport family_transport, std::optional
         return options;
     };
     const auto comm = f.mesh->owned_cell_map()->getComm();
-    if (writer || reader)
+    if (writer || reader || (limiter == SlopeLimiter::TvdMc && environment_value("_RANKS")))
     {
         const char* expected_ranks = environment_value("_RANKS");
         ASSERT_NE(expected_ranks, nullptr);
@@ -1175,6 +1181,7 @@ void exercise_coherent_transport(FamilyTransport family_transport, std::optional
         EXPECT_EQ(report.receipt_history, Flow::QbmmReceiptHistory::UnavailableAfterPortableRestart);
         EXPECT_FALSE(report.interval);
         EXPECT_EQ(report.family_transport, family_transport);
+        EXPECT_EQ(report.linear_slope_limiter, limiter);
         if (linear)
         {
             EXPECT_GT(report.linear_substeps, 0);
@@ -1189,7 +1196,7 @@ void exercise_coherent_transport(FamilyTransport family_transport, std::optional
         EXPECT_EQ((std::array{f.law_calls, f.constitutive_calls, f.slip_calls}), (std::array{0, 0, 0}));
         EXPECT_GT(controller.diagnostics().correctors, 0);
         Fixture fresh({{4, 1}, {4, 2}}, true, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles,
-            kinetic, false, family_transport);
+            kinetic, false, family_transport, {}, 1, limiter);
         EXPECT_FALSE(fresh.flow->initialized());
         fresh.flow->restore_qbmm_restart(RestartIO::read_restart(*comm, reader, ".first"));
         const auto first_recoded = fresh.flow->serialize_qbmm_restart();
@@ -1258,6 +1265,7 @@ void exercise_coherent_transport(FamilyTransport family_transport, std::optional
         EXPECT_EQ(actual.flow.family_transport, expected.flow.family_transport);
         EXPECT_EQ(actual.flow.linear_substeps, expected.flow.linear_substeps);
         EXPECT_EQ(actual.flow.linear_stages, expected.flow.linear_stages);
+        EXPECT_EQ(actual.flow.linear_upstream_returned_packets, expected.flow.linear_upstream_returned_packets);
         EXPECT_EQ(actual.flow.maximum_linear_cfl, expected.flow.maximum_linear_cfl);
         EXPECT_EQ(actual.flow.maximum_linear_stage_residual, expected.flow.maximum_linear_stage_residual);
         EXPECT_EQ(actual.flow.maximum_linear_step_residual, expected.flow.maximum_linear_step_residual);
@@ -1286,11 +1294,11 @@ void exercise_coherent_transport(FamilyTransport family_transport, std::optional
     }
     const auto accepted = f.flow->state();
     const auto before = f.flow->serialize_qbmm_restart();
-    if (gravity)
+    if (gravity || limiter == SlopeLimiter::TvdMc)
     {
         ASSERT_GT(before.size(), 3 * sizeof(std::uint64_t));
         EXPECT_EQ(before[8], std::byte{9});
-        EXPECT_EQ(before[16], linear ? std::byte{4} : std::byte{3});
+        EXPECT_EQ(before[16], limiter == SlopeLimiter::TvdMc ? std::byte{6} : (linear ? std::byte{4} : std::byte{3}));
     }
     const auto trial = controller.preview(dt);
     EXPECT_EQ(f.flow->serialize_qbmm_restart(), before);
@@ -1333,9 +1341,12 @@ void exercise_coherent_transport(FamilyTransport family_transport, std::optional
                     continue;
                 const auto& directional = *rates.kinetic;
                 const bool exterior = f.mesh->is_geometry_exterior_face(static_cast<LO>(index));
-                // Stage 1 starts uniform. Stage 2 sees opposite changes in the two unit-volume
-                // cells, so its midpoint reconstruction returns the original trace.
-                EXPECT_NEAR(rates.population_number_flux, exterior ? 0. : 8 * face.carrier_volume_flux, 3e-13);
+                // Stage 1 starts uniformly at 8. The stage-2 upwind cell has lost
+                // 8*dt*|phi| in a unit volume. The default reconstructs the midpoint,
+                // while TVD retains this new donor minimum in the unswept volume.
+                const double phi = face.carrier_volume_flux;
+                const double count = 8. * (limiter == SlopeLimiter::TvdMc ? 1. - .5 * dt * std::abs(phi) : 1.);
+                EXPECT_NEAR(rates.population_number_flux, exterior ? 0. : count * phi, 3e-13);
                 EXPECT_NEAR(rates.derived_mass_flux, 1.5 * scale * rates.population_number_flux, 2e-14);
                 EXPECT_EQ(directional.slip_volume_flux, 0.);
                 EXPECT_EQ(rates.derived_drift_momentum_flux, Flow::Vector{});
@@ -1474,6 +1485,8 @@ void exercise_coherent_transport(FamilyTransport family_transport, std::optional
         EXPECT_EQ(earlier.interval->family_transport, family_transport);
         EXPECT_EQ(earlier.interval->kinetic_substeps, kinetic ? 1 : 0);
         EXPECT_EQ(earlier.interval->linear_substeps, linear ? 1 : 0);
+        EXPECT_EQ(earlier.linear_slope_limiter, limiter);
+        EXPECT_EQ(earlier.interval->linear_upstream_returned_packets, flow.linear_upstream_returned_packets);
         EXPECT_EQ(earlier.interval->linear_stages, flow.linear_stages);
         EXPECT_EQ(earlier.interval->maximum_linear_stage_residual, flow.maximum_linear_stage_residual);
         EXPECT_EQ(earlier.interval->maximum_linear_step_residual, flow.maximum_linear_step_residual);
@@ -1514,6 +1527,25 @@ void exercise_coherent_transport(FamilyTransport family_transport, std::optional
     for (size_t face = 0; face < f.mesh->num_owned_faces(); ++face)
         EXPECT_EQ(restored.volume_flux().owned_value(static_cast<LO>(face)),
             f.flow->volume_flux().owned_value(static_cast<LO>(face)));
+    if (limiter == SlopeLimiter::TvdMc)
+    {
+        // A valid archive from the old limiter has the same mesh, EOS, and accepted
+        // inventory. A failed restore must leave this owner's older preview committable.
+        Fixture legacy({{4, 1}, {4, 2}}, true, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles,
+            false, true, family_transport);
+        Coupler legacy_controller(legacy.flow, make_options(legacy));
+        const auto image = legacy_controller.serialize_qbmm_restart();
+        const auto current = controller.serialize_qbmm_restart();
+        const auto retained = controller.preview(dt);
+        const auto calls_before = std::array{f.law_calls, f.constitutive_calls, f.slip_calls};
+        EXPECT_THROW(controller.restore_qbmm_restart(image), std::exception);
+        EXPECT_EQ(controller.serialize_qbmm_restart(), current);
+        EXPECT_EQ((std::array{f.law_calls, f.constitutive_calls, f.slip_calls}), calls_before);
+        const auto owner = controller.checkpoint();
+        controller.commit(retained);
+        EXPECT_EQ(f.flow->state().time, 2 * dt);
+        controller.restore(owner);
+    }
     if (explicit_family)
     {
         const auto expect_mismatched_policy = [&](const Flow::Options& controls)
@@ -1527,6 +1559,10 @@ void exercise_coherent_transport(FamilyTransport family_transport, std::optional
         auto different_policy = f.flow->options();
         if (linear)
         {
+            different_policy.qbmm_model.linear_slope_limiter =
+                limiter == SlopeLimiter::TvdMc ? SlopeLimiter::RealizabilityOnly : SlopeLimiter::TvdMc;
+            expect_mismatched_policy(different_policy);
+            different_policy = f.flow->options();
             different_policy.qbmm_model.linear_cfl /= 2;
             expect_mismatched_policy(different_policy);
             different_policy = f.flow->options();
@@ -1535,6 +1571,7 @@ void exercise_coherent_transport(FamilyTransport family_transport, std::optional
             {
                 auto changed = f.flow->options();
                 changed.qbmm_model.family_transport = FamilyTransport::NativeImplicit;
+                changed.qbmm_model.linear_slope_limiter = SlopeLimiter::RealizabilityOnly;
                 expect_mismatched_policy(changed);
                 changed = f.flow->options();
                 ++changed.qbmm_eos_law_identities[0]->revision;
@@ -1546,6 +1583,9 @@ void exercise_coherent_transport(FamilyTransport family_transport, std::optional
         expect_mismatched_policy(different_policy);
         const auto portable_report = restored.qbmm_report();
         EXPECT_EQ(portable_report.family_transport, family_transport);
+        EXPECT_EQ(portable_report.linear_slope_limiter, limiter);
+        EXPECT_EQ(portable_report.linear_upstream_returned_packets,
+            trial.diagnostics().flow.linear_upstream_returned_packets);
         EXPECT_EQ(portable_report.receipt_history, Flow::QbmmReceiptHistory::UnavailableAfterPortableRestart);
         EXPECT_FALSE(portable_report.interval);
         const auto& statistics = trial.diagnostics().flow;
@@ -1600,6 +1640,37 @@ TEST(ReactingMixtureQbmmSourcesTest, ZeroForceLinearTaggedRestart)
 TEST(ReactingMixtureQbmmSourcesTest, LinearTransportFeedsCoherentEventsThermalsCommitAndRestart)
 {
     exercise_coherent_transport(FamilyTransport::RealizableLinearSSPRK2);
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, TvdMcUnforcedPortableContinuation)
+{
+    exercise_coherent_transport(FamilyTransport::RealizableLinearSSPRK2, {}, SlopeLimiter::TvdMc);
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, TvdMcForcedPortableContinuation)
+{
+    exercise_coherent_transport(
+        FamilyTransport::RealizableLinearSSPRK2, Flow::Vector{0., 0., -.125}, SlopeLimiter::TvdMc);
+}
+
+TEST(ReactingMixtureQbmmSourcesTest, TvdMcRejectsInvalidAndRankMixedConfiguration)
+{
+    Fixture fixture;
+    const auto comm = fixture.mesh->owned_cell_map()->getComm();
+    const auto construct = [&](FamilyTransport transport, SlopeLimiter limiter)
+    {
+        auto options = fixture.flow->options();
+        options.qbmm_model.family_transport = transport;
+        options.qbmm_model.linear_slope_limiter = limiter;
+        return Flow(fixture.mesh, {fixture.liquid, fixture.gas, fixture.gas, fixture.gas}, options);
+    };
+    EXPECT_THROW((void) construct(FamilyTransport::NativeImplicit, SlopeLimiter::TvdMc), std::exception);
+    EXPECT_THROW(
+        (void) construct(FamilyTransport::RealizableLinearSSPRK2, static_cast<SlopeLimiter>(99)), std::exception);
+    if (comm->getSize() > 1)
+        EXPECT_THROW((void) construct(FamilyTransport::RealizableLinearSSPRK2,
+                         comm->getRank() == 0 ? SlopeLimiter::TvdMc : SlopeLimiter::RealizabilityOnly),
+            std::exception);
 }
 
 TEST(ReactingMixtureQbmmSourcesTest, CountOnlyMigrationReportsTheReceivingLinearTransportMode)

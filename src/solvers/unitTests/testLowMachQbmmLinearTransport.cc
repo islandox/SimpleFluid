@@ -6,6 +6,7 @@
 #include "utils/testing_environment.hh"
 
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <numbers>
@@ -57,6 +58,9 @@ struct Problem
               R::EnergyConvention::IncludesFormationEnergy, 1.)),
           flux(grid, 0., "prescribed_closed_carrier_flux"), volumes(grid->num_owned_cells(), std::vector<double>(1))
     {
+        const int ranks = grid->owned_cell_map()->getComm()->getSize();
+        if (const char* expected = std::getenv("SIMPLEFLUID_Q8C_EXPECTED_RANKS"))
+            EXPECT_EQ(ranks, std::stoi(expected));
         options.qbmm_model.family_transport = Model::FamilyTransport::RealizableLinearSSPRK2;
         options.minimum_pressure = 4.;
         options.maximum_pressure = 12.;
@@ -265,7 +269,7 @@ double streamfunction(const Vec& point)
     return s <= core ? .5 * (s - core - .5 * span) : .5 * span * (q - q * q * q + .5 * q * q * q * q - .5);
 }
 
-void set_vortex_flux(Problem& op, const Plane& plane)
+template<class Stream> void set_stream_flux(Problem& op, const Plane& plane, const Stream& psi)
 {
     for (const auto face : op.flux.owned_face_ids())
     {
@@ -296,7 +300,7 @@ void set_vortex_flux(Problem& op, const Plane& plane)
             begin = plane.vertex(i, j);
             end = plane.vertex(i + 1, j);
         }
-        op.flux.set_owned_value(face, streamfunction(end) - streamfunction(begin));
+        op.flux.set_owned_value(face, psi(end) - psi(begin));
     }
     op.flux.sync_ghosts();
 }
@@ -393,7 +397,7 @@ TEST(LowMachQbmmLinearTransportTest, SmoothClosedVortexConvergesForEveryChannel)
         {
             const Plane plane(kind, resolution[level]);
             Problem op(plane.mesh());
-            set_vortex_flux(op, plane);
+            set_stream_flux(op, plane, streamfunction);
             StateSnapshot initial(op.state.cells.size()), exact(initial.size());
             for (size_t row = 0; row < initial.size(); ++row)
             {
@@ -443,7 +447,389 @@ TEST(LowMachQbmmLinearTransportTest, SmoothClosedVortexConvergesForEveryChannel)
     }
 }
 
-TEST(LowMachQbmmLinearTransportTest, VolumeWeightedVacuumFrontPreservesStocks)
+void tvd_metric(const Flow::Mesh& grid, const std::string& key, double value)
+{
+    testing::Test::RecordProperty(key, value);
+    if (grid.owned_cell_map()->getComm()->getRank() == 0)
+        std::cout << "TvdMc " << key << '=' << std::setprecision(14) << value << '\n';
+}
+
+TEST(LowMachQbmmLinearTransportTest, TvdMcSmoothInteriorConvergesForEveryChannel)
+{
+    // Constant physical velocity translates the exact solution. Integrate over the central half of
+    // each coordinate interval, where the two Euler stages cannot encounter a closed boundary.
+    constexpr double vx = .25, vy = .125, dt = .001;
+    const auto profile = [](Vec p, double t)
+    {
+        const double x = p.x - vx * t, y = p.y - vy * t;
+        const double w1 = .125 * std::exp(1.25 * x + .875 * y), w2 = .25 * std::exp(.875 * x + 1.125 * y);
+        // Manufacture a smooth, signed specific energy independently of the number and mass profiles.
+        const double specific_energy = -.25 + .0625 * x + .09375 * y;
+        return stock_from_atoms(w1, w2, specific_energy * (w1 + 2. * w2));
+    };
+    for (const auto kind : mesh_families)
+    {
+        const auto name = family_names[static_cast<size_t>(kind)];
+        SCOPED_TRACE(name);
+        Stock previous{};
+        for (unsigned n : {16U, 32U, 64U})
+        {
+            const Plane plane(kind, n);
+            Problem op(plane.mesh());
+            op.options.qbmm_model.linear_slope_limiter = Model::LinearSlopeLimiter::TvdMc;
+            set_stream_flux(op, plane, [](Vec p) { return vx * p.y - vy * p.x; });
+            StateSnapshot exact(op.state.cells.size());
+            for (size_t row = 0; row < exact.size(); ++row)
+            {
+                const auto cell = static_cast<LO>(row);
+                const auto [i, j] = plane.cell_index(*op.grid, cell);
+                double v;
+                op.set(cell, integrate(plane, i, j, [&](Vec p) { return profile(p, 0.); }, v));
+                exact[row] = integrate(plane, i, j, [&](Vec p) { return profile(p, dt); }, v);
+            }
+            const auto result = op.advance(dt);
+            EXPECT_EQ(result.substeps, 1);
+            EXPECT_EQ(result.upstream_returned_packets, 0u);
+            Stock local{};
+            double local_volume = 0.;
+            for (size_t row = 0; row < exact.size(); ++row)
+            {
+                const auto cell = static_cast<LO>(row);
+                const auto [i, j] = plane.cell_index(*op.grid, cell);
+                if (i < n / 4 || j < n / 4 || i >= 3 * n / 4 || j >= 3 * n / 4)
+                    continue;
+                local_volume += op.grid->cell_volume(cell);
+                const auto actual = op.get(cell);
+                for (size_t k = 0; k < local.size(); ++k)
+                    local[k] += std::abs(actual[k] - exact[row][k]);
+            }
+            const double volume = reduce(*op.grid, Teuchos::REDUCE_SUM, local_volume);
+            for (size_t k = 0; k < local.size(); ++k)
+            {
+                SCOPED_TRACE(channel_names[k]);
+                const double error = reduce(*op.grid, Teuchos::REDUCE_SUM, local[k]) / volume;
+                EXPECT_GT(error, 0.);
+                if (n > 16)
+                {
+                    const double order = std::log2(previous[k] / error);
+                    EXPECT_GT(order, 1.8);
+                    tvd_metric(*op.grid,
+                        std::string(name) + "_" + std::string(channel_names[k]) + "_order_" + std::to_string(n), order);
+                }
+                previous[k] = error;
+            }
+        }
+    }
+}
+
+TEST(LowMachQbmmLinearTransportTest, TvdMcStepPreservesBoundsAndStationaryBystanders)
+{
+    // A divergence-free, closed vortex crosses a positive step. Scalar extrema are independent
+    // bounds for every density because both sides have the same composition and specific energy.
+    constexpr unsigned n = 12;
+    const auto low = stock_from_weights({.125, .25}), high = stock_from_weights({.5, 1.});
+    for (const auto kind : mesh_families)
+        for (const bool stretched : {false, true})
+        {
+            SCOPED_TRACE(family_names[static_cast<size_t>(kind)]);
+            SCOPED_TRACE(stretched);
+            const Plane plane(kind, n, stretched);
+            Problem op(plane.mesh());
+            op.options.qbmm_model.linear_slope_limiter = Model::LinearSlopeLimiter::TvdMc;
+            set_stream_flux(op, plane, streamfunction);
+            StateSnapshot initial(op.state.cells.size());
+            std::vector<bool> stationary(initial.size());
+            for (size_t row = 0; row < initial.size(); ++row)
+            {
+                const auto cell = static_cast<LO>(row);
+                const auto [i, j] = plane.cell_index(*op.grid, cell);
+                const double bulk = op.grid->cell_volume(cell);
+                double divergence = 0.;
+                for (const auto face : op.grid->faces(cell))
+                    divergence += (op.grid->owner_cell(face) == cell ? 1. : -1.) * op.flux.local_value(face);
+                EXPECT_NEAR(divergence, 0., 1e-16) << i << ',' << j;
+                // Put bystanders behind a full stationary ring so their distinct
+                // densities cannot enter any transporting cell's reconstruction stencil.
+                const auto inactive = [&](unsigned u, unsigned v)
+                {
+                    const double first = streamfunction(plane.vertex(u, v));
+                    return streamfunction(plane.vertex(u + 1, v)) == first &&
+                           streamfunction(plane.vertex(u, v + 1)) == first &&
+                           streamfunction(plane.vertex(u + 1, v + 1)) == first;
+                };
+                stationary[row] = inactive(i, j) && (i == 0 || inactive(i - 1, j)) && (j == 0 || inactive(i, j - 1)) &&
+                                  (i + 1 == n || inactive(i + 1, j)) && (j + 1 == n || inactive(i, j + 1));
+                if (stationary[row])
+                    initial[row] = (i + j) % 2 ? Stock{} : stock_from_weights({.125, 0.});
+                else
+                {
+                    initial[row] = i < n / 2 ? low : high;
+                    for (auto& value : initial[row])
+                        value *= bulk;
+                }
+                op.set(cell, initial[row]);
+            }
+            const auto before = op.totals();
+            const auto result = op.advance(.02);
+            EXPECT_EQ(result.upstream_returned_packets, 0u);
+            check_stock(op.totals(), before, 2e-13);
+            int moved = 0, vacuum = 0, singleton = 0;
+            double maximum_violation = 0.;
+            for (size_t row = 0; row < initial.size(); ++row)
+            {
+                const auto cell = static_cast<LO>(row);
+                const auto actual = op.get(cell);
+                if (stationary[row])
+                {
+                    EXPECT_EQ(actual, initial[row]);
+                    vacuum += actual[number] == 0.;
+                    singleton += actual[number] != 0.;
+                    continue;
+                }
+                for (size_t k = 0; k < actual.size(); ++k)
+                {
+                    SCOPED_TRACE(channel_names[k]);
+                    const double density = actual[k] / op.grid->cell_volume(cell);
+                    maximum_violation = std::max(
+                        {maximum_violation, std::min(low[k], high[k]) - density, density - std::max(low[k], high[k])});
+                    EXPECT_GE(density, std::min(low[k], high[k]) - 3e-13);
+                    EXPECT_LE(density, std::max(low[k], high[k]) + 3e-13);
+                }
+                moved += std::abs(actual[number] - initial[row][number]) > 1e-8;
+            }
+            const auto key = std::string(family_names[static_cast<size_t>(kind)]) +
+                             (stretched ? "_stretched_step" : "_uniform_step");
+            const auto changed = reduce(*op.grid, Teuchos::REDUCE_SUM, moved);
+            tvd_metric(
+                *op.grid, key + "_maximum_bound_violation", reduce(*op.grid, Teuchos::REDUCE_MAX, maximum_violation));
+            tvd_metric(*op.grid, key + "_changed_cells", changed);
+            EXPECT_GT(changed, 0);
+            EXPECT_GT(reduce(*op.grid, Teuchos::REDUCE_SUM, vacuum), 0);
+            EXPECT_GT(reduce(*op.grid, Teuchos::REDUCE_SUM, singleton), 0);
+        }
+}
+
+TEST(LowMachQbmmLinearTransportTest, TvdMcMatchesExactTwoStageRampAndRetainedMinimum)
+{
+    for (auto traces : {Kernel::TraceLimiter::AllIncident, Kernel::TraceLimiter::Outgoing})
+        for (const bool one_sided : {false, true})
+        {
+            // On the interior ramp the MC bound is the upstream jump at both stages:
+            // (.25, 1, 4.5) gives trace 1.75; the intermediate (.25, .78125, 4.71875)
+            // gives trace 1.3125. On the one-sided wall stencil (1, 8) the donor
+            // is the stencil minimum. Keeping its normalized retained density at
+            // that minimum requires its mean trace in each stage: 1, then .875.
+            const ArrReal initial = one_sided ? ArrReal{1., 8.} : ArrReal{.25, 1., 4.5};
+            const auto donor = initial.size() - 2, receiver = donor + 1;
+            Problem op(mesh(edges(initial.size(), 0., initial.size())));
+            op.options.qbmm_model.linear_slope_limiter = Model::LinearSlopeLimiter::TvdMc;
+            // Equal molar amounts give molecular mass 1.5; U=-2w yields T=1.5
+            // exactly at both stages, so the ideal-gas density is exactly 8.
+            const auto family = std::make_shared<const R::QbmmPopulationSchema>(op.species, op.species->fingerprint(),
+                "linear advection bubbles", op.options.phase_roles[0], 1.,
+                std::vector<R::QbmmMassFraction>{{47, 1. / 3.}, {48, 2. / 3.}});
+            op.options.qbmm_families = {family};
+            op.state.qbmm_families = {Flow::qbmm_family_stamp(*family)};
+            const auto ramp_stock = [](double w) -> Stock
+            { return {2. * w, 3. * w, 5. * w, 9. * w, w, w, -2. * w, .375 * w}; };
+            record_ownership(*op.grid, int(initial.size()));
+            for (size_t row = 0; row < op.state.cells.size(); ++row)
+            {
+                const auto cell = static_cast<LO>(row);
+                const double w = initial[op.grid->cell_geometry_global_id(cell)];
+                op.set(cell, ramp_stock(w));
+            }
+            for (auto face : op.flux.owned_face_ids())
+                if (op.grid->is_interior_face(face) && op.grid->face_centroid(face).x == double(receiver))
+                    op.flux.set_owned_value(face, .125 * op.grid->face_normal(face).x);
+            op.flux.sync_ghosts();
+            const double transported = .0625 * (one_sided ? 1. + .875 : 1.75 + 1.3125);
+            const auto result = op.advance(1., traces);
+            EXPECT_EQ(result.substeps, 1);
+            EXPECT_EQ(result.upstream_returned_packets, 0u);
+            for (size_t row = 0; row < op.state.cells.size(); ++row)
+            {
+                const auto cell = static_cast<LO>(row);
+                const auto i = static_cast<size_t>(op.grid->cell_geometry_global_id(cell));
+                const double w = initial[i] + transported * (int(i == receiver) - int(i == donor));
+                if (one_sided)
+                    check_stock(op.get(cell), ramp_stock(w), 2e-14);
+                else
+                    EXPECT_EQ(op.get(cell), ramp_stock(w));
+            }
+            for (auto face : op.flux.owned_face_ids())
+            {
+                const auto& packet = result.owned_flux.at(0).at(op.flux.owned_row(face));
+                const double w = op.flux.owned_value(face) * 8. * transported;
+                if (one_sided)
+                    check_stock(rates(packet), ramp_stock(w), 2e-14);
+                else
+                    EXPECT_EQ(rates(packet), ramp_stock(w));
+            }
+        }
+}
+
+TEST(LowMachQbmmLinearTransportTest, TvdMcShapeOrSignedEnergyExtremumLimitsEveryChannel)
+{
+    for (int energy_sign : {0, -1, 1})
+    {
+        Problem op(mesh({0., 1., 2., 3.}));
+        op.options.qbmm_model.linear_slope_limiter = Model::LinearSlopeLimiter::TvdMc;
+        // The first case has H0=(3,7,10.5), H1=(5,8,12), H2=(9,10,15), but H3=(17,14,21).
+        // In the other cases every moment is monotone; only the signed specific energy
+        // has an extremum. In each case the central family must ship its entire mean block.
+        std::array initial{stock_from_weights({1., 2.}), stock_from_weights({6., 1.}), stock_from_weights({9., 1.5})};
+        if (energy_sign)
+            for (size_t i = 0; i < initial.size(); ++i)
+            {
+                const double w = 1. + i;
+                constexpr std::array specific{-.125, .125, .0625};
+                initial[i] = stock_from_atoms(w, w, energy_sign * specific[i] * 3. * w);
+            }
+        for (size_t row = 0; row < op.state.cells.size(); ++row)
+        {
+            const auto cell = static_cast<LO>(row);
+            op.set(cell, initial[op.grid->cell_geometry_global_id(cell)]);
+        }
+        for (auto face : op.flux.owned_face_ids())
+            if (op.grid->is_interior_face(face) && op.grid->face_centroid(face).x == 2.)
+                op.flux.set_owned_value(face, .125 * op.grid->face_normal(face).x);
+        op.flux.sync_ghosts();
+        const auto result = op.advance(1.);
+        EXPECT_EQ(result.substeps, 1);
+        for (auto face : op.flux.owned_face_ids())
+        {
+            auto expected = initial[1];
+            // A=.125*M, B=.125*(M-A). SSPRK2 ships their arithmetic mean.
+            for (auto& value : expected)
+                value *= op.flux.owned_value(face) * (1. - .0625);
+            check_stock(rates(result.owned_flux.at(0).at(op.flux.owned_row(face))), expected, 2e-13);
+        }
+    }
+}
+
+TEST(LowMachQbmmLinearTransportTest, TvdMcBoundsTheReconstructedSpecificEnergyQuotient)
+{
+    for (const double sign : {-1., 1.})
+    {
+        Problem op(mesh({0., 1., 2., 3.}));
+        op.options.qbmm_model.linear_slope_limiter = Model::LinearSlopeLimiter::TvdMc;
+        constexpr std::array specific{0., .125, 1.125};
+        for (size_t row = 0; row < op.state.cells.size(); ++row)
+        {
+            const auto cell = static_cast<LO>(row);
+            const auto i = static_cast<size_t>(op.grid->cell_geometry_global_id(cell));
+            const double m = i + 1.;
+            op.set(cell, stock_from_atoms(.5 * m, .25 * m, sign * m * specific[i]));
+        }
+        for (auto face : op.flux.owned_face_ids())
+            if (op.grid->is_interior_face(face) && op.grid->face_centroid(face).x == 2.)
+                op.flux.set_owned_value(face, .25 * op.grid->face_normal(face).x);
+        op.flux.sync_ghosts();
+        // Changes this small leave both stages' represented input exactly unchanged.
+        // The MC increment in |U/M| is min(.125,(.125+1)/4,1)=.125.
+        // For the shared factor f, (.25 + .84375*f)/(2 + .5*f) = .25 yields f=8/23.
+        const auto result = op.advance(std::ldexp(1., -58));
+        const double m = 2. + .5 * (8. / 23.);
+        for (auto face : op.flux.owned_face_ids())
+        {
+            const double phi = op.flux.owned_value(face);
+            if (phi == 0.)
+                continue;
+            const auto& packet = result.owned_flux[0][op.flux.owned_row(face)];
+            EXPECT_NEAR(packet.internal_energy_flux / packet.derived_mass_flux, sign * .25, 2e-14);
+            const auto expected = stock_from_atoms(phi * .5 * m, phi * .25 * m, phi * sign * .25 * m);
+            check_stock(rates(packet), expected, 2e-13);
+        }
+    }
+}
+
+TEST(LowMachQbmmLinearTransportTest, TvdMcReturnsEntireTinyPacketExactlyInEitherDirection)
+{
+    // A dyadic donor has nonzero amounts in every channel. With one face and two SSPRK
+    // stages the exact answer on every partition is two returns and an unchanged donor.
+    const double weight = std::ldexp(1., -675);
+    const Stock seed = stock_from_weights({weight, 2. * weight});
+    for (const int donor : {0, 1})
+    {
+        Problem op(mesh({0., 1., 2.}));
+        op.options.qbmm_model.linear_slope_limiter = Model::LinearSlopeLimiter::TvdMc;
+        record_ownership(*op.grid, 2);
+        for (size_t row = 0; row < op.state.cells.size(); ++row)
+        {
+            const auto cell = static_cast<LO>(row);
+            op.set(cell, op.grid->cell_geometry_global_id(cell) == donor ? seed : Stock{});
+            op.state.cells[row].velocity = {.125, -.5, 1.};
+        }
+        int remote = 0;
+        for (auto face : op.flux.owned_face_ids())
+            if (op.grid->is_interior_face(face))
+            {
+                const auto owner = op.grid->owner_cell(face), neighbor = op.grid->neighbor_cell(face);
+                op.flux.set_owned_value(face, op.grid->cell_geometry_global_id(owner) == donor ? .25 : -.25);
+                remote += !op.grid->is_owned_cell(owner) || !op.grid->is_owned_cell(neighbor);
+            }
+        op.flux.sync_ghosts();
+        EXPECT_EQ(reduce(*op.grid, Teuchos::REDUCE_SUM, remote), int(Tpetra::getDefaultComm()->getSize() > 1));
+        const auto result = op.advance(1.);
+        EXPECT_EQ(result.substeps, 1);
+        EXPECT_EQ(result.upstream_returned_packets, 2u);
+        const auto label = "donor_" + std::to_string(donor);
+        tvd_metric(*op.grid, label + "_returned_packets", result.upstream_returned_packets);
+        tvd_metric(*op.grid, label + "_ranks", op.grid->owned_cell_map()->getComm()->getSize());
+        tvd_metric(
+            *op.grid, label + "_empty_ranks", reduce(*op.grid, Teuchos::REDUCE_SUM, int(op.state.cells.empty())));
+        EXPECT_EQ(op.totals(), seed);
+        for (size_t row = 0; row < op.state.cells.size(); ++row)
+        {
+            const auto cell = static_cast<LO>(row);
+            EXPECT_EQ(op.get(cell), op.grid->cell_geometry_global_id(cell) == donor ? seed : Stock{});
+        }
+        for (const auto& packet : result.owned_flux.at(0))
+        {
+            EXPECT_EQ(rates(packet), Stock{});
+            ASSERT_TRUE(packet.kinetic.has_value());
+            Flow::QbmmDirectionalFlux empty;
+            empty.species_molar_flux = {0., 0.};
+            EXPECT_EQ(packet.kinetic->forward, empty);
+            EXPECT_EQ(packet.kinetic->backward, empty);
+            EXPECT_EQ(packet.kinetic->theta, 0.);
+            EXPECT_EQ(packet.kinetic->pressure_rounding_flux, 0.);
+        }
+    }
+}
+
+TEST(LowMachQbmmLinearTransportTest, TvdMcReturnsPacketWhenOnlyHalfItsThirdMomentUnderflows)
+{
+    // The stage transfer H3=2^-1074 is representable. Its half-stage receipt
+    // is not. Count, both species, mass, signed energy, volume, and H2 are normal.
+    const double m = std::ldexp(1., -330), dt = std::ldexp(1., -84);
+    const Stock seed{1., m, std::ldexp(1., -660), std::ldexp(1., -990), .25 * m, .375 * m, -.25 * m, .140625 * m};
+    ASSERT_EQ(seed[h3] * dt, std::numeric_limits<double>::denorm_min());
+    ASSERT_EQ(.5 * (seed[h3] * dt), 0.);
+    ASSERT_GT(seed[species_a] * dt, 1e-200);
+    Problem op(mesh({0., 1., 2.}));
+    op.options.qbmm_model.linear_slope_limiter = Model::LinearSlopeLimiter::TvdMc;
+    for (size_t row = 0; row < op.state.cells.size(); ++row)
+    {
+        const auto cell = static_cast<LO>(row);
+        // Identical neighbors give a flat face trace, so it is the half stage
+        // receipt alone that falls below the representable positive range.
+        op.set(cell, seed);
+    }
+    for (const auto face : op.flux.owned_face_ids())
+        if (op.grid->is_interior_face(face))
+            op.flux.set_owned_value(face, op.grid->face_normal(face).x);
+    op.flux.sync_ghosts();
+    const auto result = op.advance(dt);
+    EXPECT_EQ(result.upstream_returned_packets, 2u);
+    for (size_t row = 0; row < op.state.cells.size(); ++row)
+        EXPECT_EQ(op.get(static_cast<LO>(row)), seed);
+    for (const auto& packet : result.owned_flux.at(0))
+        EXPECT_EQ(rates(packet), Stock{});
+}
+
+void check_vacuum_front(Model::LinearSlopeLimiter limiter)
 {
     constexpr unsigned n = 12;
     constexpr double time = .02;
@@ -453,7 +839,8 @@ TEST(LowMachQbmmLinearTransportTest, VolumeWeightedVacuumFrontPreservesStocks)
         SCOPED_TRACE(name);
         const Plane plane(kind, n, true);
         Problem op(plane.mesh());
-        set_vortex_flux(op, plane);
+        op.options.qbmm_model.linear_slope_limiter = limiter;
+        set_stream_flux(op, plane, streamfunction);
         StateSnapshot initial(op.state.cells.size());
         int local_rank_one = 0, local_vacuum = 0, local_wetted = 0, local_remote = 0;
         double local_min_volume = std::numeric_limits<double>::infinity(), local_max_volume = 0.;
@@ -576,12 +963,22 @@ TEST(LowMachQbmmLinearTransportTest, VolumeWeightedVacuumFrontPreservesStocks)
             1.1 * reduce(*op.grid, Teuchos::REDUCE_MIN, local_min_volume));
         if (op.grid->owned_cell_map()->getComm()->getSize() > 1)
             EXPECT_GT(remote, 0);
-        RecordProperty(std::string(name) + "_newly_wet_cells", wet);
-        RecordProperty(std::string(name) + "_exact_static_vacuum_cells", static_vacuum);
-        RecordProperty(std::string(name) + "_vacuum_to_rank_one_cells", wet_rank_one);
-        RecordProperty(std::string(name) + "_rank_one_to_two_cells", rank_one_to_two);
-        RecordProperty(std::string(name) + "_active_partition_faces", remote);
+        testing::Test::RecordProperty(std::string(name) + "_newly_wet_cells", wet);
+        testing::Test::RecordProperty(std::string(name) + "_exact_static_vacuum_cells", static_vacuum);
+        testing::Test::RecordProperty(std::string(name) + "_vacuum_to_rank_one_cells", wet_rank_one);
+        testing::Test::RecordProperty(std::string(name) + "_rank_one_to_two_cells", rank_one_to_two);
+        testing::Test::RecordProperty(std::string(name) + "_active_partition_faces", remote);
     }
+}
+
+TEST(LowMachQbmmLinearTransportTest, VolumeWeightedVacuumFrontPreservesStocks)
+{
+    check_vacuum_front(Model::LinearSlopeLimiter::RealizabilityOnly);
+}
+
+TEST(LowMachQbmmLinearTransportTest, TvdMcVacuumFrontPreservesStocksAndWetsRealizableSingletons)
+{
+    check_vacuum_front(Model::LinearSlopeLimiter::TvdMc);
 }
 
 TEST(LowMachQbmmLinearTransportTest, CombinedOutgoingTracesShareTheDonorLimiter)

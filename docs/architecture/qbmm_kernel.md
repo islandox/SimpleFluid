@@ -14,6 +14,8 @@ Q8a couples Fourier contacts inside the thermal corrector. Q8b admits supplied u
 acceleration for fixed closed Cartesian kinetic families. Q8c extends fixed shared-carrier
 SSPRK(2,2) to gravity on Cartesian and qualified cylindrical meshes. Q8d extends fixed-grid
 kinetic transport to closed cylindrical vessels with axial node drift and optional axial gravity.
+Upstream adaptation #1a adds an opt-in family-shared TVD-MC limiter and conservative
+return of tiny outgoing SSPRK(2,2) packets on the Q7c and Q8c fixed meshes.
 
 ## Source alignment
 
@@ -315,12 +317,12 @@ fraction and an energy-balanced timestep give no empirical validity range for a 
 | Selection | Baseline contract and gate |
 | --- | --- |
 | Native mesh and boundaries | Closed, supported orthogonal native geometry with common pressure and equilibrium temperature. Prescribed fixed-topology planar ALE supports Cartesian X/Y/Z, cylindrical axial Z on a nonperiodic sector, and `SemiStructuredXY_Z` axial Z. Moving geometry requires nonperiodic topology, zero mixture viscosity and native slip walls. General remap, AMR and open-reservoir face transport are outside this capability. |
-| Velocity and order | `NativeImplicit` admits `SharedCarrier` (default) and `SuppliedPhaseSlip`. Fixed closed Cartesian meshes and qualified cylinders admit `NodeDependentSlip` with `KineticEuler`. Cylindrical kinetic drift is axial. Fixed closed orthogonal Cartesian, native cylindrical and cylindrical `SemiStructuredXY_Z` meshes admit `SharedCarrier` with `RealizableLinearSSPRK2`. The scalar background uses transient backward Euler and upwind. Independent phase momentum, steady assembly, BDF2 and ordinary scalar high-order limiters reject. |
+| Velocity and order | `NativeImplicit` admits `SharedCarrier` (default) and `SuppliedPhaseSlip`. Fixed closed Cartesian meshes and qualified cylinders admit `NodeDependentSlip` with `KineticEuler`. Cylindrical kinetic drift is axial. Fixed closed orthogonal Cartesian, native cylindrical and cylindrical `SemiStructuredXY_Z` meshes admit `SharedCarrier` with `RealizableLinearSSPRK2` and optional `TvdMc` slope limiting. The scalar background uses transient backward Euler and upwind. Independent phase momentum, steady assembly, BDF2 and ordinary scalar high-order limiters reject. |
 | Gravity and applicability | Fixed native implicit transport, fixed closed Cartesian kinetic Euler, and fixed shared-carrier SSPRK2 on Cartesian or qualified cylindrical meshes admit optional SI acceleration. Fixed cylindrical kinetic Euler admits optional axial acceleration. A supplied zero vector selects the forced policy. Planar ALE requires absent acceleration. Applicability ranges come from the supplied laws. |
 | Family schema | One named fixed-composition family per dispersed gas phase; catalog, family stamp, reference scale and phase ordering agree on all ranks. Variable composition, cross-family coalescence and unmigrated count-only state reject. |
 | Local material and topology | Constructive paired birth, growth, shrinkage, disappearance, coalescence and breakup; transfers may involve the liquid carrier or a declared external reservoir. Declaring either direction of a family-to-background-gas material slot rejects. Generic chemistry, face transport and interphase laws can act on unbound compartments. A legacy number law must name only unbound populations. Selective or unpaired family material returned by a law rejects the preview. |
 | Thermal and pool closures | Common temperature and pressure, zero surface tension. Separate phase or node temperatures, bulk-gas conversion and capillary/surface-energy closures reject. A separate background gas may carry its own inventory. |
-| Transactions and restart | All owners use a common numerical configuration and controller selection. Commit publishes one retained trial. Rejection preserves accepted canonical state, histories and other compatible previews. Fixed-grid restart supports versions 1–5 under their original modes, version 7 for unforced kinetic Euler, version 8 for unforced realizable linear SSPRK2, and tagged version 9 for kinetic Euler or realizable linear SSPRK2 with supplied acceleration. Moving restart uses version 6 and binds the original and accepted geometry, motion controls, partition, target policy and supplied physics. |
+| Transactions and restart | All owners use a common numerical configuration and controller selection. Commit publishes one retained trial. Rejection preserves accepted canonical state, histories and other compatible previews. Fixed-grid restart supports versions 1–5 under their original modes, version 7 for unforced Cartesian kinetic Euler, version 8 for unforced realizable linear SSPRK2 with the default limiter, and tagged version 9 for forced explicit, axial kinetic and TVD-MC SSPRK2 payloads. Moving restart uses version 6 and binds the original and accepted geometry, motion controls, partition, target policy and supplied physics. |
 
 The release suite follows circulating polydisperse gas across partition faces into exact vacuum,
 combines it with population events, unrelated mole-changing chemistry and heat, and checks the
@@ -1171,3 +1173,92 @@ GCC Debug qualification passed 610 serial entries, the ELF export-boundary check
 at two MPI ranks and 59 at four MPI ranks, with zero skips. The existing Q8c MPI-2 circulation
 entry reached its 900 s timeout in the concurrent run and passed in 825.34 s when run alone
 with the same binary, inputs and timeout.
+
+## Upstream adaptation #1a for fixed-grid SSPRK(2,2)
+
+Set `QbmmModelOptions::linear_slope_limiter` to `LinearSlopeLimiter::TvdMc` with
+`RealizableLinearSSPRK2`. The default is `RealizabilityOnly`. Every owner must supply the
+same valid option, including an owner with no cells. The option applies to the closed
+Cartesian, native cylindrical sector and seam annulus, and qualified cylindrical
+`SemiStructuredXY_Z` disk and annulus. These meshes support absent or supplied gravity.
+Planar ALE requires `NativeImplicit` and absent acceleration.
+
+For an active donor channel, let \(\Delta=c_d-c_u\) and \(b=\nabla c_u\cdot d_{ud}\),
+using the displacement from the donor center to the adjacent center. The
+Darwish–Moukalled ratio is \(r=(2b-\Delta)/\Delta\), with the MC bound
+\(\phi=\max(0,\min(2r,(1+r)/2,2))\). The factor scales the reconstructed increment
+at the actual face centroid. Dividing by the centered branch \((1+r)/2\) preserves
+the physical increment when the centered branch is active. Face-pair bounds use the
+same physical offset, so a midpoint assumption is unnecessary on stretched and curved
+meshes. A nonnegative active channel with a zero donor and positive neighbor caps the
+slope at zero. Flat and excluded channels do not set the cap. Relative cross-product
+bounds recognize flat densities stored as rounded extensive stocks. Signed specific
+energy uses occupied neighbors. Its MC bound applies to the reconstructed quotient
+\(U/M\) through cross-products with the species-derived mass.
+
+The family uses the smallest face factor across its channels before the common
+realizability and energy certificate limits all applicable traces and the retained
+donor stock. Face densities and the retained density after applied withdrawals lie
+within the donor's one-ring bounds. Forced correctors certify all incident traces.
+The CFL and SSPRK stage weights follow the Q7c contract.
+
+For positive outgoing rates the gate uses the upstream packet floors of \(10^{-200}\)
+for count and total moles and \(10^{-220}\) for each active species. It checks
+representability using the donor volume and the smaller adjacent bulk volume, and
+checks both the half-weighted stage amount and its interval rate. A returned packet
+remains in the upwind cell before the retained-stock certificate runs. The canonical
+face owner publishes a zero transfer for the complete family packet, including its
+energy, anchored EOS material volume, pressure coefficient and momentum terms. Both
+incident cells use that same record. `linear_upstream_returned_packets` sums each
+canonical family face and stage return once across owners in the final corrector.
+The same value appears in the flow diagnostics and QBMM report, including the live
+interval when available.
+
+Tag **6** of portable version 9 binds `TvdMc`, linear transport revision **2**, the
+CFL and subcycle settings, advancement controls, controller stamp and returned-packet
+count. The force record distinguishes absent acceleration from explicitly supplied
+zero. Forced images bind physical providers and impulse history under the Q8c rules.
+Coupled histories retain the accepted controller identity and diagnostics. The receiving
+solver must use the same limiter before it can publish the restored state. Default-limit
+v5–v9 encodings retain their existing tags and layouts.
+
+### TVD-MC qualification
+
+The prescribed-transport oracles ran in GCC Debug at one, two and four ranks. The closed
+step used uniform and stretched grids. Across the six grid combinations, the largest
+density bound violation was \(5.33\times10^{-15}\). The monotone ramp checks the two stage
+packets and their half-weighted sum. The signed-energy checks include a varying-mass
+trace whose specific-energy quotient would violate the MC bound if only the slope
+of the specific-energy sample were capped.
+
+The smooth translation compares independent cell integrals in the interior on 16, 32
+and 64 cells per coordinate. The observed order ranges include H0 through H3, both
+species, internal energy and advected material volume.
+
+| Mesh | 16 to 32 | 32 to 64 |
+| --- | ---: | ---: |
+| Cartesian | 1.825–1.928 | 1.916–1.963 |
+| Native cylindrical | 1.991–2.067 | 1.994–2.034 |
+| Cylindrical `SemiStructuredXY_Z` | 1.983–2.107 | 1.989–2.055 |
+
+In each direction of the two-cell return oracle, both stages returned the outgoing
+packet. Each rank count reported exactly two canonical returns and conserved the
+count, material, shape, energy and volume bit for bit. The four-rank partition had two
+empty owners. A separate case returned the whole packet when only its half-weighted
+third moment lost representable precision. The forced Cartesian report oracle retained
+96 canonical returns through commit, portable restore and re-encoding at each rank count.
+
+Stratified hydrostatic rest on all five topologies had maximum speed
+\(4.23\times10^{-16}\) m/s, face rate \(4.36\times10^{-16}\) m³/s, and edge pressure
+defect \(4.80\times10^{-14}\) Pa across the three rank counts. The forced controls
+replayed single body impulses and nonzero Cartesian and azimuthal transport. The
+heated native sector and polygonal annulus tests also produced circulation under
+gravity. Portable writer and reader fixtures covered absent and nonzero acceleration,
+owner rollback, live-trial retention after rejection and matching fresh-process replay.
+The legacy writers reproduced all 287 shards captured at `4bc7417b` byte for byte
+across the three rank counts. The inventory includes 7 v5, 28 v6, 14 v7, 14 v8,
+and 224 legacy v9 shards.
+
+GCC Debug with debug symbols disabled passed 303 serial CTests, both ELF export checks,
+45 CTests at two ranks and 46 CTests at four ranks, with zero skips. The MPI totals
+include the dedicated legacy circulation runs.

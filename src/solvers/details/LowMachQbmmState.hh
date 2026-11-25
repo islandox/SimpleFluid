@@ -93,6 +93,10 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_capability(const Flow::Options& o
 {
     const auto& model = options.qbmm_model;
     const bool kinetic = uses_qbmm_kinetic_transport(model), linear = uses_qbmm_linear_transport(model);
+    using LinearSlopeLimiter = QbmmModelOptions::LinearSlopeLimiter;
+    require(model.linear_slope_limiter == LinearSlopeLimiter::RealizabilityOnly ||
+                (linear && model.linear_slope_limiter == LinearSlopeLimiter::TvdMc),
+        "QBMM requires a valid linear slope limiter, and TVD-MC requires RealizableLinearSSPRK2.");
     const bool axial_kinetic = uses_axial_kinetic_transport(options, mesh);
     using Velocity = QbmmModelOptions::Velocity;
     require((kinetic && model.velocity == Velocity::NodeDependentSlip) ||

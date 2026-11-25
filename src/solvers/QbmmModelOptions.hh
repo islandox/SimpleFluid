@@ -32,6 +32,11 @@ struct QbmmModelOptions
         KineticEuler,
         RealizableLinearSSPRK2 ///< Limited linear block reconstruction on fixed orthogonal meshes.
     };
+    enum class LinearSlopeLimiter
+    {
+        RealizabilityOnly = 0,
+        TvdMc = 1 ///< Family-shared TVD-MC cap and conservative return of tiny outgoing packets.
+    };
     FVM::ScalarTransportDiscretization transport;
     Velocity velocity = Velocity::SharedCarrier;
     bool variable_composition = false;
@@ -44,9 +49,11 @@ struct QbmmModelOptions
     int maximum_kinetic_substeps = 1024;
     double linear_cfl = 0.5; ///< Maximum sum of outgoing carrier fractions per donor and stage, in (0, 0.5].
     int maximum_linear_substeps = 1024;
+    LinearSlopeLimiter linear_slope_limiter = LinearSlopeLimiter::RealizabilityOnly;
 };
 
-inline constexpr int qbmm_linear_transport_revision = 1; ///< Portable restart revision of the linear family scheme.
+inline constexpr int qbmm_linear_transport_revision = 1; ///< Legacy linear family restart revision.
+inline constexpr int qbmm_linear_tvd_mc_revision = 2;     ///< Tagged linear family restart with TVD-MC.
 
 [[nodiscard]] constexpr bool uses_qbmm_kinetic_transport(const QbmmModelOptions& model) noexcept
 {

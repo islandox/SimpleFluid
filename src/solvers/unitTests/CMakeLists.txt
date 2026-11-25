@@ -196,6 +196,12 @@ add_qbmm_restart_tests(QbmmLinearControllerRestart testReactingMixtureQbmmSource
     ReactingMixtureQbmmSourcesTest.LinearTransportFeedsCoherentEventsThermalsCommitAndRestart
     SIMPLEFLUID_Q7C_RESTART "qbmm;restart;transaction;conservation")
 
+foreach(kind IN ITEMS Unforced Forced)
+    add_qbmm_restart_tests(QbmmTvdMc${kind}Restart testReactingMixtureQbmmSources
+        ReactingMixtureQbmmSourcesTest.TvdMc${kind}PortableContinuation
+        SIMPLEFLUID_TVD_MC_RESTART "qbmm;tvd_mc;restart;transaction")
+endforeach()
+
 add_qbmm_restart_tests(QbmmCylindricalKineticRestart testLowMachQbmmCylindricalRestart
     LowMachQbmmCylindricalRestartTest.PortableContinuation SIMPLEFLUID_Q8D_RESTART "qbmm;kinetic;gravity;restart;transaction")
 foreach(ranks IN ITEMS 2 4)
@@ -214,17 +220,28 @@ foreach(kind IN ITEMS Forced ZeroForce)
 endforeach()
 
 foreach(_linear_ranks IN ITEMS 2 4)
+    foreach(target IN ITEMS LowMachQbmmLinearTransport QbmmLinearGravity QbmmLinearGravityCirculation
+            ReactingMixtureQbmmSources)
+        set(test QbmmTvdMc${target}_${_linear_ranks}procs)
+        simplefluid_add_mpi_test(NAME ${test}
+            TARGET test${target} PROCS ${_linear_ranks}
+            ARGS "--gtest_filter=*.TvdMc*" LABELS "mpi;qbmm;tvd_mc;conservation" TIMEOUT 900)
+        if(TEST ${test})
+            set_tests_properties(${test} PROPERTIES ENVIRONMENT
+                "SIMPLEFLUID_Q8C_EXPECTED_RANKS=${_linear_ranks};SIMPLEFLUID_TVD_MC_RESTART_RANKS=${_linear_ranks}")
+        endif()
+    endforeach()
     foreach(_gravity_case IN ITEMS QbmmLinearGravity QbmmLinearGravityCirculation)
         set(_test "${_gravity_case}_${_linear_ranks}procs")
         simplefluid_add_mpi_test(NAME ${_test} TARGET test${_gravity_case} PROCS ${_linear_ranks}
-            ARGS "--gtest_filter=-QbmmCylindricalKinetic*.*"
+            ARGS "--gtest_filter=-QbmmCylindricalKinetic*.*:*.TvdMc*"
             LABELS "mpi;qbmm;gravity;low_mach;conservation" TIMEOUT 900)
         if(TEST ${_test})
             set_tests_properties(${_test} PROPERTIES ENVIRONMENT "SIMPLEFLUID_Q8C_EXPECTED_RANKS=${_linear_ranks}")
         endif()
     endforeach()
     simplefluid_add_mpi_test(NAME LowMachQbmmLinearTransport_${_linear_ranks}procs
-        TARGET testLowMachQbmmLinearTransport PROCS ${_linear_ranks}
+        TARGET testLowMachQbmmLinearTransport PROCS ${_linear_ranks} ARGS "--gtest_filter=-*.TvdMc*"
         LABELS "mpi;qbmm;low_mach;conservation;empty_rank" TIMEOUT 900)
 endforeach()
 
@@ -286,7 +303,7 @@ foreach(_mixture_ranks IN ITEMS 2 4)
         TARGET testLowMachQbmmTransport PROCS ${_mixture_ranks}
         LABELS "mpi;low_mach;qbmm;population;conservation;transaction;empty_rank" TIMEOUT 180)
     simplefluid_add_mpi_test(NAME ReactingMixtureQbmmSources_${_mixture_ranks}procs
-        TARGET testReactingMixtureQbmmSources PROCS ${_mixture_ranks}
+        TARGET testReactingMixtureQbmmSources PROCS ${_mixture_ranks} ARGS "--gtest_filter=-*.TvdMc*"
         LABELS "mpi;low_mach;reacting;qbmm;population;conservation;transaction;empty_rank" TIMEOUT 180)
     simplefluid_add_mpi_test(NAME NativeSourceDonors_${_mixture_ranks}procs
         TARGET testNativeSourceDonors PROCS ${_mixture_ranks}

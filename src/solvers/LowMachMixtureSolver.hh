@@ -438,6 +438,7 @@ public:
         double maximum_linear_cfl = 0;
         double maximum_linear_stage_residual = 0, maximum_linear_step_residual = 0;
         ///< Local block residuals normalized by the physical conservation gate, reduced over owners.
+        std::uint64_t linear_upstream_returned_packets = 0; ///< Global stage-packet count in the final corrector.
         std::vector<GrossResidualEvaluation> gross_residual_evaluations; ///< Live source trace; omitted by restart.
         std::optional<Vector> body_acceleration_m_per_s2;
         std::optional<ExternalImpulseParts> impulse_parts; ///< Accepted global body and other impulses in kg m/s.
@@ -563,6 +564,7 @@ public:
         std::uint64_t linear_stages = 0;
         double maximum_linear_cfl = 0;
         double maximum_linear_stage_residual = 0, maximum_linear_step_residual = 0;
+        std::uint64_t linear_upstream_returned_packets = 0;
     };
     struct QbmmConvergenceReport
     {
@@ -620,6 +622,9 @@ public:
         std::uint64_t linear_stages = 0;
         double maximum_linear_cfl = 0;
         double maximum_linear_stage_residual = 0, maximum_linear_step_residual = 0;
+        QbmmModelOptions::LinearSlopeLimiter linear_slope_limiter =
+            QbmmModelOptions::LinearSlopeLimiter::RealizabilityOnly;
+        std::uint64_t linear_upstream_returned_packets = 0;
     };
     class Checkpoint
     {

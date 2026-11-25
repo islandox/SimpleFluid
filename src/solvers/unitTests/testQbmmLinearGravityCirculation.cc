@@ -36,6 +36,7 @@ using Controller = R::ReactingMixtureCoupler;
 using LO = Flow::Pack::local_ordinal_type;
 using Phase = R::SpeciesPhase;
 using FamilyTransport = R::QbmmModelOptions::FamilyTransport;
+using SlopeLimiter = R::QbmmModelOptions::LinearSlopeLimiter;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
 constexpr double inner = 1., outer = 2., sector_angle = 1., height = 1.;
@@ -105,7 +106,8 @@ struct Vessel
     std::vector<double> hydrostatic_head;
     mutable std::vector<std::optional<FourierSample>> fourier_samples;
 
-    Vessel(Geometry kind, unsigned resolution, double g, double heat_sign, bool kinetic_method = false)
+    Vessel(Geometry kind, unsigned resolution, double g, double heat_sign, bool kinetic_method = false,
+        SlopeLimiter limiter = SlopeLimiter::RealizabilityOnly)
         : geometry(kind), count(resolution), acceleration(g), heating(heat_sign), kinetic(kinetic_method),
           mesh(kinetic ? Cylinder::mesh(kind, resolution, edges(resolution, 0., height)) : make_mesh(kind, resolution)),
           wall_area(mesh->num_owned_cells()), hydrostatic_head(count), fourier_samples(mesh->num_owned_faces())
@@ -144,6 +146,7 @@ struct Vessel
         options.linear.preconditioner = LinearPreconditioner::None;
         options.linear.tolerance = 1e-12;
         options.qbmm_model.family_transport = FamilyTransport::RealizableLinearSSPRK2;
+        options.qbmm_model.linear_slope_limiter = limiter;
         options.qbmm_model.velocity = R::QbmmModelOptions::Velocity::SharedCarrier;
         options.phase_roles = {{Flow::PhaseRole::BulkLiquid, "liquid"}, {Flow::PhaseRole::DispersedGas, "two sizes"},
             {Flow::PhaseRole::BulkGas, "passive gas"}};
@@ -796,10 +799,11 @@ Observables observe(const Vessel& vessel, const Controller& controller)
         global[GasVolume] / volume, std::numbers::pi * global[Diameter2], global[Diameter3] / global[Diameter2]};
 }
 
-Observables run(Geometry geometry, unsigned n, double dt, double acceleration, double heating, const std::string& name)
+Observables run(Geometry geometry, unsigned n, double dt, double acceleration, double heating, const std::string& name,
+    SlopeLimiter limiter = SlopeLimiter::RealizabilityOnly)
 {
     SCOPED_TRACE(name);
-    Vessel vessel(geometry, n, acceleration, heating);
+    Vessel vessel(geometry, n, acceleration, heating, false, limiter);
     Controller controller(vessel.flow, vessel.controller_options());
     const auto comm = vessel.mesh->owned_cell_map()->getComm();
     const int ranks = comm->getSize();
@@ -1023,6 +1027,13 @@ TEST(QbmmCylindricalKineticHeat, HeatedClosedVessels)
                 std::cout << "Q8d " << name << '_' << label << '=' << formatted.str() << '\n';
         }
     }
+}
+
+TEST(QbmmLinearGravityCirculation, TvdMcHeatedCylindricalVessels)
+{
+    for (const auto geometry : {Geometry::AnnularSector, Geometry::PolygonalAnnulus})
+        run(geometry, 2, timestep, gravity, 1., "tvd_mc_" + std::to_string(static_cast<int>(geometry)),
+            SlopeLimiter::TvdMc);
 }
 
 TEST(QbmmLinearGravityCirculation, NativeAnnularSector)

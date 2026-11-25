@@ -368,6 +368,7 @@ std::shared_ptr<const LowMachMixtureSolver::QbmmIntervalReport> LowMachMixtureSo
     interval->maximum_linear_cfl = trial.statistics.maximum_linear_cfl;
     interval->maximum_linear_stage_residual = trial.statistics.maximum_linear_stage_residual;
     interval->maximum_linear_step_residual = trial.statistics.maximum_linear_step_residual;
+    interval->linear_upstream_returned_packets = trial.statistics.linear_upstream_returned_packets;
     if (interval->kinetic_substeps > 0 || interval->linear_substeps > 0)
         interval->local_face_transport = trial.phase_transport;
     if (interval->kinetic_substeps > 0)
@@ -388,7 +389,8 @@ std::shared_ptr<const LowMachMixtureSolver::QbmmPublication> LowMachMixtureSolve
     const bool forced =
         uses_qbmm_explicit_transport(d->options.qbmm_model) && trial.statistics.body_acceleration_m_per_s2.has_value();
     const bool axial_kinetic = qbmm_detail::uses_axial_kinetic_transport(d->options, *d->mesh);
-    if (forced || (axial_kinetic && d->active_qbmm_controller && controller_diagnostics))
+    const bool tvd_mc = d->options.qbmm_model.linear_slope_limiter == QbmmModelOptions::LinearSlopeLimiter::TvdMc;
+    if (forced || ((axial_kinetic || tvd_mc) && d->active_qbmm_controller && controller_diagnostics))
     {
         check(controller_diagnostics && controller_diagnostics->saved && d->active_qbmm_controller,
             "QBMM publication requires diagnostics from the active reacting controller.");
@@ -443,6 +445,7 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
     const auto& mesh = *d->mesh;
     QbmmReport report;
     report.family_transport = d->options.qbmm_model.family_transport;
+    report.linear_slope_limiter = d->options.qbmm_model.linear_slope_limiter;
     auto& provenance = report.provenance;
     const auto& catalog = d->eos.front()->catalog();
     const auto& families = d->options.qbmm_families;
@@ -663,6 +666,7 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
             report.maximum_linear_cfl = diagnostics.maximum_linear_cfl;
             report.maximum_linear_stage_residual = diagnostics.maximum_linear_stage_residual;
             report.maximum_linear_step_residual = diagnostics.maximum_linear_step_residual;
+            report.linear_upstream_returned_packets = diagnostics.linear_upstream_returned_packets;
             if (diagnostics.correctors > 0)
             {
                 auto& convergence = report.convergence.emplace();

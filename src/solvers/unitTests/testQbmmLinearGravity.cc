@@ -135,7 +135,9 @@ struct Fixture
     std::unique_ptr<Coupler> controller;
     std::vector<SourceObservation> observations;
 
-    Fixture(SP<Flow::Mesh> mesh, Column setup, double angular_velocity = 0.)
+    Fixture(SP<Flow::Mesh> mesh, Column setup, double angular_velocity = 0.,
+        Model::LinearSlopeLimiter limiter = Model::LinearSlopeLimiter::RealizabilityOnly,
+        bool tiny_first_family = false)
         : grid(std::move(mesh)), column(std::move(setup)), observations(grid->num_owned_cells())
     {
         const int ranks = grid->owned_cell_map()->getComm()->getSize();
@@ -159,6 +161,7 @@ struct Fixture
         opts.linear.preconditioner = LinearPreconditioner::None;
         opts.linear.tolerance = 1e-12;
         opts.qbmm_model.family_transport = Model::FamilyTransport::RealizableLinearSSPRK2;
+        opts.qbmm_model.linear_slope_limiter = limiter;
         const bool circulating = column.profile == Profile::Circulation;
         if (circulating)
             opts.qbmm_model.linear_cfl = replay_cfl;
@@ -202,7 +205,8 @@ struct Fixture
             const auto x = grid->cell_centroid(id);
             const double p = column.absolute_pressure(x), t = column.temperature(p);
             const double volume = grid->cell_volume(id), alpha = column.alpha(column.layer(x.z));
-            const double share = circulating ? .5 + .125 * (x.x - 1.) + .25 * (x.y - 1.) : 1.;
+            const double share = (circulating ? .5 + .125 * (x.x - 1.) + .25 * (x.y - 1.) : 1.) *
+                                 (tiny_first_family ? std::ldexp(1., -680) : 1.);
             auto& cell = initial.cells[row];
             cell.mechanical_pressure = p - initial.thermodynamic_pressure;
             if (circulating)
@@ -284,10 +288,11 @@ struct Fixture
     }
 };
 
-void equilibrium(const SP<Flow::Mesh>& grid, const Column& column, const std::string& label)
+void equilibrium(const SP<Flow::Mesh>& grid, const Column& column, const std::string& label,
+    Model::LinearSlopeLimiter limiter = Model::LinearSlopeLimiter::RealizabilityOnly)
 {
     SCOPED_TRACE(label);
-    Fixture f(grid, column);
+    Fixture f(grid, column, 0., limiter);
     const auto initial = f.flow->state();
     const auto g = column.gravity.value_or(Vec{});
     double speed = 0., face_rate = 0., edge = 0.;
@@ -411,7 +416,7 @@ TEST(QbmmLinearGravity, AzimuthalSeamAnnulus)
 {
     qualify_column(Geometry::Annulus);
 }
-TEST(QbmmLinearGravity, RotatingFamilyCrossesTheAzimuthalSeam)
+void check_rotating_family(Model::LinearSlopeLimiter limiter)
 {
     const auto ranks = static_cast<size_t>(Tpetra::getDefaultComm()->getSize());
     ArrReal angles;
@@ -421,7 +426,7 @@ TEST(QbmmLinearGravity, RotatingFamilyCrossesTheAzimuthalSeam)
     const auto native = std::make_shared<Flow::Mesh::Cylindrical>(Vec3D<ArrReal>{ArrReal{1., 2.}, angles, heights});
     const auto grid = std::make_shared<Flow::Mesh>(
         native, Flow::Mesh::DistributionOptions{.orthogonal_partitions = std::array<size_t, 3>{1, ranks, 1}});
-    Fixture f(grid, {Profile::ConstantDensity, Vec{0., 0., -1.}, true, heights}, .25);
+    Fixture f(grid, {Profile::ConstantDensity, Vec{0., 0., -1.}, true, heights}, .25, limiter);
     const auto trial = f.controller->preview(hydro_dt);
     f.check_body(trial, hydro_dt);
     int seam = 0, interrank = 0;
@@ -449,6 +454,16 @@ TEST(QbmmLinearGravity, RotatingFamilyCrossesTheAzimuthalSeam)
     EXPECT_EQ(f.sum(seam), 2);
     EXPECT_EQ(f.sum(interrank), ranks == 1 ? 0 : 2);
     f.controller->commit(trial);
+}
+
+TEST(QbmmLinearGravity, RotatingFamilyCrossesTheAzimuthalSeam)
+{
+    check_rotating_family(Model::LinearSlopeLimiter::RealizabilityOnly);
+}
+
+TEST(QbmmLinearGravity, TvdMcRotatingFamilyCrossesTheAzimuthalSeam)
+{
+    check_rotating_family(Model::LinearSlopeLimiter::TvdMc);
 }
 
 TEST(QbmmLinearGravity, OrthogonalPolygonDiskThroughAxis)
@@ -486,14 +501,18 @@ template<size_t N> std::array<double, N> gather(const Flow::Mesh& grid, const st
     return result;
 }
 
+SP<Flow::Mesh> circulation_grid(const ArrReal& edges, size_t ranks)
+{
+    return std::make_shared<Flow::Mesh>(std::make_shared<Flow::Mesh::Cartesian>(Vec3D<ArrReal>{edges, edges, edges}),
+            Flow::Mesh::DistributionOptions{
+                .orthogonal_partitions = std::array<size_t, 3>{ranks == 1 ? 1u : 2u, ranks == 4 ? 2u : 1u, 1u}});
+}
+
 TEST(QbmmLinearGravity, TwoStagePacketsAndSingleImpulseDuringBalancedCirculation)
 {
     const ArrReal edges{0., 1., 2.};
     const auto ranks = static_cast<size_t>(Tpetra::getDefaultComm()->getSize());
-    const auto grid =
-        std::make_shared<Flow::Mesh>(std::make_shared<Flow::Mesh::Cartesian>(Vec3D<ArrReal>{edges, edges, edges}),
-            Flow::Mesh::DistributionOptions{
-                .orthogonal_partitions = std::array<size_t, 3>{ranks == 1 ? 1u : 2u, ranks == 4 ? 2u : 1u, 1u}});
+    const auto grid = circulation_grid(edges, ranks);
     record_ownership(*grid, 8);
     Fixture f(grid, {Profile::Circulation, Vec{0., 0., -1.}, true, edges});
     constexpr double dt = .0625;
@@ -683,5 +702,114 @@ TEST(QbmmLinearGravity, TwoStagePacketsAndSingleImpulseDuringBalancedCirculation
     EXPECT_EQ(f.flow->state().time, dt);
     for (const auto& observation : f.observations)
         EXPECT_EQ(observation.calls, d.source_evaluations);
+}
+TEST(QbmmLinearGravity, TvdMcCartesianCirculationReplaysCanonicalPacketsAndSingleImpulse)
+{
+    const ArrReal edges{0., 1., 2.};
+    const auto grid = circulation_grid(edges, Tpetra::getDefaultComm()->getSize());
+    Fixture f(grid, {Profile::Circulation, Vec{0., 0., -1.}, true, edges}, 0., Model::LinearSlopeLimiter::TvdMc);
+    constexpr double dt = .0625;
+    const auto trial = f.controller->preview(dt);
+    f.check_body(trial, dt);
+    const auto& d = trial.diagnostics().flow;
+    EXPECT_GT(d.linear_substeps, 1);
+    EXPECT_EQ(d.linear_stages, 2u * d.linear_substeps);
+    int remote = 0;
+    double largest = 0.;
+    for (size_t a : {1u, 2u})
+    {
+        Flow::Traits::scalar_face_type mass_rate(grid, 0., "canonical_family_mass_rate");
+        for (const auto face : mass_rate.owned_face_ids())
+        {
+            const auto& transport = trial.owned_phase_transport()[mass_rate.owned_row(face)];
+            const auto& packet = transport.qbmm_flux[a].value();
+            const auto rate = packet.derived_mass_flux;
+            largest = std::max(largest, std::abs(rate));
+            if (grid->is_geometry_exterior_face(face))
+                EXPECT_EQ(rate, 0.);
+            else
+                remote += !grid->is_owned_cell(grid->neighbor_cell(face)) && std::abs(rate) > .01;
+            mass_rate.set_owned_value(face, rate);
+            const double w = rate / (4. * gas_mass_scale);
+            EXPECT_NEAR(packet.species_molar_flux.at(0), rate, 1e-11);
+            EXPECT_NEAR(packet.population_number_flux, 2. * w, 1e-10);
+            EXPECT_NEAR(packet.shape_flux.H2, 10. * w, 1e-9);
+            EXPECT_NEAR(packet.shape_flux.H3, 28. * w, 1e-9);
+            EXPECT_NEAR(packet.internal_energy_flux, 16. * rate, 2e-10);
+            EXPECT_NEAR(packet.material_volume_flux, transport.carrier_volume_flux * packet.kinetic->theta, 1e-11);
+            EXPECT_NEAR(packet.kinetic->forward.integrated_mass, std::max(rate, 0.) * dt, 1e-12);
+            EXPECT_NEAR(packet.kinetic->backward.integrated_mass, std::min(rate, 0.) * dt, 1e-12);
+        }
+        mass_rate.sync_ghosts();
+        for (size_t row = 0; row < grid->num_owned_cells(); ++row)
+        {
+            const auto cell = static_cast<LO>(row);
+            double m = f.flow->state().cells[row].phases[a].moles[0];
+            for (const auto face : grid->faces(cell))
+                m -= (grid->owner_cell(face) == cell ? dt : -dt) * mass_rate.local_value(face);
+            const auto& actual = trial.state().cells[row];
+            const auto& transported = trial.transport_snapshot().cells[row].phases[a];
+            EXPECT_NEAR(transported.moles.at(0), m, 1e-11);
+            EXPECT_NEAR(transported.internal_energy, 16. * m, 2e-10);
+            EXPECT_NEAR(actual.phases[a].moles.at(0), m, 1e-11);
+            const double w = m / (4. * gas_mass_scale);
+            EXPECT_NEAR(*actual.phase_numbers[a], 2. * w, 1e-10);
+            EXPECT_NEAR(actual.qbmm_shape[a]->H2, 10. * w, 1e-9);
+            EXPECT_NEAR(actual.qbmm_shape[a]->H3, 28. * w, 1e-9);
+        }
+    }
+    EXPECT_GT(f.maximum(largest), .1);
+    if (grid->owned_cell_map()->getComm()->getSize() > 1)
+        EXPECT_GT(f.sum(remote), 0.);
+    f.metric("tvd_cartesian_maximum_family_mass_rate", f.maximum(largest));
+    f.metric("tvd_cartesian_single_body_impulse_z", d.impulse_parts.value().body.z);
+    f.controller->commit(trial);
+}
+
+TEST(QbmmLinearGravity, TvdMcPublicReportPreservesPositiveReturnsThroughPortableRestart)
+{
+    const ArrReal edges{0., 1., 2.};
+    const auto grid = circulation_grid(edges, Tpetra::getDefaultComm()->getSize());
+    const Column column{Profile::Circulation, Vec{0., 0., -1.}, true, edges};
+    const auto limiter = Model::LinearSlopeLimiter::TvdMc;
+    Fixture f(grid, column, 0., limiter, true);
+    const auto trial = f.controller->preview(.0625);
+    const auto report = f.controller->qbmm_report(trial);
+    const auto count = trial.diagnostics().flow.linear_upstream_returned_packets;
+    EXPECT_GT(count, 0u);
+    EXPECT_EQ(report.linear_upstream_returned_packets, count);
+    ASSERT_TRUE(report.interval);
+    EXPECT_EQ(report.interval->linear_upstream_returned_packets, count);
+    double ordinary_rate = 0.;
+    for (const auto& receipt : trial.owned_phase_transport())
+    {
+        const auto& tiny = receipt.qbmm_flux.at(1).value();
+        EXPECT_EQ(tiny.population_number_flux, 0.);
+        EXPECT_EQ(tiny.shape_flux, R::QbmmShapeState{});
+        EXPECT_EQ(tiny.species_molar_flux.at(0), 0.);
+        EXPECT_EQ(tiny.internal_energy_flux, 0.);
+        EXPECT_EQ(tiny.material_volume_flux, 0.);
+        ordinary_rate = std::max(ordinary_rate, std::abs(receipt.qbmm_flux.at(2)->derived_mass_flux));
+    }
+    EXPECT_GT(f.maximum(ordinary_rate), .1);
+    f.controller->commit(trial);
+    EXPECT_EQ(f.controller->qbmm_report().linear_upstream_returned_packets, count);
+    const auto image = f.controller->serialize_qbmm_restart();
+    Fixture resumed(grid, column, 0., limiter, true);
+    resumed.controller->restore_qbmm_restart(image);
+    EXPECT_EQ(resumed.controller->qbmm_report().linear_upstream_returned_packets, count);
+    EXPECT_EQ(resumed.controller->diagnostics().flow.linear_upstream_returned_packets, count);
+    resumed.controller->restore_qbmm_restart(resumed.controller->serialize_qbmm_restart());
+    EXPECT_EQ(resumed.controller->qbmm_report().linear_upstream_returned_packets, count);
+    f.metric("tvd_cartesian_portable_return_count", count);
+}
+
+TEST(QbmmLinearGravity, TvdMcPreservesStratifiedHydrostaticEquilibrium)
+{
+    const ArrReal z{0., .25, .5, .75, 1.};
+    for (const auto geometry :
+        {Geometry::Cartesian, Geometry::Sector, Geometry::Annulus, Geometry::PolygonDisk, Geometry::PolygonAnnulus})
+        equilibrium(grid_for(geometry, z), {Profile::Stratified, Vec{0., 0., -.981}, true, z},
+            "stratified_" + std::to_string(static_cast<int>(geometry)), Model::LinearSlopeLimiter::TvdMc);
 }
 } // namespace

@@ -702,16 +702,22 @@ struct LowMachMixtureSolver::Implementation
     {
         return explicit_family_force_recorded && diagnostics.body_acceleration_m_per_s2.has_value();
     }
+    bool has_tvd_mc_controller_history() const noexcept
+    {
+        return options.qbmm_model.linear_slope_limiter == QbmmModelOptions::LinearSlopeLimiter::TvdMc &&
+               qbmm_publication && qbmm_publication->controller_diagnostics;
+    }
     bool requires_matching_qbmm_controller() const noexcept
     {
-        return needs_restart_controller || has_forced_family_provenance() ||
+        return needs_restart_controller || has_forced_family_provenance() || has_tvd_mc_controller_history() ||
                (accepted_qbmm_controller && diagnostics.kinetic_substeps > 0 &&
                    qbmm_detail::uses_axial_kinetic_transport(options, *mesh));
     }
     std::optional<std::uint64_t> checkpoint_controller() const noexcept
     {
-        return active_qbmm_controller && !has_forced_family_provenance() ? active_qbmm_controller
-                                                                         : accepted_qbmm_controller;
+        return active_qbmm_controller && !has_forced_family_provenance() && !has_tvd_mc_controller_history()
+                   ? active_qbmm_controller
+                   : accepted_qbmm_controller;
     }
     void validate_forced_linear_geometry() const
     {
@@ -762,6 +768,8 @@ struct LowMachMixtureSolver::Implementation
         // Reject incomplete owned incidences collectively before constructing caches that traverse them.
         collective_detail::collective_local_validation(mesh, "Low-Mach mixture mesh capability",
             [&] { qbmm_detail::validate_capability(options, mesh, false, {}, false); });
+        collective_detail::require_uniform_value(mesh, static_cast<int>(options.qbmm_model.linear_slope_limiter),
+            "Native QBMM linear slope limiter");
         return options;
     }
     Implementation(
@@ -1921,10 +1929,13 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, const ControllerLeas
 {
     require_controller(controller);
     const bool axial_kinetic = qbmm_detail::uses_axial_kinetic_transport(d->options, *d->mesh);
+    const bool tvd_mc = d->options.qbmm_model.linear_slope_limiter == QbmmModelOptions::LinearSlopeLimiter::TvdMc;
     auto accepted_controller = saved.qbmm_controller_signature;
     // The saved controller stamp can authorize a lease attached after a standalone interval.
-    // A coupled axial kinetic interval always retains its controller diagnostics.
-    if (axial_kinetic && saved.diagnostics.kinetic_substeps > 0 &&
+    // Coupled axial kinetic and TVD-MC intervals retain their controller diagnostics.
+    const bool completed_tagged_interval = (axial_kinetic && saved.diagnostics.kinetic_substeps > 0) ||
+                                           (tvd_mc && saved.diagnostics.linear_substeps > 0);
+    if (completed_tagged_interval &&
         (!saved.qbmm_publication || !saved.qbmm_publication->controller_diagnostics))
         accepted_controller.reset();
     State candidate;
@@ -2274,6 +2285,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     result.maximum_linear_cfl = transported.maximum_cfl;
                     result.maximum_linear_stage_residual = transported.maximum_stage_residual;
                     result.maximum_linear_step_residual = transported.maximum_step_residual;
+                    result.linear_upstream_returned_packets = transported.upstream_returned_packets;
                 }
                 else
                 {
