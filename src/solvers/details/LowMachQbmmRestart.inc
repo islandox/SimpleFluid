@@ -794,13 +794,13 @@ void validate_forced_family_impulses(const Solver::Vector& acceleration, const S
     // Reconstruct the local contribution independently from accepted species stocks. The source-stage
     // replay admits a relative endpoint discrepancy of 64 eps times the sum of both endpoint magnitudes.
     // Allow that discrepancy and the rounding of each cell impulse and the final local sum.
-    FaceSum mass;
+    detail::CompensatedSum<long double> mass;
     for (const auto& cell : state.cells)
         for (const auto& phase : cell.phases)
         {
             const auto& species = phase.thermodynamics->catalog().species();
             for (size_t s = 0; s < phase.moles.size(); ++s)
-                mass.add_product(phase.moles[s], species[s].molarMass);
+                mass += static_cast<long double>(phase.moles[s]) * species[s].molarMass;
         }
     constexpr double eps = std::numeric_limits<double>::epsilon();
     constexpr double quantum = std::numeric_limits<double>::denorm_min();
@@ -825,21 +825,19 @@ void validate_forced_family_impulses(const Solver::Vector& acceleration, const S
         check((body == 0. || std::signbit(body) == std::signbit(g)) &&
                   (global_body == 0. || std::signbit(global_body) == std::signbit(g)),
             "Forced QBMM body impulse points against its acceleration.");
-        FaceSum force, body_error;
-        force.add_weighted(mass, g);
-        body_error.add_weighted(force, interval->time_step);
-        body_error.add_product(-body, 1.);
+        const auto force = mass.value() * g;
+        const auto body_error = std::fma(force, static_cast<long double>(interval->time_step), -body);
         const double body_bound = 256 * eps * std::abs(body) + quantum * (1. + static_cast<double>(state.cells.size()));
-        check(std::abs(body_error.rounded()) <= body_bound,
+        check(std::abs(static_cast<double>(body_error)) <= body_bound,
             "Forced QBMM body impulse disagrees with the accepted material mass and interval.");
 
-        FaceSum split_error;
-        split_error.add_product(external, 1.);
-        split_error.add_product(-body, 1.);
-        split_error.add_product(-other, 1.);
+        detail::CompensatedSum<long double> split_error;
+        split_error += external;
+        split_error += -body;
+        split_error += -other;
         const double split_bound =
             eps * std::abs(body) + eps * std::abs(other) + eps * std::abs(external) + 3 * quantum;
-        check(std::abs(split_error.rounded()) <= split_bound,
+        check(std::abs(static_cast<double>(split_error.value())) <= split_bound,
             "Forced QBMM rank-local external impulse disagrees with its body and other operands.");
     }
 }
@@ -992,15 +990,15 @@ void restart_pool_diagnostics(Archive& io, Diagnostics& value, const QbmmBulkGas
         for (const double quantity : {totals.count, totals.mass_kg, totals.H2, totals.H3})
             check(std::isfinite(quantity) && quantity >= 0. && (allowed || quantity == 0.),
                 "QBMM pool restart contains an invalid directional total.");
-        FaceSum mass;
+        detail::CompensatedSum<long double> mass;
         for (size_t k = 0; k < species.size(); ++k)
         {
             const double moles = totals.species_moles[k];
             check(std::isfinite(moles) && moles >= 0. && ((allowed && pool.permits(species[k].id)) || moles == 0.),
                 "QBMM pool restart contains an invalid directional species total.");
-            mass.add_product(moles, species[k].molarMass);
+            mass += static_cast<long double>(moles) * species[k].molarMass;
         }
-        const auto expected_mass = mass.rounded();
+        const auto expected_mass = static_cast<double>(mass.value());
         const bool active = totals.count > 0;
         check(active == (expected_mass > 0) && active == (totals.mass_kg > 0) &&
                   active == (totals.H2 > 0) && active == (totals.H3 > 0) &&

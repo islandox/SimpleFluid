@@ -417,23 +417,25 @@ std::shared_ptr<const LowMachMixtureSolver::QbmmPublication> LowMachMixtureSolve
         auto& interval = publication->forced_family_interval.emplace();
         interval.old_time = trial.transport.accepted_time;
         interval.time_step = trial.transport.time_step;
-        std::array<FaceSum, 3> body, other;
+        std::array<ReportSum, 3> body, other;
         for (const auto& source : trial.sources)
         {
             const auto& parts = source.impulse_parts.value();
             for (size_t axis = 0; axis < 3; ++axis)
             {
-                body[axis].add_product(parts.body.component(axis), 1.);
-                other[axis].add_product(parts.other.component(axis), 1.);
+                body[axis] += parts.body.component(axis);
+                other[axis] += parts.other.component(axis);
             }
         }
         // Retain the three independent roundings entering the momentum reduction.
         for (size_t axis = 0; axis < 3; ++axis)
         {
-            interval.local_body.component(axis) = body[axis].rounded();
-            interval.local_other.component(axis) = other[axis].rounded();
-            body[axis].add_weighted(other[axis], 1.);
-            interval.local_external.component(axis) = body[axis].rounded();
+            interval.local_body.component(axis) = static_cast<double>(body[axis].value());
+            interval.local_other.component(axis) = static_cast<double>(other[axis].value());
+            ReportSum external;
+            external.append(body[axis]);
+            external.append(other[axis]);
+            interval.local_external.component(axis) = static_cast<double>(external.value());
         }
     }
     if (const auto& geometry = trial.ale_geometry)
@@ -563,8 +565,8 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                 double mixture_mass = 0, gas_volume = 0, dispersed_volume = 0, passive_volume = 0, pool_volume = 0;
                 const auto& pool = d->options.qbmm_bulk_gas_pool;
                 const auto interval = trial ? nullptr : d->qbmm_publication ? d->qbmm_publication->interval : nullptr;
-                FaceSum total_mass;
-                std::array<FaceSum, 3> drift_momentum, absolute_momentum;
+                ReportSum total_mass;
+                std::array<ReportSum, 3> drift_momentum, absolute_momentum;
                 cell.families.resize(families.size());
                 if (uses_qbmm_kinetic_transport(d->options.qbmm_model))
                     qbmm_native_law_detail::validate_kinetic_closure(d->options, mesh, state.cells[c]);
@@ -573,11 +575,11 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                     const auto& phase = state.cells[c].phases[a];
                     const auto mass = qbmm_report_phase_mass(phase);
                     mixture_mass += mass;
-                    total_mass.add_product(mass, 1.);
+                    total_mass += mass;
                     for (std::size_t axis = 0; axis < 3; ++axis)
                     {
-                        drift_momentum[axis].add_product(mass, state.cells[c].drift_velocity[a].component(axis));
-                        absolute_momentum[axis].add_product(mass, cell.carrier_velocity.component(axis));
+                        add_product(drift_momentum[axis], mass, state.cells[c].drift_velocity[a].component(axis));
+                        add_product(absolute_momentum[axis], mass, cell.carrier_velocity.component(axis));
                     }
                     if (mass > 0 && !cell.temperature_K)
                         cell.temperature_K = phase.temperature;
@@ -648,9 +650,10 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                 check(mixture_mass > 0, "QBMM report barycentric velocity requires positive finite mixture mass.");
                 for (std::size_t axis = 0; axis < 3; ++axis)
                 {
-                    const double drift = drift_momentum[axis].rounded(total_mass);
-                    absolute_momentum[axis].add_weighted(drift_momentum[axis], 1.);
-                    const double barycentric = absolute_momentum[axis].rounded(total_mass);
+                    const double drift = qbmm_native_law_detail::rounded_kinetic_ratio(drift_momentum[axis], total_mass);
+                    absolute_momentum[axis].append(drift_momentum[axis]);
+                    const double barycentric =
+                        qbmm_native_law_detail::rounded_kinetic_ratio(absolute_momentum[axis], total_mass);
                     check(std::isfinite(drift) && std::isfinite(barycentric),
                         "QBMM report drift or barycentric velocity is not finite.");
                     cell.mass_weighted_drift.component(axis) = drift;
