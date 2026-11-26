@@ -5,9 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <initializer_list>
 #include <limits>
-#include <numeric>
 #include <stdexcept>
 
 namespace SimpleFluid::Reacting::qbmm_kinetic_detail
@@ -66,20 +64,26 @@ struct LawTrace
     std::array<Evaluation, nodes> observations;
 };
 
+struct TraceScratch
+{
+    Flow::CellState donor;
+    std::vector<StageThermal> thermal;
+    std::vector<double> volumes, composition;
+};
+
 template<class View>
 void stage_traces(const Mesh& mesh, const Flow::Options& options, const Flow::State& accepted, const Flow::State& guess,
     const Flow::State& candidate, const std::vector<size_t>& phases, const View& trace,
-    std::vector<LawTrace>& law_traces)
+    std::vector<LawTrace>& law_traces, TraceScratch& scratch)
 {
+    auto& [donor, thermal, volumes, composition] = scratch;
     for (size_t c = 0; c < candidate.cells.size(); ++c)
     {
         const auto cell = static_cast<LO>(c);
         const double bulk_volume = mesh.cell_volume(cell);
         const auto location = qbmm_native_law_detail::kinetic_location(mesh, cell);
-        auto donor = guess.cells[c];
+        donor = guess.cells[c];
         const auto& stock = candidate.cells[c];
-        std::vector<StageThermal> thermal(donor.phases.size());
-        std::vector<double> volumes(donor.phases.size());
         const double pressure = guess.thermodynamic_pressure + donor.mechanical_pressure;
         for (size_t p = 0; p < donor.phases.size(); ++p)
         {
@@ -94,7 +98,7 @@ void stage_traces(const Mesh& mesh, const Flow::Options& options, const Flow::St
                 donor.phase_numbers[p] = stock.phase_numbers[p];
                 donor.qbmm_shape[p] = stock.qbmm_shape[p];
             }
-            thermal[p] = thermal_trace(phase, !occupied || !(phase.temperature > 0));
+            thermal[p] = thermal_trace(phase, !occupied || !(phase.temperature > 0), composition);
             volumes[p] = thermal[p].volume;
         }
         for (size_t a = 0; a < phases.size(); ++a)
@@ -147,6 +151,13 @@ std::vector<UnresolvedOffset> unresolved_offsets(const Mesh& mesh)
     std::vector<UnresolvedOffset> unresolved;
     std::vector<Mesh::Vec3> displacements;
     std::vector<double> weights;
+    FaceOffsetFit fit;
+    size_t maximum_faces = 0;
+    for (size_t c = 0; c < mesh.num_owned_cells(); ++c)
+        maximum_faces = std::max(maximum_faces, static_cast<size_t>(mesh.faces(static_cast<LO>(c)).size()));
+    displacements.reserve(maximum_faces);
+    weights.reserve(maximum_faces);
+    fit.reserve(maximum_faces);
     for (size_t c = 0; c < mesh.num_owned_cells(); ++c)
     {
         const auto cell = static_cast<LO>(c);
@@ -155,7 +166,7 @@ std::vector<UnresolvedOffset> unresolved_offsets(const Mesh& mesh)
         for (const auto face : mesh.faces(cell))
             if (!mesh.is_geometry_exterior_face(face))
                 displacements.push_back(mesh.cell_center_vector(face, cell));
-        const FaceOffsetFit fit(displacements);
+        fit.assign(displacements);
         for (const auto face : mesh.faces(cell))
             if (!mesh.is_geometry_exterior_face(face) && !fit.weights(mesh.face_centroid(face) - center, weights))
                 unresolved.push_back({face, mesh.owner_cell(face) == cell ? 0u : 1u});
@@ -190,11 +201,19 @@ void stage_speeds(const Mesh& mesh, const Flow::Traits::scalar_face_type& carrie
                     {
                         const auto atom = base + FirstAtom + i * AtomColumns;
                         const auto slip = trace_vector(trace, donor, atom + Slip);
-                        FaceSum total;
-                        total.add_product(phi, 1.);
+                        long double projected = phi;
                         for (size_t axis = 0; axis < dimensions; ++axis)
-                            total.add_product(slip.component(axis), area.component(axis));
-                        speed = represented(total);
+                        {
+                            const long double velocity = slip.component(axis);
+                            const long double measure = area.component(axis);
+                            const long double contribution = velocity * measure;
+                            const long double sum = projected + contribution;
+                            // Preserve the sign of a nearly cancelling carrier and slip contribution.
+                            projected = contribution != 0 && std::abs(sum) <= eps * std::abs(projected)
+                                            ? std::fma(velocity, measure, projected)
+                                            : sum;
+                        }
+                        speed = represented(projected);
                     }
                     speeds(face, outgoing_column(a, side, i)) = speed;
                 }
@@ -210,28 +229,28 @@ template<class Speeds> double reserve(const Mesh& mesh, const Speeds& speeds, si
         const auto cell = static_cast<LO>(c);
         const auto volume = mesh.cell_volume(cell);
         require(std::isfinite(volume) && volume > 0, "Invalid QBMM kinetic bulk volume.");
-        FaceSum cap_volume;
-        cap_volume.add_product(cfl, volume);
+        const long double cap_volume = static_cast<long double>(cfl) * volume;
         for (size_t a = 0; a < families; ++a)
             for (size_t i = 0; i < nodes; ++i)
             {
-                FaceSum rate;
+                Accumulator rate;
                 for (const auto face : mesh.faces(cell))
                 {
                     const size_t direction = mesh.owner_cell(face) == cell ? 0 : 1;
-                    rate.add_product(active_speed(speeds(face, outgoing_column(a, direction, i)), direction), 1.);
+                    rate += active_speed(speeds(face, outgoing_column(a, direction, i)), direction);
                 }
-                if (rate.sign() > 0)
+                const long double outgoing_rate = rate.value();
+                require(std::isfinite(outgoing_rate), "Nonfinite QBMM kinetic outgoing rate.");
+                if (outgoing_rate > 0)
                 {
-                    double bound = cap_volume.rounded(rate);
-                    if (std::isfinite(bound) && bound > 0)
+                    const long double duration = cap_volume / outgoing_rate;
+                    if (duration <= std::numeric_limits<double>::max())
                     {
-                        FaceSum slack = cap_volume;
-                        slack.add_weighted(rate, -bound);
-                        if (slack.sign() < 0)
+                        double bound = static_cast<double>(duration);
+                        if (bound > duration)
                             bound = std::nextafter(bound, 0.);
+                        local_limit = std::min(local_limit, bound);
                     }
-                    local_limit = std::min(local_limit, bound);
                 }
             }
     }
@@ -240,7 +259,7 @@ template<class Speeds> double reserve(const Mesh& mesh, const Speeds& speeds, si
 
 template<class Speeds>
 double verify_reservations(
-    const Mesh& mesh, const Speeds& speeds, size_t families, double h, double cap, std::vector<FaceSum>& fractions)
+    const Mesh& mesh, const Speeds& speeds, size_t families, double h, double cap, std::vector<long double>& remainders)
 {
     double local_maximum = 0;
     for (size_t c = 0; c < mesh.num_owned_cells(); ++c)
@@ -250,28 +269,86 @@ double verify_reservations(
         for (size_t a = 0; a < families; ++a)
             for (size_t i = 0; i < nodes; ++i)
             {
-                auto& used = fractions[(c * families + a) * nodes + i];
-                used = {};
+                Accumulator used, remainder;
+                remainder += 1.L;
                 for (const auto face : mesh.faces(cell))
                 {
                     const size_t direction = mesh.owner_cell(face) == cell ? 0 : 1;
                     const double speed = active_speed(speeds(face, outgoing_column(a, direction, i)), direction);
-                    used.add_weighted(product({h, speed}, {volume}).sum(), 1.);
+                    const long double fraction = static_cast<long double>(h) * speed / volume;
+                    used += fraction;
+                    remainder += -fraction;
                 }
-                FaceSum excess = used;
-                excess.add_product(-cap, 1.);
-                const auto actual = used.rounded();
+                auto excess = used;
+                excess += -cap;
+                const long double used_fraction = used.value();
+                const double actual = rounded_rate(used_fraction);
+                bool exceeds_cap = excess.value() > 0;
+                long double retained = remainder.value();
+                if (actual == cap && used_fraction > 0)
+                {
+                    // On the cap, retain product roundoff to distinguish a small
+                    // withdrawal excess from complete or almost complete evacuation.
+                    const long double cap_volume = static_cast<long double>(cap) * volume;
+                    Accumulator margin;
+                    margin += cap_volume;
+                    margin += std::fma(static_cast<long double>(cap), volume, -cap_volume);
+                    for (const auto face : mesh.faces(cell))
+                    {
+                        const size_t direction = mesh.owner_cell(face) == cell ? 0 : 1;
+                        const double speed = active_speed(speeds(face, outgoing_column(a, direction, i)), direction);
+                        if (speed == 0)
+                            continue;
+                        const long double swept_volume = static_cast<long double>(h) * speed;
+                        margin += -swept_volume;
+                        margin += -std::fma(static_cast<long double>(h), speed, -swept_volume);
+                    }
+                    const long double remaining_volume = margin.value();
+                    exceeds_cap = remaining_volume < 0;
+                    retained = (1.L - cap) + remaining_volume / volume;
+                }
+                remainders[(c * families + a) * nodes + i] = retained;
                 local_maximum = std::max(local_maximum,
-                    excess.sign() > 0 ? std::nextafter(actual, std::numeric_limits<double>::infinity()) : actual);
+                    exceeds_cap ? std::nextafter(actual, std::numeric_limits<double>::infinity()) : actual);
             }
     }
     return local_maximum;
 }
 
+void fill_species_packet(const QbmmPopulationSchema& family, double scaled_mass, std::span<double> moles)
+{
+    // Use the family composition and the same roundoff budget as its owning packet API.
+    constexpr double composition_tolerance = 64 * eps;
+    const auto fractions = family.mass_fractions();
+    const auto& species = family.catalog().species();
+    const long double mass = static_cast<long double>(scaled_mass) * family.mass_scale_kg();
+    for (size_t s = 0; s < moles.size(); ++s)
+    {
+        if (fractions[s] == 0)
+        {
+            moles[s] = 0;
+            continue;
+        }
+        const long double amount = mass * fractions[s] / species[s].molarMass;
+        require(std::isfinite(amount) && amount <= std::numeric_limits<double>::max(),
+            "QBMM value exceeds the representable range.");
+        moles[s] = rounded_rate(amount);
+        require(moles[s] != 0, "A nonzero QBMM value underflows to zero.");
+        const long double represented_moles = moles[s];
+        require(std::abs(represented_moles - amount) <= composition_tolerance * std::max(represented_moles, amount),
+            "The QBMM value cannot be represented within the roundoff budget.");
+    }
+    const double recovered = family.scaled_mass_change(moles);
+    require(std::abs(static_cast<long double>(recovered) - scaled_mass) <=
+                composition_tolerance * static_cast<long double>(std::max(recovered, scaled_mass)),
+        "The QBMM packet cannot represent its requested mass.");
+}
+
 template<class Trace, class Speeds, class Packet>
 void stage_packets(const Mesh& mesh, const Flow::Options& options, const std::vector<size_t>& phases,
     const Trace& trace, const Speeds& speeds, const Packet& packet, size_t packet_columns,
-    std::vector<FaceInterval>& intervals, FaceSum& caloric, FaceSum& energy, double h)
+    std::vector<FaceInterval>& intervals, Accumulator& caloric, Accumulator& energy, double h,
+    std::span<Accumulator> channels, std::span<double> moles)
 {
     for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
     {
@@ -291,7 +368,7 @@ void stage_packets(const Mesh& mesh, const Flow::Options& options, const std::ve
                 const auto donor = side == 0 ? left : right;
                 const auto rank = static_cast<size_t>(trace(donor, base + Rank));
                 const size_t first = (a * sides + side) * packet_columns;
-                std::vector<FaceSum> channels(packet_columns);
+                std::ranges::fill(channels, Accumulator{});
                 for (size_t i = 0; !wall && i < rank; ++i)
                 {
                     const auto atom = base + FirstAtom + i * AtomColumns;
@@ -304,108 +381,103 @@ void stage_packets(const Mesh& mesh, const Flow::Options& options, const std::ve
                     const double volume = trace(donor, base + BulkVolume);
                     const double density = trace(donor, base + Density);
                     const double scale = family.mass_scale_kg();
-                    const auto alpha =
-                        product({h, speed == 0 ? .5 : 1., weight, support, scale}, {volume, density}).sum();
-                    interval.theta.add_weighted(alpha, 1.);
+                    require(std::isfinite(volume) && volume > 0 && std::isfinite(density) && density > 0,
+                        "Invalid QBMM kinetic packet divisor.");
+                    const long double swept = static_cast<long double>(h) / volume;
+                    const long double alpha = swept * (speed == 0 ? .5L : 1.L) * weight * support * scale / density;
+                    interval.theta += alpha;
                     for (size_t axis = 0; axis < dimensions; ++axis)
-                    {
-                        FaceSum aligned;
-                        aligned.add_weighted(alpha, slip.component(axis));
-                        interval.slip.add_weighted(aligned, area.component(axis));
-                    }
+                        interval.slip += alpha * slip.component(axis) * area.component(axis);
                     if (outward == 0)
                         continue;
                     const auto carrier = trace_vector(trace, donor, base + Carrier);
-                    FaceSum withdrawal;
-                    withdrawal.add_weighted(product({h, outward}, {volume}).sum(), weight);
-                    const double count = represented(withdrawal);
-                    channels[H0].add_product(count, 1.);
-                    const double h1 = represented(product({count, support}));
-                    channels[H1].add_product(h1, 1.);
-                    channels[H2].add_product(represented(product({count, support, support})), 1.);
-                    channels[H3].add_product(represented(product({count, support, support, support})), 1.);
-                    const auto moles = family.species_moles(h1);
-                    FaceSum material;
+                    const double count = represented(static_cast<long double>(h) * outward / volume * weight);
+                    const long double first_moment = static_cast<long double>(count) * support;
+                    const long double second_moment = first_moment * support;
+                    const double h1 = represented(first_moment);
+                    channels[H0] += count;
+                    channels[H1] += h1;
+                    channels[H2] += represented(second_moment);
+                    channels[H3] += represented(second_moment * support);
+                    fill_species_packet(family, h1, moles);
+                    auto& momentum = interval.momentum[side];
+                    Accumulator material;
                     for (size_t s = 0; s < moles.size(); ++s)
                     {
-                        channels[FirstSpecies + s].add_product(moles[s], 1.);
-                        material.add_product(moles[s], family.catalog().species()[s].molarMass);
+                        channels[FirstSpecies + s] += moles[s];
+                        const double molar_mass = family.catalog().species()[s].molarMass;
+                        const long double species_mass = static_cast<long double>(moles[s]) * molar_mass;
+                        material += species_mass;
+                        if constexpr (std::numeric_limits<long double>::digits == std::numeric_limits<double>::digits)
+                        {
+                            // Preserve the product residual in the directional budget on binary64-only targets.
+                            momentum[Mass] += sign * species_mass;
+                            momentum[Mass] += sign * std::fma(moles[s], molar_mass, -static_cast<double>(species_mass));
+                        }
                     }
-                    require(material.sign() > 0, "QBMM kinetic atom count and material transfer disagree.");
-                    auto& momentum = interval.momentum[side];
-                    momentum[Mass].add_weighted(material, sign);
+                    const long double mass = material.value();
+                    require(std::isfinite(mass) && mass > 0, "QBMM kinetic atom count and material transfer disagree.");
+                    if constexpr (std::numeric_limits<long double>::digits > std::numeric_limits<double>::digits)
+                        momentum[Mass] += sign * mass;
                     const double donor_mass = trace(donor, base + MaterialMass);
-                    FaceSum energy_packet;
-                    product({trace(donor, base + Energy)}, {donor_mass}).add_weighted(energy_packet, material);
-                    channels[U].add_weighted(energy_packet, 1.);
-                    energy.add_weighted(energy_packet, energy_packet.sign() < 0 ? -1. : 1.);
-                    product({}, {density}).add_weighted(channels[W], material);
-                    caloric.add_weighted(material, trace(donor, base + CaloricSpecific));
+                    require(std::isfinite(donor_mass) && donor_mass > 0, "Invalid QBMM kinetic packet divisor.");
+                    const long double energy_packet =
+                        static_cast<long double>(trace(donor, base + Energy)) / donor_mass * mass;
+                    channels[U] += energy_packet;
+                    energy += std::abs(energy_packet);
+                    channels[W] += mass / density;
+                    caloric += mass * trace(donor, base + CaloricSpecific);
                     for (size_t axis = 0; axis < dimensions; ++axis)
                     {
-                        momentum[CarrierMomentum + axis].add_weighted(material, sign * carrier.component(axis));
-                        momentum[DriftMomentum + axis].add_weighted(material, sign * slip.component(axis));
+                        momentum[CarrierMomentum + axis] += sign * mass * carrier.component(axis);
+                        momentum[DriftMomentum + axis] += sign * mass * slip.component(axis);
                     }
                 }
                 for (size_t q = 0; q < packet_columns; ++q)
                 {
-                    const double amount = represented(channels[q]);
+                    const double amount = represented(channels[q].value());
                     packet(face, first + q) = amount;
-                    interval.direction[side][q].add_product(amount, sign);
+                    interval.direction[side][q] += sign * amount;
                 }
             }
         }
     }
 }
 
-void compare(const FaceSum& actual, const FaceSum& constructive)
+void compare(long double actual, long double constructive)
 {
-    FaceSum difference = actual;
-    difference.add_weighted(constructive, -1.);
-    FaceSum magnitude = constructive;
-    magnitude.add_weighted(actual, 1.);
-    require(relative_difference(difference, magnitude) <= 2 * qbmm_reconstruction_tolerance,
+    require(relative_difference(actual - constructive, actual + constructive) <= 2 * qbmm_reconstruction_tolerance,
         "QBMM kinetic canonical endpoint disagrees with the constructive measure.");
 }
 
-double updated_amount(double before, const FaceSum& incoming, const FaceSum& outgoing, bool depleted, bool nonnegative,
-    double tolerance, double& maximum_residual)
+double updated_amount(double before, long double incoming, long double outgoing, const Accumulator& net, bool depleted,
+    bool nonnegative, double tolerance, double& maximum_residual)
 {
-    FaceSum result;
-    result.add_product(before, 1.);
-    result.add_weighted(incoming, 1.);
-    result.add_weighted(outgoing, -1.);
+    auto result = net;
+    result += before;
     // A completely exhausted reconstructed measure can differ from the stored
     // donor by its inversion/product roundoff. Check that discrepancy against
     // the donor before adopting the incoming measure, including exact vacuum.
     if (depleted)
     {
-        FaceSum remainder = result;
-        remainder.add_weighted(incoming, -1.);
-        FaceSum donor;
-        donor.add_product(std::abs(before), 1.);
-        donor.add_weighted(outgoing, outgoing.sign() < 0 ? -1. : 1.);
+        const long double remainder = before - outgoing;
+        const long double donor = std::abs(before) + std::abs(outgoing);
         require(relative_difference(remainder, donor) <= 2 * qbmm_reconstruction_tolerance,
             "QBMM kinetic complete evacuation disagrees with the authoritative stock.");
     }
     else
-        require(!nonnegative || result.sign() >= 0, "QBMM kinetic withdrawal exceeds its canonical stock.");
-    const double actual = represented(depleted ? incoming : result);
+        require(!nonnegative || result.value() >= 0, "QBMM kinetic withdrawal exceeds its canonical stock.");
+    const double actual = represented(depleted ? incoming : result.value());
     if (actual == before && before != 0)
     {
-        FaceSum net = incoming;
-        net.add_weighted(outgoing, -1.);
-        const bool withdrawal = before > 0 ? net.sign() < 0 : net.sign() > 0;
+        const bool withdrawal = before > 0 ? net.value() < 0 : net.value() > 0;
         require(!withdrawal, "QBMM kinetic net transfer is too small to update its authoritative stock.");
     }
-    FaceSum defect = result;
-    defect.add_product(-actual, 1.);
-    FaceSum magnitude;
-    magnitude.add_product(std::abs(before), 1.);
-    magnitude.add_product(std::abs(actual), 1.);
-    magnitude.add_weighted(incoming, incoming.sign() < 0 ? -1. : 1.);
-    magnitude.add_weighted(outgoing, outgoing.sign() < 0 ? -1. : 1.);
-    const double residual = relative_difference(defect, magnitude) / tolerance;
+    auto defect = result;
+    defect += -actual;
+    const long double magnitude = static_cast<long double>(std::abs(before)) + std::abs(actual) +
+                                  std::abs(incoming) + std::abs(outgoing);
+    const double residual = relative_difference(defect.value(), magnitude) / tolerance;
     require(residual <= 1, "QBMM kinetic component fails its canonical cell/face balance.");
     maximum_residual = std::max(maximum_residual, residual);
     return actual;
@@ -414,8 +486,10 @@ double updated_amount(double before, const FaceSum& incoming, const FaceSum& out
 template<class Trace, class Packet>
 void apply_packets(const Mesh& mesh, const Flow::Options& options, Flow::State& candidate,
     const std::vector<size_t>& phases, const Trace& trace, const Packet& packet, size_t packet_columns,
-    const std::vector<FaceSum>& fractions, std::vector<CellInterval>& intervals, TransportResult& result)
+    const std::vector<long double>& remainders, std::vector<CellInterval>& intervals, TransportResult& result,
+    std::array<std::vector<Accumulator>, 3>& channels)
 {
+    auto& [incoming, outgoing, net] = channels;
     for (size_t c = 0; c < candidate.cells.size(); ++c)
     {
         const auto cell = static_cast<LO>(c);
@@ -425,7 +499,8 @@ void apply_packets(const Mesh& mesh, const Flow::Options& options, Flow::State& 
             const auto phase = phases[a];
             const auto& family = *options.qbmm_families[phase];
             const auto rank = static_cast<size_t>(trace(cell, a * trace_columns + Rank));
-            std::vector<FaceSum> incoming(packet_columns), outgoing(packet_columns);
+            for (auto& channel : channels)
+                std::ranges::fill(channel, Accumulator{});
             for (const auto face : mesh.faces(cell))
             {
                 const size_t side = mesh.owner_cell(face) == cell ? 0 : 1;
@@ -433,69 +508,63 @@ void apply_packets(const Mesh& mesh, const Flow::Options& options, Flow::State& 
                 const size_t in = (a * sides + 1 - side) * packet_columns;
                 for (size_t q = 0; q < packet_columns; ++q)
                 {
-                    incoming[q].add_product(packet(face, in + q), 1.);
-                    outgoing[q].add_product(packet(face, out + q), 1.);
+                    const double credit = packet(face, in + q);
+                    const double debit = packet(face, out + q);
+                    incoming[q] += credit;
+                    outgoing[q] += debit;
+                    net[q] += credit;
+                    net[q] += -debit;
                 }
             }
-            if (!incoming[H0].sign() && !outgoing[H0].sign())
+            if (incoming[H0].value() == 0 && outgoing[H0].value() == 0)
                 continue;
-            std::array<FaceSum, 4> constructive;
+            std::array<Accumulator, 4> constructive;
             bool exhausted = rank > 0;
             for (size_t i = 0; i < rank; ++i)
             {
-                const auto& fraction = fractions[(c * phases.size() + a) * nodes + i];
-                FaceSum remainder;
-                remainder.add_product(1., 1.);
-                remainder.add_weighted(fraction, -1.);
-                require(remainder.sign() >= 0, "QBMM kinetic constructive donor remainder is negative.");
-                exhausted &= remainder.sign() == 0;
+                const auto remainder = remainders[(c * phases.size() + a) * nodes + i];
+                require(remainder >= 0, "QBMM kinetic constructive donor remainder is negative.");
+                exhausted &= remainder == 0;
                 const size_t atom = a * trace_columns + FirstAtom + i * AtomColumns;
                 const double support = trace(cell, atom + Support);
-                auto weight = remainder;
-                for (size_t k = 0; k < constructive.size(); ++k)
+                long double moment = remainder * trace(cell, atom + Weight);
+                for (auto& channel : constructive)
                 {
-                    auto moment = weight;
-                    weight = {};
-                    weight.add_weighted(moment, support);
-                    constructive[k].add_weighted(moment, trace(cell, atom + Weight));
+                    channel += moment;
+                    moment *= support;
                 }
             }
             for (size_t k = 0; k < constructive.size(); ++k)
-                constructive[k].add_weighted(incoming[k], 1.);
+                constructive[k].append(incoming[k]);
             const auto before =
                 qbmm_cell_moments(family, qbmm_native_law_detail::kinetic_cell_view(family, stock, phase));
             auto& shape = *stock.qbmm_shape[phase];
             auto& thermal = stock.phases[phase];
             const double tolerance = options.conservation_relative_tolerance;
-            *stock.phase_numbers[phase] = updated_amount(
-                before[0], incoming[H0], outgoing[H0], exhausted, true, tolerance, result.maximum_population_residual);
-            shape.H2 = updated_amount(
-                before[2], incoming[H2], outgoing[H2], exhausted, true, tolerance, result.maximum_shape_residual);
-            shape.H3 = updated_amount(
-                before[3], incoming[H3], outgoing[H3], exhausted, true, tolerance, result.maximum_shape_residual);
-            thermal.internal_energy = updated_amount(thermal.internal_energy, incoming[U], outgoing[U], exhausted,
-                false, tolerance, result.maximum_energy_residual);
+            const auto update = [&](size_t channel, double before_amount, bool nonnegative, double& residual)
+            {
+                return updated_amount(before_amount, incoming[channel].value(), outgoing[channel].value(), net[channel],
+                    exhausted, nonnegative, tolerance, residual);
+            };
+            *stock.phase_numbers[phase] = update(H0, before[0], true, result.maximum_population_residual);
+            shape.H2 = update(H2, before[2], true, result.maximum_shape_residual);
+            shape.H3 = update(H3, before[3], true, result.maximum_shape_residual);
+            thermal.internal_energy = update(U, thermal.internal_energy, false, result.maximum_energy_residual);
             for (size_t s = 0; s < thermal.moles.size(); ++s)
-                thermal.moles[s] = updated_amount(thermal.moles[s], incoming[FirstSpecies + s],
-                    outgoing[FirstSpecies + s], exhausted, true, tolerance, result.maximum_species_residual);
+                thermal.moles[s] = update(FirstSpecies + s, thermal.moles[s], true, result.maximum_species_residual);
             const auto after =
                 qbmm_cell_moments(family, qbmm_native_law_detail::kinetic_cell_view(family, stock, phase));
             for (size_t k = 0; k < constructive.size(); ++k)
-            {
-                FaceSum canonical;
-                canonical.add_product(after[k], 1.);
-                compare(canonical, constructive[k]);
-            }
+                compare(after[k], constructive[k].value());
             const auto quadrature = invert_qbmm_moments(after);
             if (!quadrature.valid())
                 throw std::invalid_argument(
                     std::string("QBMM kinetic compression failed at the represented endpoint (") +
                     qbmm_inversion_status_name(quadrature.status) + ").");
             auto& interval = intervals[c * phases.size() + a];
-            interval.work_volume.add_weighted(incoming[W], 1.);
-            interval.work_volume.add_weighted(outgoing[W], -1.);
-            interval.gross_volume.add_weighted(incoming[W], 1.);
-            interval.gross_volume.add_weighted(outgoing[W], 1.);
+            interval.work_volume.append(net[W]);
+            interval.gross_volume.append(incoming[W]);
+            interval.gross_volume.append(outgoing[W]);
         }
     }
 }
@@ -514,11 +583,15 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
     std::vector<size_t> phases;
     size_t packet_columns = 0;
     TransportResult result;
+    TraceScratch trace_scratch;
     std::vector<LawTrace> laws;
-    std::vector<FaceSum> fractions;
+    std::vector<long double> remainders;
     std::vector<FaceInterval> faces;
     std::vector<CellInterval> cells;
-    FaceSum caloric, energy;
+    std::vector<Accumulator> face_channels;
+    std::vector<double> species_packet;
+    std::array<std::vector<Accumulator>, 3> cell_channels;
+    Accumulator caloric, energy;
     const double cap = options.qbmm_model.kinetic_cfl;
     const int max_substeps = options.qbmm_model.maximum_kinetic_substeps;
     std::vector<UnresolvedOffset> unresolved;
@@ -548,22 +621,42 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
             faces.resize(nf * phases.size());
             cells.resize(nc * phases.size());
             laws.resize(nc * phases.size());
-            fractions.resize(nc * phases.size() * nodes);
+            remainders.resize(nc * phases.size() * nodes);
+            trace_scratch.thermal.resize(nphase);
+            trace_scratch.volumes.resize(nphase);
+            if (nc != 0)
+            {
+                trace_scratch.donor = thermodynamic_guess.cells.front();
+                size_t maximum_species = 0;
+                for (const auto& phase : trace_scratch.donor.phases)
+                    maximum_species = std::max(maximum_species, phase.moles.size());
+                trace_scratch.composition.reserve(maximum_species);
+            }
+            face_channels.resize(packet_columns);
+            species_packet.resize(packet_columns - FirstSpecies);
+            for (auto& channel : cell_channels)
+                channel.resize(packet_columns);
             for (const auto p : phases)
+            {
+                require(options.qbmm_families[p]->catalog().species().size() == species_packet.size(),
+                    "QBMM kinetic family catalog sizes differ.");
                 result.owned_flux[p].resize(nf);
+            }
             for (auto& face : faces)
                 for (auto& direction : face.direction)
                     direction.resize(packet_columns);
             for (size_t c = 0; c < nc; ++c)
             {
-                require(accepted_material_volumes[c].size() == nphase, "QBMM kinetic material-volume layout differs.");
+                require(thermodynamic_guess.cells[c].phases.size() == nphase &&
+                            accepted_material_volumes[c].size() == nphase,
+                    "QBMM kinetic phase or material-volume layout differs.");
                 for (size_t a = 0; a < phases.size(); ++a)
                 {
                     const double volume = accepted_material_volumes[c][phases[a]];
                     require(std::isfinite(volume) && volume >= 0, "Invalid QBMM kinetic accepted material volume.");
                     auto& cell = cells[c * phases.size() + a];
-                    cell.work_volume.add_product(volume, 1.);
-                    cell.gross_volume.add_product(volume, 1.);
+                    cell.work_volume += volume;
+                    cell.gross_volume += volume;
                 }
             }
         });
@@ -603,8 +696,12 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
     {
         if (result.substeps >= max_substeps)
             throw std::runtime_error("QBMM kinetic transport exhausted its subcycle cap.");
-        collective_detail::collective_local_validation(mesh, "QBMM kinetic owned donor laws and caloric traces", [&]
-            { stage_traces(mesh, options, accepted, thermodynamic_guess, candidate, phases, traces->write(), laws); });
+        collective_detail::collective_local_validation(mesh, "QBMM kinetic owned donor laws and caloric traces",
+            [&]
+            {
+                stage_traces(mesh, options, accepted, thermodynamic_guess, candidate, phases, traces->write(), laws,
+                    trace_scratch);
+            });
         traces->synchronize();
         const auto trace = traces->read();
         collective_detail::collective_local_validation(mesh, "QBMM kinetic canonical face speeds",
@@ -636,7 +733,7 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
                 "QBMM kinetic subcycle has no representable time progress.");
             double local_cfl = 0;
             collective_detail::collective_local_validation(mesh, "QBMM kinetic fractions actually used",
-                [&] { local_cfl = verify_reservations(mesh, speed, phases.size(), h, cap, fractions); });
+                [&] { local_cfl = verify_reservations(mesh, speed, phases.size(), h, cap, remainders); });
             const double used = maximum(local_cfl);
             if (used <= cap)
             {
@@ -659,8 +756,8 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
                         for (size_t i = 0; i < law.closure.active_atoms; ++i)
                         {
                             const auto atom = a * trace_columns + FirstAtom + i * AtomColumns;
-                            const double mass_kg = represented(
-                                product({trace(cell, atom + Support), options.qbmm_families[phase]->mass_scale_kg()}));
+                            const double mass_kg = represented(static_cast<long double>(trace(cell, atom + Support)) *
+                                                               options.qbmm_families[phase]->mass_scale_kg());
                             result.law_receipts.push_back(
                                 {mesh.cell_geometry_global_id(cell), phase, static_cast<size_t>(result.substeps), i, h,
                                     mass_kg, law.closure.node_velocities[i], law.observations[i]});
@@ -671,15 +768,15 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
         collective_detail::collective_local_validation(mesh, "QBMM kinetic canonical directional packets",
             [&]
             {
-                stage_packets(
-                    mesh, options, phases, trace, speed, packets->write(), packet_columns, faces, caloric, energy, h);
+                stage_packets(mesh, options, phases, trace, speed, packets->write(), packet_columns, faces, caloric,
+                    energy, h, face_channels, species_packet);
             });
         packets->synchronize();
         collective_detail::collective_local_validation(mesh, "QBMM kinetic constructive compression and balances",
             [&]
             {
-                apply_packets(
-                    mesh, options, candidate, phases, trace, packets->read(), packet_columns, fractions, cells, result);
+                apply_packets(mesh, options, candidate, phases, trace, packets->read(), packet_columns, remainders,
+                    cells, result, cell_channels);
             });
         ++result.substeps;
         remaining -= h;
@@ -687,11 +784,11 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
     collective_detail::collective_local_validation(mesh, "QBMM kinetic interval receipts and work volumes",
         [&]
         {
-            FaceSum interval;
-            interval.add_product(dt, 1.);
+            Accumulator covered;
+            covered += dt;
             for (const auto h : result.substep_durations)
-                interval.add_product(-h, 1.);
-            require(!interval.sign(), "QBMM kinetic substeps do not cover the requested interval exactly.");
+                covered += -h;
+            require(covered.value() == 0, "QBMM kinetic substeps do not cover the requested interval exactly.");
             for (size_t c = 0; c < nc; ++c)
                 for (size_t a = 0; a < phases.size(); ++a)
                 {
@@ -701,35 +798,48 @@ TransportResult transport(const SP<const Flow::Mesh>& grid, const Flow::Options&
                     if (*candidate.cells[c].phase_numbers[phase] == 0)
                     {
                         require(phase_state.internal_energy == 0 &&
-                                    relative_difference(cell.work_volume, cell.gross_volume) <=
+                                    relative_difference(cell.work_volume.value(), cell.gross_volume.value()) <=
                                         2 * qbmm_reconstruction_tolerance,
                             "Locally empty kinetic phase has inconsistent canonical energy/work-volume packets.");
                         result.advected_material_volumes[c][phase] = 0;
                     }
                     else
-                        result.advected_material_volumes[c][phase] = represented(cell.work_volume);
+                        result.advected_material_volumes[c][phase] = represented(cell.work_volume.value());
                 }
             for (size_t f = 0; f < nf; ++f)
+            {
+                std::array<Accumulator, sides> mass;
+                std::array<Accumulator, dimensions> drift;
+                Accumulator theta, slip, material_volume;
                 for (size_t a = 0; a < phases.size(); ++a)
                 {
                     const auto& interval = faces[f * phases.size() + a];
-                    auto& momentum = result.integrated_faces[f];
-                    momentum.forward_mass.add_weighted(interval.momentum[0][Mass], 1.);
-                    momentum.backward_mass.add_weighted(interval.momentum[1][Mass], -1.);
-                    momentum.theta.add_weighted(interval.theta, 1.);
-                    momentum.slip.add_weighted(interval.slip, 1.);
-                    momentum.material_volume.add_weighted(interval.direction[0][W], 1.);
-                    momentum.material_volume.add_weighted(interval.direction[1][W], 1.);
-                    for (size_t axis = 0; axis < dimensions; ++axis)
+                    theta.append(interval.theta);
+                    slip.append(interval.slip);
+                    for (size_t side = 0; side < sides; ++side)
                     {
-                        momentum.drift[axis].add_weighted(interval.momentum[0][DriftMomentum + axis], 1.);
-                        momentum.drift[axis].add_weighted(interval.momentum[1][DriftMomentum + axis], 1.);
+                        material_volume.append(interval.direction[side][W]);
+                        mass[side].append(interval.momentum[side][Mass]);
+                        for (size_t axis = 0; axis < dimensions; ++axis)
+                            drift[axis].append(interval.momentum[side][DriftMomentum + axis]);
                     }
                     result.owned_flux[phases[a]][f] =
                         face_receipt(interval, dt, carrier_flux.local_value(static_cast<LO>(f)));
                 }
-            result.local_caloric_transport_magnitude = represented(caloric);
-            result.local_energy_transport_magnitude = represented(energy);
+                auto net_mass = mass[0];
+                net_mass.append(mass[1]);
+                auto& momentum = result.integrated_faces[f];
+                momentum.forward_mass = rounded_rate(mass[0].value());
+                momentum.backward_mass = rounded_rate(-mass[1].value());
+                momentum.net_mass = rounded_rate(net_mass.value());
+                momentum.theta = rounded_rate(theta.value());
+                momentum.slip = rounded_rate(slip.value());
+                momentum.material_volume = rounded_rate(material_volume.value());
+                for (size_t axis = 0; axis < dimensions; ++axis)
+                    momentum.drift[axis] = rounded_rate(drift[axis].value());
+            }
+            result.local_caloric_transport_magnitude = represented(caloric.value());
+            result.local_energy_transport_magnitude = represented(energy.value());
         });
     validate_closed_balances(
         mesh, options, accepted, candidate, phases, packet_columns, accepted_material_volumes, result);

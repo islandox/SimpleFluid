@@ -5,7 +5,6 @@
 #include "FVM/CellOperators.hh"
 #include "equations/CollectiveValidation.hh"
 #include "equations/EquationValidation.hh"
-#include "equations/details/LowMachScaledFaceSum.hh"
 #include <Teuchos_Array.hpp>
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
@@ -241,22 +240,51 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
     collective_detail::require_uniform_value(mesh, int(options.backend), "Pressure linear backend");
     collective_detail::require_uniform_value(mesh, int(options.preconditioner), "Pressure preconditioner");
     collective_detail::require_uniform_value(mesh, int(options.reuse_preconditioner), "Pressure preconditioner reuse");
+    const auto fused = [](double a, double b, double c)
+    {
+#if defined(__GNUC__) && defined(__FMA__)
+        // GCC can lower std::fma to a library call at -O0, even with -mfma.
+        return __builtin_fma(a, b, c);
+#else
+        return std::fma(a, b, c);
+#endif
+    };
     const auto evaluate_material_flux = [&](LO face, double phi)
     {
         const double theta = fraction->local_value(face);
         if (!anchor)
-            return std::fma(theta, phi, slip->local_value(face));
+            return fused(theta, phi, slip->local_value(face));
         const double datum = anchor->material_rate.local_value(face);
         const double reference = anchor->carrier_flux.local_value(face);
         if (theta == 0 || phi == reference)
             return datum;
-        // Form the products before rounding so a finite weighted difference
-        // survives both cancellation and an overflowing bare phi-phi0.
-        qbmm_face_detail::ScaledFaceSum packet;
-        packet.add_product(datum, 1.);
-        packet.add_product(theta, phi);
-        packet.add_product(-theta, reference);
-        return packet.rounded();
+        const double change = phi - reference;
+        if constexpr (std::numeric_limits<long double>::max_exponent == std::numeric_limits<double>::max_exponent)
+            if (!std::isfinite(change))
+                return std::abs(phi) >= std::abs(reference) ? fused(-theta, reference, fused(theta, phi, datum))
+                                                            : fused(theta, phi, fused(-theta, reference, datum));
+        double flux = std::numeric_limits<double>::infinity();
+        if (std::isfinite(change))
+        {
+            flux = fused(theta, change, datum);
+            if (std::isfinite(flux) && std::abs(flux) >= .5 * std::abs(datum))
+                return flux;
+            // Near cancellation, apply the anchor to the dominant carrier term first
+            // if subtracting the two carrier terms rounded away part of the change.
+            double reordered = flux;
+            if (std::abs(phi) >= std::abs(reference))
+            {
+                if (change - phi != -reference)
+                    reordered = fused(-theta, reference, fused(theta, phi, datum));
+            }
+            else if (change + reference != phi)
+                reordered = fused(theta, phi, fused(-theta, reference, datum));
+            if (std::isfinite(reordered))
+                return reordered;
+        }
+        // Range failure in an intermediate can still leave a finite material flux.
+        const double wide = static_cast<double>(theta * (static_cast<long double>(phi) - reference) + datum);
+        return std::isfinite(wide) || !std::isfinite(flux) ? wide : flux;
     };
     std::unique_ptr<FaceField> material_predictor, material_candidate;
     if (material)

@@ -1542,6 +1542,31 @@ TEST(LowMachQbmmLinearTransportTest, AlignedSubcyclesKeepTheIntegratedTwoCellRec
     EXPECT_EQ(op.totals(), before);
 }
 
+TEST(LowMachQbmmLinearTransportTest, AllFaceCflIncludesOutflowBelowTheAggregateRoundoff)
+{
+    Problem op(mesh({0., 1., 2., 3.}));
+    op.options.qbmm_model.linear_cfl = .5;
+    op.options.qbmm_model.maximum_linear_substeps = 2;
+    for (size_t row = 0; row < op.state.cells.size(); ++row)
+    {
+        const auto cell = static_cast<LO>(row);
+        op.set(cell, stock_from_weights(op.grid->cell_centroid(cell).x == 1.5 ? Weights{2., 1.} : Weights{}));
+    }
+    for (const auto face : op.flux.owned_face_ids())
+        if (op.grid->is_interior_face(face))
+        {
+            const double rate = op.grid->face_centroid(face).x < 1.5 ? -0x1p-65 : 1.;
+            op.flux.set_owned_value(face, rate * op.grid->face_area_vector(face).x);
+        }
+    op.flux.sync_ghosts();
+
+    // The two positive outward sweeps sum to more than .5 at h=.5.
+    const auto result = op.advance(.5);
+    const double first = std::nextafter(.5, 0.);
+    EXPECT_EQ(result.substep_durations, (std::vector<double>{first, .5 - first}));
+    EXPECT_LE(result.maximum_cfl, .5);
+}
+
 TEST(LowMachQbmmLinearTransportTest, TiedPressureTraceUsesThePhysicalFaceOnUnequalCells)
 {
     Problem op(mesh({0., 1., 4.}));
@@ -1575,7 +1600,7 @@ TEST(LowMachQbmmLinearTransportTest, TiedPressureTraceUsesThePhysicalFaceOnUnequ
                 EXPECT_NEAR(packet.kinetic->theta, theta, 2e-15);
                 EXPECT_EQ(packet.kinetic->slip_volume_flux, 0.);
             }
-            EXPECT_NEAR(result.integrated_faces.at(row).theta.rounded(.5), theta, 2e-15);
+            EXPECT_NEAR(result.integrated_faces.at(row).theta / .5, theta, 2e-15);
         }
     }
     EXPECT_EQ(reduce(*op.grid, Teuchos::REDUCE_SUM, local_ties), 1);

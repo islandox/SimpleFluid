@@ -412,6 +412,28 @@ TEST(LowMachPressureContractsTest, KineticZeroDerivativeRequiresEOSAnchoringAndR
         EXPECT_EQ(f.corrected.value(face), f.predictor.value(face));
 }
 
+TEST(LowMachPressureContractsTest, AnchoredMaterialRetainsCarrierDifferenceAfterCancellation)
+{
+    Fixture f;
+    constexpr double residual = 0x1p-53;
+    f.configure(1., -1., 1.);
+    Pressure::FaceField reference(f.grid, 0., "anchored_reference_carrier");
+    for (const auto face : reference.owned_face_ids())
+        if (!f.grid->is_geometry_exterior_face(face))
+            reference.set_owned_value(face, -residual * f.orientation(face));
+    reference.sync_ghosts();
+    for (size_t c = 0; c < f.target.size(); ++c)
+        f.target[c] = f.lower(static_cast<LO>(c)) ? residual : -residual;
+
+    // The predictor already gives J = 1*(1 + residual) - 1 = residual.
+    // Rounding the carrier difference before applying the anchor would give zero.
+    const auto result = f.equation.project_kinetic_material_with_eos(f.rho, 1., f.target, f.chi, f.theta,
+        f.slip, reference, f.predictor, f.corrected, f.mechanical, f.velocity, f.linear(), residual / 4.);
+    EXPECT_EQ(result.maximum_continuity_residual, 0.);
+    for (const auto face : f.corrected.owned_face_ids())
+        EXPECT_EQ(f.corrected.owned_value(face), f.predictor.owned_value(face));
+}
+
 TEST(LowMachPressureContractsTest, MovingAnchorProjectsRelativeMaterialAndKeepsAbsoluteWallRates)
 {
     Fixture f;

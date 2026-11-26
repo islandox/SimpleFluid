@@ -3333,7 +3333,10 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             // Pressure uses the directly accumulated material flux at this corrector's
                             // frozen carrier flux. S remains the physical slip term, even near a kink.
                             const auto& packet = explicit_faces[f];
-                            auto theta = packet.theta, slip = packet.slip, work = packet.material_volume;
+                            FaceSum theta, slip, work;
+                            theta.add_scaled_value(packet.theta, 0);
+                            slip.add_scaled_value(packet.slip, 0);
+                            work.add_scaled_value(packet.material_volume, 0);
                             theta.add_weighted(theta_sum, dt);
                             slip.add_weighted(slip_rate, dt);
                             work.add_weighted(direct_volume_rate, dt);
@@ -3347,12 +3350,14 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             receipt.pressure_rounding_flux = representation.rounded();
                             pressure_input = receipt.material_volume_flux;
 
-                            // Combine momenta before rounding any family's physical mass rate.
-                            auto net = packet.forward_mass;
-                            net.add_weighted(packet.backward_mass, -1.);
+                            // Combine integrated packets before forming mass rates.
+                            FaceSum net;
+                            net.add_scaled_value(packet.net_mass, 0);
                             net.add_weighted(mixture_mass_rate, dt);
                             mass_flux = net.rounded(dt);
-                            auto forward = packet.forward_mass, backward = packet.backward_mass;
+                            FaceSum forward, backward;
+                            forward.add_scaled_value(packet.forward_mass, 0);
+                            backward.add_scaled_value(packet.backward_mass, 0);
                             forward.add_weighted(forward_mass, dt);
                             backward.add_weighted(backward_mass, dt);
                             receipt.forward_mass_flux = forward.rounded(dt);
@@ -3365,7 +3370,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             bidirectional->set_owned_value(face, receipt.symmetric_mass_flux);
                             for (size_t axis = 0; axis < 3; ++axis)
                             {
-                                auto drift = packet.drift[axis];
+                                FaceSum drift;
+                                drift.add_scaled_value(packet.drift[axis], 0);
                                 drift.add_weighted(mixture_drift_rate[axis], dt);
                                 drift_flux.component(axis) = drift.rounded(dt);
                             }

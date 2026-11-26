@@ -270,9 +270,10 @@ void validate_axial_kinetic_geometry(const Mesh& mesh)
     }
 }
 
-FaceOffsetFit::FaceOffsetFit(std::span<const Vec3> displacements)
+void FaceOffsetFit::assign(std::span<const Vec3> displacements)
 {
     std::array<std::array<real_t, dimensions>, dimensions> matrix{};
+    samples.clear();
     samples.reserve(displacements.size());
     for (const auto& displacement : displacements)
     {
@@ -306,51 +307,13 @@ bool FaceOffsetFit::weights(const Vec3& offset, std::vector<double>& result) con
     bool resolved = true;
     for (size_t i = 0; i < dimensions; ++i)
     {
-        FaceSum defect;
-        defect.add_product(-offset.component(i), 1.);
+        Accumulator defect;
+        defect += -offset.component(i);
         for (size_t k = 0; k < samples.size(); ++k)
-            defect.add_product(result[k], samples[k].displacement.component(i));
-        resolved &= std::abs(defect.rounded(distance)) <= 4096 * eps;
+            defect += static_cast<long double>(result[k]) * samples[k].displacement.component(i);
+        resolved &= relative_difference(defect.value(), distance) <= 4096 * eps;
     }
     return resolved;
-}
-
-void Product::multiply(double value)
-{
-    require(std::isfinite(value), "Nonfinite QBMM kinetic packet operand.");
-    int shift;
-    fraction *= std::frexp(value, &shift);
-    exponent += shift;
-}
-
-void Product::divide(double positive)
-{
-    int shift;
-    require(std::isfinite(positive) && positive > 0, "Invalid QBMM kinetic packet divisor.");
-    fraction /= std::frexp(positive, &shift);
-    exponent -= shift;
-}
-
-FaceSum Product::sum() const
-{
-    FaceSum result;
-    result.add_scaled_value(fraction, exponent);
-    return result;
-}
-
-void Product::add_weighted(FaceSum& result, const FaceSum& value) const
-{
-    result.add_scaled_weighted(value, fraction, exponent);
-}
-
-Product product(std::initializer_list<double> numerator, std::initializer_list<double> denominator)
-{
-    Product result;
-    for (const auto value : numerator)
-        result.multiply(value);
-    for (const auto value : denominator)
-        result.divide(value);
-    return result;
 }
 
 double finite_rate(double value, const char* message)
@@ -359,59 +322,54 @@ double finite_rate(double value, const char* message)
     return value;
 }
 
-double relative_difference(const FaceSum& difference, const FaceSum& magnitude)
+double relative_difference(long double difference, long double magnitude)
 {
-    if (!difference.sign())
+    constexpr double infinity = std::numeric_limits<double>::infinity();
+    if (!std::isfinite(difference) || !std::isfinite(magnitude))
+        return infinity;
+    if (difference == 0)
         return 0;
-    if (magnitude.sign() <= 0)
-        return std::numeric_limits<double>::infinity();
-    return std::abs(difference.rounded(magnitude));
+    if (magnitude <= 0)
+        return infinity;
+    const long double relative = std::abs(difference) / magnitude;
+    return relative <= std::numeric_limits<double>::max() ? static_cast<double>(relative) : infinity;
 }
 
-void add_magnitude(FaceSum& sum, const FaceSum& operand)
+static double checked_rate(long double amount, long double duration, const char* message)
 {
-    sum.add_weighted(operand, operand.sign() < 0 ? -1. : 1.);
+    require(std::isfinite(duration) && duration > 0, "Invalid QBMM kinetic packet divisor.");
+    const long double rate = amount / duration;
+    require(std::isfinite(rate) && std::abs(rate) <= std::numeric_limits<double>::max(), message);
+    return static_cast<double>(rate);
 }
 
-double represented(const FaceSum& amount, double divisor)
+double represented(long double amount, long double divisor)
 {
-    const auto value = finite_rate(amount.rounded(divisor), "QBMM kinetic transfer overflows binary64.");
-    require(value != 0 || !amount.sign(), "QBMM kinetic transfer underflows binary64.");
+    const double value = checked_rate(amount, divisor, "QBMM kinetic transfer overflows binary64.");
+    require(value != 0 || amount == 0, "QBMM kinetic transfer underflows binary64.");
     if (std::fpclassify(value) == FP_SUBNORMAL)
     {
-        FaceSum error = amount;
-        error.add_product(-value, divisor);
-        FaceSum magnitude = amount;
-        if (amount.sign() < 0)
-        {
-            magnitude = {};
-            magnitude.add_weighted(amount, -1.);
-        }
-        require(relative_difference(error, magnitude) <= eps, "QBMM kinetic transfer loses relative precision.");
+        const long double error = std::fma(-static_cast<long double>(value), divisor, amount);
+        require(relative_difference(error, std::abs(amount)) <= eps, "QBMM kinetic transfer loses relative precision.");
     }
     return value;
 }
 
-double represented(const Product& amount)
+double rounded_rate(long double amount, long double duration)
 {
-    return represented(amount.sum());
-}
-
-double rounded_rate(const FaceSum& amount, double duration)
-{
-    return finite_rate(amount.rounded(duration), "QBMM kinetic face receipt overflows binary64.");
+    return checked_rate(amount, duration, "QBMM kinetic face receipt overflows binary64.");
 }
 
 static double mass(const PhaseThermalState& phase)
 {
-    FaceSum sum;
+    Accumulator sum;
     const auto& species = phase.thermodynamics->catalog().species();
     for (size_t s = 0; s < phase.moles.size(); ++s)
-        sum.add_product(phase.moles[s], species[s].molarMass);
-    return represented(sum);
+        sum += static_cast<long double>(phase.moles[s]) * species[s].molarMass;
+    return represented(sum.value());
 }
 
-StageThermal thermal_trace(PhaseThermalState& phase, bool recover_arrival)
+StageThermal thermal_trace(PhaseThermalState& phase, bool recover_arrival, std::vector<double>& composition)
 {
     StageThermal result;
     result.material_mass = mass(phase);
@@ -422,7 +380,7 @@ StageThermal thermal_trace(PhaseThermalState& phase, bool recover_arrival)
             std::span(&phase, 1), phase.internal_energy, PhaseThermalMode::SeparatePhaseTemperatures)
                                 .phases[0]
                                 .temperature;
-    auto composition = phase.moles;
+    composition = phase.moles;
     const double scale = *std::ranges::max_element(composition);
     for (auto& value : composition)
         value /= scale;
@@ -431,8 +389,14 @@ StageThermal thermal_trace(PhaseThermalState& phase, bool recover_arrival)
         value /= sum;
     const auto point = phase.thermodynamics->evaluate(phase.temperature, phase.absolute_pressure, composition);
     result.density = point.density;
-    result.volume = represented(product({result.material_mass}, {point.density}));
-    result.caloric_specific = represented(product({phase.temperature, point.internal_energy_temperature}));
+    require(std::isfinite(point.density) && point.density > 0, "Invalid QBMM kinetic packet divisor.");
+    const double volume = result.material_mass / point.density;
+    result.volume = std::isnormal(volume) ? volume
+                                         : represented(static_cast<long double>(result.material_mass) / point.density);
+    const double caloric = phase.temperature * point.internal_energy_temperature;
+    result.caloric_specific = std::isnormal(caloric)
+        ? caloric
+        : represented(static_cast<long double>(phase.temperature) * point.internal_energy_temperature);
     require(result.caloric_specific >= 0, "QBMM kinetic caloric transport characteristic is negative.");
     return result;
 }
@@ -456,15 +420,15 @@ double exact_interval_substep(double remaining, double limit)
 
 struct SIMPLEFLUID_SOLVERS_LOCAL ClosedBalance
 {
-    FaceSum change, magnitude;
+    Accumulator change, magnitude;
     double scale = 0;
 
     void add(double before, double after)
     {
-        change.add_product(after, 1.);
-        change.add_product(-before, 1.);
-        magnitude.add_product(std::abs(before), 1.);
-        magnitude.add_product(std::abs(after), 1.);
+        change += after;
+        change += -before;
+        magnitude += std::abs(before);
+        magnitude += std::abs(after);
         scale = std::max({scale, std::abs(before), std::abs(after)});
     }
 };
@@ -476,18 +440,18 @@ static Flow::QbmmDirectionalFlux direction_receipt(const FaceInterval& interval,
     const auto& momentum = interval.momentum[side];
     result.species_molar_flux.resize(channels.size() - FirstSpecies);
     for (size_t s = 0; s < result.species_molar_flux.size(); ++s)
-        result.species_molar_flux[s] = represented(channels[FirstSpecies + s], dt);
+        result.species_molar_flux[s] = represented(channels[FirstSpecies + s].value(), dt);
     for (size_t k = 0; k < result.moment_flux.size(); ++k)
-        result.moment_flux[k] = represented(channels[k], dt);
-    result.integrated_count = represented(channels[H0]);
-    result.integrated_mass = rounded_rate(momentum[Mass]);
-    result.mass_flux = rounded_rate(momentum[Mass], dt);
-    result.internal_energy_flux = represented(channels[U], dt);
-    result.material_volume_flux = represented(channels[W], dt);
+        result.moment_flux[k] = represented(channels[k].value(), dt);
+    result.integrated_count = represented(channels[H0].value());
+    result.integrated_mass = rounded_rate(momentum[Mass].value());
+    result.mass_flux = rounded_rate(momentum[Mass].value(), dt);
+    result.internal_energy_flux = represented(channels[U].value(), dt);
+    result.material_volume_flux = represented(channels[W].value(), dt);
     for (size_t axis = 0; axis < dimensions; ++axis)
     {
-        result.carrier_momentum_flux.component(axis) = rounded_rate(momentum[CarrierMomentum + axis], dt);
-        result.drift_momentum_flux.component(axis) = rounded_rate(momentum[DriftMomentum + axis], dt);
+        result.carrier_momentum_flux.component(axis) = rounded_rate(momentum[CarrierMomentum + axis].value(), dt);
+        result.drift_momentum_flux.component(axis) = rounded_rate(momentum[DriftMomentum + axis].value(), dt);
     }
     return result;
 }
@@ -501,9 +465,9 @@ Flow::QbmmFaceFlux face_receipt(const FaceInterval& interval, double dt, double 
     kinetic.backward = direction_receipt(interval, 1, dt);
     const auto net = [&](const auto& streams, size_t channel)
     {
-        FaceSum total = streams[0][channel];
-        total.add_weighted(streams[1][channel], 1.);
-        return rounded_rate(total, dt);
+        auto total = streams[0][channel];
+        total.append(streams[1][channel]);
+        return rounded_rate(total.value(), dt);
     };
     result.species_molar_flux.resize(kinetic.forward.species_molar_flux.size());
     for (size_t s = 0; s < result.species_molar_flux.size(); ++s)
@@ -516,64 +480,55 @@ Flow::QbmmFaceFlux face_receipt(const FaceInterval& interval, double dt, double 
     for (size_t axis = 0; axis < dimensions; ++axis)
         result.derived_drift_momentum_flux.component(axis) = net(interval.momentum, DriftMomentum + axis);
 
-    FaceSum physical_defect, physical_scale;
-    physical_defect.add_weighted(interval.theta, carrier_flux);
-    physical_defect.add_weighted(interval.slip, 1.);
-    physical_defect.add_weighted(interval.direction[0][W], -1.);
-    physical_defect.add_weighted(interval.direction[1][W], -1.);
-    physical_scale.add_weighted(interval.theta, std::abs(carrier_flux));
-    physical_scale.add_weighted(interval.slip, interval.slip.sign() < 0 ? -1. : 1.);
-    physical_scale.add_weighted(interval.direction[0][W], 1.);
-    physical_scale.add_weighted(interval.direction[1][W], -1.);
+    const long double theta = interval.theta.value(), slip = interval.slip.value();
+    const long double forward_volume = interval.direction[0][W].value();
+    const long double backward_volume = interval.direction[1][W].value();
+    auto packet = interval.direction[0][W];
+    packet.append(interval.direction[1][W]);
+    const long double physical_carrier = theta * carrier_flux;
+    const long double physical_defect = physical_carrier + slip - packet.value();
+    const long double physical_scale = std::abs(physical_carrier) + std::abs(slip) + forward_volume - backward_volume;
     require(relative_difference(physical_defect, physical_scale) <= 2 * qbmm_reconstruction_tolerance,
         "QBMM kinetic pressure coefficients disagree with the directly transported volume packet.");
 
-    kinetic.theta = rounded_rate(interval.theta, dt);
+    kinetic.theta = rounded_rate(theta, dt);
     require(kinetic.theta >= 0, "QBMM kinetic pressure coefficient is negative.");
-    kinetic.slip_volume_flux = rounded_rate(interval.slip, dt);
+    kinetic.slip_volume_flux = rounded_rate(slip, dt);
     // Coefficient rounding can lose material flux near the subnormal floor or
     // when two normal operands almost cancel. Use a separate representation
     // term at the frozen carrier flux, leaving physical slip independently recorded.
-    const auto imprecisely_rounded = [](double rounded, const FaceSum& exact)
-    { return std::fpclassify(rounded) == FP_SUBNORMAL || (rounded == 0 && exact.sign()); };
-    FaceSum residual, direct_magnitude;
-    residual.add_product(result.material_volume_flux, 1.);
-    residual.add_product(-kinetic.theta, carrier_flux);
-    residual.add_product(-kinetic.slip_volume_flux, 1.);
-    direct_magnitude.add_product(kinetic.forward.material_volume_flux, 1.);
-    direct_magnitude.add_product(-kinetic.backward.material_volume_flux, 1.);
-    if (imprecisely_rounded(kinetic.theta, interval.theta) ||
-        imprecisely_rounded(kinetic.slip_volume_flux, interval.slip) ||
+    const auto imprecisely_rounded = [](double rounded, long double exact)
+    { return std::fpclassify(rounded) == FP_SUBNORMAL || (rounded == 0 && exact != 0); };
+    const long double pressure_carrier = static_cast<long double>(kinetic.theta) * carrier_flux;
+    long double pressure_volume_flux = pressure_carrier + kinetic.slip_volume_flux;
+    if (pressure_carrier != 0 && std::abs(pressure_volume_flux) <= eps * std::abs(pressure_carrier))
+        pressure_volume_flux =
+            std::fma(static_cast<long double>(kinetic.theta), carrier_flux, kinetic.slip_volume_flux);
+    const long double residual = result.material_volume_flux - pressure_volume_flux;
+    const long double direct_magnitude =
+        static_cast<long double>(kinetic.forward.material_volume_flux) - kinetic.backward.material_volume_flux;
+    if (imprecisely_rounded(kinetic.theta, theta) || imprecisely_rounded(kinetic.slip_volume_flux, slip) ||
         relative_difference(residual, direct_magnitude) > 2 * qbmm_reconstruction_tolerance)
     {
         kinetic.pressure_rounding_flux = rounded_rate(residual);
 
-        FaceSum theta_error = interval.theta, slip_error = interval.slip, packet_error = interval.direction[0][W];
-        theta_error.add_product(-kinetic.theta, dt);
-        slip_error.add_product(-kinetic.slip_volume_flux, dt);
-        packet_error.add_weighted(interval.direction[1][W], 1.);
-        packet_error.add_product(-result.material_volume_flux, dt);
-        FaceSum rounding_bound;
-        rounding_bound.add_weighted(
-            theta_error, theta_error.sign() < 0 ? -std::abs(carrier_flux) : std::abs(carrier_flux));
-        add_magnitude(rounding_bound, slip_error);
-        add_magnitude(rounding_bound, packet_error);
-        add_magnitude(rounding_bound, physical_defect);
-        rounding_bound.add_product(std::numeric_limits<double>::denorm_min(), dt, .5);
-        rounding_bound.add_product(-std::abs(kinetic.pressure_rounding_flux), dt, 1. - 2. * eps);
-        require(rounding_bound.sign() >= 0, "QBMM kinetic pressure correction exceeds its coefficient rounding bound.");
+        const long double theta_error = std::fma(-static_cast<long double>(kinetic.theta), dt, theta);
+        const long double slip_error = std::fma(-static_cast<long double>(kinetic.slip_volume_flux), dt, slip);
+        const long double packet_error =
+            std::fma(-static_cast<long double>(result.material_volume_flux), dt, packet.value());
+        const long double half_minimum_packet =
+            static_cast<long double>(std::numeric_limits<double>::denorm_min()) * dt * .5L;
+        const long double rounding_bound = std::abs(theta_error * carrier_flux) + std::abs(slip_error) +
+                                           std::abs(packet_error) + std::abs(physical_defect) + half_minimum_packet;
+        const long double correction =
+            static_cast<long double>(std::abs(kinetic.pressure_rounding_flux)) * dt * (1.L - 2.L * eps);
+        require(correction <= rounding_bound,
+            "QBMM kinetic pressure correction exceeds its coefficient rounding bound.");
     }
 
-    FaceSum defect, magnitude;
-    defect.add_product(kinetic.theta, carrier_flux);
-    defect.add_product(kinetic.slip_volume_flux, 1.);
-    defect.add_product(kinetic.pressure_rounding_flux, 1.);
-    defect.add_product(-result.material_volume_flux, 1.);
-    magnitude.add_product(kinetic.theta, std::abs(carrier_flux));
-    magnitude.add_product(std::abs(kinetic.slip_volume_flux), 1.);
-    magnitude.add_product(std::abs(kinetic.pressure_rounding_flux), 1.);
-    magnitude.add_product(kinetic.forward.material_volume_flux, 1.);
-    magnitude.add_product(-kinetic.backward.material_volume_flux, 1.);
+    const long double defect = kinetic.pressure_rounding_flux - residual;
+    const long double magnitude = std::abs(pressure_carrier) + std::abs(kinetic.slip_volume_flux) +
+                                  std::abs(kinetic.pressure_rounding_flux) + direct_magnitude;
     require(relative_difference(defect, magnitude) <= 2 * qbmm_reconstruction_tolerance,
         "QBMM kinetic pressure split disagrees with the directly transported volume packet.");
     return result;
@@ -627,8 +582,8 @@ void validate_closed_balances(const Mesh& mesh, const Flow::Options& options, co
             for (size_t q = 0; q < channels; ++q)
                 if (scale[q] > 0)
                 {
-                    local[2 * q] = budget[q].change.rounded(scale[q]);
-                    local[2 * q + 1] = budget[q].magnitude.rounded(scale[q]);
+                    local[2 * q] = rounded_rate(budget[q].change.value(), scale[q]);
+                    local[2 * q + 1] = rounded_rate(budget[q].magnitude.value(), scale[q]);
                 }
         });
     Teuchos::reduceAll(comm, Teuchos::REDUCE_SUM, static_cast<int>(operands), local.data(), totals.data());

@@ -15,6 +15,24 @@ include(CheckCXXCompilerFlag)
 check_cxx_compiler_flag(
     "-fno-semantic-interposition"
     SIMPLEFLUID_CXX_HAS_FNO_SEMANTIC_INTERPOSITION)
+check_cxx_compiler_flag("-ffp-contract=off" SIMPLEFLUID_CXX_HAS_FFP_CONTRACT_OFF)
+set(_simplefluid_fma_default OFF)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$" AND SIMPLEFLUID_CXX_HAS_FFP_CONTRACT_OFF)
+    check_cxx_compiler_flag("-mfma" SIMPLEFLUID_CXX_HAS_X86_FMA)
+    if(SIMPLEFLUID_CXX_HAS_X86_FMA)
+        set(_simplefluid_fma_default ON)
+    endif()
+endif()
+option(SIMPLEFLUID_ENABLE_FMA "Use the x86-64 FMA instruction set for explicit fused operations"
+       ${_simplefluid_fma_default})
+# Keep these options common to the shared PCH providers and their C++ consumers.
+if(SIMPLEFLUID_CXX_HAS_FFP_CONTRACT_OFF)
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off>")
+    if(SIMPLEFLUID_ENABLE_FMA AND _simplefluid_fma_default)
+        add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-mfma>")
+    endif()
+endif()
+unset(_simplefluid_fma_default)
 
 include(CTest)
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/Profiling.cmake")

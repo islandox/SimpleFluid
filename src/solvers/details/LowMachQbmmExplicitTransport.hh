@@ -3,10 +3,9 @@
  */
 #pragma once
 
-#include "equations/details/LowMachScaledFaceSum.hh"
 #include "solvers/LowMachMixtureSolver.hh"
+#include "utils/CompensatedSum.hh"
 
-#include <initializer_list>
 #include <limits>
 
 namespace SimpleFluid::Reacting::qbmm_explicit_detail
@@ -15,16 +14,17 @@ using Flow = LowMachMixtureSolver;
 using Mesh = Flow::Mesh;
 using LO = Flow::Pack::local_ordinal_type;
 using Vector = Flow::Vector;
-using FaceSum = qbmm_face_detail::ScaledFaceSum;
+using Accumulator = SimpleFluid::detail::CompensatedSum<long double>;
 using MultiVector = Flow::Pack::multi_vector_type;
 using Map = Flow::Pack::map_type;
 using Import = Flow::Pack::import_type;
 
 struct SIMPLEFLUID_SOLVERS_LOCAL FaceIntegrals
 {
-    qbmm_face_detail::ScaledFaceSum forward_mass, backward_mass;  ///< Nonnegative kg per direction.
-    std::array<qbmm_face_detail::ScaledFaceSum, 3> drift;         ///< Signed kg m/s in owner orientation.
-    qbmm_face_detail::ScaledFaceSum theta, slip, material_volume; ///< Integrated physical pressure operands.
+    double forward_mass = 0, backward_mass = 0;      ///< Nonnegative kg per direction.
+    double net_mass = 0;                            ///< Signed kg in owner orientation before directional rounding.
+    std::array<double, 3> drift{};                   ///< Signed kg m/s in owner orientation.
+    double theta = 0, slip = 0, material_volume = 0; ///< Integrated physical pressure operands.
 };
 
 struct SIMPLEFLUID_SOLVERS_LOCAL TransportResult
@@ -83,27 +83,16 @@ public:
     void synchronize() { ghosted.doImport(owned, importer, Tpetra::REPLACE); }
 };
 
-struct SIMPLEFLUID_SOLVERS_LOCAL Product
-{
-    double fraction = 1;
-    int exponent = 0;
-
-    void multiply(double value);
-    void divide(double positive);
-    [[nodiscard]] FaceSum sum() const;
-    void add_weighted(FaceSum& result, const FaceSum& value) const;
-};
-
 struct SIMPLEFLUID_SOLVERS_LOCAL FaceInterval
 {
-    std::array<std::vector<FaceSum>, sides> direction;
-    std::array<std::array<FaceSum, MomentumColumns>, sides> momentum;
-    FaceSum theta, slip;
+    std::array<std::vector<Accumulator>, sides> direction;
+    std::array<std::array<Accumulator, MomentumColumns>, sides> momentum;
+    Accumulator theta, slip;
 };
 
 struct SIMPLEFLUID_SOLVERS_LOCAL CellInterval
 {
-    FaceSum work_volume, gross_volume;
+    Accumulator work_volume, gross_volume;
 };
 
 struct SIMPLEFLUID_SOLVERS_LOCAL StageThermal
@@ -122,7 +111,8 @@ class SIMPLEFLUID_SOLVERS_LOCAL FaceOffsetFit
     std::vector<Sample> samples;
 
 public:
-    explicit FaceOffsetFit(std::span<const Mesh::Vec3> displacements);
+    void reserve(size_t count) { samples.reserve(count); }
+    void assign(std::span<const Mesh::Vec3> displacements);
     bool weights(const Mesh::Vec3& offset, std::vector<double>& result) const;
 };
 
@@ -132,15 +122,12 @@ SIMPLEFLUID_SOLVERS_LOCAL void validate_cylindrical_base(const Mesh::SemiStructu
 SIMPLEFLUID_SOLVERS_LOCAL void validate_axial_kinetic_geometry(const Mesh& mesh);
 
 SIMPLEFLUID_SOLVERS_LOCAL void require(bool valid, const char* message);
-SIMPLEFLUID_SOLVERS_LOCAL Product product(
-    std::initializer_list<double> numerator, std::initializer_list<double> denominator = {});
 SIMPLEFLUID_SOLVERS_LOCAL double finite_rate(double value, const char* message);
-SIMPLEFLUID_SOLVERS_LOCAL double relative_difference(const FaceSum& difference, const FaceSum& magnitude);
-SIMPLEFLUID_SOLVERS_LOCAL void add_magnitude(FaceSum& sum, const FaceSum& operand);
-SIMPLEFLUID_SOLVERS_LOCAL double represented(const FaceSum& amount, double divisor = 1.);
-SIMPLEFLUID_SOLVERS_LOCAL double represented(const Product& amount);
-SIMPLEFLUID_SOLVERS_LOCAL double rounded_rate(const FaceSum& amount, double duration = 1.);
-SIMPLEFLUID_SOLVERS_LOCAL StageThermal thermal_trace(PhaseThermalState& phase, bool recover_arrival);
+SIMPLEFLUID_SOLVERS_LOCAL double relative_difference(long double difference, long double magnitude);
+SIMPLEFLUID_SOLVERS_LOCAL double represented(long double amount, long double divisor = 1.L);
+SIMPLEFLUID_SOLVERS_LOCAL double rounded_rate(long double amount, long double duration = 1.L);
+SIMPLEFLUID_SOLVERS_LOCAL StageThermal thermal_trace(
+    PhaseThermalState& phase, bool recover_arrival, std::vector<double>& composition);
 SIMPLEFLUID_SOLVERS_LOCAL double exact_interval_substep(double remaining, double limit);
 
 SIMPLEFLUID_SOLVERS_LOCAL Flow::QbmmFaceFlux face_receipt(const FaceInterval& interval, double dt, double carrier_flux);

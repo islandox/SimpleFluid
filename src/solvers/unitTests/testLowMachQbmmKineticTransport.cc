@@ -342,13 +342,12 @@ TEST(LowMachQbmmKineticTransportTest, CancellingKineticFamiliesRetainExactSpecie
                 ++local_remote;
             const size_t f = carrier.owned_row(face);
             const auto& integral = result.integrated_faces[f];
-            auto remainder = integral.forward_mass;
-            remainder.add_weighted(integral.backward_mass, -1.);
+            const double remainder = integral.net_mass;
             const double sign = grid->face_area_vector(face).x;
             // A=(2^27+1)^2 and B=2^27(2^27+2) round to the same binary64 mass, while A-B=1 exactly.
             EXPECT_EQ(result.owned_flux[0][f].derived_mass_flux + result.owned_flux[1][f].derived_mass_flux, 0.);
-            EXPECT_EQ(sign * remainder.rounded(), 1.);
-            EXPECT_EQ(sign * remainder.rounded(width), 1. / width);
+            EXPECT_EQ(sign * remainder, 1.);
+            EXPECT_EQ(sign * remainder / width, 1. / width);
         }
     const int remote = reduce(*grid, Teuchos::REDUCE_SUM, local_remote);
     EXPECT_EQ(remote, int(grid->owned_cell_map()->getComm()->getSize() > 1));
@@ -359,6 +358,26 @@ TEST(LowMachQbmmKineticTransportTest, CancellingKineticFamiliesRetainExactSpecie
         EXPECT_EQ(candidate.cells[c].phases[receiver].moles[receiver], counts[receiver]);
         EXPECT_EQ(candidate.cells[c].phases[1 - receiver].moles[1 - receiver], 0.);
     }
+}
+
+TEST(LowMachQbmmKineticTransportTest, ReservationRoundsDownWhenTheSweptProductTiesAtTheCap)
+{
+    constexpr double rate = 1. + 0x1p-32, width = 1. + 0x1p-31;
+    Operator op(mesh({0., width, 2. * width}), 8.);
+    const auto opts = options(op.species, [](const auto&) { return std::array{0., 0., 0.}; }, op.bounds, 1., 2);
+    op.fill(
+        opts, [](auto x) { return x.x < width ? R::QbmmMomentBlock{1., 1., 1., 1.} : R::QbmmMomentBlock{}; },
+        [](auto) { return 1.; });
+    for (const auto face : op.carrier.owned_face_ids())
+        if (op.grid->is_interior_face(face))
+            op.carrier.set_owned_value(face, rate * op.grid->face_area_vector(face).x);
+
+    // The exact sweep for dt=rate is width+2^-64 even though the product can round to width.
+    Flow::State candidate;
+    const auto result = op.advance(opts, candidate, rate);
+    const double first = std::nextafter(rate, 0.);
+    EXPECT_EQ(result.substep_durations, (std::vector<double>{first, rate - first}));
+    EXPECT_LE(result.maximum_cfl, 1.);
 }
 
 TEST(LowMachQbmmKineticTransportTest, SubnormalReservationRateChoosesTheLargestSafeDuration)
