@@ -12,6 +12,7 @@
 #include <cmath>
 #include <gtest/gtest.h>
 #include <limits>
+#include <map>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -92,6 +93,88 @@ TEST(LowMachMixtureSolverTest, UniformClosedHeatingRecoversPressureTemperatureAn
         EXPECT_EQ(solver.state().cells[c].phases[0].moles, initial.cells[c].phases[0].moles);
         const double mass = initial.cells[c].phases[0].moles[0] * 0.018 + initial.cells[c].phases[0].moles[1] * 0.032;
         EXPECT_NEAR(solver.density().value(static_cast<LO>(c)), mass / grid->cell_volume(static_cast<LO>(c)), 1e-12);
+    }
+}
+
+TEST(LowMachMixtureSolverTest, NonlinearEnthalpyRecoversOccupiedAndArrivingPhasesFromTheirOwnSeeds)
+{
+    auto grid = mesh();
+    const auto species = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
+        {1, "liquid", 1, {{"A", 1}}, {R::SpeciesPhase::Liquid}}});
+    std::array<std::map<double, size_t>, 2> calls;
+    std::vector<std::shared_ptr<const R::MixtureThermodynamics>> liquids;
+    for (size_t a = 0; a < calls.size(); ++a)
+        liquids.push_back(std::make_shared<const R::MixtureThermodynamics>(species,
+            R::ThermodynamicBounds{1, 5, .5, 1.5}, R::EOSKind::Liquid,
+            [&, a](double t, double p, std::span<const double>)
+            {
+                ++calls[a][t];
+                // v=2-p, so (de/dp)_T=p. At p=1, h=T^4+1 and rho=1 for both phases.
+                const double rho = 1 / (2 - p), t2 = t * t, e = t2 * t2 + .5 * (p * p - 1);
+                return R::MixtureThermodynamicPoint{rho, e, e + p / rho, 4 * t2 * t, p, 0, rho * rho, {}, {}};
+            }));
+    const double interior = 3.25 + 0x1p-40;
+    const double low = 3.25, high = std::nextafter(low, 5.);
+    const double adjacent_h = std::nextafter(std::pow(low, 4) + 1, std::numeric_limits<double>::infinity());
+    ASSERT_LT(adjacent_h, std::pow(high, 4) + 1);
+    for (const auto mode : {R::PhaseThermalMode::Equilibrium, R::PhaseThermalMode::SeparatePhaseTemperatures})
+    {
+        auto opt = options();
+        opt.minimum_pressure = .5;
+        opt.maximum_pressure = 1.5;
+        opt.thermal_mode = mode;
+        Solver solver(grid, liquids, opt);
+        Solver::State initial;
+        initial.thermodynamic_pressure = 1;
+        initial.cells.resize(grid->num_owned_cells());
+        for (size_t c = 0; c < initial.cells.size(); ++c)
+        {
+            const double v = grid->cell_volume(static_cast<LO>(c));
+            const double seed = grid->cell_global_id(static_cast<LO>(c)) == 0 ? 1 : 3.;
+            initial.cells[c].phases = {{liquids[0], {v}, 1, v * std::pow(seed, 4), seed}, {liquids[1], {0}, 1, 0, 0}};
+        }
+        solver.initialize(initial);
+        for (const auto [h, expected] : {std::pair{2., 1.}, std::pair{626., 5.},
+                 std::pair{std::pow(interior, 4) + 1, interior}, std::pair{adjacent_h, std::midpoint(low, high)}})
+        {
+            SCOPED_TRACE(::testing::Message() << "enthalpy " << h << ", mode " << static_cast<int>(mode));
+            std::vector<Solver::CellSources> sources(initial.cells.size());
+            for (size_t c = 0; c < sources.size(); ++c)
+            {
+                const double v = grid->cell_volume(static_cast<LO>(c));
+                // Each phase ends with half the stock. The old phase supplies the work volume v,
+                // while the newly occupied phase enters enthalpy recovery with zero T and work volume.
+                sources[c].species_moles = {{-.5 * v}, {.5 * v}};
+                sources[c].internal_energy = {.5 * v * h - v - initial.cells[c].phases[0].internal_energy, .5 * v * h};
+            }
+            calls = {};
+            const auto trial = solver.preview(.01, sources);
+            EXPECT_EQ(trial.state().thermodynamic_pressure, 1.);
+            for (const auto& cell : trial.state().cells)
+                for (const auto& phase : cell.phases)
+                {
+                    EXPECT_EQ(phase.temperature, expected);
+                    EXPECT_DOUBLE_EQ(phase.internal_energy, phase.moles[0] * std::pow(expected, 4));
+                }
+            if (expected == interior && !initial.cells.empty())
+            {
+                // Each inversion queries the upper bound exactly once. External transport and
+                // publication query only accepted/returned temperatures for this uniform final state.
+                // A lower-bound bisection from [1,5] uses 53 interior trials here, including the exact root.
+                const auto inversions = calls[1].at(5.);
+                size_t interior_calls = 0;
+                for (const auto& [t, count] : calls[1])
+                    if (t > 1 && t < 5 && t != expected)
+                    {
+                        EXPECT_LE(count, inversions) << "repeated EOS at trial temperature " << t;
+                        interior_calls += count;
+                    }
+                const std::string mode_name = mode == R::PhaseThermalMode::Equilibrium ? "equilibrium" : "separate";
+                RecordProperty(mode_name + "_arriving_phase_inversions", std::to_string(inversions));
+                RecordProperty(mode_name + "_nonterminal_interior_eos_calls", std::to_string(interior_calls));
+                EXPECT_LT(interior_calls, 21 * inversions);
+            }
+        }
     }
 }
 

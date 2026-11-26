@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numbers>
 #include <stdexcept>
 
@@ -45,11 +46,20 @@ std::array<Sum, 4> sum_moments(std::span<const QbmmAtom> atoms)
     return sums;
 }
 
-// Kahan's difference of products retains the sign at a cancellation boundary.
-long double determinant(long double a, long double b, long double d)
+double fused(double a, double b, double c)
 {
-    const long double bb = b * b;
-    return std::fma(a, d, -bb) + std::fma(-b, b, bb);
+#if defined(__GNUC__) && defined(__FMA__)
+    return __builtin_fma(a, b, c);
+#else
+    return std::fma(a, b, c);
+#endif
+}
+
+// Kahan's difference of products retains the sign at a cancellation boundary.
+double determinant(double a, double b, double d)
+{
+    const double bb = b * b;
+    return fused(a, d, -bb) + fused(-b, b, bb);
 }
 
 void verify(QbmmQuadrature& result, const QbmmMomentBlock& h, std::span<const QbmmAtom> atoms)
@@ -123,24 +133,25 @@ QbmmQuadrature invert_qbmm_moments(QbmmMomentBlock h) noexcept
     const int coord = std::ilogb(h[1]) - count_exponent;
     auto& report = result.conditioning;
     report.coordinate_exponent = coord;
-    std::array<long double, 4> m;
+    std::array<double, 4> m;
     for (int k = 0; k < 4; ++k)
-        m[k] = std::scalbn(static_cast<long double>(h[k]), -count_exponent - k * coord);
+        m[k] = std::scalbn(h[k], -count_exponent - k * coord);
     const long double d0 = determinant(m[0], m[1], m[2]), d1 = determinant(m[1], m[2], m[3]);
-    const long double hankel_margin = d0 / (m[0] * m[2] + m[1] * m[1]);
-    const long double shifted_hankel_margin = d1 / (m[1] * m[3] + m[2] * m[2]);
+    const long double m0 = m[0], m1 = m[1], m2 = m[2], m3 = m[3];
+    const long double hankel_margin = d0 / (m0 * m2 + m1 * m1);
+    const long double shifted_hankel_margin = d1 / (m1 * m3 + m2 * m2);
     report.hankel_margin = qbmm_detail::diagnostic_double(hankel_margin);
     report.shifted_hankel_margin = qbmm_detail::diagnostic_double(shifted_hankel_margin);
     result.status = InversionStatus::IllConditioned;
     if (!std::ranges::all_of(m, positive) || !std::isfinite(hankel_margin) || !std::isfinite(shifted_hankel_margin))
         return result;
 
-    const long double a0 = m[1] / m[0];
+    const long double a0 = m1 / m0;
     report.a0 = qbmm_detail::diagnostic_double(a0, coord);
     if (std::abs(hankel_margin) <= qbmm_rank_tolerance)
     {
-        const long double mono2 = m[1] * a0, mono3 = mono2 * a0;
-        if (std::abs(mono2 - m[2]) > qbmm_rank_tolerance * m[2] || std::abs(mono3 - m[3]) > qbmm_rank_tolerance * m[3])
+        const long double mono2 = m1 * a0, mono3 = mono2 * a0;
+        if (std::abs(mono2 - m2) > qbmm_rank_tolerance * m2 || std::abs(mono3 - m3) > qbmm_rank_tolerance * m3)
         {
             result.status = d0 > 0 && d1 > 0 ? InversionStatus::IllConditioned : InversionStatus::InconsistentRank;
             return result;
@@ -172,7 +183,7 @@ QbmmQuadrature invert_qbmm_moments(QbmmMomentBlock h) noexcept
     if (shifted_hankel_margin <= qbmm_rank_tolerance)
         return result; // A positive lower endpoint cannot be resolved at the input precision.
 
-    const long double b1 = d0 / (m[0] * m[0]), det_j = d1 / d0;
+    const long double b1 = d0 / (m0 * m0), det_j = d1 / d0;
     // det(J) = a0*a1 - b1. Recover a1 using positive terms only.
     const long double a1 = (det_j + b1) / a0;
     report.a1 = qbmm_detail::diagnostic_double(a1, coord);

@@ -97,6 +97,8 @@ TEST(QbmmInversionTest, TwoPositiveAtomsAndUnscaledJacobiRecurrence)
     const auto q = R::invert_qbmm_moments(expected);
     ASSERT_EQ(q.status, R::InversionStatus::TwoNodes);
     ASSERT_EQ(q.active_atoms, 2u);
+    EXPECT_DOUBLE_EQ(q.conditioning.hankel_margin, 54. / 446);
+    EXPECT_DOUBLE_EQ(q.conditioning.shifted_hankel_margin, 216. / 5216);
     EXPECT_NEAR(q.conditioning.a0, 14.0 / 5, 2e-14);
     EXPECT_NEAR(q.conditioning.b1, 54.0 / 25, 2e-14);
     EXPECT_NEAR(q.conditioning.a1, 11.0 / 5, 2e-14);
@@ -106,6 +108,31 @@ TEST(QbmmInversionTest, TwoPositiveAtomsAndUnscaledJacobiRecurrence)
         EXPECT_NEAR(q.atoms[i].mass_over_scale, atoms[i].mass_over_scale, 1e-13);
     }
     check_reconstruction(q, expected, 1e-13);
+}
+
+TEST(QbmmInversionTest, OppositeUnitDeterminantsSurviveCancellationOfLargeProducts)
+{
+    // F69 through F72 are exact binary64 integers. Cassini's identity gives
+    // F69*F71 - F70^2 = +1 and F70*F72 - F71^2 = -1.
+    const R::QbmmMomentBlock h{117669030460994., 190392490709135., 308061521170129., 498454011879264.};
+    const auto q = R::invert_qbmm_moments(h);
+    EXPECT_EQ(q.status, R::InversionStatus::RankOne);
+    EXPECT_DOUBLE_EQ(q.conditioning.hankel_margin, 1. / (2 * h[1] * h[1] + 1));
+    EXPECT_DOUBLE_EQ(q.conditioning.shifted_hankel_margin, -1. / (2 * h[2] * h[2] - 1));
+}
+
+TEST(QbmmInversionTest, RejectsExtremeScaledMomentAndProductRanges)
+{
+    // These inconsistent stocks exercise an underflowed square, an overflowed
+    // square, and an overflow when scaling the moments themselves.
+    const auto tiny = R::invert_qbmm_moments({1, 1, 0x1p-538, 0x1p-1074});
+    EXPECT_EQ(tiny.status, R::InversionStatus::InconsistentRank);
+    const auto huge = R::invert_qbmm_moments({1, 1, 0x1p512, 0x1p1023});
+    EXPECT_EQ(huge.status, R::InversionStatus::IllConditioned);
+    const auto scaled_overflow = R::invert_qbmm_moments({1, 0x1p-512, 0x1p-1023, 1});
+    EXPECT_EQ(scaled_overflow.status, R::InversionStatus::IllConditioned);
+    EXPECT_DOUBLE_EQ(scaled_overflow.conditioning.hankel_margin, 1. / 3);
+    EXPECT_TRUE(std::isnan(scaled_overflow.conditioning.shifted_hankel_margin));
 }
 
 TEST(QbmmInversionTest, RejectsInconsistentRankNegativeSupportAndNonfiniteDataAtActualStockScale)

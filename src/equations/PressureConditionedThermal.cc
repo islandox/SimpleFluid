@@ -2,9 +2,10 @@
 #include "equations/PressureConditionedThermal.hh"
 #include "utils/CompensatedSum.hh"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <numeric>
-#include <set>
+#include <string_view>
 
 namespace SimpleFluid::Reacting
 {
@@ -71,42 +72,50 @@ void valid_bounds(const ThermodynamicBounds& b)
                 b.minimum_pressure < b.maximum_pressure,
         "Invalid supplied thermal law bounds.");
 }
-struct Point
+struct PreparedStock
 {
     std::vector<double> x;
-    long double amount = 0, mass = 0, H = 0, Ht = 0, Hp = 0, V = 0, Vt = 0, Vp = 0, U = 0, caloric = 0;
+    long double mass = 0;
 };
-Point point(const PhaseThermalState& phase, std::span<const double> moles, double t, double p)
+void prepare_stock(PreparedStock& result, const SpeciesCatalog& catalog, std::span<const double> moles)
 {
-    const auto& eos = *phase.thermodynamics;
-    const auto& catalog = eos.catalog();
     require(moles.size() == catalog.species().size(), "Thermal species layout differs.");
-    Point result;
     Acc amount, mass;
     for (size_t i = 0; i < moles.size(); ++i)
     {
-        require(std::isfinite(moles[i]) && moles[i] >= 0, "Invalid thermal species inventory.");
         amount.add(moles[i]);
         mass.add(static_cast<long double>(moles[i]) * catalog.species()[i].molarMass);
     }
-    result.amount = amount.value();
     result.mass = mass.value();
-    result.x.assign(moles.size(), 0);
-    if (result.amount == 0)
-        return result;
     require(result.mass > 0, "Occupied phase mass is not representable.");
+    result.x.resize(moles.size());
+    const auto total_amount = amount.value();
     for (size_t i = 0; i < moles.size(); ++i)
-        result.x[i] = static_cast<double>(moles[i] / result.amount);
-    const auto properties = eos.evaluate(t, p, result.x);
+        result.x[i] = static_cast<double>(moles[i] / total_amount);
+}
+struct Point
+{
+    long double H = 0, Ht = 0, Hp = 0, V = 0, Vt = 0, Vp = 0, U = 0, caloric = 0;
+};
+struct EnthalpySample
+{
+    double temperature;
+    long double enthalpy, slope, physical_scale, error, roundoff;
+    size_t slot;
+};
+Point point(const MixtureThermodynamics& eos, const PreparedStock& stock, double t, double p)
+{
+    const auto properties = eos.evaluate(t, p, stock.x);
     const long double rho = properties.density, rho2 = rho * rho;
-    result.H = result.mass * properties.enthalpy;
-    result.U = result.mass * properties.internal_energy;
-    result.Ht = result.mass * (properties.internal_energy_temperature - p * properties.density_temperature / rho2);
-    result.Hp = result.mass * (properties.internal_energy_pressure + 1 / rho - p * properties.density_pressure / rho2);
-    result.V = result.mass / rho;
-    result.Vt = -result.mass * properties.density_temperature / rho2;
-    result.Vp = -result.mass * properties.density_pressure / rho2;
-    result.caloric = std::abs(t * result.mass * properties.internal_energy_temperature);
+    Point result;
+    result.H = stock.mass * properties.enthalpy;
+    result.U = stock.mass * properties.internal_energy;
+    result.Ht = stock.mass * (properties.internal_energy_temperature - p * properties.density_temperature / rho2);
+    result.Hp = stock.mass * (properties.internal_energy_pressure + 1 / rho - p * properties.density_pressure / rho2);
+    result.V = stock.mass / rho;
+    result.Vt = -stock.mass * properties.density_temperature / rho2;
+    result.Vp = -stock.mass * properties.density_pressure / rho2;
+    result.caloric = std::abs(t * stock.mass * properties.internal_energy_temperature);
     require(std::isfinite(result.H) && std::isfinite(result.U) && std::isfinite(result.Ht) && result.Ht > 0 &&
                 std::isfinite(result.Hp) && std::isfinite(result.V) && result.V > 0 && std::isfinite(result.Vt) &&
                 std::isfinite(result.Vp),
@@ -304,6 +313,28 @@ const ConfiguredInterphaseStage* paired_substep_stage(const FrozenInterphasePlan
 {
     return plan.material_tail.paired_stage ? &plan.configuration->stages.back() : nullptr;
 }
+
+size_t first_duplicate_stage(std::span<const ConfiguredInterphaseStage> stages)
+{
+    if (stages.size() <= 16)
+    {
+        for (size_t i = 1; i < stages.size(); ++i)
+            for (size_t j = 0; j < i; ++j)
+                if (stages[i].identity == stages[j].identity)
+                    return i;
+        return stages.size();
+    }
+    std::vector<std::pair<std::string_view, size_t>> ids;
+    ids.reserve(stages.size());
+    for (size_t i = 0; i < stages.size(); ++i)
+        ids.emplace_back(stages[i].identity, i);
+    std::sort(ids.begin(), ids.end());
+    size_t duplicate = stages.size();
+    for (size_t i = 1; i < ids.size(); ++i)
+        if (ids[i].first == ids[i - 1].first)
+            duplicate = std::min(duplicate, ids[i].second);
+    return duplicate;
+}
 } // namespace
 void validate_interphase_configuration(const InterphaseConfiguration& config, std::span<const PhaseThermalState> phases)
 {
@@ -334,11 +365,11 @@ void validate_interphase_configuration(const InterphaseConfiguration& config, st
                     law.metadata.schema_fingerprint == catalog.fingerprint() && law.evaluate,
             "Invalid whole-plan caloric domain provider metadata.");
     }
-    std::set<std::string> ids;
-    for (const auto& stage : config.stages)
+    const auto duplicate = first_duplicate_stage(config.stages);
+    for (size_t i = 0; i < config.stages.size(); ++i)
     {
-        require(!stage.identity.empty() && ids.insert(stage.identity).second,
-            "Interphase stage identities must be explicit and unique.");
+        const auto& stage = config.stages[i];
+        require(!stage.identity.empty() && i != duplicate, "Interphase stage identities must be explicit and unique.");
         require(stage.kind == InterphaseStageKind::Heat || stage.kind == InterphaseStageKind::Material,
             "Unknown interphase stage kind.");
         if (stage.kind == InterphaseStageKind::Heat)
@@ -500,10 +531,12 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
         targets[a].append(sources[a]);
         target_derivative[a] = advected_volumes[a];
     }
+    std::vector<PreparedStock> prepared(np);
     std::vector<Point> points(np);
+    std::vector<std::array<Point, 3>> trial_points(np);
+    std::vector<int> occupied(np);
     auto recover = [&]()
     {
-        std::vector<int> occupied(np, 0);
         double common_lower = 0, common_upper = std::numeric_limits<double>::infinity();
         size_t active = 0;
         for (size_t a = 0; a < np; ++a)
@@ -543,55 +576,124 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
             }
         }
         require(active > 0, "A closed control volume has no occupied caloric phase.");
-        auto invert = [&](size_t selected, double lo, double hi)
+        const auto invert = [&](size_t selected, double lo, double hi)
         {
             if (lo > hi)
                 throw ThermalCaloricRangeError("Thermal anchors lack a common supplied temperature interval.");
+            const auto includes = [&](size_t a) { return occupied[a] && (selected == np || selected == a); };
             Acc target;
             for (size_t a = 0; a < np; ++a)
-                if (occupied[a] && (selected == np || selected == a))
+                if (includes(a))
+                {
                     target.append(targets[a]);
-            auto enthalpy = [&](double t, long double* physical = nullptr)
+                    prepare_stock(prepared[a], catalog, moles[a]);
+                }
+            const auto evaluate = [&](double t, size_t slot)
             {
-                Acc value;
-                long double scale = 0;
+                Acc enthalpy;
+                long double slope = 0, physical_scale = 0;
                 for (size_t a = 0; a < np; ++a)
-                    if (occupied[a] && (selected == np || selected == a))
+                    if (includes(a))
                     {
-                        const auto state = point(final_templates[a], moles[a], t, pressure);
-                        value.add(state.H);
-                        scale += std::abs(t * state.Ht);
+                        auto& state = trial_points[a][slot];
+                        state = point(*final_templates[a].thermodynamics, prepared[a], t, pressure);
+                        enthalpy.add(state.H);
+                        slope += state.Ht;
+                        physical_scale += std::abs(t * state.Ht);
                     }
-                if (physical)
-                    *physical = scale;
-                return value;
+                Acc residual;
+                residual.append(enthalpy);
+                residual.append(target, -1);
+                const auto roundoff = 32 * std::numeric_limits<double>::epsilon() * std::abs(enthalpy.value()) +
+                                      enthalpy.error_bound() + target.error_bound() + residual.error_bound();
+                return EnthalpySample{t, enthalpy.value(), slope, physical_scale, residual.value(), roundoff, slot};
             };
-            const auto low = enthalpy(lo), high = enthalpy(hi);
-            if (target.value() < low.value() || target.value() > high.value())
+            auto lower = evaluate(lo, 0);
+            auto upper = lo == hi ? lower : evaluate(hi, 1);
+            if (target.value() < lower.enthalpy || target.value() > upper.enthalpy)
                 throw ThermalCaloricRangeError(
                     "Conditioned phase enthalpy is outside supplied caloric validity bounds.");
-            for (int iteration = 0; iteration < 180; ++iteration)
+            const auto check_conditioning = [&](const EnthalpySample& sample)
             {
-                const double t = std::midpoint(lo, hi);
-                long double physical = 0;
-                const auto value = enthalpy(t, &physical);
-                Acc residual;
-                residual.append(value);
-                residual.append(target, -1);
-                const auto roundoff = 32 * std::numeric_limits<double>::epsilon() * std::abs(value.value()) +
-                                      value.error_bound() + target.error_bound() + residual.error_bound();
-                require(roundoff <=
+                require(sample.roundoff <=
                             .25L * std::min(controls.physical_relative_tolerance, controls.caloric_relative_tolerance) *
-                                physical,
+                                sample.physical_scale,
                     "Caloric reference/operands cannot resolve requested conditioned temperature accuracy.");
-                // Operand roundoff bounds certify conditioning; they must not become a reference-dependent
-                // temperature stopping tolerance. Resolve the supplied monotone EOS to its representable bracket.
-                if (residual.value() == 0 || t == lo || t == hi)
-                    return t;
-                if (residual.value() < 0)
-                    lo = t;
+            };
+            const auto finish = [&](const EnthalpySample& sample)
+            {
+                check_conditioning(sample);
+                for (size_t a = 0; a < np; ++a)
+                    if (includes(a))
+                        points[a] = trial_points[a][sample.slot];
+                return sample.temperature;
+            };
+            if (lower.error == 0)
+                return finish(lower);
+            if (upper.error == 0)
+                return finish(upper);
+
+            size_t trial_slot = 2;
+            double trial = std::midpoint(lo, hi);
+            double checkpoint_width = hi - lo;
+            int accelerated = 0, window = 0;
+            bool neighbor_probe = false;
+            for (int midpoints = 0; midpoints < 180;)
+            {
+                const double mid = std::midpoint(lo, hi);
+                if (mid == lo || mid == hi)
+                    return finish(mid == lo ? lower : upper);
+                const auto sample = evaluate(trial, trial_slot);
+                check_conditioning(sample);
+                if (sample.error == 0)
+                    return finish(sample);
+                if (sample.error < 0)
+                {
+                    lo = trial;
+                    trial_slot = lower.slot;
+                    lower = sample;
+                }
                 else
-                    hi = t;
+                {
+                    hi = trial;
+                    trial_slot = upper.slot;
+                    upper = sample;
+                }
+                bool require_midpoint = neighbor_probe;
+                if (trial == mid)
+                {
+                    ++midpoints;
+                    window = 0;
+                    checkpoint_width = hi - lo;
+                }
+                else
+                {
+                    ++accelerated;
+                    if (++window == 2)
+                    {
+                        require_midpoint = require_midpoint || hi - lo > .5 * checkpoint_width;
+                        window = 0;
+                        checkpoint_width = hi - lo;
+                    }
+                }
+                trial = std::midpoint(lo, hi);
+                neighbor_probe = false;
+                const auto& base = std::abs(lower.error) <= std::abs(upper.error) ? lower : upper;
+                if (!require_midpoint && accelerated < 12 && std::isfinite(base.slope) && base.slope > 0)
+                {
+                    const auto estimate = base.temperature - base.error / base.slope;
+                    if (estimate == base.temperature || (estimate > lo && estimate < hi))
+                    {
+                        double next = static_cast<double>(estimate);
+                        if (next == base.temperature)
+                        {
+                            next = std::nextafter(base.temperature, base.temperature == lo ? hi : lo);
+                            neighbor_probe = next > lo && next < hi;
+                        }
+                        if (next > lo && next < hi)
+                            trial = next;
+                    }
+                }
             }
             throw std::runtime_error("Bounded conditioned enthalpy inversion did not converge.");
         };
@@ -604,7 +706,6 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
                 const double t = mode == PhaseThermalMode::Equilibrium
                                      ? common
                                      : invert(a, b.minimum_temperature, b.maximum_temperature);
-                points[a] = point(final_templates[a], moles[a], t, pressure);
                 last_caloric[a] = points[a].caloric;
                 result.phases[a].moles = moles[a];
                 result.phases[a].temperature = t;
@@ -678,14 +779,14 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
             const auto a = slot.donor;
             if (!evaluated[a])
             {
-                require(points[a].amount > 0, "Material donor has no actual anchor stock.");
+                require(occupied[a], "Material donor has no actual anchor stock.");
                 const auto& law = *plan.configuration->phase_enthalpy[a];
                 const auto t = result.phases[a].temperature;
                 if (t < law.bounds.minimum_temperature || t > law.bounds.maximum_temperature ||
                     pressure < law.bounds.minimum_pressure || pressure > law.bounds.maximum_pressure)
                     throw ThermalCaloricRangeError(
                         "Occupied donor anchor lies outside supplied partial-h law domain.");
-                properties[a] = law.evaluate(t, pressure, points[a].x);
+                properties[a] = law.evaluate(t, pressure, prepared[a].x);
                 const auto& h = properties[a];
                 require(h.value.size() == catalog.species().size() && h.temperature.size() == h.value.size() &&
                             h.pressure.size() == h.value.size(),
@@ -777,10 +878,11 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
                 for (const size_t a : {donor, receiver})
                     if (!heat_active[a])
                     {
-                        require(points[a].amount > 0, "Heat reservation needs an actual occupied predecessor phase.");
-                        const auto& bounds = final_templates[a].thermodynamics->bounds();
-                        const auto lower = point(final_templates[a], moles[a], bounds.minimum_temperature, pressure);
-                        const auto upper = point(final_templates[a], moles[a], bounds.maximum_temperature, pressure);
+                        require(occupied[a], "Heat reservation needs an actual occupied predecessor phase.");
+                        const auto& eos = *final_templates[a].thermodynamics;
+                        const auto& bounds = eos.bounds();
+                        const auto lower = point(eos, prepared[a], bounds.minimum_temperature, pressure);
+                        const auto upper = point(eos, prepared[a], bounds.maximum_temperature, pressure);
                         heat_margin[a].add(points[a].H);
                         heat_margin[a].add(-lower.H);
                         heat_headroom[a].add(upper.H);
@@ -801,7 +903,7 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
                 require(std::isfinite(q), "Nonfinite frozen interphase heat.");
                 if (q == 0)
                     continue;
-                require(points[slot.first].amount > 0 && points[slot.second].amount > 0,
+                require(occupied[slot.first] && occupied[slot.second],
                     "Heat exchange needs both actual occupied predecessor phases; no absent phase temperature is "
                     "invented.");
                 targets[slot.first].add(-q);

@@ -544,20 +544,28 @@ CaloricCell recover_enthalpy(const Solver::CellState& transported, std::span<con
         return result;
     }
     const size_t count = transported.phases.size();
-    std::vector<std::vector<double>> x(count);
-    std::vector<double> mass(count), targets(count);
+    struct PhaseCaloricData
+    {
+        std::vector<double> composition;
+        double mass = 0, target = 0;
+        // Slots rotate with the bracket. Retain the EOS point at either endpoint
+        // so the final U, V and pressure tangent use the same evaluated state.
+        std::array<MixtureThermodynamicPoint, 3> points;
+    };
+    std::vector<PhaseCaloricData> data(count);
     double lower = 0, upper = std::numeric_limits<double>::infinity(), total_target = 0, occupied_temperature = 0;
     for (size_t a = 0; a < count; ++a)
     {
         auto& phase = result.cell.phases[a];
+        auto& caloric = data[a];
         phase.absolute_pressure = p0 + transported.mechanical_pressure;
-        x[a] = fractions(phase);
-        mass[a] = phase_mass(phase);
-        targets[a] = phase.internal_energy + phase.absolute_pressure * advected_volumes[a];
+        caloric.mass = phase_mass(phase);
+        caloric.target = phase.internal_energy + phase.absolute_pressure * advected_volumes[a];
         result.pressure_operands += std::abs(phase.absolute_pressure * advected_volumes[a]);
-        total_target += targets[a];
-        if (mass[a] > 0)
+        total_target += caloric.target;
+        if (caloric.mass > 0)
         {
+            caloric.composition = fractions(phase);
             occupied_temperature = phase.temperature;
             lower = std::max(lower, phase.thermodynamics->bounds().minimum_temperature);
             upper = std::min(upper, phase.thermodynamics->bounds().maximum_temperature);
@@ -567,102 +575,192 @@ CaloricCell recover_enthalpy(const Solver::CellState& transported, std::span<con
             const double bound =
                 32 * std::numeric_limits<double>::epsilon() *
                 (std::abs(phase.internal_energy) + std::abs(phase.absolute_pressure * advected_volumes[a]));
-            check(std::abs(targets[a]) <= bound, "Empty phase has unallocated physical energy/volume work.");
-            result.roundoff -= targets[a];
-            total_target -= targets[a];
+            check(std::abs(caloric.target) <= bound, "Empty phase has unallocated physical energy/volume work.");
+            result.roundoff -= caloric.target;
+            total_target -= caloric.target;
             result.work += phase.absolute_pressure * advected_volumes[a];
             result.work_magnitude += std::abs(phase.absolute_pressure * advected_volumes[a]);
         }
     }
-    auto invert = [&](size_t selected, double target, double lo, double hi)
+    struct CaloricRoot
     {
-        auto enthalpy = [&](double t)
+        double temperature;
+        size_t slot;
+    };
+    const auto heat_slope = [](const MixtureThermodynamicPoint& point, double pressure, double mass)
+    {
+        return mass * (point.internal_energy_temperature -
+                          pressure * point.density_temperature / (point.density * point.density));
+    };
+    const auto invert = [&](size_t selected, double target, double lo, double hi) -> CaloricRoot
+    {
+        struct Sample
         {
-            double value = 0;
+            double enthalpy = 0;
+            long double derivative = 0;
+        };
+        const auto evaluate = [&](double t, size_t slot)
+        {
+            Sample sample;
             for (size_t a = 0; a < count; ++a)
-                if (mass[a] > 0 && (selected == count || selected == a))
-                    value += mass[a] * result.cell.phases[a]
-                                           .thermodynamics->evaluate(t, result.cell.phases[a].absolute_pressure, x[a])
-                                           .enthalpy;
-            return value;
+                if (data[a].mass > 0 && (selected == count || selected == a))
+                {
+                    auto& caloric = data[a];
+                    const auto& phase = result.cell.phases[a];
+                    auto& point = caloric.points[slot];
+                    point = phase.thermodynamics->evaluate(t, phase.absolute_pressure, caloric.composition);
+                    sample.enthalpy += caloric.mass * point.enthalpy;
+                    sample.derivative += heat_slope(point, phase.absolute_pressure, caloric.mass);
+                }
+            return sample;
         };
         check(lo <= hi && std::isfinite(target), "Low-Mach enthalpy target or common caloric interval is invalid.");
-        const double minimum = enthalpy(lo), maximum = enthalpy(hi);
-        check(std::isfinite(minimum) && std::isfinite(maximum), "Low-Mach enthalpy bounds are nonfinite.");
+        size_t lo_slot = 0, hi_slot = 1, trial_slot = 2;
+        auto minimum = evaluate(lo, lo_slot);
+        auto maximum = lo == hi ? minimum : evaluate(hi, hi_slot);
+        check(std::isfinite(minimum.enthalpy) && std::isfinite(maximum.enthalpy),
+            "Low-Mach enthalpy bounds are nonfinite.");
         const double seed = selected == count ? occupied_temperature : transported.phases[selected].temperature;
+        std::optional<Sample> seed_sample;
+        const auto seed_slot = seed == lo ? lo_slot : (seed == hi ? hi_slot : trial_slot);
+        const auto sample_seed = [&]() -> const Sample&
+        {
+            if (!seed_sample)
+                seed_sample = seed == lo ? minimum : (seed == hi ? maximum : evaluate(seed, seed_slot));
+            return *seed_sample;
+        };
         if (uses_qbmm_kinetic_transport(options.qbmm_model) && selected == count && seed >= lo && seed <= hi)
         {
             // At a valid EOS endpoint, m*h and m*e + p*(m/rho) can round to opposite sides of the
             // enthalpy bound. First test the defining U and V equalities in every physical phase.
+            sample_seed();
             bool same = true;
             for (size_t a = 0; a < count && same; ++a)
             {
                 const auto& phase = result.cell.phases[a];
-                if (mass[a] == 0.)
+                const auto& caloric = data[a];
+                if (caloric.mass == 0.)
                     same = phase.internal_energy == 0. && advected_volumes[a] == 0.;
                 else
                 {
-                    const auto point = phase.thermodynamics->evaluate(seed, phase.absolute_pressure, x[a]);
-                    same = phase.temperature == seed && phase.internal_energy == mass[a] * point.internal_energy &&
-                           advected_volumes[a] == mass[a] / point.density;
+                    const auto& point = caloric.points[seed_slot];
+                    same = phase.temperature == seed && phase.internal_energy == caloric.mass * point.internal_energy &&
+                           advected_volumes[a] == caloric.mass / point.density;
                 }
             }
             if (same)
-                return seed;
+                return {seed, seed_slot};
         }
-        if (target < minimum || target > maximum)
+        if (target < minimum.enthalpy || target > maximum.enthalpy)
             throw CaloricRangeError("Low-Mach phase enthalpy is outside supplied caloric validity bounds.");
         // Preserve an already represented enthalpy root during forced explicit transport.
-        if (check_exact_enthalpy_seed && seed >= lo && seed <= hi && enthalpy(seed) == target)
-            return seed;
-        if (target == minimum)
-            return lo;
-        if (target == maximum)
-            return hi;
+        if (check_exact_enthalpy_seed && seed >= lo && seed <= hi && sample_seed().enthalpy == target)
+            return {seed, seed_slot};
+        if (target == minimum.enthalpy)
+            return {lo, lo_slot};
+        if (target == maximum.enthalpy)
+            return {hi, hi_slot};
         // Resolve the monotone caloric law to its representable temperature bracket rather than stopping
-        // early on a reference-shifted energy roundoff band.
-        for (int iteration = 0; iteration < 180; ++iteration)
+        // early on a reference-shifted energy roundoff band. An interior rounded enthalpy equal to the
+        // target tightens the upper side, preserving the original rule for a plateau.
+        double trial = seed > lo && seed < hi ? seed : std::midpoint(lo, hi);
+        double checkpoint_width = hi - lo;
+        int accelerated = 0, window = 0;
+        bool neighbor_probe = false;
+        for (int midpoints = 0; midpoints < 180;)
         {
             const double mid = std::midpoint(lo, hi);
             if (mid == lo || mid == hi)
-                return mid;
-            const double value = enthalpy(mid);
-            check(std::isfinite(value), "Low-Mach enthalpy inversion returned nonfinite enthalpy.");
-            if (value < target)
-                lo = mid;
+                return {mid, mid == lo ? lo_slot : hi_slot};
+            const auto sample = seed_sample && trial == seed ? *seed_sample : evaluate(trial, trial_slot);
+            seed_sample.reset();
+            check(std::isfinite(sample.enthalpy), "Low-Mach enthalpy inversion returned nonfinite enthalpy.");
+            const bool below = sample.enthalpy < target;
+            if (below)
+            {
+                lo = trial;
+                minimum = sample;
+                std::swap(lo_slot, trial_slot);
+            }
             else
-                hi = mid;
+            {
+                hi = trial;
+                maximum = sample;
+                std::swap(hi_slot, trial_slot);
+            }
+            bool require_midpoint = neighbor_probe;
+            if (trial == mid)
+            {
+                ++midpoints;
+                window = 0;
+                checkpoint_width = hi - lo;
+            }
+            else
+            {
+                ++accelerated;
+                if (++window == 2)
+                {
+                    require_midpoint = require_midpoint || hi - lo > .5 * checkpoint_width;
+                    window = 0;
+                    checkpoint_width = hi - lo;
+                }
+            }
+            trial = std::midpoint(lo, hi);
+            neighbor_probe = false;
+            // Bisection can update the remote side without discarding a good Newton base.
+            const long double low_residual = static_cast<long double>(minimum.enthalpy) - target;
+            const long double high_residual = static_cast<long double>(maximum.enthalpy) - target;
+            const bool use_low = -low_residual < high_residual;
+            const double base = use_low ? lo : hi;
+            const long double slope = use_low ? minimum.derivative : maximum.derivative;
+            if (!require_midpoint && accelerated < 8 && std::isfinite(slope) && slope > 0)
+            {
+                const long double estimate = base - (use_low ? low_residual : high_residual) / slope;
+                if (estimate == base || (estimate > lo && estimate < hi))
+                {
+                    double next = static_cast<double>(estimate);
+                    if (next == base)
+                    {
+                        next = std::nextafter(base, use_low ? hi : lo);
+                        neighbor_probe = next > lo && next < hi;
+                    }
+                    if (next > lo && next < hi)
+                        trial = next;
+                }
+            }
         }
         throw std::runtime_error("Low-Mach phase enthalpy inversion did not converge.");
     };
-    const double common =
-        options.thermal_mode == PhaseThermalMode::Equilibrium ? invert(count, total_target, lower, upper) : 0;
+    const bool equilibrium = options.thermal_mode == PhaseThermalMode::Equilibrium;
+    const auto common = equilibrium ? invert(count, total_target, lower, upper) : CaloricRoot{};
     double h_t = 0, h_p = 0, v_t = 0, v_p = 0, adv_volume = 0;
     for (size_t a = 0; a < count; ++a)
     {
         auto& phase = result.cell.phases[a];
-        if (mass[a] == 0)
+        const auto& caloric = data[a];
+        const auto mass = caloric.mass;
+        if (mass == 0)
         {
             phase.temperature = 0;
             phase.internal_energy = 0;
             continue;
         }
         const auto& bounds = phase.thermodynamics->bounds();
-        phase.temperature = options.thermal_mode == PhaseThermalMode::Equilibrium
-                                ? common
-                                : invert(a, targets[a], bounds.minimum_temperature, bounds.maximum_temperature);
-        const auto point = phase.thermodynamics->evaluate(phase.temperature, phase.absolute_pressure, x[a]);
+        const auto root = equilibrium
+                              ? common
+                              : invert(a, caloric.target, bounds.minimum_temperature, bounds.maximum_temperature);
+        phase.temperature = root.temperature;
+        const auto& point = caloric.points[root.slot];
         const double rho2 = point.density * point.density;
-        const double vt = -mass[a] * point.density_temperature / rho2;
-        const double vp = -mass[a] * point.density_pressure / rho2;
-        const double ht =
-            mass[a] * (point.internal_energy_temperature - phase.absolute_pressure * point.density_temperature / rho2);
-        const double hp = mass[a] * (1 / point.density + phase.temperature * point.density_temperature / rho2);
+        const double vt = -mass * point.density_temperature / rho2;
+        const double vp = -mass * point.density_pressure / rho2;
+        const double ht = heat_slope(point, phase.absolute_pressure, mass);
+        const double hp = mass * (1 / point.density + phase.temperature * point.density_temperature / rho2);
         check(std::isfinite(ht) && ht > 0 && std::isfinite(hp) && std::isfinite(vt) && std::isfinite(vp),
             "Low-Mach phase caloric/pressure derivatives are invalid.");
-        result.volumes[a] = mass[a] / point.density;
+        result.volumes[a] = mass / point.density;
         result.pressure_operands += std::abs(phase.absolute_pressure * result.volumes[a]);
-        phase.internal_energy = mass[a] * point.internal_energy;
+        phase.internal_energy = mass * point.internal_energy;
         result.volume += result.volumes[a];
         const double phase_work = -phase.absolute_pressure * (result.volumes[a] - advected_volumes[a]);
         result.work += phase_work;
