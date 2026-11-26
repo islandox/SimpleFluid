@@ -48,6 +48,12 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       PROPERTIES LABELS "qbmm\\;kinetic\\;low_mach\\;conservation"
         TIMEOUT 900 ENVIRONMENT "SIMPLEFLUID_Q8D_EXPECTED_RANKS=1")
   endif()
+  if(TEST_NAME STREQUAL "testLowMachQbmmPlanarALEGravityReference")
+    simplefluid_discover_tests(${TEST_NAME} TEST_FILTER "QbmmPlanarLinearGravityReference.*-*PortableContinuation"
+      XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q8f/$<CONFIG>"
+      PROPERTIES LABELS "qbmm\\;q8f\\;gravity\\;ale\\;conservation"
+        TIMEOUT 900 ENVIRONMENT "SIMPLEFLUID_Q8F_RANKS=1")
+  endif()
   if(TEST_NAME STREQUAL "testVerificationCases")
     simplefluid_discover_tests(
       ${TEST_NAME}
@@ -63,8 +69,13 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       ${TEST_NAME}
       PROPERTIES LABELS "ale\\;free_surface\\;boussinesq\\;conservation\\;transaction"
     )
+  elseif(TEST_NAME STREQUAL "testLowMachQbmmPlanarLinearGravity")
+    simplefluid_discover_tests(${TEST_NAME}
+      XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q8f/$<CONFIG>"
+      PROPERTIES LABELS "qbmm\\;q8f\\;gravity\\;ale\\;conservation"
+        TIMEOUT 900 ENVIRONMENT "SIMPLEFLUID_Q8F_RANKS=1")
   elseif(TEST_NAME MATCHES "^testLowMachQbmmPlanarALEGravity(Reference)?$")
-    simplefluid_discover_tests(${TEST_NAME} TEST_FILTER "-*PortableContinuation"
+    simplefluid_discover_tests(${TEST_NAME} TEST_FILTER "-*PortableContinuation:QbmmPlanarLinearGravityReference.*"
       XML_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/qbmm-q8e/$<CONFIG>"
       PROPERTIES LABELS "qbmm\\;gravity\\;ale\\;conservation"
         TIMEOUT 900 ENVIRONMENT "SIMPLEFLUID_Q8E_RANKS=1")
@@ -202,10 +213,33 @@ function(add_qbmm_restart_tests name target filter environment_prefix labels)
 endfunction()
 
 foreach(ranks IN ITEMS 2 4)
+    foreach(group IN ITEMS QbmmPlanarLinearGravity QbmmPlanarLinearGravityReference)
+        if(group STREQUAL "QbmmPlanarLinearGravity")
+            set(target testLowMachQbmmPlanarLinearGravity)
+            set(filter "*/QbmmPlanarLinearGravity.*:QbmmPlanarLinearGravityFourier.*")
+        else()
+            set(target testLowMachQbmmPlanarALEGravityReference)
+            set(filter "${group}.*-*PortableContinuation")
+        endif()
+        set(test "${group}_${ranks}procs")
+        simplefluid_add_mpi_test(NAME "${test}" TARGET "${target}" PROCS ${ranks}
+            ARGS "--gtest_filter=${filter}" LABELS "mpi;qbmm;q8f;gravity;ale;conservation;empty_rank" TIMEOUT 900)
+        if(TEST "${test}")
+            set_tests_properties("${test}" PROPERTIES ENVIRONMENT "SIMPLEFLUID_Q8F_RANKS=${ranks}")
+        endif()
+    endforeach()
+endforeach()
+foreach(limiter IN ITEMS Signed TvdMc)
+    add_qbmm_restart_tests(QbmmPlanarLinearGravity${limiter}Restart testLowMachQbmmPlanarALEGravityReference
+        QbmmPlanarLinearGravityReference.${limiter}PortableContinuation SIMPLEFLUID_Q8F_REFERENCE
+        "qbmm;q8f;gravity;ale;restart;transaction;empty_rank")
+endforeach()
+
+foreach(ranks IN ITEMS 2 4)
     foreach(suffix IN ITEMS "" Reference)
         set(test "QbmmPlanarALEGravity${suffix}_${ranks}procs")
         simplefluid_add_mpi_test(NAME "${test}" TARGET testLowMachQbmmPlanarALEGravity${suffix} PROCS ${ranks}
-            ARGS "--gtest_filter=-*PortableContinuation"
+            ARGS "--gtest_filter=-*PortableContinuation:QbmmPlanarLinearGravityReference.*"
             LABELS "mpi;qbmm;gravity;ale;conservation;empty_rank" TIMEOUT 900)
         if(TEST "${test}")
             set_tests_properties("${test}" PROPERTIES ENVIRONMENT "SIMPLEFLUID_Q8E_RANKS=${ranks}")

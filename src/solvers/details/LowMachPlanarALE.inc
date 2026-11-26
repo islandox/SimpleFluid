@@ -113,6 +113,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_planar_impl(double dt,
     const auto& mesh = *d->mesh;
     const auto force = d->active_body_acceleration ? acceleration_vector(d->active_body_acceleration)
                                                    : (provider ? provider->body_acceleration : std::nullopt);
+    const bool linear = uses_qbmm_linear_transport(d->options.qbmm_model);
     collective_detail::collective_local_validation(mesh, "Prescribed planar preview input",
         [&]
         {
@@ -125,6 +126,12 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_planar_impl(double dt,
                 "Planar QBMM source providers require the coherent reacting controller.");
             check(!coherent_qbmm || (has_qbmm && controller && controller->reacting_source_authority && provider),
                 "Planar QBMM source preview requires the reacting controller and an immutable source provider.");
+            if (linear && force)
+            {
+                check(coherent_qbmm && d->active_qbmm_controller && force == provider->body_acceleration,
+                    "Forced planar SSPRK2 requires its matching reacting source and motion controller.");
+                d->validate_forced_linear_geometry();
+            }
             check(std::isfinite(dt) && dt > 0 && std::isfinite(target_surface),
                 "Planar preview needs a finite target and positive finite timestep.");
             for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
@@ -145,7 +152,6 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_planar_impl(double dt,
             collective_detail::require_uniform_value(mesh, force->component(axis), "Prescribed planar acceleration");
     auto certificate = capture_accepted_geometry(motion);
     std::vector<double> accepted_flux;
-    const bool linear = uses_qbmm_linear_transport(d->options.qbmm_model);
     std::vector<qbmm_linear_detail::PlanarFaceGeometry> old_faces;
     collective_detail::collective_local_validation(mesh, "Planar accepted absolute flux receipt",
         [&]

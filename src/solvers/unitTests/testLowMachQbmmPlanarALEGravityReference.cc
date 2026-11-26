@@ -1,6 +1,7 @@
 /** Independently integrated one-dimensional forced two-family column on a prescribed moving domain. */
 #include "QbmmRestartTestSupport.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
+#include "geometry/mesh/SemiStructuredXY_Z.hh"
 #include "solvers/ReactingMixtureCoupler.hh"
 #include "utils/testing_environment.hh"
 
@@ -136,26 +137,73 @@ Column reference(size_t n, bool supplied)
     return q;
 }
 
+using Limiter = R::QbmmModelOptions::LinearSlopeLimiter;
+constexpr auto signed_limiter = Limiter::RealizabilityOnly, mc_limiter = Limiter::TvdMc;
+enum class Profile
+{
+    Stratified,
+    Smooth,
+    Front
+};
+struct Setup
+{
+    std::optional<Limiter> limiter;
+    Profile profile = Profile::Stratified;
+    bool extruded = false;
+    double cfl = .5;
+};
+
+constexpr double translation_speed = -.375;
+using Family = std::array<double, 4>; // number, species moles (molar mass 1), H2 and H3
+// Exact integrals over the physical interval of two atom weights at dimensionless masses 1 and 3.
+Family translated_family(double left, double right, double t, size_t phase, Profile profile)
+{
+    const double dz = right - left, x = left - t * translation_speed;
+    const auto exponential = [&](double k) { return std::exp(k * x) * std::expm1(k * dz) / k; };
+    const double high = std::clamp(x + dz - .5, 0., dz);
+    double a = profile == Profile::Smooth ? .5 * exponential(1.5) : .5 * dz + .5 * high;
+    double b = profile == Profile::Smooth ? exponential(.75) : dz + .5 * high;
+    // Complementary families leave total gas mass, pressure, energy and velocity uniform.
+    if (phase == 2)
+    {
+        a = 8. * dz - a;
+        b = 8. * dz - b;
+    }
+    return {a + b, mass_scale * (a + 3. * b), a + 9. * b, a + 27. * b};
+}
+
 struct Vessel
 {
     size_t n;
     bool supplied, reject_source = false;
+    Setup setup;
     int targets = 0, sources = 0, rejected = 0;
     std::shared_ptr<Flow::Mesh> mesh;
     std::shared_ptr<Flow> flow;
     std::unique_ptr<Coupler> controller;
 
-    Vessel(size_t layers, bool slip, bool batched = true, bool empty = false) : n(layers), supplied(slip)
+    Vessel(size_t layers, bool slip, bool batched = true, bool empty = false, Setup config = {})
+        : n(layers), supplied(slip), setup(config)
     {
         const auto ranks = static_cast<size_t>(Tpetra::getDefaultComm()->getSize());
         const size_t across = empty ? std::min<size_t>(ranks, 2) : 1;
         ArrReal edges;
         for (size_t j = 0; j <= n; ++j)
             edges.push_back(double(j) / n);
-        mesh = std::make_shared<Flow::Mesh>(
-            std::make_shared<Flow::Mesh::Cartesian>(Vec3D<ArrReal>{ArrReal{0., 1.}, ArrReal{0., 1.}, edges}),
-            Flow::Mesh::DistributionOptions{.allow_empty_partitions = true,
-                .orthogonal_partitions = std::array<size_t, 3>{across, 1, ranks / across}});
+        if (setup.extruded)
+        {
+            using Semi = Meshes::SemiStructuredXY_Z;
+            mesh = std::make_shared<Flow::Mesh>(
+                std::make_shared<Semi>(Arr<Semi::Vec3>{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}},
+                    Arr<Arr<unsigned>>{{0, 1, 2, 3}}, edges),
+                Flow::Mesh::DistributionOptions{
+                    .allow_empty_partitions = true, .xy_partitions = across, .z_partitions = ranks / across});
+        }
+        else
+            mesh = std::make_shared<Flow::Mesh>(
+                std::make_shared<Flow::Mesh::Cartesian>(Vec3D<ArrReal>{ArrReal{0., 1.}, ArrReal{0., 1.}, edges}),
+                Flow::Mesh::DistributionOptions{.allow_empty_partitions = true,
+                    .orthogonal_partitions = std::array<size_t, 3>{across, 1, ranks / across}});
         const auto catalog = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
             {47, "column material", 1., {{"M", 1}}, {R::SpeciesPhase::Liquid, R::SpeciesPhase::Dispersed}}});
         const R::ThermodynamicBounds bounds{2., 16., 16., 128.};
@@ -173,6 +221,12 @@ struct Vessel
         opts.linear.preconditioner = LinearPreconditioner::None;
         opts.linear.tolerance = 1e-12;
         opts.use_multi_rhs_transport = batched;
+        if (setup.limiter)
+        {
+            opts.qbmm_model.family_transport = R::QbmmModelOptions::FamilyTransport::RealizableLinearSSPRK2;
+            opts.qbmm_model.linear_slope_limiter = *setup.limiter;
+            opts.qbmm_model.linear_cfl = setup.cfl;
+        }
         opts.qbmm_model.velocity =
             supplied ? R::QbmmModelOptions::Velocity::SuppliedPhaseSlip : R::QbmmModelOptions::Velocity::SharedCarrier;
         opts.phase_roles = {{Flow::PhaseRole::BulkLiquid, "solvent"}, {Flow::PhaseRole::DispersedGas, "ascending"},
@@ -195,7 +249,18 @@ struct Vessel
         for (size_t j = 0; j < mesh->num_owned_cells(); ++j)
         {
             const auto x = mesh->cell_centroid(static_cast<LO>(j)).z;
-            const auto q = initial(x);
+            auto q = initial(x);
+            if (setup.profile != Profile::Stratified)
+            {
+                // Total gas density 4 and liquid density 8 per unit vessel volume.
+                const auto layer = static_cast<size_t>(x * n);
+                const auto first = translated_family(double(layer) / n, double(layer + 1) / n, 0., 1, setup.profile);
+                const double r = std::clamp(8. * std::min(x, 1. - x), 0., 1.);
+                const double taper = r * r * (3. - 2. * r);
+                const double wall_speed = x < .5 ? 0. : lid_speed;
+                const double u = std::lerp(wall_speed, translation_speed, taper);
+                q = {8., first[1] * n, 4. - first[1] * n, 12. * u, cv * 12. * 8.};
+            }
             const auto a = recover(q, x, 0., supplied);
             auto& cell = state.cells.emplace_back();
             cell.velocity.z = a.u;
@@ -212,11 +277,21 @@ struct Vessel
                 const double w = m / (5. * mass_scale);
                 cell.phase_numbers[p] = 3. * w;
                 cell.qbmm_shape[p] = R::QbmmShapeState{11. * w, 29. * w};
+                if (setup.profile != Profile::Stratified)
+                {
+                    const auto layer = static_cast<size_t>(x * n);
+                    const auto moments =
+                        translated_family(double(layer) / n, double(layer + 1) / n, 0., p, setup.profile);
+                    cell.phase_numbers[p] = moments[0];
+                    cell.qbmm_shape[p] = R::QbmmShapeState{moments[2], moments[3]};
+                }
                 cell.drift_velocity[p].z = (p == 1 ? 1. : -1.) * slip_speed(x, supplied);
             }
         }
         flow->initialize(std::move(state));
         R::ReactingMixtureOptions controls;
+        if (setup.profile != Profile::Stratified)
+            controls.maximum_correctors = 80;
         controls.mechanism = std::make_shared<const R::ReactionMechanism>(
             catalog, std::vector<R::ReactionDefinition>{}, gas->energy_convention());
         controls.phases = {{R::SpeciesPhase::Liquid, {}, {}}, {R::SpeciesPhase::Dispersed, "ascending", {}},
@@ -232,7 +307,8 @@ struct Vessel
             }
             return R::ReactionSourceInput{};
         };
-        controls.body_acceleration = Flow::Vector{0., 0., gravity};
+        controls.body_acceleration =
+            setup.profile == Profile::Stratified ? Flow::Vector{0., 0., gravity} : Flow::Vector{gravity, 0., 0.};
         controls.planar_motion = std::make_shared<const R::MixturePlanarMotionProvider>(
             R::MixturePlanarMotionProvider{mesh, {}, "constant column lid speed", 1, [this](double t, double h)
                 {
@@ -241,7 +317,8 @@ struct Vessel
                 }});
         controller = std::make_unique<Coupler>(flow, controls);
         EXPECT_EQ(sum(mesh->num_owned_cells() == 0), ranks - ranks / across);
-        for (const char* key : {"SIMPLEFLUID_Q8E_REFERENCE_RANKS", "SIMPLEFLUID_Q8E_RANKS"})
+        for (const char* key : {"SIMPLEFLUID_Q8E_REFERENCE_RANKS", "SIMPLEFLUID_Q8E_RANKS", "SIMPLEFLUID_Q8F_RANKS",
+                 "SIMPLEFLUID_Q8F_REFERENCE_RANKS"})
             if (const char* expected = std::getenv(key))
                 EXPECT_EQ(ranks, std::stoul(expected));
     }
@@ -257,9 +334,22 @@ struct Vessel
         const auto trial = controller->preview(h);
         const auto& d = trial.diagnostics().flow;
         ASSERT_TRUE(d.impulse_parts);
-        EXPECT_NEAR(d.impulse_parts->body.z, 12. * gravity * h, 4e-14);
+        EXPECT_NEAR(
+            d.impulse_parts->body.component(setup.profile == Profile::Stratified ? 2 : 0), 12. * gravity * h, 4e-14);
+        if (setup.limiter)
+        {
+            EXPECT_GT(d.linear_substeps, 0);
+            EXPECT_EQ(d.linear_stages, 2u * d.linear_substeps);
+            EXPECT_LE(d.maximum_linear_cfl, flow->options().qbmm_model.linear_cfl);
+        }
         EXPECT_EQ(d.impulse_parts->other, Flow::Vector{});
-        EXPECT_LE(d.maximum_continuity_residual, flow->options().continuity_tolerance);
+        // The physical projection uses a dimensional rate tolerance scaled by the
+        // assembled source and flux balances. Its true-residual floor is one eighth
+        // of that gate divided by the configured relative linear tolerance.
+        const double continuity_gate = setup.profile == Profile::Stratified
+                                           ? flow->options().continuity_tolerance
+                                           : 8. * flow->options().linear.tolerance * d.pressure_linear_rhs_norm_floor;
+        EXPECT_LE(d.maximum_continuity_residual, continuity_gate);
         size_t crossing = 0;
         for (size_t i = 0; i < trial.owned_phase_transport().size(); ++i)
         {
@@ -330,7 +420,7 @@ void metric(const std::string& name, double value)
     ::testing::Test::RecordProperty(name, message.str());
 }
 
-void reference_case(bool slip)
+void reference_case(bool slip, std::optional<Limiter> limiter = {})
 {
     const auto fine = reference(256, slip), refined = reference(512, slip);
     const std::array<std::string, 4> names{"pressure_pa", "carrier_m_s", "rising_kg_m3", "falling_kg_m3"};
@@ -356,7 +446,7 @@ void reference_case(bool slip)
     // at fixed 16 cells: no cancellation between changes of space and time in either check.
     const auto integrate = [&](int n, int steps)
     {
-        Vessel f(n, slip);
+        Vessel f(n, slip, true, false, {.limiter = limiter});
         for (int i = 0; i < steps; ++i)
             f.step(duration / steps, slip);
         const auto err = reference_error(f, refined);
@@ -466,6 +556,13 @@ void same_endpoint(const Vessel& a, const Vessel& b, double tolerance = 0.)
     {
         EXPECT_EQ(x.correctors, y.correctors);
         EXPECT_EQ(x.flow.impulse_parts, y.flow.impulse_parts);
+        EXPECT_EQ(x.flow.pressure_impulse, y.flow.pressure_impulse);
+        EXPECT_EQ(x.flow.linear_substeps, y.flow.linear_substeps);
+        EXPECT_EQ(x.flow.linear_stages, y.flow.linear_stages);
+        EXPECT_EQ(x.flow.maximum_linear_cfl, y.flow.maximum_linear_cfl);
+        EXPECT_EQ(x.flow.maximum_linear_stage_residual, y.flow.maximum_linear_stage_residual);
+        EXPECT_EQ(x.flow.maximum_linear_step_residual, y.flow.maximum_linear_step_residual);
+        EXPECT_EQ(x.flow.linear_upstream_returned_packets, y.flow.linear_upstream_returned_packets);
     }
 }
 
@@ -487,21 +584,21 @@ TEST(QbmmPlanarGravityReference, GroupedAndScalarStocksAcrossPartitionsAndEmptyO
         }
 }
 
-void check_tag(std::span<const std::byte> bytes)
+void check_tag(std::span<const std::byte> bytes, bool linear)
 {
     std::vector<std::byte> expected;
-    for (auto word : std::array<std::uint64_t, 3>{0x5453524d4d425153ULL, 9, 12})
+    for (auto word : std::array<std::uint64_t, 3>{0x5453524d4d425153ULL, 9, linear ? 13ULL : 12ULL})
         IO::append_restart_word(expected, word);
     ASSERT_GE(bytes.size(), expected.size());
     EXPECT_TRUE(std::equal(expected.begin(), expected.end(), bytes.begin()));
 }
 
-void portable(bool supplied)
+void portable(bool supplied, std::optional<Limiter> limiter = {})
 {
-    const char* writer = std::getenv("SIMPLEFLUID_Q8E_REFERENCE_WRITE");
-    const char* reader = std::getenv("SIMPLEFLUID_Q8E_REFERENCE_READ");
+    const char* writer = std::getenv(limiter ? "SIMPLEFLUID_Q8F_REFERENCE_WRITE" : "SIMPLEFLUID_Q8E_REFERENCE_WRITE");
+    const char* reader = std::getenv(limiter ? "SIMPLEFLUID_Q8F_REFERENCE_READ" : "SIMPLEFLUID_Q8E_REFERENCE_READ");
     ASSERT_FALSE(writer && reader);
-    Vessel original(8, supplied, true, true);
+    Vessel original(8, supplied, true, true, {.limiter = limiter});
     const auto comm = original.mesh->owned_cell_map()->getComm();
     const double h = duration / 2;
     std::vector<std::byte> first;
@@ -516,7 +613,7 @@ void portable(bool supplied)
     {
         original.step(h);
         first = original.controller->serialize_qbmm_restart();
-        check_tag(first);
+        check_tag(first, limiter.has_value());
         original.step(h);
         if (writer)
         {
@@ -525,14 +622,24 @@ void portable(bool supplied)
             return;
         }
     }
-    check_tag(first);
-    Vessel resumed(8, supplied, true, true);
+    check_tag(first, limiter.has_value());
+    Vessel resumed(8, supplied, true, true, {.limiter = limiter});
     resumed.controller->restore_qbmm_restart(first);
     EXPECT_EQ(resumed.sources, 0);
     EXPECT_EQ(resumed.targets, 0);
     const auto restored = resumed.controller->qbmm_report();
     EXPECT_EQ(restored.receipt_history, Flow::QbmmReceiptHistory::UnavailableAfterPortableRestart);
     EXPECT_EQ(restored.body_acceleration_m_per_s2, (Flow::Vector{0., 0., gravity}));
+    if (limiter)
+    {
+        EXPECT_EQ(restored.linear_slope_limiter, *limiter);
+        EXPECT_GT(restored.linear_substeps, 0);
+        EXPECT_EQ(restored.linear_stages, 2u * restored.linear_substeps);
+        EXPECT_GT(restored.maximum_linear_cfl, 0.);
+        EXPECT_LE(restored.maximum_linear_cfl, resumed.flow->options().qbmm_model.linear_cfl);
+        EXPECT_TRUE(restored.balanced_linear_pressure_policy);
+        EXPECT_TRUE(restored.forced_linear_thermal_policy);
+    }
     ASSERT_TRUE(restored.external_impulses_kg_m_per_s);
     EXPECT_NEAR(restored.external_impulses_kg_m_per_s->body.z, gravity * 12. * h, 4e-14);
     const auto accepted = resumed.controller->serialize_qbmm_restart();
@@ -541,8 +648,39 @@ void portable(bool supplied)
     resumed.reject_source = true;
     EXPECT_THROW((void) resumed.controller->preview(.5 * h), std::exception);
     EXPECT_EQ(resumed.sum(resumed.rejected), 1.);
+    EXPECT_EQ(resumed.controller->serialize_qbmm_restart(), accepted);
+    EXPECT_EQ(resumed.mesh->geometry_epoch(), epoch);
     resumed.reject_source = false;
     const auto counts = std::pair{resumed.targets, resumed.sources};
+    if (limiter)
+    {
+        // These are independent 64-bit wire fields in the tag-13 image, including the
+        // provider fingerprint, gravity z, target configuration and limiter after a complete interval.
+        const std::array fields{std::pair{4u, "advancement controls or providers"},
+            std::pair{7u, "body acceleration differs"}, std::pair{27u, "target law differs"},
+            std::pair{48u, "linear slope limiter differs"}};
+        for (const auto& [word, reason] : fields)
+        {
+            SCOPED_TRACE(word);
+            auto altered = first;
+            altered.resize(altered.size() - 2 * sizeof(std::uint64_t));
+            if (comm->getRank() == 0)
+                altered.at(word * sizeof(std::uint64_t)) ^= std::byte{1};
+            IO::append_restart_checksums(*comm, altered);
+            try
+            {
+                resumed.controller->restore_qbmm_restart(altered);
+                ADD_FAILURE() << "Accepted a resealed tag-13 shard with incompatible " << reason;
+            }
+            catch (const std::exception& e)
+            {
+                if (comm->getRank() == 0)
+                    EXPECT_NE(std::string_view(e.what()).find(reason), std::string_view::npos) << e.what();
+            }
+            EXPECT_EQ(resumed.controller->serialize_qbmm_restart(), accepted);
+            EXPECT_EQ(resumed.mesh->geometry_epoch(), epoch);
+        }
+    }
     // Recompute shard and global checksums after independently changing the rank-local body impulse.
     constexpr size_t local_body_z = 19 * sizeof(std::uint64_t);
     auto corrupt = first;
@@ -562,7 +700,7 @@ void portable(bool supplied)
     // Decode valid first-interval stocks, force, motion law and wall data on the second
     // accepted surface. The geometry digest is checked only after staging the earlier surface.
     auto wrong_geometry = first;
-    constexpr size_t geometry_word = 26; // Follows the tag-12 interval's rank-local external impulse.
+    constexpr size_t geometry_word = 26; // Follows the forced interval's rank-local external impulse.
     wrong_geometry.resize(wrong_geometry.size() - 2 * sizeof(std::uint64_t));
     if (comm->getRank() == 0)
         wrong_geometry.at(geometry_word * sizeof(std::uint64_t)) ^= std::byte{1};
@@ -597,5 +735,175 @@ TEST(QbmmPlanarGravityReference, SharedPortableContinuation)
 TEST(QbmmPlanarGravityReference, SuppliedSlipPortableContinuation)
 {
     portable(true);
+}
+Family observed_family(const Flow::CellState& cell, size_t p)
+{
+    return {*cell.phase_numbers[p], cell.phases[p].moles[0], cell.qbmm_shape[p]->H2, cell.qbmm_shape[p]->H3};
+}
+
+using Interior = std::vector<Family>;
+// One-dimensional translation before disturbances from the reflecting walls reach the
+// central quarter. Transverse gravity acts throughout. Each family has the same EOS and
+// the sum of the analytic material densities is constant, leaving the axial carrier uniform.
+Interior transport_case(unsigned n, int substeps, bool extruded, Profile profile, bool exact, double cfl = .5,
+    double* measured_cfl = nullptr)
+{
+    constexpr double transport_duration = 1. / 1024.;
+    Vessel v(n, false, true, false, {.limiter = mc_limiter, .profile = profile, .extruded = extruded, .cfl = cfl});
+    std::array<Family, 2> initial{}, final{};
+    for (const auto& cell : v.flow->state().cells)
+        for (size_t p = 1; p < 3; ++p)
+        {
+            const auto stock = observed_family(cell, p);
+            for (size_t j = 0; j < stock.size(); ++j)
+                initial[p - 1][j] += stock[j];
+        }
+    v.step(transport_duration);
+    EXPECT_EQ(v.controller->diagnostics().flow.linear_substeps, substeps);
+    if (measured_cfl)
+        *measured_cfl = v.controller->diagnostics().flow.maximum_linear_cfl;
+    const double height = length(transport_duration);
+    Interior result;
+    double violation = 0., changed = 0., axial_defect = 0.;
+    for (size_t c = 0; c < v.flow->state().cells.size(); ++c)
+    {
+        const auto id = static_cast<LO>(c);
+        const auto& cell = v.flow->state().cells[c];
+        const auto layer = static_cast<unsigned>(v.mesh->cell_centroid(id).z * n / height);
+        const double volume = v.mesh->cell_volume(id);
+        EXPECT_NEAR(volume, height / n, 1.e-14);
+        for (size_t p = 1; p < 3; ++p)
+        {
+            auto stock = observed_family(cell, p);
+            for (size_t j = 0; j < stock.size(); ++j)
+                final[p - 1][j] += stock[j];
+            if (layer < 3 * n / 8 || layer >= 5 * n / 8)
+                continue;
+            const auto analytic =
+                translated_family(height * layer / n, height * (layer + 1) / n, transport_duration, p, profile);
+            if (profile == Profile::Front)
+            {
+                const auto a = translated_family(0., .25, 0., p, profile),
+                           b = translated_family(.75, 1., 0., p, profile);
+                const auto before = translated_family(double(layer) / n, double(layer + 1) / n, 0., p, profile);
+                for (size_t j = 0; j < stock.size(); ++j)
+                {
+                    const double density = stock[j] / volume;
+                    const double lo = 4. * std::min(a[j], b[j]), hi = 4. * std::max(a[j], b[j]);
+                    violation = std::max({violation, (lo - density) / hi, (density - hi) / hi});
+                }
+                changed = std::max(changed, std::abs(stock[1] / volume - n * before[1]));
+            }
+            else if (exact)
+                for (size_t j = 0; j < stock.size(); ++j)
+                    stock[j] -= analytic[j];
+            result.push_back(stock);
+            axial_defect = std::max(axial_defect, std::abs(cell.velocity.z - translation_speed));
+        }
+    }
+    for (size_t p = 0; p < 2; ++p)
+        for (size_t j = 0; j < final[p].size(); ++j)
+            EXPECT_NEAR(v.sum(final[p][j] - initial[p][j]), 0., 3e-13 * std::max(1., std::abs(v.sum(initial[p][j]))));
+    double max_defect = 0.;
+    const auto maximum = [&](double local)
+    {
+        Teuchos::reduceAll(*v.mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local, &max_defect);
+        return max_defect;
+    };
+    EXPECT_LT(maximum(axial_defect), 1.e-8);
+    if (profile == Profile::Front)
+    {
+        const auto defect = maximum(violation);
+        metric(extruded ? "extruded_sharp_bound_violation" : "cartesian_sharp_bound_violation", defect);
+        EXPECT_LE(defect, 1.e-14);
+        EXPECT_GT(maximum(changed), .001);
+    }
+    return result;
+}
+
+Family difference(const Interior& a, const Interior& b = {})
+{
+    Family local{}, result{};
+    for (size_t c = 0; c < a.size(); ++c)
+        for (size_t j = 0; j < local.size(); ++j)
+            local[j] += std::abs(a[c][j] - (b.empty() ? 0. : b.at(c)[j]));
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, int(local.size()), local.data(), result.data());
+    return result;
+}
+
+TEST(QbmmPlanarLinearGravityReference, MovingTvdMcSharpFront)
+{
+    for (bool extruded : {false, true})
+        transport_case(64, 1, extruded, Profile::Front, false);
+}
+
+TEST(QbmmPlanarLinearGravityReference, MovingTvdMcSmoothSpatialAndTemporalOrders)
+{
+    constexpr std::array names{"H0", "species_H1", "H2", "H3"};
+    for (bool extruded : {false, true})
+    {
+        const std::string prefix = extruded ? "extruded_" : "cartesian_";
+        const auto check = [&](const Family& coarse, const Family& fine, const std::string& label)
+        {
+            for (size_t j = 0; j < coarse.size(); ++j)
+            {
+                const auto key = prefix + label + names[j];
+                SCOPED_TRACE(key);
+                const double order = std::log2(coarse[j] / fine[j]);
+                metric(key + "_coarse_L1", coarse[j]);
+                metric(key + "_fine_L1", fine[j]);
+                metric(key + "_order", order);
+                EXPECT_GE(order, 1.8);
+                EXPECT_LE(order, 2.1);
+            }
+        };
+        std::array<Family, 3> spatial;
+        for (unsigned level = 0; level < spatial.size(); ++level)
+            spatial[level] = difference(transport_case(16u << level, 1, extruded, Profile::Smooth, true));
+        check(spatial[0], spatial[1], "space16_32_");
+        check(spatial[1], spatial[2], "space32_64_");
+        // Refine only the SSPRK2 time increment within the same coupled gravity and
+        // wall interval. The cap margin avoids a roundoff-sized last substep. Check
+        // the actual substeps in each accepted controller diagnostic.
+        double cfl = 0.;
+        const auto coarse = transport_case(32, 1, extruded, Profile::Smooth, false, .5, &cfl);
+        const auto half = transport_case(32, 2, extruded, Profile::Smooth, false, 1.001 * cfl / 2.);
+        const auto quarter = transport_case(32, 4, extruded, Profile::Smooth, false, 1.001 * cfl / 4.);
+        check(difference(coarse, half), difference(half, quarter), "time_");
+    }
+}
+
+TEST(QbmmPlanarLinearGravityReference, SignedPortableContinuation)
+{
+    portable(false, signed_limiter);
+}
+TEST(QbmmPlanarLinearGravityReference, TvdMcPortableContinuation)
+{
+    portable(false, mc_limiter);
+}
+TEST(QbmmPlanarLinearGravityReference, SignedStratifiedColumnAgainstIndependentMovingCoordinateEvolution)
+{
+    reference_case(false, signed_limiter);
+}
+TEST(QbmmPlanarLinearGravityReference, TvdMcStratifiedColumnAgainstIndependentMovingCoordinateEvolution)
+{
+    reference_case(false, mc_limiter);
+}
+TEST(QbmmPlanarLinearGravityReference, GroupedAndScalarUnboundStocksAcrossPartitionsAndEmptyOwners)
+{
+    for (auto limiter : {signed_limiter, mc_limiter})
+        for (bool empty : {false, true})
+        {
+            Vessel grouped(8, false, true, empty, {.limiter = limiter});
+            Vessel scalar(8, false, false, empty, {.limiter = limiter});
+            for (int i = 0; i < 2; ++i)
+            {
+                grouped.step(duration / 2);
+                scalar.step(duration / 2);
+                EXPECT_GT(grouped.controller->diagnostics().flow.transport_multi_rhs.operator_groups, 0u);
+                EXPECT_EQ(scalar.controller->diagnostics().flow.transport_multi_rhs.operator_groups, 0u);
+                same_endpoint(grouped, scalar, 3e-9);
+            }
+        }
 }
 } // namespace

@@ -143,16 +143,23 @@ public:
      * on the certified trial geometry, with absolute carrier fluxes phi and phi0.
      * The target is relative to the moving control volumes. Exterior faces require
      * J0 = 0 and both absolute carrier rates equal to the prescribed swept rate.
-     * The EOS and mobility gates match the fixed anchored projection. This
-     * relative material projection uses the HomogeneousNeumann cell gradient.
+     * The EOS and mobility gates match the fixed anchored projection.
+     * This overload uses the HomogeneousNeumann cell gradient.
      */
     Result project_anchored_material_ale_with_eos(const ScalarField& density, double time_step,
         std::span<const double> target_relative, std::span<const double> volume_susceptibility,
         const FaceField& material_carrier_fraction, const FaceField& anchored_relative_material_rate,
         const FaceField& reference_carrier_absolute, const FaceField& predictor_absolute, FaceField& corrected_absolute,
         ScalarField& mechanical_pressure, VectorField& velocity, const FVM::ALEControlVolumeState& ale,
-        const LinearSolverOptions& linear = {}, double continuity_tolerance = 1e-10,
-        CellPressureGradient cell_gradient = CellPressureGradient::HomogeneousNeumann);
+        const LinearSolverOptions& linear = {}, double continuity_tolerance = 1e-10);
+
+    /** The same anchored relative material target, with an explicit cell-gradient policy. */
+    Result project_anchored_material_ale_with_eos(const ScalarField& density, double time_step,
+        std::span<const double> target_relative, std::span<const double> volume_susceptibility,
+        const FaceField& material_carrier_fraction, const FaceField& anchored_relative_material_rate,
+        const FaceField& reference_carrier_absolute, const FaceField& predictor_absolute, FaceField& corrected_absolute,
+        ScalarField& mechanical_pressure, VectorField& velocity, const FVM::ALEControlVolumeState& ale,
+        const LinearSolverOptions& linear, double continuity_tolerance, CellPressureGradient cell_gradient);
 
 private:
     struct SIMPLEFLUID_SOLVERS_LOCAL MaterialAnchor

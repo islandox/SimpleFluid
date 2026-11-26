@@ -2226,7 +2226,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
     }
     const auto accepted = d->accepted;
     const auto column_axis =
-        (kinetic || forced_pool || balanced_planar) && force ? axial_column(mesh, *force) : std::nullopt;
+        (kinetic || forced_pool || (balanced_planar && !linear)) && force ? axial_column(mesh, *force) : std::nullopt;
     const auto trial_volume = [&](LO cell)
     { return ale ? ale->new_cell_volumes()[cell] : mesh.cell_volume(cell); };
     bool rounded_hydrostatic_rest = column_axis.has_value();
@@ -3886,8 +3886,10 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         for (size_t f = 0; f < previous_flux.size(); ++f)
                         {
                             const auto face = static_cast<LO>(f);
-                            d->trial_flux.set_owned_value(face,
-                                std::lerp(previous_flux[f], d->trial_flux.owned_value(face), relaxed_step));
+                            const double flux = ale && mesh.is_geometry_exterior_face(face)
+                                ? ale->face_mesh_fluxes()[f]
+                                : std::lerp(previous_flux[f], d->trial_flux.owned_value(face), relaxed_step);
+                            d->trial_flux.set_owned_value(face, flux);
                         }
                     });
                 d->mechanical_pressure.sync_ghosts();

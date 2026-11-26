@@ -1704,7 +1704,8 @@ Stock scaled(Stock stock, double factor)
 // The interior absolute velocity is constant in physical space. Only the exterior
 // wall velocity follows the mesh. Central cells isolate exact translation from that wall.
 Kernel::TransportResult move_column(Problem& op, Dimension axis, double target, double dt, std::optional<double> speed,
-    const std::function<double(LO)>& prescribed_interior = {}, double* max_relative_gcl_error = nullptr)
+    const std::function<double(LO)>& prescribed_interior = {}, double* max_relative_gcl_error = nullptr,
+    Kernel::TraceLimiter trace_limiter = Kernel::TraceLimiter::Outgoing)
 {
     Flow::PlanarMotion motion(op.grid, {.axis = axis});
     const auto old_face_geometry = Kernel::capture_planar_face_geometry(*op.grid);
@@ -1732,7 +1733,7 @@ Kernel::TransportResult move_column(Problem& op, Dimension axis, double target, 
         if (max_relative_gcl_error)
             *max_relative_gcl_error = std::max(*max_relative_gcl_error, error);
     }
-    auto result = op.advance(dt, Kernel::TraceLimiter::Outgoing, &planar);
+    auto result = op.advance(dt, trace_limiter, &planar);
     for (const auto face : op.flux.owned_face_ids())
         if (op.grid->is_geometry_exterior_face(face))
         {
@@ -2071,7 +2072,7 @@ TEST(QbmmMovingLinearTransport, SmoothPhysicalTranslationHasSecondOrderSpatialAc
             }
 }
 
-TEST(QbmmMovingLinearTransport, TinyMcPacketRemainsWithItsDonorOnEveryPartition)
+void check_moving_tiny_packet_return(Kernel::TraceLimiter trace_limiter)
 {
     const double weight = std::ldexp(1., -675);
     const Stock seed = stock_from_weights({weight, 2. * weight});
@@ -2086,7 +2087,8 @@ TEST(QbmmMovingLinearTransport, TinyMcPacketRemainsWithItsDonorOnEveryPartition)
             op.set(cell, op.grid->cell_geometry_global_id(cell) == donor ? seed : Stock{});
             op.state.cells[i].velocity = {.125, -.5, 1.};
         }
-        const auto result = move_column(op, Dimension::X, donor == 0 ? .96875 : 1.03125, .125, 0.);
+        const auto result =
+            move_column(op, Dimension::X, donor == 0 ? .96875 : 1.03125, .125, 0., {}, nullptr, trace_limiter);
         EXPECT_EQ(result.substeps, 1);
         EXPECT_EQ(result.upstream_returned_packets, 2u);
         EXPECT_EQ(op.totals(), seed);
@@ -2111,7 +2113,17 @@ TEST(QbmmMovingLinearTransport, TinyMcPacketRemainsWithItsDonorOnEveryPartition)
             const auto cell = static_cast<LO>(i);
             EXPECT_EQ(op.get(cell), op.grid->cell_geometry_global_id(cell) == donor ? seed : Stock{});
         }
-        RecordProperty("canonical_returns", int(result.upstream_returned_packets));
+        ::testing::Test::RecordProperty("canonical_returns", int(result.upstream_returned_packets));
     }
+}
+
+TEST(QbmmMovingLinearTransport, TinyMcPacketRemainsWithItsDonorOnEveryPartition)
+{
+    check_moving_tiny_packet_return(Kernel::TraceLimiter::Outgoing);
+}
+
+TEST(QbmmMovingLinearTransport, AllIncidentMovingTinyMcPacketReturnsOnEveryPartition)
+{
+    check_moving_tiny_packet_return(Kernel::TraceLimiter::AllIncident);
 }
 } // namespace

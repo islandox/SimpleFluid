@@ -68,6 +68,8 @@ Vec3 planar_face_offset(const Mesh& mesh, LO face, LO cell)
 
 class StageGeometry
 {
+    // Planar motion changes volumes and offsets affinely. Use the same
+    // stage geometry for both trace policies, including non-donor traces.
     const Mesh& mesh;
     const PlanarTransportGeometry* planar;
     bool from_old;
@@ -1053,6 +1055,8 @@ void stage_packets(const Mesh& mesh, const Flow::Options& options, const Carrier
                         require(std::isfinite(density) && density > 0, "Invalid QBMM linear face EOS density.");
                         const auto donor_volume = traces(face, first + columns.volume());
                         const auto trace_mass = material_mass(family, moles(trace));
+                        // Tied relative rates supply two half-branch derivatives
+                        // to the anchor without withdrawing any stock.
                         pressure_theta_weight(h, outward == 0 ? .25 : .5, donor_volume, density)
                             .add_weighted(interval.theta, trace_mass);
                         if (outward > 0)

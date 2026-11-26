@@ -108,6 +108,17 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_anchored_materi
     double dt, std::span<const double> target, std::span<const double> susceptibility, const FaceField& fraction,
     const FaceField& anchored_material_rate, const FaceField& reference_carrier_flux, const FaceField& predictor,
     FaceField& corrected, ScalarField& pressure, VectorField& velocity, const FVM::ALEControlVolumeState& ale,
+    const LinearSolverOptions& options, double tolerance)
+{
+    return project_anchored_material_ale_with_eos(rho, dt, target, susceptibility, fraction, anchored_material_rate,
+        reference_carrier_flux, predictor, corrected, pressure, velocity, ale, options, tolerance,
+        CellPressureGradient::HomogeneousNeumann);
+}
+
+LowMachPressureEquation::Result LowMachPressureEquation::project_anchored_material_ale_with_eos(const ScalarField& rho,
+    double dt, std::span<const double> target, std::span<const double> susceptibility, const FaceField& fraction,
+    const FaceField& anchored_material_rate, const FaceField& reference_carrier_flux, const FaceField& predictor,
+    FaceField& corrected, ScalarField& pressure, VectorField& velocity, const FVM::ALEControlVolumeState& ale,
     const LinearSolverOptions& options, double tolerance, CellPressureGradient cell_gradient)
 {
     const MaterialAnchor anchor{anchored_material_rate, reference_carrier_flux};
@@ -148,9 +159,8 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
             BelosLinearSolver<Pack>::validate_options(options);
             if ((cell_gradient != CellPressureGradient::HomogeneousNeumann &&
                     cell_gradient != CellPressureGradient::Interior) ||
-                (cell_gradient == CellPressureGradient::Interior && (!material || (ale && anchor))))
-                throw std::invalid_argument(
-                    "Interior pressure reconstruction requires fixed or absolute moving material projection.");
+                (cell_gradient == CellPressureGradient::Interior && !material))
+                throw std::invalid_argument("Interior pressure reconstruction requires material projection.");
             if (d->epoch != mesh_geometry_epoch(mesh) || !std::isfinite(dt) || dt <= 0 || !std::isfinite(tolerance) ||
                 tolerance <= 0 || target.size() != mesh.num_owned_cells() ||
                 (linearize_eos && susceptibility.size() != mesh.num_owned_cells()))

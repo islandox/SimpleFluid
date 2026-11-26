@@ -397,8 +397,10 @@ count-only flow and native implicit QBMM with either prescribed velocity
 mode. Forced moving material projection uses the interior cell gradient.
 Its absolute continuity target includes the divergence of the material
 fraction times the swept mesh rate. Pressure correction retains the
-prescribed absolute wall flux. Forced pool conversion and forced explicit
-family transport remain outside this moving capability.
+prescribed absolute wall flux. Forced planar SSPRK2 with shared carrier
+uses the interior-gradient overload of the anchored relative material
+projection, with the same prescribed absolute wall flux. Forced moving
+pool conversion and moving kinetic transport reject.
 
 Geometry epochs invalidate numerical caches on motion and rollback. A separate
 logical accepted-geometry identity lets earlier valid candidates survive a
@@ -413,6 +415,8 @@ lease that outlives the controller.
 Portable v9 tag 12 binds the forced planar reacting controller, acceleration,
 physical provider identities, accepted motion interval, and split impulse
 ledger. The receiving controller must be initialized with matching authority.
+Tag 13 carries that provenance for forced planar SSPRK2 and binds its
+linear limiter, substep policy, and returned-packet total.
 
 Species, phase internal energy, population number and momentum use accepted-old
 and trial-new control-volume storage with mesh-relative phase advection. The

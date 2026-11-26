@@ -10,9 +10,9 @@ namespace SimpleFluid::Reacting
  * KineticEuler admits fixed closed Cartesian meshes with node-dependent slip and optional body acceleration.
  * It also admits orthogonal native cylindrical meshes and polygonal disk or annulus extrusions with axial
  * node slip and axial body acceleration. Carrier velocities have Cartesian components in all three directions.
- * RealizableLinearSSPRK2 requires closed orthogonal meshes with shared carrier. Prescribed planar ALE
- * requires absent acceleration. On fixed geometry, supplied acceleration requires Cartesian, native cylindrical,
- * or a polygonal disk/annulus extrusion. The solver checks this collectively, including on empty owners.
+ * RealizableLinearSSPRK2 requires closed orthogonal meshes with shared carrier. Supplied acceleration is
+ * supported on Cartesian meshes, native cylindrical meshes, and polygonal disk/annulus extrusions, with
+ * the Q7a geometry constraints on prescribed planar ALE. The solver checks this collectively, including empty owners.
  * Native phase temperatures, prescribed drift and mesh motion have their own
  * configuration or state checks.
  */

@@ -138,8 +138,8 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_capability(const Flow::Options& o
     if (moving)
     {
         require(!kinetic, "Planar ALE excludes kinetic family transport.");
-        require(!force || (!linear && !model.bulk_gas_conversion),
-            "Planar ALE with supplied acceleration requires implicit transport without BulkGas conversion.");
+        require(!force || !model.bulk_gas_conversion,
+            "Planar ALE with supplied acceleration excludes BulkGas conversion.");
         mesh.visit(
             [](const auto& native)
             {

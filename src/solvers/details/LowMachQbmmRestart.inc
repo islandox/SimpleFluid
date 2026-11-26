@@ -20,7 +20,7 @@ namespace
 // Version 9 tags forced Cartesian kinetic, forced SSPRK2, axial kinetic, TVD-MC SSPRK2, and planar SSPRK2 payloads.
 // The axial and TVD-MC tags distinguish absent acceleration from supplied zero acceleration.
 // The planar SSPRK2 tag binds moving-stage and advancement controls before the planar geometry record.
-// The forced planar implicit tag binds prescribed motion, reacting and physical providers, and the split impulse.
+// The forced planar tags bind prescribed motion, reacting and physical providers, and the split impulse.
 // Version 10 adds fixed shared-carrier implicit BulkGas pool conversion and its accepted directional totals.
 // Its new tags extend the implicit pool to planar motion, fixed forcing and fixed unforced supplied slip.
 constexpr std::uint64_t qbmm_restart_magic = 0x5453524d4d425153ULL;
@@ -32,6 +32,7 @@ constexpr std::uint64_t qbmm_tagged_restart_version = 9;
 constexpr std::uint64_t qbmm_pool_restart_version = 10;
 constexpr std::uint64_t qbmm_pool_restart_policy_revision = 1;
 constexpr std::uint64_t qbmm_planar_forced_implicit_restart_revision = 1;
+constexpr std::uint64_t qbmm_planar_forced_linear_restart_revision = 1;
 
 enum class RestartPayload : std::uint64_t
 {
@@ -46,7 +47,8 @@ enum class RestartPayload : std::uint64_t
     PlanarImplicitBulkGasPool = 9,
     ForcedImplicitBulkGasPool = 10,
     FixedSlipImplicitBulkGasPool = 11,
-    PlanarForcedImplicit = 12
+    PlanarForcedImplicit = 12,
+    PlanarForcedLinear = 13
 };
 
 bool is_kinetic_payload(RestartPayload payload)
@@ -54,10 +56,15 @@ bool is_kinetic_payload(RestartPayload payload)
     return payload == RestartPayload::FixedKinetic || payload == RestartPayload::FixedAxialKinetic;
 }
 
+bool is_planar_linear_payload(RestartPayload payload)
+{
+    return payload == RestartPayload::PlanarLinear || payload == RestartPayload::PlanarForcedLinear;
+}
+
 bool is_linear_payload(RestartPayload payload)
 {
     return payload == RestartPayload::FixedLinear || payload == RestartPayload::FixedLinearTvdMc ||
-           payload == RestartPayload::PlanarLinear;
+           is_planar_linear_payload(payload);
 }
 
 constexpr size_t restart_word_size = sizeof(std::uint64_t);
@@ -196,7 +203,8 @@ RestartPayload decode_restart_payload(std::uint64_t version, RestartReader& read
                       tag == static_cast<std::uint64_t>(RestartPayload::FixedAxialKinetic) ||
                       tag == static_cast<std::uint64_t>(RestartPayload::FixedLinearTvdMc) ||
                       tag == static_cast<std::uint64_t>(RestartPayload::PlanarLinear) ||
-                      tag == static_cast<std::uint64_t>(RestartPayload::PlanarForcedImplicit),
+                      tag == static_cast<std::uint64_t>(RestartPayload::PlanarForcedImplicit) ||
+                      tag == static_cast<std::uint64_t>(RestartPayload::PlanarForcedLinear),
                 "Unknown v9 QBMM payload type.");
             return static_cast<RestartPayload>(tag);
         }
@@ -229,7 +237,7 @@ RestartPayload configured_restart_payload(
     if (motion)
     {
         if (uses_qbmm_linear_transport(options.qbmm_model))
-            return RestartPayload::PlanarLinear;
+            return force ? RestartPayload::PlanarForcedLinear : RestartPayload::PlanarLinear;
         if (force && options.qbmm_model.family_transport == QbmmModelOptions::FamilyTransport::NativeImplicit)
             return RestartPayload::PlanarForcedImplicit;
         return RestartPayload::PlanarImplicit;
@@ -620,14 +628,17 @@ std::uint64_t restart_forced_physical_fingerprint(const Solver::Options& options
     return restart_physical_fingerprint(options, eos, domain, true);
 }
 
-std::uint64_t restart_planar_forced_implicit_fingerprint(
-    const Solver::Options& options, std::span<const std::shared_ptr<const MixtureThermodynamics>> eos)
+std::uint64_t restart_planar_forced_fingerprint(const Solver::Options& options,
+    std::span<const std::shared_ptr<const MixtureThermodynamics>> eos, bool linear)
 {
     RestartHash hash;
     hash.word(restart_advance_controls(options));
-    // Native count-only solves can select a nonzero absolute Krylov tolerance.
+    // Include the absolute tolerance omitted from the legacy advancement fingerprint.
     hash.number(options.linear.absolute_tolerance);
-    hash.word(restart_physical_fingerprint(options, eos, "planar-forced-implicit-physical-providers-v1", true));
+    if (linear)
+        hash.word(qbmm_planar_linear_transport_revision);
+    hash.word(restart_physical_fingerprint(options, eos,
+        linear ? "planar-forced-linear-physical-providers-v1" : "planar-forced-implicit-physical-providers-v1", true));
     return hash.value;
 }
 
@@ -731,7 +742,7 @@ void restart_diagnostics(
     if (is_linear_payload(type))
         io(value.linear_substeps, value.linear_stages, value.maximum_linear_cfl, value.maximum_linear_stage_residual,
             value.maximum_linear_step_residual);
-    if (type == RestartPayload::FixedLinearTvdMc || type == RestartPayload::PlanarLinear)
+    if (type == RestartPayload::FixedLinearTvdMc || is_planar_linear_payload(type))
         io(value.linear_upstream_returned_packets);
 }
 
@@ -1235,8 +1246,9 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
     const auto type = configured_restart_payload(d->options, mesh, motion != nullptr, force.has_value());
     const bool forced_pool = type == RestartPayload::ForcedImplicitBulkGasPool;
     const bool axial_kinetic = type == RestartPayload::FixedAxialKinetic;
-    const bool planar_linear = type == RestartPayload::PlanarLinear;
-    const bool planar_forced = type == RestartPayload::PlanarForcedImplicit;
+    const bool planar_linear = is_planar_linear_payload(type);
+    const bool planar_forced_implicit = type == RestartPayload::PlanarForcedImplicit;
+    const bool planar_forced = planar_forced_implicit || type == RestartPayload::PlanarForcedLinear;
     const bool fixed_tvd_mc = type == RestartPayload::FixedLinearTvdMc;
     const bool tvd_mc = d->options.qbmm_model.linear_slope_limiter == QbmmModelOptions::LinearSlopeLimiter::TvdMc;
     const bool retains_linear_controller = fixed_tvd_mc || planar_linear;
@@ -1280,7 +1292,7 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
     collective_detail::collective_local_validation(mesh, "QBMM restart encoding",
         [&]
         {
-            check(d->initialized && (!count_only || planar_forced) &&
+            check(d->initialized && (!count_only || planar_forced_implicit) &&
                       (motion || (d->logical_geometry == 0 && !d->active_controller_motion)) &&
                       d->epoch == mesh_geometry_epoch(mesh),
                 "QBMM restart requires initialized QBMM state on its current accepted geometry.");
@@ -1309,7 +1321,7 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
                     restart_forced_family_impulses(writer, d->diagnostics, forced_interval, true);
                 }
             }
-            else if (planar_linear)
+            else if (planar_linear && !planar_forced)
             {
                 check(!force && !d->diagnostics.impulse_parts && !forced_interval,
                     "Planar linear QBMM restart requires absent body acceleration and impulse history.");
@@ -1320,10 +1332,11 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
             {
                 check(signature && !d->qbmm_legacy_default_only,
                     "Planar forced QBMM restart requires its bound reacting controller.");
-                physical_fingerprint = restart_planar_forced_implicit_fingerprint(d->options, d->eos);
+                physical_fingerprint = restart_planar_forced_fingerprint(d->options, d->eos, planar_linear);
                 validate_planar_restart_force_interval(*force, d->diagnostics, state, forced_interval, wall_interval);
-                writer(static_cast<std::uint64_t>(type), qbmm_planar_forced_implicit_restart_revision,
-                    physical_fingerprint, *force);
+                const auto revision = planar_linear ? qbmm_planar_forced_linear_restart_revision
+                                                    : qbmm_planar_forced_implicit_restart_revision;
+                writer(static_cast<std::uint64_t>(type), revision, physical_fingerprint, *force);
                 restart_forced_family_impulses(writer, d->diagnostics, forced_interval, true);
             }
             else if (tagged)
@@ -1489,7 +1502,7 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
         if (forced_pool)
             require_uniform_forced_family_history(mesh, *force, d->diagnostics, forced_interval);
     }
-    else if (planar_linear)
+    else if (planar_linear && !planar_forced)
         collective_detail::require_uniform_value(mesh, planar_linear_controls, "Planar linear QBMM advancement controls");
     else if (tagged)
     {
@@ -1540,8 +1553,9 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
     const bool count_only = d->options.qbmm_families.empty();
     const bool forced_pool = configured_type == RestartPayload::ForcedImplicitBulkGasPool;
     const bool axial_kinetic = configured_type == RestartPayload::FixedAxialKinetic;
-    const bool planar_linear = configured_type == RestartPayload::PlanarLinear;
-    const bool planar_forced = configured_type == RestartPayload::PlanarForcedImplicit;
+    const bool planar_linear = is_planar_linear_payload(configured_type);
+    const bool planar_forced_implicit = configured_type == RestartPayload::PlanarForcedImplicit;
+    const bool planar_forced = planar_forced_implicit || configured_type == RestartPayload::PlanarForcedLinear;
     const bool fixed_tvd_mc = configured_type == RestartPayload::FixedLinearTvdMc;
     const bool tvd_mc = d->options.qbmm_model.linear_slope_limiter == QbmmModelOptions::LinearSlopeLimiter::TvdMc;
     const bool retains_linear_controller = fixed_tvd_mc || planar_linear;
@@ -1563,7 +1577,8 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
     collective_detail::collective_local_validation(mesh, "QBMM restart decoding",
         [&]
         {
-            check(d->trial_nonce != std::numeric_limits<std::uint64_t>::max() && (!count_only || planar_forced) &&
+            check(d->trial_nonce != std::numeric_limits<std::uint64_t>::max() &&
+                      (!count_only || planar_forced_implicit) &&
                       (motion || (d->logical_geometry == 0 && !d->active_controller_motion)) &&
                       d->epoch == mesh_geometry_epoch(mesh),
                 "QBMM restart target requires QBMM configuration on its current accepted geometry.");
@@ -1587,7 +1602,7 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
             reader.expect(qbmm_restart_magic, "Invalid QBMM restart signature.");
             reader(version);
             const auto type = decode_restart_payload(version, reader);
-            check(!is_linear_payload(type) || !linear || (type == RestartPayload::PlanarLinear) != planar_linear ||
+            check(!is_linear_payload(type) || !linear || is_planar_linear_payload(type) || planar_linear ||
                       type == configured_type,
                 "QBMM restart linear slope limiter differs.");
             check(type == configured_type,
@@ -1604,7 +1619,7 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
                     restart_forced_family_impulses(reader, statistics, forced_interval, true);
                 }
             }
-            else if (planar_linear)
+            else if (planar_linear && !planar_forced)
             {
                 reader.expect(qbmm_planar_linear_transport_revision, "QBMM restart planar linear algorithm differs.");
                 reader.expect(restart_advance_controls(d->options), "QBMM restart advancement controls differ.");
@@ -1613,9 +1628,13 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
             {
                 check(controller && controller->reacting_source_authority && d->active_qbmm_controller,
                     "Planar forced QBMM restart requires its bound reacting controller.");
-                reader.expect(qbmm_planar_forced_implicit_restart_revision,
-                    "QBMM restart planar forced implicit algorithm differs.");
-                physical_fingerprint = restart_planar_forced_implicit_fingerprint(d->options, d->eos);
+                if (planar_linear)
+                    reader.expect(qbmm_planar_forced_linear_restart_revision,
+                        "QBMM restart planar forced linear algorithm differs.");
+                else
+                    reader.expect(qbmm_planar_forced_implicit_restart_revision,
+                        "QBMM restart planar forced implicit algorithm differs.");
+                physical_fingerprint = restart_planar_forced_fingerprint(d->options, d->eos, planar_linear);
                 reader.expect(physical_fingerprint, "Planar forced QBMM restart advancement controls or providers differ.");
                 reader(statistics.body_acceleration_m_per_s2.emplace());
                 restart_forced_family_impulses(reader, statistics, forced_interval, true);
@@ -1958,7 +1977,7 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
             require_uniform_forced_family_history(
                 mesh, *statistics.body_acceleration_m_per_s2, statistics, forced_interval);
     }
-    if (version == qbmm_tagged_restart_version && !planar_linear)
+    if (version == qbmm_tagged_restart_version && (!planar_linear || planar_forced))
     {
         collective_detail::require_uniform_value(mesh, int(statistics.body_acceleration_m_per_s2.has_value()),
             "Tagged QBMM acceleration presence");
@@ -2025,7 +2044,7 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
         d->publish_fixed(std::move(candidate), std::move(statistics), face_flux, generation, std::move(publication));
     }
     d->explicit_family_force_recorded = explicit_family || pool_conversion || planar_forced;
-    if (planar_forced && count_only)
+    if (planar_forced_implicit && count_only)
     {
         d->count_only_force_provenance_recorded = true;
         d->accepted_count_only_body_acceleration = acceleration_components(d->diagnostics.body_acceleration_m_per_s2);

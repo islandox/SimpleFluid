@@ -3058,19 +3058,12 @@ TEST(ReactingMixtureQbmmSourcesTest, MovingLinearCapabilityRejectsUnsupportedOpt
             true, FamilyTransport::RealizableLinearSSPRK2, {}, 1, limiter);
         const auto checkpoint = f.flow->serialize_qbmm_restart();
         const auto epoch = f.mesh->geometry_epoch();
-        auto options = f.options([](const auto&) { return Ops{}; });
-        options.planar_motion = motion(f);
-        for (const double gravity : {0., -9.81})
-        {
-            options.body_acceleration = Flow::Vector{0., 0., gravity};
-            EXPECT_THROW((void) Coupler(f.flow, options), std::exception);
-        }
-        EXPECT_EQ(f.flow->serialize_qbmm_restart(), checkpoint);
-        EXPECT_EQ(f.mesh->geometry_epoch(), epoch);
-
         auto flow_options = f.flow->options();
         const auto eos = std::vector{f.liquid, f.gas, f.gas, f.gas};
         flow_options.qbmm_model.velocity = Velocity::SuppliedPhaseSlip;
+        EXPECT_THROW((void) Flow(f.mesh, eos, flow_options), std::exception);
+        flow_options = f.flow->options();
+        flow_options.qbmm_model.bulk_gas_conversion = true;
         EXPECT_THROW((void) Flow(f.mesh, eos, flow_options), std::exception);
 
         Flow::Mesh::DistributionOptions partition;
@@ -3080,6 +3073,8 @@ TEST(ReactingMixtureQbmmSourcesTest, MovingLinearCapabilityRejectsUnsupportedOpt
                 Vec3D<ArrReal>{ArrReal{0, .5, 1}, ArrReal{0, 1}, ArrReal{0, 1}}, Vec3D<bool>{true, false, false}),
             partition);
         EXPECT_THROW((void) Flow(periodic, eos, f.flow->options()), std::exception);
+        EXPECT_EQ(f.flow->serialize_qbmm_restart(), checkpoint);
+        EXPECT_EQ(f.mesh->geometry_epoch(), epoch);
     }
 
     Fixture kinetic({{4, 1}}, false, false, R::EnergyConvention::IncludesFormationEnergy, {}, liquid_moles, true);
