@@ -320,9 +320,9 @@ fraction and an energy-balanced timestep give no empirical validity range for a 
 | Velocity and order | `NativeImplicit` admits `SharedCarrier` (default) and `SuppliedPhaseSlip`. Fixed closed Cartesian meshes and qualified cylinders admit `NodeDependentSlip` with `KineticEuler`. Cylindrical kinetic drift is axial. Closed orthogonal Cartesian, native cylindrical and cylindrical `SemiStructuredXY_Z` meshes admit `SharedCarrier` with `RealizableLinearSSPRK2` and either linear slope limiter. Prescribed planar motion is supported with this pairing and absent acceleration. Unbound phases use transient backward Euler and upwind with carrier-grouped linear solves or scalar opt-out. Independent phase momentum, steady assembly, BDF2 and ordinary scalar high-order limiters reject. |
 | Gravity and applicability | Fixed native implicit transport, fixed closed Cartesian kinetic Euler, and fixed shared-carrier SSPRK2 on Cartesian or qualified cylindrical meshes admit optional SI acceleration. Fixed cylindrical kinetic Euler admits optional axial acceleration. A supplied zero vector selects the forced policy. Planar ALE requires absent acceleration. Applicability ranges come from the supplied laws. |
 | Family schema | One named fixed-composition family per dispersed gas phase; catalog, family stamp, reference scale and phase ordering agree on all ranks. Variable composition, cross-family coalescence and unmigrated count-only state reject. |
-| Local material and topology | Constructive paired birth, growth, shrinkage, disappearance, coalescence and breakup; transfers may involve the liquid carrier or a declared external reservoir. Declaring either direction of a family-to-background-gas material slot rejects. Generic chemistry, face transport and interphase laws can act on unbound compartments. A legacy number law must name only unbound populations. Selective or unpaired family material returned by a law rejects the preview. |
-| Thermal and pool closures | Common temperature and pressure, zero surface tension. Separate phase or node temperatures, bulk-gas conversion and capillary/surface-energy closures reject. A separate background gas may carry its own inventory. |
-| Transactions and restart | All owners use a common numerical configuration and controller selection. Commit publishes one retained trial. Rejection preserves accepted canonical state, histories and other compatible previews. Fixed-grid restart supports versions 1–5 under their original modes, version 7 for unforced Cartesian kinetic Euler, version 8 for unforced realizable linear SSPRK2 with the default limiter, and tagged version 9 for forced explicit, axial kinetic and TVD-MC SSPRK2 payloads. Moving implicit restart uses version 6. Moving linear restart uses version 9 tag 7. Both bind the original and accepted geometry, motion controls, partition, target policy and supplied physics. |
+| Local material and topology | Constructive paired birth, growth, shrinkage, disappearance, coalescence and breakup. Transfers may involve the liquid carrier, a declared external reservoir, or the designated gas pool for a tagged birth or disappearance. Family material slots targeting passive background gas reject. Generic chemistry, face transport and interphase laws can act on their admitted unbound compartments. A legacy number law must name only unbound populations. Selective or unpaired family material returned by a law rejects the preview. |
+| Thermal and pool closures | Common temperature and pressure, zero surface tension. The explicit gas pool admits both native implicit velocity modes, fixed with optional acceleration or planar with absent acceleration. Separate phase or node temperatures, pool conversion with either explicit integrator, and capillary/surface-energy closures reject. Passive background gas carries its own inventory. |
+| Transactions and restart | All owners use a common numerical configuration and controller selection. Commit publishes one retained trial. Rejection preserves accepted canonical state, histories and other compatible previews. Fixed-grid restart supports versions 1–5 under their original modes, version 7 for unforced Cartesian kinetic Euler, version 8 for unforced realizable linear SSPRK2 with the default limiter, and tagged version 9 for forced explicit, axial kinetic and TVD-MC SSPRK2 payloads. Moving implicit restart uses version 6. Moving linear restart uses version 9 tag 7. Version 10 tags 8–11 bind the admitted pool modes. Moving records bind the original and accepted geometry, motion controls, partition, target policy and supplied physics. |
 
 The release suite follows circulating polydisperse gas across partition faces into exact vacuum,
 combines it with population events, unrelated mole-changing chemistry and heat, and checks the
@@ -1578,14 +1578,16 @@ or dissolved inventory is invalid. In pure QBMM applicability, an explicit
 carrier liquid volume of zero makes liquid-dependent ranges inapplicable,
 with no temperature or concentration supplied.
 
-## Q9b fixed-mesh BulkGas pool conversion
+## Q9b and Q9c BulkGas pool conversion
 
 The low-Mach runtime admits `bulk_gas_conversion = true` with an explicit
-`Options::qbmm_bulk_gas_pool` binding on fixed supported orthogonal meshes
-using `NativeImplicit` and `SharedCarrier`. Prescribed planar ALE,
-`SuppliedPhaseSlip`, `KineticEuler`, `RealizableLinearSSPRK2`, and supplied
-body acceleration are rejected, including a supplied zero vector. Passive
-background gas retains its own transport and thermodynamic inventory.
+`Options::qbmm_bulk_gas_pool` binding and `NativeImplicit` family transport.
+Q9c admits `SharedCarrier` and `SuppliedPhaseSlip` on fixed supported
+orthogonal meshes, with optional supplied acceleration, and on unforced
+Q7a prescribed planar ALE meshes. Planar ALE rejects any supplied
+acceleration, including an explicit zero vector, pending Q8e.
+`KineticEuler` and `RealizableLinearSSPRK2` both reject pool conversion.
+Passive background gas retains its own transport and thermodynamic inventory.
 
 One unbound physical gas phase owns the unnamed chemical `Resolved`
 pool. A paired QBMM material slot needs a permitted species and direction
@@ -1595,7 +1597,18 @@ All enabled provider styles reserve original counts and species jointly
 within each cell and accepted source substep. Pressure-conditioned
 recovery uses the actual donor partial-molar enthalpy for each slot.
 The pool uses the ordinary gas EOS and unbound-phase transport, including
-the batched and scalar paths. Dry liquid contacts skip their callbacks.
+the batched and scalar paths. Its phase flux uses its own supplied drift.
+In slip mode the carrier momentum operator retains both directional mass
+rates and the donor drift-momentum flux. The difference between the old and
+final phase drift momenta accounts for the changed material inventory.
+On fixed forced runs the body impulse uses the full final mixture mass,
+including passive gas, and the pressure predictor reconstructs hydrostatic
+residuals. An engaged zero acceleration carries its own provenance.
+
+Planar runs use relative phase fluxes, impermeable moving walls, and the
+accepted and trial cell volumes in storage and pressure work. Failed and
+speculative previews restore accepted geometry, epoch, absolute flux, and
+motion history. Dry liquid contacts skip their callbacks.
 Gas-based chemistry uses actual occupied gas volume, and independent
 heating is available on occupied gas. An absent phase has zero physical
 volume and undefined temperature and concentration.
@@ -1609,8 +1622,13 @@ includes pool diagnostics and separate dispersed, designated-pool,
 passive, and total gas fractions on the same bulk cell volume.
 Pool-law evaluation is recorded independently of the closure flags.
 
-Portable restart v10 tag 8 binds the fixed runtime pool configuration,
-law contracts, controller signature, and directional interval totals.
+Portable restart v10 binds the pool configuration, law contracts,
+controller signature, and directional interval totals. Tag 8 keeps the
+Q9b unforced fixed `SharedCarrier` layout. Tag 9 covers both planar modes
+and binds the motion authority, target law, accepted geometry, and last
+wall interval. Tag 10 covers both fixed forced modes and binds the actual
+acceleration, the split impulse and interval, and physical provider
+identities. Tag 11 covers unforced fixed `SuppliedPhaseSlip`.
 Restore of coupled history requires an initialized receiving controller,
 which validates the decoded chemical inventory before the solver publishes it.
 The archived interval totals are available after restore. Its detailed

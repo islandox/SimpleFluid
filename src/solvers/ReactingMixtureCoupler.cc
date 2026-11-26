@@ -1463,7 +1463,7 @@ struct SourceEngine
                             prepare_material_stages(current, donors, raw_donors, sums, gross, guesses, thermal,
                                 qbmm, schedule, substep_retries);
                         if (options.body_acceleration)
-                            add_body_impulse(current.transport.time_step, donors, sums, gross);
+                            add_body_impulse(current.transport, donors, sums, gross);
                     };
                 ordered.reserve(face_stages.size());
                 for (const auto& stage : face_stages)
@@ -1592,24 +1592,28 @@ struct SourceEngine
         return result;
     }
 
-    void add_body_impulse(double dt, const std::vector<CellSpeciesState>& endpoints,
+    void add_body_impulse(const Solver::TransportSnapshot& transport, const std::vector<CellSpeciesState>& endpoints,
         Faces::LocalSourceAccumulator& sums, std::vector<std::vector<double>>& gross) const
     {
         const auto& catalog = options.mechanism->catalog();
         for (size_t cell = 0; cell < endpoints.size(); ++cell)
         {
             Sum mass;
-            for (const auto& phase : options.phases)
+            for (size_t p = 0; p < options.phases.size(); ++p)
+            {
+                const auto& phase = options.phases[p];
+                const bool passive = passive_bulk_gas(*flow, p);
                 for (size_t species = 0; species < catalog.species().size(); ++species)
                 {
                     const auto& descriptor = catalog.species()[species];
-                    const auto moles =
-                        endpoints[cell].amount(catalog, descriptor.id, compartment(phase, species), phase.population);
+                    const auto moles = passive ? transport.cells[cell].phases[p].moles[species]
+                        : endpoints[cell].amount(catalog, descriptor.id, compartment(phase, species), phase.population);
                     mass += static_cast<long double>(moles) * descriptor.molarMass;
                 }
+            }
             for (size_t axis = 0; axis < 3; ++axis)
             {
-                const auto impulse = mass.value() * options.body_acceleration->component(axis) * dt;
+                const auto impulse = mass.value() * options.body_acceleration->component(axis) * transport.time_step;
                 sums.add_body_momentum(cell, axis, impulse);
                 gross[cell].push_back(population_source_detail::narrow(std::abs(impulse)));
             }

@@ -1,262 +1,11 @@
 /** Coupled fixed-grid BulkGas conversion with independent extensive and caloric oracles. */
-#include "QbmmRestartTestSupport.hh"
-#include "equations/QbmmPopulationLawAdapters.hh"
-#include "geometry/mesh/OrthogonalCartesian3D.hh"
-#include "solvers/ReactingMixtureCoupler.hh"
-#include "utils/testing_environment.hh"
-
-#include <gtest/gtest.h>
-#include <numeric>
+#include "QbmmPoolTestSupport.hh"
 
 namespace
 {
 using namespace SimpleFluid;
-namespace R = Reacting;
-namespace IO = Testing::QbmmRestart;
-using Flow = R::LowMachMixtureSolver;
-using Coupler = R::ReactingMixtureCoupler;
-using Phase = R::SpeciesPhase;
-using Direction = R::QbmmPoolConversionDirection;
-using Operations = std::vector<R::QbmmEventOperation>;
-using Context = R::MixtureQbmmContext;
+using namespace Testing::QbmmPool;
 const auto environment = ::testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
-constexpr R::SpeciesId A = 17, B = 31, solvent = 53;
-constexpr double scale = 8., T0 = 256., gas_R = 8., dt = 1. / 64., liquid_cv = 512.;
-constexpr R::ThermodynamicBounds bounds{100., 800., 4000., 500000.};
-
-struct FixtureOptions
-{
-    double liquid_fraction = 1. / 16., pool_stock = 0;
-    bool different_eos = false, two_families = false, circulating = false, two_cells = false, batched = true;
-    bool extra_permitted = false, dry_chemistry = false, declare_liquid_law = false;
-    Direction direction = Direction::Bidirectional;
-    std::uint64_t law_revision = 1;
-    bool legacy = false;
-    std::string pool_name = "pool";
-    bool passive = false;
-};
-
-struct Fixture
-{
-    FixtureOptions setup;
-    std::shared_ptr<const R::SpeciesCatalog> catalog =
-        std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
-            {A, "monomer", 1, {{"X", 1}}, {Phase::Dissolved, Phase::Dispersed, Phase::Resolved}},
-            {B, "dimer", 2, {{"X", 2}}, {Phase::Dissolved, Phase::Dispersed, Phase::Resolved}},
-            {solvent, "solvent", 1, {{"S", 1}}, {Phase::Liquid, Phase::Resolved}}});
-    std::shared_ptr<Flow::Mesh> mesh;
-    Flow::Options controls;
-    std::vector<std::shared_ptr<const R::MixtureThermodynamics>> eos;
-    std::shared_ptr<Flow> flow;
-    R::ReactingMixtureOptions options;
-    std::shared_ptr<const R::QbmmBulkGasPoolBinding> pool;
-    std::shared_ptr<R::InterphaseConfiguration> slots;
-    std::unique_ptr<Coupler> controller;
-    std::function<Operations(const Context&)> events;
-    R::QbmmLawMetadata liquid_law{"liquid tracer", 1, R::QbmmLawKind::MassTransfer, "liquid mol/m3", "mol/cell",
-        R::QbmmApplicabilityGate::RejectOutside, true,
-        {{R::QbmmRangeVariable::CarrierLiquidConcentrationMolPerM3, 0, 1000, 0}}};
-    int calls = 0, partial_calls = 0, liquid_calls = 0;
-    double pressure;
-
-    static std::vector<double> moles(double scaled_mass) { return {4 * scaled_mass, 2 * scaled_mass, 0}; }
-    static double gas_capacity(const std::vector<double>& n, double factor)
-    {
-        return factor * (16 * n[0] + 32 * n[1] + 16 * n[2]);
-    }
-    explicit Fixture(FixtureOptions s = {})
-        : setup(s), pressure((5 + s.pool_stock + (s.passive ? 2 : 0)) * 6 * gas_R * T0 / (1 - s.liquid_fraction))
-    {
-        const auto cuts = s.circulating ? ArrReal{0, .5, 1} : ArrReal{0, 1};
-        const auto z = s.two_cells ? ArrReal{0, .5, 1} : cuts;
-        mesh = std::make_shared<Flow::Mesh>(
-            std::make_shared<Flow::Mesh::Cartesian>(Vec3D<ArrReal>{cuts, ArrReal{0, 1}, z}),
-            Flow::Mesh::DistributionOptions{.allow_empty_partitions = true});
-        const auto fp = catalog->fingerprint();
-        const auto liquid = R::make_linear_compressible_mixture_liquid(catalog, bounds, [this](auto)
-            { return R::LinearCompressibleMixtureLiquid{T0, pressure, 1, liquid_cv, 0, 0, liquid_cv * T0, 0, 0}; });
-        auto gas = [&](double factor)
-        {
-            return R::make_ideal_gas_mixture(catalog,
-                {{16 * factor, T0, 16 * factor * T0}, {32 * factor, T0, 32 * factor * T0},
-                    {16 * factor, T0, 16 * factor * T0}},
-                bounds, R::EnergyConvention::IncludesFormationEnergy, gas_R);
-        };
-        controls.qbmm_model.bulk_gas_conversion = !s.legacy;
-        controls.use_multi_rhs_transport = s.batched;
-        controls.minimum_pressure = bounds.minimum_pressure;
-        controls.maximum_pressure = bounds.maximum_pressure;
-        controls.linear.preconditioner = LinearPreconditioner::None;
-        controls.linear.tolerance = 1e-12;
-        controls.phase_roles = {{Flow::PhaseRole::BulkLiquid, "liquid"}, {Flow::PhaseRole::DispersedGas, "fine"}};
-        if (s.two_families)
-            controls.phase_roles.push_back({Flow::PhaseRole::DispersedGas, "coarse"});
-        controls.phase_roles.push_back({Flow::PhaseRole::BulkGas, s.pool_name});
-        const size_t last = controls.phase_roles.size() - 1;
-        if (s.passive)
-            controls.phase_roles.push_back({Flow::PhaseRole::BulkGas, "passive gas"});
-        const auto nph = controls.phase_roles.size();
-        const std::array enabled{false, true, s.two_families, false, false};
-        std::vector<R::SpeciesId> permitted{A, B};
-        if (s.extra_permitted)
-            permitted.push_back(solvent);
-        pool = std::make_shared<const R::QbmmBulkGasPoolBinding>(
-            catalog, fp, std::span(controls.phase_roles), last, permitted, s.direction, std::span(enabled).first(nph));
-        if (!s.legacy)
-            controls.qbmm_bulk_gas_pool = pool;
-        controls.qbmm_eos_law_identities.resize(nph);
-        controls.qbmm_eos_law_identities[0] = R::ThermalLawIdentity{"constant density", 1, fp};
-        controls.qbmm_families.resize(nph);
-        options.phases = {{Phase::Liquid, {}, {Phase::Dissolved, Phase::Dissolved, Phase::Liquid}}};
-        eos = {liquid};
-        slots = std::make_shared<R::InterphaseConfiguration>();
-        slots->metadata = {"ideal partial molar enthalpy", 1, fp};
-        slots->phase_enthalpy.resize(nph);
-        slots->stages = {{"conversion", R::InterphaseStageKind::Material, {}, {}}};
-        for (size_t p = 1; p < nph; ++p)
-        {
-            const bool is_pool = p == last;
-            const double factor = is_pool && s.different_eos ? 1.5 : 1.;
-            eos.push_back(gas(factor));
-            slots->phase_enthalpy[p] = std::make_shared<const R::PartialMolarEnthalpyLaw>(
-                R::PartialMolarEnthalpyLaw{{is_pool ? "pool ideal enthalpy" : "bubble ideal enthalpy", 1, fp}, bounds,
-                    [this, factor](double t, double, std::span<const double>)
-                    {
-                        ++partial_calls;
-                        const double ca = 16 * factor + gas_R, cb = 32 * factor + gas_R;
-                        return R::PartialMolarEnthalpyPoint{{ca * t, cb * t, ca * t}, {ca, cb, ca}, {0, 0, 0}};
-                    }});
-            if (p >= last)
-            {
-                options.phases.push_back({Phase::Resolved, {}, {}});
-                continue;
-            }
-            auto name = controls.phase_roles[p].identity;
-            R::QbmmClosureVersions versions;
-            versions.source_identity = "pool kinetics";
-            versions.laws = {{"prescribed conversion", s.law_revision, R::QbmmLawKind::BulkGasConversion,
-                "fixed SI node masses and frozen stock", "mol/cell", R::QbmmApplicabilityGate::ReportOnly, false,
-                {{R::QbmmRangeVariable::BulkGasPoolVolumeFraction, 0, 1, {}}}}};
-            if (s.declare_liquid_law)
-                versions.laws.push_back(liquid_law);
-            if (s.legacy)
-                versions.laws.clear();
-            controls.qbmm_families[p] =
-                std::make_shared<const R::QbmmPopulationSchema>(catalog, fp, name, controls.phase_roles[p], scale,
-                    std::vector<R::QbmmMassFraction>{{A, .5}, {B, .5}, {solvent, 0}}, versions);
-            options.phases.push_back({Phase::Dispersed, name, {}});
-            for (auto id : {A, B})
-            {
-                if (pool->allows(Direction::DispersedToPool))
-                    slots->stages[0].material.push_back({id, p, last});
-                if (pool->allows(Direction::PoolToDispersed))
-                    slots->stages[0].material.push_back({id, last, p});
-            }
-        }
-        std::vector<R::ReactionDefinition> reactions;
-        if (s.dry_chemistry)
-            reactions.push_back(
-                {7, "resolved dimerization", {{A, Phase::Resolved, -2, {}}, {B, Phase::Resolved, 1, {}}}, 0.});
-        options.mechanism =
-            std::make_shared<const R::ReactionMechanism>(catalog, reactions, eos[0]->energy_convention());
-        options.heat_phase = last;
-        flow = std::make_shared<Flow>(mesh, eos, controls);
-        Flow::State state;
-        state.thermodynamic_pressure = pressure;
-        state.qbmm_families.resize(nph);
-        for (size_t p = 1; p < last; ++p)
-            state.qbmm_families[p] = Flow::qbmm_family_stamp(*controls.qbmm_families[p]);
-        for (size_t c = 0; c < mesh->num_owned_cells(); ++c)
-        {
-            auto& cell = state.cells.emplace_back();
-            const auto x = mesh->cell_centroid(c);
-            const double v = mesh->cell_volume(c), wl = s.liquid_fraction * v;
-            cell.phase_numbers.resize(nph);
-            cell.qbmm_shape.resize(nph);
-            cell.phases = {{eos[0], {0, 0, wl}, pressure, wl * liquid_cv * T0, wl > 0 ? T0 : 0.}};
-            double fine = v, pool_mass = s.pool_stock * v;
-            if (s.circulating)
-            {
-                fine = x.x < .5 ? v : 0;
-                pool_mass += (v - fine) * 5;
-                cell.velocity = Flow::Vector{.5 - x.z, 0, x.x < .5 ? -.25 : .25};
-            }
-            for (size_t p = 1; p < nph; ++p)
-            {
-                const double f = p == 1 ? fine : 0.;
-                const auto n = moles(p > last ? 2 * v : p == last ? pool_mass : 5 * f);
-                cell.phases.push_back({eos[p], n, pressure,
-                    gas_capacity(n, p == last && s.different_eos ? 1.5 : 1.) * T0, n[0] > 0 ? T0 : 0.});
-                if (p < last)
-                {
-                    cell.phase_numbers[p] = 3 * f;
-                    cell.qbmm_shape[p] = R::QbmmShapeState{11 * f, 29 * f};
-                }
-            }
-        }
-        flow->initialize(std::move(state));
-        events = [this](const Context& ctx) { return trajectory(ctx); };
-    }
-    void start()
-    {
-        const R::ThermalLawIdentity id{"pool kinetics", 1, catalog->fingerprint()};
-        std::vector<std::shared_ptr<const R::MixtureQbmmLaw>> laws;
-        if (setup.declare_liquid_law)
-            laws.push_back(std::make_shared<const R::MixtureQbmmLaw>(R::MixtureQbmmLaw{liquid_law, [this](const auto&)
-                {
-                    ++liquid_calls;
-                    return Operations{};
-                }}));
-        options.qbmm_population =
-            std::make_shared<const R::MixtureQbmmProvider>(R::MixtureQbmmProvider{id, setup.legacy ? nullptr : slots,
-                [this](const Context& ctx)
-                {
-                    ++calls;
-                    return events(ctx);
-                },
-                laws});
-        controller = std::make_unique<Coupler>(flow, options);
-    }
-    Operations drain(const Context& in, std::vector<double> fractions) const
-    {
-        return R::qbmm_pool_drain_from_fraction(in.family, *in.law_inputs, *pool, fractions);
-    }
-    Operations birth(const Context& in, double count, double size) const
-    {
-        return R::qbmm_pool_birth_from_spectrum(
-            in.family, *in.law_inputs, *pool, std::array{R::QbmmPoolBirthAtom{count, size * scale}});
-    }
-    Operations trajectory(const Context& in) const
-    {
-        const size_t step = static_cast<size_t>(std::lround(in.accepted_time / dt));
-        if (step == 0)
-            return drain(in, {0, 1});
-        if (step == 1)
-            return birth(in, 2, 1.5);
-        if (step == 2)
-            return drain(in, std::vector<double>(in.quadrature.active_atoms, 1));
-        return birth(in, 10, .5);
-    }
-    double sum(double local) const
-    {
-        double total = 0;
-        Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local, &total);
-        return total;
-    }
-    void check_ranks(bool one_cell = true) const
-    {
-        const auto comm = mesh->owned_cell_map()->getComm();
-        if (const char* ranks = std::getenv("SIMPLEFLUID_Q9B_RANKS"))
-            EXPECT_EQ(comm->getSize(), std::stoi(ranks));
-        if (one_cell)
-            EXPECT_EQ(sum(mesh->num_owned_cells() == 0), comm->getSize() - 1);
-    }
-};
-
-void near(double actual, double expected, double tol = 3e-9)
-{
-    EXPECT_NEAR(actual, expected, tol * std::max(1., std::abs(expected)));
-}
 
 TEST(ReactingMixtureQbmmPool, BidirectionalSpectrumExactAbsenceAndRegeneration)
 {
@@ -918,7 +667,7 @@ TEST(ReactingMixtureQbmmPool, UnsupportedModelsAndUnpermittedSlotsFailCollective
     using M = R::QbmmModelOptions;
     Fixture f;
     const auto comm = f.mesh->owned_cell_map()->getComm();
-    for (int mode = 0; mode < 9; ++mode)
+    for (int mode = 0; mode < 8; ++mode)
     {
         SCOPED_TRACE(mode);
         auto options = f.controls;
@@ -932,42 +681,32 @@ TEST(ReactingMixtureQbmmPool, UnsupportedModelsAndUnpermittedSlotsFailCollective
             if (mode == 2)
                 model.linear_slope_limiter = M::LinearSlopeLimiter::TvdMc;
             if (mode == 3)
-                model.velocity = M::Velocity::SuppliedPhaseSlip;
-            if (mode == 4)
                 model.velocity = M::Velocity::NodeDependentSlip;
-            if (mode == 5)
+            if (mode == 4)
                 model.velocity = M::Velocity::IndependentPhaseMomentum;
-            if (mode == 6)
+            if (mode == 5)
                 model.transport.time = FVM::ScalarTimeScheme::BDF2;
-            if (mode == 7)
+            if (mode == 6)
                 model.transport.convection = FVM::ScalarConvectionScheme::BoundedLinearUpwind;
-            if (mode == 8)
+            if (mode == 7)
                 options.qbmm_bulk_gas_pool.reset();
         }
         EXPECT_THROW((void) Flow(f.mesh, f.eos, options), std::exception);
     }
-    for (auto acceleration : {Flow::Vector{}, Flow::Vector{0., 0., -1.}})
-    {
-        int direct_calls = 0;
-        auto direct = std::make_shared<const Flow::SourceStageProvider>(
-            Flow::SourceStageProvider{"direct acceleration", 1, f.catalog->fingerprint(),
-                [&](const auto&)
-                {
-                    ++direct_calls;
-                    return Flow::SourceStageResult{};
-                },
-                0., 0, acceleration});
-        EXPECT_THROW((void) f.flow->preview_with_sources(dt, direct), std::exception);
-        EXPECT_EQ(direct_calls, 0);
-        f.options.body_acceleration = acceleration;
-        EXPECT_THROW(f.start(), std::exception);
-    }
-    f.options.body_acceleration.reset();
-    {
-        Flow::PlanarMotion motion(f.mesh);
-        EXPECT_THROW((void) f.flow->preview_ale(dt, motion, 1.001), std::exception);
-        EXPECT_FALSE(motion.has_active_trial());
-    }
+    int direct_calls = 0;
+    const auto direct = std::make_shared<const Flow::SourceStageProvider>(
+        Flow::SourceStageProvider{"direct acceleration", 1, f.catalog->fingerprint(),
+            [&](const auto&)
+            {
+                ++direct_calls;
+                return Flow::SourceStageResult{};
+            },
+            0., 0, Flow::Vector{0, 0, -1}});
+    EXPECT_THROW((void) f.flow->preview_with_sources(dt, direct), std::exception);
+    EXPECT_EQ(direct_calls, 0);
+    Flow::PlanarMotion motion(f.mesh);
+    EXPECT_THROW((void) f.flow->preview_ale(dt, motion, 1.001), std::exception);
+    EXPECT_FALSE(motion.has_active_trial());
     int motion_calls = 0;
     f.options.planar_motion = std::make_shared<const R::MixturePlanarMotionProvider>(
         R::MixturePlanarMotionProvider{f.mesh, {}, "prescribed", 1, [&](double, double)
@@ -975,8 +714,12 @@ TEST(ReactingMixtureQbmmPool, UnsupportedModelsAndUnpermittedSlotsFailCollective
                 ++motion_calls;
                 return 1.;
             }});
-    EXPECT_THROW(f.start(), std::exception);
-    EXPECT_EQ(motion_calls, 0);
+    for (const auto gravity : {Flow::Vector{}, Flow::Vector{0, 0, -1}})
+    {
+        f.options.body_acceleration = gravity;
+        EXPECT_THROW(f.start(), std::exception);
+        EXPECT_EQ(motion_calls, 0);
+    }
     Fixture wrong({.direction = Direction::DispersedToPool});
     if (comm->getRank() == comm->getSize() - 1)
         wrong.slots->stages[0].material.push_back({A, 2, 1});
@@ -989,6 +732,566 @@ TEST(ReactingMixtureQbmmPool, UnsupportedModelsAndUnpermittedSlotsFailCollective
             (void) missing.controller->preview(dt);
         },
         std::exception);
+}
+
+// Drain one eighth of each transported node and buy a monodisperse birth from original pool stock.
+void start_exchange(Fixture& f, double reservoir_count_per_m3 = 0.)
+{
+    f.events = [&f, reservoir_count_per_m3](const Context& in)
+    {
+        if (f.setup.supplied_slip)
+        {
+            const auto& drift = f.flow->state().cells.at(in.owned_cell).drift_velocity.at(in.phase);
+            near(in.law_inputs->slip_speed_m_per_s.value(), drift.norm(), 2e-14);
+        }
+        auto out = f.drain(in, std::vector<double>(in.quadrature.active_atoms, .125));
+        auto back = f.birth(in, in.law_inputs->bulk_volume_m3 / 16, 1.5);
+        out.push_back(std::move(back.front()));
+        if (reservoir_count_per_m3 > 0)
+        {
+            const double count = reservoir_count_per_m3 * in.law_inputs->bulk_volume_m3;
+            const auto n = Fixture::moles(count);
+            const R::QbmmReservoirExchange feed{
+                "external feed", Fixture::gas_capacity(n, 1.) * T0, {-.5 * count, .25 * count, .75 * count}};
+            out.emplace_back(R::QbmmBirth{{{{count, 1.}, {feed, n}}}});
+        }
+        return out;
+    };
+    f.start();
+}
+
+double phase_mass(const std::vector<double>& moles)
+{
+    return moles[0] + 2 * moles[1] + moles[2];
+}
+
+void audit_exchange(const Fixture& f, const Coupler::Trial& trial, double reservoir_count = 0.)
+{
+    const auto& diag = trial.diagnostics().flow;
+    const auto& directions = diag.pool_conversion.value().directions;
+    std::array<double, 4> old{}, now{};
+    std::array<double, 3> species_delta{};
+    std::array<double, 2> enthalpy{};
+    Flow::Vector delta_momentum{};
+    double old_mass = 0, delta_energy = 0;
+    for (size_t c = 0; c < trial.state().cells.size(); ++c)
+    {
+        const auto& before = f.flow->state().cells[c];
+        const auto& after = trial.state().cells[c];
+        const auto accumulate = [](const Flow::CellState& cell, std::array<double, 4>& v)
+        {
+            v[0] += *cell.phase_numbers[1];
+            v[1] += phase_mass(cell.phases[1].moles) / scale;
+            v[2] += cell.qbmm_shape[1]->H2;
+            v[3] += cell.qbmm_shape[1]->H3;
+        };
+        accumulate(before, old);
+        accumulate(after, now);
+        EXPECT_EQ(after.drift_velocity, before.drift_velocity);
+        EXPECT_FALSE(after.phase_numbers[2]);
+        EXPECT_FALSE(after.qbmm_shape[2]);
+        for (size_t p = 0; p < after.phases.size(); ++p)
+        {
+            const auto& a = before.phases[p];
+            const auto& b = after.phases[p];
+            const double ma = phase_mass(a.moles), mb = phase_mass(b.moles);
+            old_mass += ma;
+            delta_momentum = delta_momentum + (after.velocity + after.drift_velocity[p]) * mb -
+                             (before.velocity + before.drift_velocity[p]) * ma;
+            delta_energy += b.internal_energy - a.internal_energy;
+            for (size_t s = 0; s < species_delta.size(); ++s)
+                species_delta[s] += b.moles[s] - a.moles[s];
+        }
+        const auto& thermal = trial.final_thermal_evaluations()[c];
+        const auto& transport = trial.transport_snapshot().cells[c];
+        for (const auto& event : thermal.material_events)
+        {
+            const auto& config = *trial.interphase_receipt()->cells.at(c).configuration;
+            const auto& slot = config.stages.at(event.stage).material.at(event.slot);
+            const bool drain = slot.donor == 1;
+            const size_t s = slot.species == A ? 0 : 1;
+            const double amount =
+                drain ? .125 * transport.phases[1].moles[s] : Fixture::moles(1.5 * f.mesh->cell_volume(c) / 16)[s];
+            const double h = (s == 0 ? 24. : 40.) * thermal.anchors.at(event.stage).temperature.at(slot.donor);
+            near(event.carried_energy, amount * h);
+            enthalpy[drain ? 0 : 1] += amount * h;
+        }
+    }
+    const auto feed_moles = Fixture::moles(reservoir_count);
+    for (size_t s = 0; s < species_delta.size(); ++s)
+        near(f.sum(species_delta[s]), feed_moles[s]);
+    const std::array birth{1. / 16, 1.5 / 16, 2.25 / 16, 3.375 / 16};
+    const auto block = [](const Flow::QbmmPoolDirectionDiagnostics& dir)
+    { return std::array{dir.count, dir.mass_kg / scale, dir.H2, dir.H3}; };
+    for (size_t k = 0; k < old.size(); ++k)
+    {
+        const double initial = f.sum(old[k]);
+        near(block(directions[0])[k], .125 * initial);
+        near(block(directions[1])[k], birth[k]);
+        near(f.sum(now[k]), .875 * initial + birth[k] + reservoir_count);
+    }
+    for (size_t d = 0; d < 2; ++d)
+    {
+        const auto n = Fixture::moles(directions[d].mass_kg / scale);
+        for (size_t s = 0; s < n.size(); ++s)
+            near(directions[d].species_moles[s], n[s]);
+        near(directions[d].carried_enthalpy_j, f.sum(enthalpy[d]));
+    }
+    near(f.sum(delta_energy), diag.pressure_work + 128. * T0 * reservoir_count, 3e-7);
+    const auto body =
+        f.setup.acceleration.value_or(Flow::Vector{}) * ((f.sum(old_mass) + scale * reservoir_count) * dt);
+    const auto other = Flow::Vector{-.5, .25, .75} * reservoir_count;
+    const auto impulse = body + other;
+    for (size_t axis = 0; axis < 3; ++axis)
+    {
+        near(diag.external_impulse.component(axis), impulse.component(axis));
+        near(f.sum(delta_momentum.component(axis)), impulse.component(axis) + diag.pressure_impulse.component(axis));
+    }
+    EXPECT_EQ(diag.body_acceleration_m_per_s2, f.setup.acceleration);
+    EXPECT_EQ(diag.impulse_parts.has_value(), f.setup.acceleration.has_value());
+    if (diag.impulse_parts)
+    {
+        near((diag.impulse_parts->body - body).norm(), 0);
+        EXPECT_EQ(diag.impulse_parts->other, other);
+    }
+}
+
+TEST(ReactingMixtureQbmmPool, FixedHydrostaticBidirectionalConversionWithEmptyOwners)
+{
+    for (double g : {0., -1.})
+    {
+        Fixture f({.pool_stock = 1, .two_cells = true, .acceleration = Flow::Vector{0, 0, g}});
+        const auto ranks = f.mesh->owned_cell_map()->getComm()->getSize();
+        if (ranks > 2)
+            EXPECT_GE(f.sum(f.mesh->num_owned_cells() == 0), ranks - 2);
+        auto initial = f.flow->state();
+        // With two equal cells and gas density affine in p, the face-average density equals rho(p0).
+        const double rho = f.setup.liquid_fraction + 6 * scale;
+        for (size_t c = 0; c < initial.cells.size(); ++c)
+        {
+            auto& cell = initial.cells[c];
+            cell.mechanical_pressure = rho * g * (f.mesh->cell_centroid(c).z - .5);
+            const double p = f.pressure + cell.mechanical_pressure, ratio = p / f.pressure;
+            for (auto& phase : cell.phases)
+                phase.absolute_pressure = p;
+            for (size_t phase = 1; phase < cell.phases.size(); ++phase)
+            {
+                for (auto& n : cell.phases[phase].moles)
+                    n *= ratio;
+                cell.phases[phase].internal_energy *= ratio;
+            }
+            *cell.phase_numbers[1] *= ratio;
+            cell.qbmm_shape[1]->H2 *= ratio;
+            cell.qbmm_shape[1]->H3 *= ratio;
+        }
+        f.flow->initialize(initial);
+        start_exchange(f);
+        const auto trial = f.controller->preview(dt);
+        audit_exchange(f, trial);
+        for (size_t c = 0; c < trial.state().cells.size(); ++c)
+        {
+            const double expected = f.pressure + initial.cells[c].mechanical_pressure;
+            EXPECT_NEAR(
+                trial.state().thermodynamic_pressure + trial.state().cells[c].mechanical_pressure, expected, 1e-7);
+            near(trial.state().cells[c].velocity.norm(), 0, 1e-9);
+        }
+        for (const auto& face : trial.owned_phase_transport())
+            near(face.carrier_volume_flux, 0, 1e-9);
+        near(trial.diagnostics().flow.pressure_impulse.z, -rho * g * dt);
+    }
+}
+
+TEST(ReactingMixtureQbmmPool, FixedPeriodicColumnPressureRampCannotCancelGravityAcrossSeam)
+{
+    constexpr double g = -1.;
+    Fixture f({.liquid_fraction = .25, .pool_stock = 3, .four_layers = true, .periodic_z = true});
+    f.options.body_acceleration = Flow::Vector{0, 0, g};
+    auto state = f.flow->state();
+    const double density = 1.;
+    for (size_t c = 0; c < state.cells.size(); ++c)
+    {
+        // An exactly incompressible liquid and absent gas slots make the three interior pressure slopes exact.
+        auto& cell = state.cells[c];
+        cell.mechanical_pressure = density * g * (f.mesh->cell_centroid(c).z - .5);
+        const double pressure = f.pressure + cell.mechanical_pressure;
+        for (auto& phase : cell.phases)
+            phase.absolute_pressure = pressure;
+        const double volume = f.mesh->cell_volume(c);
+        cell.phases[0].moles = {0, 0, volume};
+        cell.phases[0].internal_energy = volume * liquid_cv * T0;
+        for (size_t p = 1; p < 3; ++p)
+        {
+            cell.phases[p].moles = {0, 0, 0};
+            cell.phases[p].internal_energy = 0;
+            cell.phases[p].temperature = 0;
+        }
+        cell.phase_numbers[1] = 0;
+        cell.qbmm_shape[1] = R::QbmmShapeState{};
+    }
+    f.flow->initialize(std::move(state));
+    f.events = [](const Context&) { return Operations{}; };
+    f.start();
+    const auto trial = f.controller->preview(dt);
+    double momentum = 0.;
+    for (const auto& cell : trial.state().cells)
+        for (const auto& phase : cell.phases)
+            momentum += phase_mass(phase.moles) * cell.velocity.z;
+    // A periodic pressure field supplies no external axial impulse. The unclosed head accelerates the column.
+    near(trial.diagnostics().flow.external_impulse.z, density * g * dt);
+    near(trial.diagnostics().flow.pressure_impulse.z, 0., 2e-10);
+    near(f.sum(momentum), density * g * dt, 2e-10);
+}
+
+TEST(ReactingMixtureQbmmPool, FixedBuoyancyMovesDenseAndLightColumnsDuringBidirectionalConversion)
+{
+    Fixture f({.pool_stock = 1, .circulating = true, .acceleration = Flow::Vector{0, 0, -1}});
+    auto initial = f.flow->state();
+    for (size_t c = 0; c < initial.cells.size(); ++c)
+    {
+        auto& cell = initial.cells[c];
+        const double volume = f.mesh->cell_volume(c);
+        const double liquid = f.mesh->cell_centroid(c).x < .5 ? .25 : .50;
+        cell.velocity = {};
+        cell.phases[0].moles[2] = volume * liquid;
+        cell.phases[0].internal_energy = volume * liquid * liquid_cv * T0;
+        const double gas = (1 - liquid) * volume * f.pressure / (6 * gas_R * T0);
+        for (size_t p = 1; p < 3; ++p)
+        {
+            auto& phase = cell.phases[p];
+            phase.moles = Fixture::moles(.5 * gas);
+            phase.internal_energy = Fixture::gas_capacity(phase.moles, 1.) * T0;
+            phase.temperature = T0;
+        }
+        const double family = .5 * gas / 5.;
+        cell.phase_numbers[1] = 3 * family;
+        cell.qbmm_shape[1] = R::QbmmShapeState{11 * family, 29 * family};
+    }
+    f.flow->initialize(std::move(initial));
+    start_exchange(f);
+    const auto trial = f.controller->preview(dt);
+    audit_exchange(f, trial);
+    // In this manufactured EOS the gas is denser than the liquid. The gas-rich left column descends.
+    std::array<double, 2> vertical{};
+    for (size_t face = 0; face < trial.owned_phase_transport().size(); ++face)
+    {
+        if (f.mesh->is_geometry_exterior_face(face))
+            continue;
+        const auto area = f.mesh->face_area_vector(face);
+        if (area.z != 0)
+            vertical[f.mesh->face_centroid(face).x < .5 ? 0 : 1] +=
+                trial.owned_phase_transport()[face].carrier_volume_flux / area.z;
+    }
+    EXPECT_LT(f.sum(vertical[0]), -1e-6);
+    EXPECT_GT(f.sum(vertical[1]), 1e-6);
+}
+
+TEST(ReactingMixtureQbmmPool, FixedSlipCarriesCountercurrentPoolMassMomentumAndFamilyMomentsAcrossOwners)
+{
+    for (const bool forced : {false, true})
+    {
+        FixtureOptions setup{.pool_stock = 1, .circulating = true, .supplied_slip = true};
+        if (forced)
+            setup.acceleration = Flow::Vector{0, 0, -.125};
+        Fixture packed(setup);
+        setup.batched = false;
+        Fixture scalar(setup);
+        for (auto* f : {&packed, &scalar})
+        {
+            auto state = f->flow->state();
+            for (size_t c = 0; c < state.cells.size(); ++c)
+            {
+                const auto x = f->mesh->cell_centroid(c);
+                auto& cell = state.cells[c];
+                cell.velocity.y = x.x - 2 * x.z;
+                cell.drift_velocity[1].y = x.x < .5 ? .03125 : -.0625;
+                cell.drift_velocity[2].y = -.75 * cell.drift_velocity[1].y;
+            }
+            f->flow->initialize(std::move(state));
+            start_exchange(*f);
+        }
+        const auto a = packed.controller->preview(dt), b = scalar.controller->preview(dt);
+        audit_exchange(packed, a);
+        audit_exchange(scalar, b);
+        EXPECT_GT(a.diagnostics().flow.transport_multi_rhs.operator_groups, 0u);
+        EXPECT_EQ(b.diagnostics().flow.transport_multi_rhs.operator_groups, 0u);
+        const auto index = [&](auto cell)
+        {
+            const auto point = packed.mesh->cell_centroid(cell);
+            return (point.x > .5 ? 1u : 0u) + (point.z > .5 ? 2u : 0u);
+        };
+        const auto drift = [&](size_t p, auto cell)
+        {
+            const auto point = packed.mesh->cell_centroid(cell);
+            const Flow::Vector loop{.5 - point.z, point.x < .5 ? .03125 : -.0625, point.x < .5 ? -.25 : .25};
+            return loop * (p == 1 ? 1. : p == 2 ? -.75 : 0.);
+        };
+        // Globally assemble the four post-advection donor concentrations for a face oracle on partition faces.
+        std::array<double, 12> densities{};
+        std::array<double, 4> tangential_velocity{}, tangential_outflow{}, symmetric_outflow{};
+        for (size_t c = 0; c < a.transport_snapshot().cells.size(); ++c)
+        {
+            const auto& ca = a.state().cells[c];
+            const auto& cb = b.state().cells[c];
+            tangential_velocity[index(c)] = ca.velocity.y;
+            near((ca.velocity - cb.velocity).norm(), 0);
+            near(ca.mechanical_pressure, cb.mechanical_pressure);
+            near(*ca.phase_numbers[1], *cb.phase_numbers[1]);
+            near(ca.qbmm_shape[1]->H2, cb.qbmm_shape[1]->H2);
+            near(ca.qbmm_shape[1]->H3, cb.qbmm_shape[1]->H3);
+            for (size_t p = 0; p < 3; ++p)
+            {
+                for (size_t s = 0; s < 3; ++s)
+                    near(ca.phases[p].moles[s], cb.phases[p].moles[s]);
+                near(ca.phases[p].internal_energy, cb.phases[p].internal_energy);
+                densities[3 * index(c) + p] =
+                    phase_mass(a.transport_snapshot().cells[c].phases[p].moles) / packed.mesh->cell_volume(c);
+            }
+        }
+        for (auto& density : densities)
+            density = packed.sum(density);
+        for (auto& velocity : tangential_velocity)
+            velocity = packed.sum(velocity);
+        double countercurrent = 0., crossing = 0.;
+        for (size_t face = 0; face < a.owned_phase_transport().size(); ++face)
+        {
+            const auto& receipt = a.owned_phase_transport()[face];
+            const auto& ref = b.owned_phase_transport()[face];
+            if (packed.mesh->is_geometry_exterior_face(face))
+            {
+                EXPECT_EQ(receipt.momentum_mass_flux, 0.);
+                EXPECT_EQ(receipt.drift_momentum_flux, Flow::Vector{});
+                continue;
+            }
+            const auto owner = packed.mesh->owner_cell(face), neighbor = packed.mesh->neighbor_cell(face);
+            const auto area = packed.mesh->face_area_vector(face);
+            double forward = 0., backward = 0.;
+            Flow::Vector drift_flux{};
+            for (size_t p = 0; p < 3; ++p)
+            {
+                const double rate = receipt.carrier_volume_flux + .5 * (drift(p, owner) + drift(p, neighbor)).dot(area);
+                near(receipt.relative_phase_volume_flux[p], rate);
+                const auto donor = rate >= 0 ? owner : neighbor;
+                const double mass_rate = rate * densities[3 * index(donor) + p];
+                forward += std::max(0., mass_rate);
+                backward += std::max(0., -mass_rate);
+                drift_flux = drift_flux + drift(p, donor) * mass_rate;
+                if (p == 1)
+                {
+                    const auto& flux = receipt.qbmm_flux[p].value();
+                    near(flux.derived_mass_flux, mass_rate);
+                    near((flux.derived_drift_momentum_flux - drift(p, donor) * mass_rate).norm(), 0);
+                    near(flux.population_number_flux, ref.qbmm_flux[p]->population_number_flux);
+                    near(flux.shape_flux.H2, ref.qbmm_flux[p]->shape_flux.H2);
+                    near(flux.shape_flux.H3, ref.qbmm_flux[p]->shape_flux.H3);
+                }
+            }
+            const auto i = index(owner), j = index(neighbor);
+            const double y_flux = forward * tangential_velocity[i] - backward * tangential_velocity[j] + drift_flux.y;
+            const double symmetric = std::min(forward, backward) * (tangential_velocity[i] - tangential_velocity[j]);
+            tangential_outflow[i] += y_flux;
+            tangential_outflow[j] -= y_flux;
+            symmetric_outflow[i] += symmetric;
+            symmetric_outflow[j] -= symmetric;
+            near(receipt.momentum_mass_flux, forward - backward);
+            near(receipt.forward_mass_flux, forward);
+            near(receipt.backward_mass_flux, backward);
+            near(receipt.symmetric_mass_flux, std::min(forward, backward));
+            near((receipt.implicit_carrier_momentum_flux -
+                     (receipt.momentum_owner_velocity * forward - receipt.momentum_neighbor_velocity * backward))
+                     .norm(),
+                0);
+            near((receipt.drift_momentum_flux - drift_flux).norm(), 0);
+            if (receipt.relative_phase_volume_flux[1] * receipt.relative_phase_volume_flux[2] < 0 &&
+                std::min(forward, backward) > 1e-6)
+            {
+                ++countercurrent;
+                if (static_cast<size_t>(owner) >= packed.mesh->num_owned_cells() ||
+                    static_cast<size_t>(neighbor) >= packed.mesh->num_owned_cells())
+                    ++crossing;
+            }
+        }
+        // In the single y layer, pressure, body force and viscous impulse all have zero y component.
+        // Reconstruct the momentum update from the two carrier donors, both drifts and extensive phase masses.
+        double largest_symmetric = 0.;
+        for (size_t i = 0; i < tangential_outflow.size(); ++i)
+        {
+            tangential_outflow[i] = packed.sum(tangential_outflow[i]);
+            largest_symmetric = std::max(largest_symmetric, std::abs(dt * packed.sum(symmetric_outflow[i])));
+        }
+        EXPECT_GT(largest_symmetric, 1e-5);
+        const auto tangential_momentum = [](const Flow::CellState& cell)
+        {
+            double momentum = 0.;
+            for (size_t p = 0; p < cell.phases.size(); ++p)
+                momentum += phase_mass(cell.phases[p].moles) * (cell.velocity.y + cell.drift_velocity[p].y);
+            return momentum;
+        };
+        for (size_t c = 0; c < a.state().cells.size(); ++c)
+        {
+            const double change =
+                tangential_momentum(a.state().cells[c]) - tangential_momentum(packed.flow->state().cells[c]);
+            EXPECT_NEAR(change, -dt * tangential_outflow[index(c)], 2e-10);
+        }
+        EXPECT_GT(packed.sum(countercurrent), 0.);
+        if (packed.mesh->owned_cell_map()->getComm()->getSize() > 1)
+            EXPECT_GT(packed.sum(crossing), 0.);
+    }
+}
+
+TEST(ReactingMixtureQbmmPool, FixedModesPortableContinuation)
+{
+    const auto* write = std::getenv("SIMPLEFLUID_Q9C_FIXED_WRITE");
+    const auto* read = std::getenv("SIMPLEFLUID_Q9C_FIXED_READ");
+    ASSERT_FALSE(write && read);
+    const Flow::Vector gravity{.03125, -.0625, -.125};
+    for (int mode = 0; mode < 5; ++mode)
+    {
+        SCOPED_TRACE(mode);
+        const double reservoir_count = mode == 4 ? 1. / 32 : 0.;
+        FixtureOptions setup{.pool_stock = 1, .law_revision = mode == 4 ? 2u : 1u, .supplied_slip = mode != 1};
+        if (mode != 0)
+            setup.acceleration = mode == 2 ? Flow::Vector{} : gravity;
+        const auto configure = [reservoir_count](Fixture& f)
+        {
+            if (f.setup.supplied_slip)
+            {
+                auto state = f.flow->state();
+                for (auto& cell : state.cells)
+                {
+                    cell.drift_velocity[1] = {.25, 0, .0625};
+                    cell.drift_velocity[2] = {-.0625, 0, -.125};
+                }
+                f.flow->initialize(std::move(state));
+            }
+            start_exchange(f, reservoir_count);
+        };
+        Fixture reference(setup);
+        configure(reference);
+        const auto comm = reference.mesh->owned_cell_map()->getComm();
+        reference.check_ranks();
+        if (const auto* ranks = std::getenv("SIMPLEFLUID_Q9C_FIXED_RANKS"))
+            EXPECT_EQ(comm->getSize(), std::stoi(ranks));
+        std::vector<std::byte> image;
+        const std::string mid = "." + std::to_string(mode) + ".mid", end = "." + std::to_string(mode) + ".end";
+        if (read)
+        {
+            image = IO::read_restart(*comm, read, mid.c_str());
+            reference.controller->restore_qbmm_restart(IO::read_restart(*comm, read, end.c_str()));
+            EXPECT_EQ(reference.calls, 0);
+        }
+        else
+        {
+            reference.controller->advance(dt);
+            image = reference.controller->serialize_qbmm_restart();
+            reference.controller->advance(dt);
+            if (write)
+            {
+                IO::write_restart(*comm, write, mid.c_str(), image);
+                IO::write_restart(*comm, write, end.c_str(), reference.controller->serialize_qbmm_restart());
+                continue;
+            }
+        }
+        EXPECT_EQ(image.at(8), std::byte{10});
+        EXPECT_EQ(image.at(16), setup.acceleration ? std::byte{10} : std::byte{11});
+        Fixture fresh(setup);
+        configure(fresh);
+        fresh.controller->restore_qbmm_restart(image);
+        const auto report = fresh.controller->qbmm_report();
+        EXPECT_EQ(report.body_acceleration_m_per_s2, setup.acceleration);
+        if (setup.acceleration)
+        {
+            const auto& parts = report.external_impulses_kg_m_per_s.value();
+            const double end_mass = setup.liquid_fraction + (6. + reservoir_count) * scale;
+            near((parts.body - *setup.acceleration * (end_mass * dt)).norm(), 0);
+            EXPECT_EQ(parts.other, (Flow::Vector{-.5, .25, .75} * reservoir_count));
+        }
+        EXPECT_EQ(report.receipt_history, Flow::QbmmReceiptHistory::UnavailableAfterPortableRestart);
+        EXPECT_FALSE(report.interval);
+        EXPECT_EQ(fresh.calls, 0);
+        const auto trial = fresh.controller->preview(dt);
+        audit_exchange(fresh, trial, reservoir_count);
+        const auto baseline = fresh.controller->serialize_qbmm_restart();
+        const auto calls = fresh.calls;
+        // Repair both checksums after corrupting one shard. MPI4 changes an empty owner's provenance.
+        const auto reject_tamper = [&](size_t offset)
+        {
+            auto bad = image;
+            bad.resize(bad.size() - 16);
+            if (comm->getRank() == comm->getSize() - 1)
+                bad.at(offset) ^= std::byte{0x40};
+            IO::append_restart_checksums(*comm, bad);
+            EXPECT_THROW(fresh.controller->restore_qbmm_restart(bad), std::exception);
+            EXPECT_EQ(fresh.controller->serialize_qbmm_restart(), baseline);
+            EXPECT_EQ(fresh.calls, calls);
+        };
+        reject_tamper(16);         // Payload tag.
+        reject_tamper(24 + 5 * 8); // Pool binding fingerprint.
+        if (setup.acceleration == gravity)
+        {
+            std::vector<std::byte> pattern;
+            for (double component : {gravity.x, gravity.y, gravity.z})
+                IO::append_restart_word(pattern, std::bit_cast<std::uint64_t>(component));
+            IO::append_restart_word(pattern, 1); // Accepted force interval present.
+            const auto match = std::ranges::search(image, pattern);
+            const bool unique =
+                !match.empty() && std::ranges::search(std::ranges::subrange(match.end(), image.end()), pattern).empty();
+            ASSERT_EQ(fresh.sum(unique), comm->getSize());
+            const auto force = static_cast<size_t>(match.begin() - image.begin());
+            reject_tamper(force + 7);               // x acceleration.
+            reject_tamper(force + (4 + 7) * 8 + 7); // Interval duration.
+            reject_tamper(force + (4 + 8) * 8 + 7); // First partition-local body impulse.
+        }
+        fresh.controller->commit(trial);
+        EXPECT_EQ(fresh.calls, calls);
+        const auto& got = fresh.flow->state();
+        const auto& expected = reference.flow->state();
+        EXPECT_EQ(got.revision, expected.revision);
+        EXPECT_EQ(got.time, expected.time);
+        EXPECT_EQ(got.thermodynamic_pressure, expected.thermodynamic_pressure);
+        EXPECT_EQ(fresh.controller->diagnostics().flow.pool_conversion,
+            reference.controller->diagnostics().flow.pool_conversion);
+        EXPECT_EQ(
+            fresh.controller->diagnostics().flow.impulse_parts, reference.controller->diagnostics().flow.impulse_parts);
+        for (size_t c = 0; c < got.cells.size(); ++c)
+        {
+            const auto& a = got.cells[c];
+            const auto& b = expected.cells[c];
+            EXPECT_EQ(a.velocity, b.velocity);
+            EXPECT_EQ(a.drift_velocity, b.drift_velocity);
+            EXPECT_EQ(a.mechanical_pressure, b.mechanical_pressure);
+            EXPECT_EQ(a.phase_numbers, b.phase_numbers);
+            EXPECT_EQ(a.qbmm_shape, b.qbmm_shape);
+            for (size_t p = 0; p < a.phases.size(); ++p)
+            {
+                EXPECT_EQ(a.phases[p].moles, b.phases[p].moles);
+                EXPECT_EQ(a.phases[p].internal_energy, b.phases[p].internal_energy);
+                EXPECT_EQ(a.phases[p].temperature, b.phases[p].temperature);
+            }
+        }
+        for (size_t face = 0; face < fresh.mesh->num_owned_faces(); ++face)
+            EXPECT_EQ(fresh.flow->volume_flux().owned_value(face), reference.flow->volume_flux().owned_value(face));
+        for (int change = 0; change < 3; ++change)
+        {
+            auto mismatch = setup;
+            if (change == 0)
+                mismatch.supplied_slip = !setup.supplied_slip;
+            if (change == 1)
+            {
+                if (setup.acceleration)
+                    mismatch.acceleration.reset();
+                else
+                    mismatch.acceleration = Flow::Vector{};
+            }
+            if (change == 2)
+                mismatch.acceleration = Flow::Vector{gravity.x, gravity.y, -2};
+            Fixture wrong(mismatch);
+            configure(wrong);
+            const auto saved = wrong.controller->serialize_qbmm_restart();
+            EXPECT_THROW(wrong.controller->restore_qbmm_restart(image), std::exception);
+            EXPECT_EQ(wrong.controller->serialize_qbmm_restart(), saved);
+            EXPECT_EQ(wrong.calls, 0);
+        }
+    }
 }
 
 TEST(ReactingMixtureQbmmPool, PortableContinuation)
@@ -1021,6 +1324,7 @@ TEST(ReactingMixtureQbmmPool, PortableContinuation)
     }
     ASSERT_GE(first.size(), 24u);
     EXPECT_EQ(first[8], std::byte{10});
+    EXPECT_EQ(first[16], std::byte{8});
     Fixture fresh;
     fresh.start();
     fresh.controller->restore_qbmm_restart(first);

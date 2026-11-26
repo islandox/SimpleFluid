@@ -10,7 +10,7 @@ LowMachMixtureSolver::PlanarMotionFrame LowMachMixtureSolver::capture_planar_mot
 {
     PlanarMotionFrame frame{};
     frame.epoch = mesh_geometry_epoch(*d->mesh);
-    if (uses_qbmm_linear_transport(d->options.qbmm_model))
+    if (d->preserves_planar_trial())
         collective_detail::collective_local_validation(*d->mesh, "Accepted planar motion history",
             [&]
             {
@@ -155,7 +155,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_planar_impl(double dt,
     Trial result;
     try
     {
-        motion.begin_trial_impl(target_surface, dt, linear);
+        motion.begin_trial_impl(target_surface, dt, d->preserves_planar_trial());
         const auto ale = FVM::make_validated_planar_ale_control_volume_state(mesh, motion);
         collective_detail::collective_local_validation(mesh, "Planar accepted-old storage match",
             [&]
@@ -196,7 +196,6 @@ void LowMachMixtureSolver::commit_planar_impl(const Trial& trial, PlanarMotion& 
     require_uniform_advancement(*d->mesh, AdvancementOperation::CommitPlanar);
     require_controller(controller);
     const auto& mesh = *d->mesh;
-    const bool linear = uses_qbmm_linear_transport(d->options.qbmm_model);
     State candidate;
     Diagnostics statistics;
     std::vector<double> candidate_flux, accepted_flux;
@@ -232,7 +231,7 @@ void LowMachMixtureSolver::commit_planar_impl(const Trial& trial, PlanarMotion& 
     auto accepted_frame = capture_planar_motion_frame(motion);
     try
     {
-        motion.begin_trial_impl(certificate->target_surface, certificate->time_step, linear);
+        motion.begin_trial_impl(certificate->target_surface, certificate->time_step, d->preserves_planar_trial());
         const auto ale = FVM::make_validated_planar_ale_control_volume_state(mesh, motion);
         collective_detail::collective_local_validation(mesh, "Exact retained planar geometry restaging",
             [&]
@@ -263,7 +262,7 @@ void LowMachMixtureSolver::commit_planar_impl(const Trial& trial, PlanarMotion& 
         d->qbmm_publication = std::move(publication);
         d->accepted_qbmm_controller = d->active_qbmm_controller;
         d->accepted_planar_motion = motion.d_authority;
-        d->explicit_family_force_recorded = linear;
+        d->explicit_family_force_recorded = d->preserves_planar_trial();
         d->needs_restart_controller = false;
     }
     ++d->logical_geometry;
@@ -287,15 +286,15 @@ LowMachMixtureSolver::Checkpoint LowMachMixtureSolver::checkpoint(const PlanarMo
 void LowMachMixtureSolver::rollback_planar_geometry(PlanarMotion& motion, PlanarMotionFrame& accepted_frame)
 {
     const bool active = motion.has_active_trial();
-    const bool linear = uses_qbmm_linear_transport(d->options.qbmm_model);
+    const bool preserve = d->preserves_planar_trial();
     if (active)
     {
-        if (linear)
+        if (preserve)
             motion.rollback_trial_preserving_epoch(accepted_frame.epoch);
         else
             motion.rollback_trial();
     }
-    if (linear)
+    if (preserve)
     {
         motion.d_old_cell_volumes = std::move(accepted_frame.old_volumes);
         motion.d_new_cell_volumes = std::move(accepted_frame.new_volumes);
@@ -311,7 +310,6 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, PlanarMotion& motion
 {
     require_controller(controller);
     const auto& mesh = *d->mesh;
-    const bool linear = uses_qbmm_linear_transport(d->options.qbmm_model);
     State candidate;
     Diagnostics statistics;
     std::shared_ptr<const QbmmPublication> publication;
@@ -360,7 +358,7 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, PlanarMotion& motion
     auto accepted_frame = capture_planar_motion_frame(motion);
     try
     {
-        motion.stage_restart_geometry(saved.ale_geometry->source.surface_elevation(), linear);
+        motion.stage_restart_geometry(saved.ale_geometry->source.surface_elevation(), d->preserves_planar_trial());
         collective_detail::collective_local_validation(mesh, "Planar checkpoint storage geometry",
             [&]
             {

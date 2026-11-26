@@ -120,9 +120,8 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_capability(const Flow::Options& o
                     (model.velocity == Velocity::SharedCarrier || model.velocity == Velocity::SuppliedPhaseSlip)),
         "Native QBMM requires a compatible family integrator and velocity mode.");
     require(!model.bulk_gas_conversion ||
-                (!moving && !force && model.family_transport == QbmmModelOptions::FamilyTransport::NativeImplicit &&
-                    model.velocity == Velocity::SharedCarrier),
-        "QBMM BulkGas conversion requires fixed NativeImplicit SharedCarrier without supplied acceleration.");
+                model.family_transport == QbmmModelOptions::FamilyTransport::NativeImplicit,
+        "QBMM BulkGas conversion requires NativeImplicit family transport.");
     require(!model.variable_composition && !model.cross_family_coalescence,
         "Native QBMM requires fixed family composition and within-family population events.");
     require(!model.capillarity && !model.independent_node_temperatures,

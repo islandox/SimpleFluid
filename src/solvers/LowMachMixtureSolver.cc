@@ -151,10 +151,15 @@ std::optional<size_t> axial_column(const Solver::Mesh& mesh, const Solver::Vecto
     const auto* cartesian = std::get_if<Solver::Mesh::CartesianPtr>(&mesh.variant());
     if (!cartesian)
     {
-        if (gravity.z != 0. && gravity.x == 0. && gravity.y == 0. &&
-            (std::holds_alternative<Solver::Mesh::CylindricalPtr>(mesh.variant()) ||
-                std::holds_alternative<Solver::Mesh::SemiStructuredPtr>(mesh.variant())))
-            return 2;
+        if (gravity.z == 0. || gravity.x != 0. || gravity.y != 0.)
+            return std::nullopt;
+        // A hydrostatic column does not close across a periodic seam in the force direction.
+        if (const auto* cylinder = std::get_if<Solver::Mesh::CylindricalPtr>(&mesh.variant()))
+            if (!(*cylinder)->indexer().periodic_dimensions[Solver::Mesh::Cylindrical::AXIAL])
+                return 2;
+        if (const auto* layered = std::get_if<Solver::Mesh::SemiStructuredPtr>(&mesh.variant()))
+            if (!(*layered)->indexer().axial_periodic)
+                return 2;
         return std::nullopt;
     }
     const auto& dimensions = (*cartesian)->num_cells_per_dimension();
@@ -163,7 +168,7 @@ std::optional<size_t> axial_column(const Solver::Mesh& mesh, const Solver::Vecto
     {
         if (dimensions[k] > 1)
         {
-            if (axis || gravity.component(k) == 0.)
+            if (axis || gravity.component(k) == 0. || (*cartesian)->indexer().periodic_dimensions[k])
                 return std::nullopt;
             axis = k;
         }
@@ -348,7 +353,7 @@ bool column_at_stored_pressure(const Solver::Mesh& mesh, size_t axis, double acc
     return compatible != 0;
 }
 
-bool stationary_kinetic_cell(const Solver::CellState& cell)
+bool stationary_phase_velocities(const Solver::CellState& cell)
 {
     if (cell.velocity != Solver::Vector{} ||
         !std::ranges::all_of(cell.drift_velocity, [](const auto& slip) { return slip == Solver::Vector{}; }))
@@ -702,6 +707,10 @@ struct LowMachMixtureSolver::Implementation
     bool has_forced_family_provenance() const noexcept
     {
         return explicit_family_force_recorded && diagnostics.body_acceleration_m_per_s2.has_value();
+    }
+    bool preserves_planar_trial() const noexcept
+    {
+        return uses_qbmm_linear_transport(options.qbmm_model) || bool(options.qbmm_bulk_gas_pool);
     }
     bool has_tvd_mc_controller_history() const noexcept
     {
@@ -1942,7 +1951,7 @@ LowMachMixtureSolver::Checkpoint LowMachMixtureSolver::checkpoint_state() const
     saved.qbmm_legacy_default_only = d->qbmm_legacy_default_only;
     saved.explicit_family_force_recorded = d->explicit_family_force_recorded;
     if (!saved.explicit_family_force_recorded && d->active_qbmm_controller &&
-        uses_qbmm_explicit_transport(d->options.qbmm_model))
+        (uses_qbmm_explicit_transport(d->options.qbmm_model) || d->options.qbmm_bulk_gas_pool))
     {
         saved.explicit_family_force_recorded = true;
         saved.diagnostics.body_acceleration_m_per_s2 = acceleration_vector(d->active_body_acceleration);
@@ -2079,6 +2088,11 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
     const bool explicit_family = kinetic || linear;
     const auto force = provider ? provider->body_acceleration : std::nullopt;
     const bool forced_explicit_family = explicit_family && force.has_value();
+    const bool pool_conversion = bool(d->options.qbmm_bulk_gas_pool);
+    const bool forced_pool = pool_conversion && force.has_value();
+    const bool balanced_forcing = forced_explicit_family || forced_pool;
+    const bool directional_momentum = explicit_family ||
+        (pool_conversion && d->options.qbmm_model.velocity == QbmmModelOptions::Velocity::SuppliedPhaseSlip);
     require_controller(controller);
     collective_detail::require_uniform_value(mesh, dt, "Low-Mach mixture timestep");
     collective_detail::require_uniform_value(mesh, int(ale != nullptr), "Low-Mach ALE transport selection");
@@ -2204,7 +2218,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
         stage.invocation = ++d->source_invocation;
     }
     const auto accepted = d->accepted;
-    const auto column_axis = kinetic && force ? axial_column(mesh, *force) : std::nullopt;
+    const auto column_axis = (kinetic || forced_pool) && force ? axial_column(mesh, *force) : std::nullopt;
     bool rounded_hydrostatic_rest = column_axis.has_value();
     const size_t nc = accepted.cells.size(), np = d->eos.size(), ns = d->eos.front()->catalog().species().size();
     const auto& qbmm_families = d->options.qbmm_families;
@@ -3209,7 +3223,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 d->mesh, 0.0, explicit_family ? "explicit_anchored_material_rate" : "phase_slip_material_volume");
             FaceField carrier_fraction(d->mesh, 0.0, "phase_upwind_carrier_fraction");
             std::optional<FaceField> bidirectional;
-            if (explicit_family)
+            if (directional_momentum)
                 bidirectional.emplace(d->mesh, 0.0, "opposing_carrier_mass_rates");
             std::array<std::unique_ptr<FaceField>, 3> drift_momentum;
             for (auto& field : drift_momentum)
@@ -3350,6 +3364,15 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         {
                             receipt.forward_mass_flux = forward_mass.rounded();
                             receipt.backward_mass_flux = backward_mass.rounded();
+                            if (bidirectional)
+                            {
+                                receipt.symmetric_mass_flux =
+                                    std::min(receipt.forward_mass_flux, receipt.backward_mass_flux);
+                                check(std::isfinite(receipt.forward_mass_flux) &&
+                                          std::isfinite(receipt.backward_mass_flux) && receipt.symmetric_mass_flux >= 0,
+                                    "Directional carrier mass rates must be finite nonnegative magnitudes.");
+                                bidirectional->set_owned_value(face, receipt.symmetric_mass_flux);
+                            }
                             receipt.pressure_rounding_flux = pressure_rounding.rounded();
                             for (size_t axis = 0; axis < 3; ++axis)
                                 drift_flux.component(axis) = mixture_drift_rate[axis].rounded();
@@ -3455,10 +3478,9 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             pressure_operand_magnitude = d->sum(local_pressure_operands);
             result.empty_phase_energy_roundoff = d->sum(local_roundoff);
             result.conditioned_raw_energy_roundoff_bound = d->sum(local_raw_roundoff);
-            const bool body_forced = force && (explicit_family || force->x != 0 || force->y != 0 || force->z != 0);
-            // The fixed anchored path reconstructs the common hydrostatic residual at cells and faces.
-            // Implicit-family body forcing retains its established pressure predictor.
-            const bool reconstruct_residual = forced_explicit_family;
+            const bool body_forced = balanced_forcing || (force && (force->x != 0 || force->y != 0 || force->z != 0));
+            // Forced explicit and pool runs reconstruct the same hydrostatic residual at cells and faces.
+            const bool reconstruct_residual = balanced_forcing;
             using CellPressureGradient = LowMachPressureEquation::CellPressureGradient;
             const auto cell_gradient =
                 body_forced ? CellPressureGradient::Interior : CellPressureGradient::HomogeneousNeumann;
@@ -3466,7 +3488,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             {
                 int local_rest = 1;
                 collective_detail::collective_local_validation(mesh,
-                    "Kinetic hydrostatic state at stored pressure precision",
+                    "Hydrostatic state at stored pressure precision",
                     [&]
                     {
                         for (size_t c = 0; c < nc; ++c)
@@ -3475,8 +3497,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             const auto& current = trial.cells[c];
                             const double pi = d->mechanical_pressure.owned_value(static_cast<LO>(c));
                             // Independently retained finer mechanical pressure remains authoritative.
-                            if ((p0 + pi) - p0 != pi || !stationary_kinetic_cell(old) ||
-                                !stationary_kinetic_cell(current) || target[c] != 0. ||
+                            if ((p0 + pi) - p0 != pi || !stationary_phase_velocities(old) ||
+                                !stationary_phase_velocities(current) || target[c] != 0. ||
                                 sources.at(c).impulse_parts.value().other != Vector{})
                             {
                                 local_rest = 0;
@@ -3557,7 +3579,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 },
                 {}, {}, d->options.linear, FVM::NonOrthogonalTreatment::Implicit, ale,
                 bidirectional ? &*bidirectional : nullptr);
-            if (explicit_family)
+            if (directional_momentum)
                 collective_detail::collective_local_validation(mesh, "Implicit directional carrier momentum receipts",
                     [&]
                     {
@@ -3950,7 +3972,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     if (!sources.empty())
                         for (size_t axis = 0; axis < external_momentum.size(); ++axis)
                         {
-                            if (!forced_explicit_family)
+                            if (!balanced_forcing)
                                 external_momentum[axis].add_product(sources[c].momentum.component(axis), 1.);
                             if (split_impulse)
                             {
@@ -4084,7 +4106,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             {
                 for (size_t axis = 0; axis < 3; ++axis)
                 {
-                    if (forced_explicit_family)
+                    if (balanced_forcing)
                     {
                         external_momentum[axis].add_weighted(body_momentum[axis], 1.);
                         external_momentum[axis].add_weighted(other_momentum[axis], 1.);
@@ -4212,7 +4234,8 @@ LowMachMixtureSolver::ControllerLease LowMachMixtureSolver::acquire_controller_f
             {
                 RestartHash hash;
                 hash.string(signature);
-                if (axial_kinetic || (body_acceleration && uses_qbmm_explicit_transport(d->options.qbmm_model)))
+                if (axial_kinetic || (body_acceleration &&
+                        (uses_qbmm_explicit_transport(d->options.qbmm_model) || d->options.qbmm_bulk_gas_pool)))
                     hash.word(restart_forced_physical_fingerprint(
                         d->options, d->eos, d->options.qbmm_model.family_transport, axial_kinetic));
                 binding = hash.value;
@@ -4326,7 +4349,8 @@ void LowMachMixtureSolver::commit_fixed(
     }
     d->publish_fixed(
         std::move(candidate), std::move(statistics), trial.face_flux, d->trial_nonce + 1, std::move(publication));
-    d->explicit_family_force_recorded = uses_qbmm_explicit_transport(d->options.qbmm_model);
+    d->explicit_family_force_recorded =
+        uses_qbmm_explicit_transport(d->options.qbmm_model) || bool(d->options.qbmm_bulk_gas_pool);
     if (d->options.qbmm_families.empty())
     {
         d->accepted_count_only_body_acceleration =

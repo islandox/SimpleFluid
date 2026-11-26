@@ -94,12 +94,12 @@ public:
         QbmmModelOptions qbmm_model;
         std::vector<std::shared_ptr<const QbmmNodeSlipLaw>>
             qbmm_node_slip_laws; ///< Kinetic-only, EOS-indexed and nonnull precisely for bound families.
-        /** Forced explicit-family physical provider identities in EOS phase order, including phases with no current stock.
+        /** Forced explicit-family and implicit-pool provider identities in EOS phase order, including empty phases.
          * A built-in ideal gas supplies its intrinsic data. Declare the immutable evaluator for any other EOS,
          * including a liquid property evaluator, and for a built-in ideal gas's optional transport law.
          */
         std::vector<std::optional<ThermalLawIdentity>> qbmm_eos_law_identities;
-        std::optional<ThermalLawIdentity> qbmm_mixture_viscosity_identity; ///< Binds supplied viscosity in v9.
+        std::optional<ThermalLawIdentity> qbmm_mixture_viscosity_identity; ///< Binds supplied viscosity in forced restart.
         std::shared_ptr<const QbmmBulkGasPoolBinding> qbmm_bulk_gas_pool;
     };
     struct QbmmKineticClosure

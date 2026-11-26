@@ -21,6 +21,7 @@ namespace
 // The axial and TVD-MC tags distinguish absent acceleration from supplied zero acceleration.
 // The planar SSPRK2 tag binds moving-stage and advancement controls before the planar geometry record.
 // Version 10 adds fixed shared-carrier implicit BulkGas pool conversion and its accepted directional totals.
+// Its new tags extend the implicit pool to planar motion, fixed forcing and fixed unforced supplied slip.
 constexpr std::uint64_t qbmm_restart_magic = 0x5453524d4d425153ULL;
 constexpr std::uint64_t qbmm_fixed_restart_version = 5;
 constexpr std::uint64_t qbmm_planar_restart_version = 6;
@@ -39,7 +40,10 @@ enum class RestartPayload : std::uint64_t
     FixedAxialKinetic = 5,
     FixedLinearTvdMc = 6,
     PlanarLinear = 7,
-    FixedImplicitBulkGasPool = 8
+    FixedImplicitBulkGasPool = 8,
+    PlanarImplicitBulkGasPool = 9,
+    ForcedImplicitBulkGasPool = 10,
+    FixedSlipImplicitBulkGasPool = 11
 };
 
 bool is_kinetic_payload(RestartPayload payload)
@@ -192,19 +196,32 @@ RestartPayload decode_restart_payload(std::uint64_t version, RestartReader& read
                 "Unknown v9 QBMM payload type.");
             return static_cast<RestartPayload>(tag);
         }
-        case qbmm_pool_restart_version:
-            reader.expect(static_cast<std::uint64_t>(RestartPayload::FixedImplicitBulkGasPool),
+        case qbmm_pool_restart_version: {
+            std::uint64_t tag = 0;
+            reader(tag);
+            check(tag >= static_cast<std::uint64_t>(RestartPayload::FixedImplicitBulkGasPool) &&
+                      tag <= static_cast<std::uint64_t>(RestartPayload::FixedSlipImplicitBulkGasPool),
                 "Unknown v10 QBMM payload type.");
-            return RestartPayload::FixedImplicitBulkGasPool;
+            return static_cast<RestartPayload>(tag);
+        }
         default:
             throw std::invalid_argument("Unknown QBMM restart version.");
     }
 }
 
-RestartPayload configured_restart_payload(const Solver::Options& options, const Solver::Mesh& mesh, bool motion)
+RestartPayload configured_restart_payload(
+    const Solver::Options& options, const Solver::Mesh& mesh, bool motion, bool force)
 {
     if (options.qbmm_model.bulk_gas_conversion)
+    {
+        if (motion)
+            return RestartPayload::PlanarImplicitBulkGasPool;
+        if (force)
+            return RestartPayload::ForcedImplicitBulkGasPool;
+        if (options.qbmm_model.velocity == QbmmModelOptions::Velocity::SuppliedPhaseSlip)
+            return RestartPayload::FixedSlipImplicitBulkGasPool;
         return RestartPayload::FixedImplicitBulkGasPool;
+    }
     if (motion)
         return uses_qbmm_linear_transport(options.qbmm_model) ? RestartPayload::PlanarLinear
                                                              : RestartPayload::PlanarImplicit;
@@ -439,10 +456,10 @@ std::uint64_t restart_model_code(const Solver::Options& options)
               !model.cross_family_coalescence && !model.capillarity &&
               !model.independent_node_temperatures,
         "QBMM restart requires the admitted fixed-composition backward-Euler upwind model.");
-    check(!model.bulk_gas_conversion ||
-              (model.family_transport == QbmmModelOptions::FamilyTransport::NativeImplicit &&
-                  model.velocity == QbmmModelOptions::Velocity::SharedCarrier),
-        "QBMM pool restart requires native implicit transport with shared-carrier velocity.");
+    check(!model.bulk_gas_conversion || (model.family_transport == QbmmModelOptions::FamilyTransport::NativeImplicit &&
+                                            (model.velocity == QbmmModelOptions::Velocity::SharedCarrier ||
+                                                model.velocity == QbmmModelOptions::Velocity::SuppliedPhaseSlip)),
+        "QBMM pool restart requires native implicit transport with shared-carrier or supplied-slip velocity.");
     // Explicit wire codes: enum declaration order is not an archive contract.
     switch (model.velocity)
     {
@@ -550,15 +567,16 @@ std::uint64_t restart_physical_fingerprint(const Solver::Options& options,
     return hash.value;
 }
 
-RestartWriter restart_pool_configuration(
-    const Solver::Options& options, std::span<const std::shared_ptr<const MixtureThermodynamics>> eos)
+RestartWriter restart_pool_configuration(const Solver::Options& options,
+    std::span<const std::shared_ptr<const MixtureThermodynamics>> eos, RestartPayload type)
 {
     check(bool(options.qbmm_bulk_gas_pool), "QBMM pool restart requires its BulkGas phase binding.");
     const auto& pool = *options.qbmm_bulk_gas_pool;
     const auto species = pool.catalog().species();
     RestartWriter header;
     header(qbmm_pool_restart_policy_revision, restart_advance_controls(options),
-        restart_physical_fingerprint(options, eos, "implicit-pool-physical-providers-v1", false),
+        restart_physical_fingerprint(
+            options, eos, "implicit-pool-physical-providers-v1", type == RestartPayload::ForcedImplicitBulkGasPool),
         static_cast<std::uint64_t>(pool.phase_index()), static_cast<std::uint64_t>(pool.direction()),
         pool.fingerprint());
     header.string(pool.phase_identity());
@@ -585,10 +603,11 @@ std::uint64_t restart_forced_physical_fingerprint(const Solver::Options& options
     std::span<const std::shared_ptr<const MixtureThermodynamics>> eos, QbmmModelOptions::FamilyTransport transport,
     bool axial_kinetic)
 {
-    const auto domain = axial_kinetic ? "axial-kinetic-physical-providers-v1"
-                        : transport == QbmmModelOptions::FamilyTransport::KineticEuler
-                            ? "forced-kinetic-physical-providers-v1"
-                            : "forced-linear-physical-providers-v1";
+    const auto domain =
+        axial_kinetic                                                    ? "axial-kinetic-physical-providers-v1"
+        : transport == QbmmModelOptions::FamilyTransport::KineticEuler   ? "forced-kinetic-physical-providers-v1"
+        : transport == QbmmModelOptions::FamilyTransport::NativeImplicit ? "implicit-pool-physical-providers-v1"
+                                                                         : "forced-linear-physical-providers-v1";
     return restart_physical_fingerprint(options, eos, domain, true);
 }
 
@@ -706,19 +725,40 @@ void validate_restart_kinetic_diagnostics(const Solver::Options& options, const 
         "QBMM restart kinetic interval diagnostics disagree with the configured substep policy.");
 }
 
+template<class Archive, class Diagnostics, class Interval>
+void restart_forced_family_impulses(Archive& io, Diagnostics& stats, Interval& interval, bool has_force)
+{
+    bool present = stats.impulse_parts.has_value();
+    io(present);
+    check(!present || has_force, "QBMM restart body impulse requires supplied acceleration.");
+    if (!present)
+        return;
+    if constexpr (std::is_same_v<Archive, RestartReader>)
+    {
+        stats.impulse_parts.emplace();
+        interval.emplace();
+    }
+    check(interval.has_value(), "QBMM restart body impulse requires interval provenance.");
+    auto& parts = *stats.impulse_parts;
+    io(parts.body, parts.other, interval->old_time, interval->time_step, interval->local_body, interval->local_other,
+        interval->local_external);
+}
+
 void validate_forced_family_impulses(const Solver::Vector& acceleration, const Solver::Diagnostics& stats,
     const Solver::State& state, const std::optional<ForcedFamilyInterval>& interval)
 {
-    check(stats.impulse_parts.has_value() == (stats.kinetic_substeps > 0 || stats.linear_substeps > 0) &&
-              interval.has_value() == stats.impulse_parts.has_value(),
-        "Forced explicit QBMM impulse diagnostics disagree with interval history.");
+    const bool advanced = stats.family_transport == QbmmModelOptions::FamilyTransport::NativeImplicit
+                              ? stats.correctors > 0
+                              : stats.kinetic_substeps > 0 || stats.linear_substeps > 0;
+    check(stats.impulse_parts.has_value() == advanced && interval.has_value() == stats.impulse_parts.has_value(),
+        "Forced QBMM impulse diagnostics disagree with interval history.");
     if (!interval)
         return;
     check(stats.source_evaluations == stats.correctors && stats.correctors >= 2,
-        "Forced explicit QBMM interval requires a source evaluation for each accepted corrector.");
+        "Forced QBMM interval requires a source evaluation for each accepted corrector.");
     check(std::isfinite(interval->old_time) && std::isfinite(interval->time_step) && interval->time_step > 0 &&
               state.time > interval->old_time && state.time == interval->old_time + interval->time_step,
-        "Forced explicit QBMM impulse interval disagrees with the accepted clock.");
+        "Forced QBMM impulse interval disagrees with the accepted clock.");
 
     // Reconstruct the local contribution independently from accepted species stocks. The source-stage
     // replay admits a relative endpoint discrepancy of 64 eps times the sum of both endpoint magnitudes.
@@ -742,25 +782,25 @@ void validate_forced_family_impulses(const Solver::Vector& acceleration, const S
         const double global_external = stats.external_impulse.component(axis);
         check(std::isfinite(body) && std::isfinite(other) && std::isfinite(external) && std::isfinite(global_body) &&
                   std::isfinite(global_other) && std::isfinite(global_external),
-            "Forced explicit QBMM impulse diagnostics are nonfinite.");
+            "Forced QBMM impulse diagnostics are nonfinite.");
         if (state.cells.empty())
-            check(body == 0. && other == 0. && external == 0., "Empty owner has a forced explicit QBMM impulse.");
+            check(body == 0. && other == 0. && external == 0., "Empty owner has a forced QBMM impulse.");
         if (g == 0.)
         {
             check(body == 0. && global_body == 0. && other == external && global_other == global_external,
-                "Forced explicit QBMM impulse is inconsistent with an unforced component.");
+                "Forced QBMM impulse is inconsistent with an unforced component.");
             continue;
         }
         check((body == 0. || std::signbit(body) == std::signbit(g)) &&
                   (global_body == 0. || std::signbit(global_body) == std::signbit(g)),
-            "Forced explicit QBMM body impulse points against its acceleration.");
+            "Forced QBMM body impulse points against its acceleration.");
         FaceSum force, body_error;
         force.add_weighted(mass, g);
         body_error.add_weighted(force, interval->time_step);
         body_error.add_product(-body, 1.);
         const double body_bound = 256 * eps * std::abs(body) + quantum * (1. + static_cast<double>(state.cells.size()));
         check(std::abs(body_error.rounded()) <= body_bound,
-            "Forced explicit QBMM body impulse disagrees with the accepted material mass and interval.");
+            "Forced QBMM body impulse disagrees with the accepted material mass and interval.");
 
         FaceSum split_error;
         split_error.add_product(external, 1.);
@@ -769,7 +809,7 @@ void validate_forced_family_impulses(const Solver::Vector& acceleration, const S
         const double split_bound =
             eps * std::abs(body) + eps * std::abs(other) + eps * std::abs(external) + 3 * quantum;
         check(std::abs(split_error.rounded()) <= split_bound,
-            "Forced explicit QBMM rank-local external impulse disagrees with its body and other operands.");
+            "Forced QBMM rank-local external impulse disagrees with its body and other operands.");
     }
 }
 
@@ -788,7 +828,7 @@ void require_uniform_forced_family_history(const Solver::Mesh& mesh, const Solve
         hash.number(interval->old_time);
         hash.number(interval->time_step);
     }
-    collective_detail::require_uniform_value(mesh, hash.value, "Forced explicit QBMM restart impulse history");
+    collective_detail::require_uniform_value(mesh, hash.value, "Forced QBMM restart impulse history");
     if (!interval)
         return;
 
@@ -808,7 +848,7 @@ void require_uniform_forced_family_history(const Solver::Mesh& mesh, const Solve
     const auto& comm = *mesh.owned_cell_map()->getComm();
     if (comm.getSize() == 1)
     {
-        check(local == saved, "Forced explicit QBMM archived impulse totals differ from their local operands.");
+        check(local == saved, "Forced QBMM archived impulse totals differ from their local operands.");
         return;
     }
     std::ranges::transform(local, magnitudes.begin(), [](double value) { return std::abs(value); });
@@ -829,7 +869,7 @@ void require_uniform_forced_family_history(const Solver::Mesh& mesh, const Solve
         const double allowance =
             4. * comm.getSize() * std::numeric_limits<double>::epsilon() * scaled_sum[local.size() + k];
         check(std::abs(reported - scaled_sum[k]) <= allowance,
-            "Forced explicit QBMM archived impulse totals differ from their rank-local operands.");
+            "Forced QBMM archived impulse totals differ from their rank-local operands.");
     }
 }
 
@@ -1153,16 +1193,18 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
     const bool kinetic = uses_qbmm_kinetic_transport(d->options.qbmm_model);
     const bool linear = uses_qbmm_linear_transport(d->options.qbmm_model);
     const bool explicit_family = kinetic || linear;
-    const auto type = configured_restart_payload(d->options, mesh, motion != nullptr);
-    const bool pool_conversion = type == RestartPayload::FixedImplicitBulkGasPool;
+    const bool pool_conversion = d->options.qbmm_model.bulk_gas_conversion;
+    const auto force = d->controller_active && !d->has_forced_family_provenance() &&
+                               !(pool_conversion && d->explicit_family_force_recorded)
+                           ? acceleration_vector(d->active_body_acceleration)
+                           : d->diagnostics.body_acceleration_m_per_s2;
+    const auto type = configured_restart_payload(d->options, mesh, motion != nullptr, force.has_value());
+    const bool forced_pool = type == RestartPayload::ForcedImplicitBulkGasPool;
     const bool axial_kinetic = type == RestartPayload::FixedAxialKinetic;
     const bool planar_linear = type == RestartPayload::PlanarLinear;
     const bool fixed_tvd_mc = type == RestartPayload::FixedLinearTvdMc;
     const bool tvd_mc = d->options.qbmm_model.linear_slope_limiter == QbmmModelOptions::LinearSlopeLimiter::TvdMc;
     const bool retains_linear_controller = fixed_tvd_mc || planar_linear;
-    const auto force = d->controller_active && !d->has_forced_family_provenance()
-                           ? acceleration_vector(d->active_body_acceleration)
-                           : d->diagnostics.body_acceleration_m_per_s2;
     const bool tagged = axial_kinetic || retains_linear_controller || (explicit_family && force);
     const auto version = pool_conversion ? qbmm_pool_restart_version
                          : tagged        ? qbmm_tagged_restart_version
@@ -1216,14 +1258,21 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
             writer(qbmm_restart_magic, version);
             if (pool_conversion)
             {
-                check(!motion && !force && !d->diagnostics.body_acceleration_m_per_s2 &&
-                          !d->diagnostics.impulse_parts && !forced_interval && !wall_interval &&
-                          !d->qbmm_legacy_default_only,
-                    "QBMM pool restart requires fixed geometry, absent body acceleration and current provenance.");
+                check(!d->qbmm_legacy_default_only && (!wall_interval || motion) &&
+                          (forced_pool ? (signature && force)
+                                       : (!force && !d->diagnostics.body_acceleration_m_per_s2 &&
+                                             !d->diagnostics.impulse_parts && !forced_interval)),
+                    "QBMM pool restart geometry, acceleration and controller provenance differ.");
                 writer(static_cast<std::uint64_t>(type));
-                const auto header = restart_pool_configuration(d->options, d->eos);
+                const auto header = restart_pool_configuration(d->options, d->eos, type);
                 pool_configuration = restart_checksum(header.bytes);
                 writer.bytes.insert(writer.bytes.end(), header.bytes.begin(), header.bytes.end());
+                if (forced_pool)
+                {
+                    validate_forced_family_impulses(*force, d->diagnostics, state, forced_interval);
+                    writer(*force);
+                    restart_forced_family_impulses(writer, d->diagnostics, forced_interval, true);
+                }
             }
             else if (planar_linear)
             {
@@ -1246,14 +1295,8 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
                 writer(static_cast<std::uint64_t>(type), force.has_value(), force.value_or(Vector{}),
                     kinetic ? balanced_kinetic_pressure_revision : balanced_linear_pressure_revision,
                     kinetic ? forced_kinetic_thermal_revision : forced_linear_thermal_revision,
-                    restart_advance_controls(d->options), physical_fingerprint,
-                    d->diagnostics.impulse_parts.has_value());
-                if (const auto& parts = d->diagnostics.impulse_parts)
-                {
-                    writer(parts->body, parts->other);
-                    writer(forced_interval->old_time, forced_interval->time_step, forced_interval->local_body,
-                        forced_interval->local_other, forced_interval->local_external);
-                }
+                    restart_advance_controls(d->options), physical_fingerprint);
+                restart_forced_family_impulses(writer, d->diagnostics, forced_interval, force.has_value());
             }
             writer(restart_partition_fingerprint(mesh));
             if (axial_kinetic)
@@ -1270,8 +1313,9 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
                 axial_binding = restart_axial_binding(signature, force, physical_fingerprint);
                 writer(axial_binding);
             }
-            else if (tagged && force)
-                writer(restart_force_binding(*signature, *force, physical_fingerprint));
+            else if ((tagged || forced_pool) && force)
+                writer(
+                    restart_force_binding(*signature, *force, forced_pool ? pool_configuration : physical_fingerprint));
             writer(model, d->qbmm_legacy_default_only);
             if (kinetic)
                 writer(restart_kinetic_policy_fingerprint(d->options));
@@ -1335,6 +1379,7 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
                     writer(wall_interval->old_surface, wall_interval->time_step);
                 }
             }
+            const auto summary_start = writer.bytes.size();
             restart_diagnostics(writer, d->diagnostics, d->eos.size(), catalog.species().size(), version, type);
             auto balances = d->qbmm_publication ? d->qbmm_publication->balances : std::nullopt;
             restart_qbmm_balances(writer, balances, d->diagnostics, catalog);
@@ -1342,7 +1387,8 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
                 writer(d->qbmm_publication->shape_diagnostics_version);
             if (motion || explicit_family || pool_conversion)
             {
-                const auto start = writer.bytes.size();
+                const bool q9c_pool = pool_conversion && type != RestartPayload::FixedImplicitBulkGasPool;
+                const auto start = q9c_pool ? summary_start : writer.bytes.size();
                 const auto* live = controller_diagnostics ? controller_diagnostics->saved : nullptr;
                 const auto* retained = (explicit_family || pool_conversion) && d->qbmm_publication
                                            ? d->qbmm_publication->controller_diagnostics.get()
@@ -1391,7 +1437,11 @@ std::vector<std::byte> LowMachMixtureSolver::serialize_qbmm_restart_impl(const P
         collective_detail::require_uniform_value(mesh, controller_history, "QBMM restart controller diagnostics");
     }
     if (pool_conversion)
+    {
         collective_detail::require_uniform_value(mesh, pool_configuration, "QBMM restart BulkGas pool configuration");
+        if (forced_pool)
+            require_uniform_forced_family_history(mesh, *force, d->diagnostics, forced_interval);
+    }
     else if (planar_linear)
         collective_detail::require_uniform_value(mesh, planar_linear_controls, "Planar linear QBMM advancement controls");
     else if (tagged)
@@ -1437,8 +1487,10 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
     const bool kinetic = uses_qbmm_kinetic_transport(d->options.qbmm_model);
     const bool linear = uses_qbmm_linear_transport(d->options.qbmm_model);
     const bool explicit_family = kinetic || linear;
-    const auto configured_type = configured_restart_payload(d->options, mesh, motion != nullptr);
-    const bool pool_conversion = configured_type == RestartPayload::FixedImplicitBulkGasPool;
+    const auto configured_type =
+        configured_restart_payload(d->options, mesh, motion != nullptr, d->active_body_acceleration.has_value());
+    const bool pool_conversion = d->options.qbmm_model.bulk_gas_conversion;
+    const bool forced_pool = configured_type == RestartPayload::ForcedImplicitBulkGasPool;
     const bool axial_kinetic = configured_type == RestartPayload::FixedAxialKinetic;
     const bool planar_linear = configured_type == RestartPayload::PlanarLinear;
     const bool fixed_tvd_mc = configured_type == RestartPayload::FixedLinearTvdMc;
@@ -1493,12 +1545,15 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
                 "QBMM restart payload is incompatible with the receiving geometry or transport mode.");
             if (pool_conversion)
             {
-                check(!motion && !d->active_body_acceleration && !d->diagnostics.body_acceleration_m_per_s2,
-                    "QBMM pool restart requires fixed geometry and absent body acceleration.");
-                const auto header = restart_pool_configuration(d->options, d->eos);
+                const auto header = restart_pool_configuration(d->options, d->eos, type);
                 reader.expect_bytes(
                     header.bytes, "QBMM restart BulkGas pool, closure laws or advancement controls differ.");
                 pool_configuration = restart_checksum(header.bytes);
+                if (forced_pool)
+                {
+                    reader(statistics.body_acceleration_m_per_s2.emplace());
+                    restart_forced_family_impulses(reader, statistics, forced_interval, true);
+                }
             }
             else if (planar_linear)
             {
@@ -1523,27 +1578,17 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
                     physical_fingerprint = restart_forced_physical_fingerprint(
                         d->options, d->eos, d->options.qbmm_model.family_transport, axial_kinetic);
                 reader.expect(physical_fingerprint, "Tagged QBMM restart physical provider binding differs.");
-                bool has_impulses = false;
-                reader(has_impulses);
-                check(!has_impulses || has_force, "QBMM restart body impulse requires supplied acceleration.");
-                if (has_impulses)
-                {
-                    auto& parts = statistics.impulse_parts.emplace();
-                    reader(parts.body, parts.other);
-                    auto& interval = forced_interval.emplace();
-                    reader(interval.old_time, interval.time_step, interval.local_body, interval.local_other,
-                        interval.local_external);
-                }
+                restart_forced_family_impulses(reader, statistics, forced_interval, has_force);
             }
-            if (explicit_family && d->explicit_family_force_recorded)
+            if ((explicit_family || pool_conversion) && d->explicit_family_force_recorded)
                 check(d->diagnostics.body_acceleration_m_per_s2 == statistics.body_acceleration_m_per_s2,
-                    "QBMM restart body acceleration differs from the accepted explicit configuration.");
-            if (explicit_family && d->controller_active)
+                    "QBMM restart body acceleration differs from the accepted configuration.");
+            if ((explicit_family || pool_conversion) && d->controller_active)
                 check(d->active_body_acceleration == acceleration_components(statistics.body_acceleration_m_per_s2),
                     "QBMM restart body acceleration differs from the receiving controller.");
             qbmm_detail::validate_capability(d->options, mesh, motion != nullptr,
-                explicit_family ? statistics.body_acceleration_m_per_s2
-                                : acceleration_vector(d->active_body_acceleration));
+                explicit_family || pool_conversion ? statistics.body_acceleration_m_per_s2
+                                                   : acceleration_vector(d->active_body_acceleration));
             if (statistics.body_acceleration_m_per_s2)
                 d->validate_forced_linear_geometry();
             if (motion)
@@ -1602,11 +1647,11 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
             }
             else if (statistics.body_acceleration_m_per_s2)
             {
-                check(controller_signature.has_value(), "Forced explicit QBMM restart lacks its controller signature.");
+                check(controller_signature.has_value(), "Forced QBMM restart lacks its controller signature.");
                 check(!d->has_forced_family_provenance() || controller_signature == d->accepted_qbmm_controller,
                     "QBMM restart controller signature differs from the accepted forced explicit configuration.");
-                reader.expect(restart_force_binding(
-                                  *controller_signature, *statistics.body_acceleration_m_per_s2, physical_fingerprint),
+                reader.expect(restart_force_binding(*controller_signature, *statistics.body_acceleration_m_per_s2,
+                                  forced_pool ? pool_configuration : physical_fingerprint),
                     "QBMM restart force and controller binding differ.");
             }
             // Old images have no model stamp. In particular, a numerically zero
@@ -1733,6 +1778,7 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
                     old_cap = edges.back();
                 }
             }
+            const auto summary_remaining = reader.remaining_size();
             restart_diagnostics(reader, statistics, phases, species, version, type);
             if (statistics.body_acceleration_m_per_s2)
                 validate_forced_family_impulses(
@@ -1767,7 +1813,8 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
             std::shared_ptr<ReactingMixtureCoupler::Diagnostics> archived_controller;
             if (motion || explicit_family || pool_conversion)
             {
-                const auto before = reader.remaining_size();
+                const bool q9c_pool = pool_conversion && type != RestartPayload::FixedImplicitBulkGasPool;
+                const auto before = q9c_pool ? summary_remaining : reader.remaining_size();
                 bool has_history = false;
                 reader(has_history);
                 check(!statistics.body_acceleration_m_per_s2 || has_history == forced_interval.has_value(),
@@ -1838,7 +1885,12 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
     collective_detail::require_uniform_value(
         mesh, static_cast<std::uint64_t>(configured_type), "QBMM restart payload type");
     if (pool_conversion)
+    {
         collective_detail::require_uniform_value(mesh, pool_configuration, "QBMM restart BulkGas pool configuration");
+        if (forced_pool)
+            require_uniform_forced_family_history(
+                mesh, *statistics.body_acceleration_m_per_s2, statistics, forced_interval);
+    }
     if (version == qbmm_tagged_restart_version && !planar_linear)
     {
         collective_detail::require_uniform_value(mesh, int(statistics.body_acceleration_m_per_s2.has_value()),
@@ -1870,7 +1922,7 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
         auto accepted_frame = capture_planar_motion_frame(*motion);
         try
         {
-            motion->stage_restart_geometry(surface, linear);
+            motion->stage_restart_geometry(surface, d->preserves_planar_trial());
             collective_detail::collective_local_validation(mesh, "Planar QBMM restart physical state",
                 [&]
                 {
@@ -1905,7 +1957,7 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
             [&] { validate_restart_physics(mesh, d->options, candidate, face_flux); });
         d->publish_fixed(std::move(candidate), std::move(statistics), face_flux, generation, std::move(publication));
     }
-    d->explicit_family_force_recorded = explicit_family;
+    d->explicit_family_force_recorded = explicit_family || pool_conversion;
     d->accepted_qbmm_controller = controller_signature;
     d->needs_restart_controller = controller_signature.has_value();
     d->qbmm_legacy_default_only = legacy_default_only;

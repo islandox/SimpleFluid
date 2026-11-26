@@ -196,12 +196,15 @@ function(add_qbmm_restart_tests name target filter environment_prefix labels)
     endforeach()
 endfunction()
 
+add_qbmm_restart_tests(QbmmPoolFixedQ9cRestart testReactingMixtureQbmmPool
+    ReactingMixtureQbmmPool.FixedModesPortableContinuation SIMPLEFLUID_Q9C_FIXED
+    "qbmm;reacting;pool;slip;gravity;restart;conservation;empty_rank")
 add_qbmm_restart_tests(QbmmPoolRestart testReactingMixtureQbmmPool ReactingMixtureQbmmPool.PortableContinuation
     SIMPLEFLUID_Q9B "qbmm;reacting;pool;restart;conservation;empty_rank")
 foreach(ranks IN ITEMS 1 2 4)
     set(test "QbmmPoolContracts_${ranks}procs")
     simplefluid_add_mpi_test(NAME "${test}" TARGET testReactingMixtureQbmmPool PROCS ${ranks}
-        ARGS "--gtest_filter=ReactingMixtureQbmmPool.*-*.PortableContinuation"
+        ARGS "--gtest_filter=ReactingMixtureQbmmPool.*-*.*PortableContinuation"
         LABELS "mpi;qbmm;reacting;pool;multi_rhs;conservation;transaction;empty_rank" TIMEOUT 240)
     if(TEST "${test}")
         set_tests_properties("${test}" PROPERTIES ENVIRONMENT "SIMPLEFLUID_Q9B_RANKS=${ranks}")
@@ -235,6 +238,21 @@ foreach(ranks IN ITEMS 2 4)
         LABELS "mpi;qbmm;film;reacting;ale;conservation;transaction;empty_rank" TIMEOUT 180)
     if(TEST "${test}")
         set_tests_properties("${test}" PROPERTIES ENVIRONMENT "SIMPLEFLUID_FILM_RANKS=${ranks}")
+    endif()
+endforeach()
+
+foreach(velocity IN ITEMS Shared SuppliedSlip)
+    add_qbmm_restart_tests(QbmmPoolPlanar${velocity}Restart testReactingMixtureQbmmPoolALE
+        ReactingMixtureQbmmPoolALE.${velocity}PortableContinuation SIMPLEFLUID_Q9C_ALE
+        "qbmm;pool;ale;restart;transaction;empty_rank")
+endforeach()
+foreach(ranks IN ITEMS 1 2 4)
+    set(test "QbmmPoolPlanarContracts_${ranks}procs")
+    simplefluid_add_mpi_test(NAME "${test}" TARGET testReactingMixtureQbmmPoolALE PROCS ${ranks}
+        ARGS "--gtest_filter=ReactingMixtureQbmmPoolALE.*-*.*PortableContinuation"
+        LABELS "mpi;qbmm;pool;ale;multi_rhs;conservation;transaction;empty_rank" TIMEOUT 240)
+    if(TEST "${test}")
+        set_tests_properties("${test}" PROPERTIES ENVIRONMENT "SIMPLEFLUID_Q9C_ALE_RANKS=${ranks}")
     endif()
 endforeach()
 
