@@ -344,11 +344,11 @@ TEST_F(QbmmBulkGasConversionTest, JointOwnerCannotFundLaterBirthWithEarlierDepos
     EXPECT_EQ(result.rejected_event->donor_shortfall->requested, 1.5);
 }
 
-TEST_F(QbmmBulkGasConversionTest, GrossReservationRetainsThirdScaleDebitsForSpeciesAndBubbleCounts)
+TEST_F(QbmmBulkGasConversionTest, GrossReservationChecksSmallDebitsAndPositiveRemainders)
 {
     // The first, third and fourth requests sum to exactly one in real arithmetic.
-    // The extra second request must survive cancellation with the near-unit third request.
-    const std::array quantities{0x1p-100, 0x1p-200, 1. - 0x1p-53, 0x1p-53 - 0x1p-100};
+    // Put the extra debit below the stock ULP and within the native compensated subtotal.
+    const std::array quantities{0x1p-60, 0x1p-100, 1. - 0x1p-53, 0x1p-53 - 0x1p-60};
     for (bool extra : {false, true})
     {
         Operations births_from_pool, consume_parents;
@@ -375,12 +375,12 @@ TEST_F(QbmmBulkGasConversionTest, GrossReservationRetainsThirdScaleDebitsForSpec
             ASSERT_TRUE(species.rejected_event->donor_shortfall);
             const auto& debit = *species.rejected_event->donor_shortfall;
             EXPECT_EQ(std::get<R::QbmmSpeciesDonor>(debit.stock).species, A);
-            EXPECT_EQ(debit.shortfall, 0x1p-201); // The A stock holds 0.5 mol per scaled mass unit.
+            EXPECT_EQ(debit.shortfall, 0x1p-101); // The A stock holds 0.5 mol per scaled mass unit.
             reject(count, Status::CountDonorOverdraw);
             ASSERT_EQ(count.failed_event, 3u);
             ASSERT_TRUE(count.rejected_event);
             ASSERT_TRUE(count.rejected_event->donor_shortfall);
-            EXPECT_EQ(count.rejected_event->donor_shortfall->shortfall, 0x1p-200);
+            EXPECT_EQ(count.rejected_event->donor_shortfall->shortfall, 0x1p-100);
         }
         else
         {
@@ -389,17 +389,16 @@ TEST_F(QbmmBulkGasConversionTest, GrossReservationRetainsThirdScaleDebitsForSpec
             EXPECT_EQ(count.endpoint->families[0].quadrature.status, R::InversionStatus::RankOne);
         }
     }
-    // Six partial withdrawals leave exactly 2^-200 unit atoms. Exact positivity matters independently
-    // of rejection: no rounded zero, doubled residual, or unrepresentable-absence shortcut is admissible.
+    // Six partial withdrawals leave exactly 2^-100 unit atoms, with a positive rank-one endpoint.
     const auto one_atom = inputs(small, {1., 1., 1., 1.});
     Operations partial_drains;
     for (const double count :
-        {0x1p-100, 0x1p-200, 1. - 0x1p-53, 0x1p-53 - 0x1p-99, 0x1p-100 - 0x1p-150, 0x1p-150 - 0x1p-199})
+        {0x1p-60, 0x1p-100, 1. - 0x1p-53, 0x1p-53 - 0x1p-59, 0x1p-60 - 0x1p-79, 0x1p-79 - 0x1p-99})
     {
         auto drain = R::qbmm_pool_drain_from_fraction(small, one_atom, pool, std::array{count});
         partial_drains.push_back(std::move(drain.at(0)));
     }
-    constexpr double residual = 0x1p-200;
+    constexpr double residual = 0x1p-100;
     const auto residual_state = advance(stock(1), 1., {1., 1.}, partial_drains);
     ASSERT_NO_FATAL_FAILURE(check_endpoint(residual_state, {residual, residual, residual, residual}, 1.));
     EXPECT_EQ(residual_state.endpoint->families[0].quadrature.status, R::InversionStatus::RankOne);

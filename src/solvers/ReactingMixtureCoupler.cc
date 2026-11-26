@@ -217,7 +217,7 @@ struct SourceEngine
             transport.cells.size() == trial.cells.size() && transport.cells.size() == flow->mesh()->num_owned_cells(),
             "Transport/source cell counts do not agree.");
         const auto& pool = flow->options().qbmm_bulk_gas_pool;
-        stage.sums.reset(transport.cells.size(), np, ns, bool(pool));
+        stage.sums.reset(transport.cells.size(), np, ns);
         stage.gross_events.resize(transport.cells.size());
         stage.ledgers.reserve(transport.cells.size());
         stage.post_chemistry.reserve(transport.cells.size());
@@ -744,8 +744,7 @@ struct SourceEngine
     QbmmSourceStepResult apply_qbmm_step(const Solver::SourceStageContext& context, size_t c,
         const QbmmSourceStep& step, const Solver::CellState& caloric_guess,
         const Solver::TransportCellInventory& predecessor, std::span<const std::optional<QbmmQuadrature>> quadratures,
-        CellSpeciesState& material, Faces::RawAmounts& raw_material, std::span<double> number_changes = {},
-        qbmm_event_detail::RawSpeciesExactStocks* substep_stocks = nullptr) const
+        CellSpeciesState& material, Faces::RawAmounts& raw_material, std::span<double> number_changes = {}) const
     {
         const auto& transport = context.transport;
         const auto& catalog = options.mechanism->catalog();
@@ -753,7 +752,6 @@ struct SourceEngine
         Faces::validate_raw_inventory(catalog, material, raw_material);
         QbmmSourceStepResult result;
         auto& tail = result.tail;
-        tail.exact_material_reservation = bool(flow->options().qbmm_bulk_gas_pool);
         result.cells.resize(families.size());
         if (step.adaptive && !step.validate_only)
             result.moment_changes.resize(families.size());
@@ -899,6 +897,7 @@ struct SourceEngine
             throw std::invalid_argument(message);
         };
         std::optional<QbmmJointPopulationEndpoint> joint_endpoint;
+        qbmm_event_detail::RawSpeciesStocks joint_stocks;
         std::vector<std::array<long double, 4>> joint_moments;
         if (pool)
         {
@@ -908,10 +907,8 @@ struct SourceEngine
             joint_moments.resize(batches.size());
             for (const auto& row : batches)
                 inputs.push_back({*families[row.phase], row.predecessor, row.batch});
-            qbmm_event_detail::RawSpeciesExactStocks single_step_stocks;
-            auto& exact_stocks = substep_stocks ? *substep_stocks : single_step_stocks;
             auto advance = qbmm_event_detail::advance_joint_with_raw_species(
-                material, inputs, *pool, raw_material, exact_stocks, adaptive_moments, joint_moments);
+                material, inputs, *pool, raw_material, joint_stocks, adaptive_moments, joint_moments);
             if (!advance.endpoint)
                 reject_advance(
                     advance.failed_family ? inputs[*advance.failed_family].schema.population() : "joint stage",
@@ -990,10 +987,11 @@ struct SourceEngine
         }
         if (joint_endpoint)
         {
-            // The joint reserve/replay owns the exact result. An expansion is retained in substep_stocks,
-            // while the legacy material view exposes its checked binary64 projection.
+            // Keep the compensated joint stock in the same raw inventory used by every source step.
+            require(joint_stocks.size() == raw_material.size(), "Joint QBMM raw stock layout differs.");
+            for (size_t i = 0; i < raw_material.size(); ++i)
+                raw_material[i] = joint_stocks[i].components();
             material = std::move(joint_endpoint->species);
-            raw_material = Faces::raw_amounts_from_state(material);
             return result;
         }
         // Replay all legacy families together against one uncollapsed predecessor.
@@ -1063,7 +1061,6 @@ struct SourceEngine
         Faces::RawAmounts raw_material;
         Solver::TransportCellInventory inventory;
         std::vector<std::optional<QbmmQuadrature>> quadratures;
-        qbmm_event_detail::RawSpeciesExactStocks exact_stocks;
     };
 
     QbmmSourceStepResult advance_qbmm_source(const Solver::SourceStageContext& context, size_t c,
@@ -1072,7 +1069,7 @@ struct SourceEngine
         try
         {
             auto result = apply_qbmm_step(context, c, step, caloric_guess, state.inventory, state.quadratures,
-                state.material, state.raw_material, {}, &state.exact_stocks);
+                state.material, state.raw_material);
             const auto& families = flow->options().qbmm_families;
             for (size_t p = 0; p < families.size(); ++p)
                 if (const auto& receipt = result.cells[p])
@@ -1182,7 +1179,7 @@ struct SourceEngine
     {
         const auto& transport = context.transport;
         const double dt = transport.time_step;
-        const QbmmSourceState initial{material, raw_material, transport.cells[c], qbmm.pre_material[c], {}};
+        const QbmmSourceState initial{material, raw_material, transport.cells[c], qbmm.pre_material[c]};
         require(schedule > 0 && schedule <= options.qbmm_source_maximum_substeps,
             "Invalid retained QBMM source substep schedule.");
         auto stages = schedule;
@@ -1241,7 +1238,6 @@ struct SourceEngine
 
         FrozenMaterialSourceTail tail;
         tail.paired_stage = accepted.front().second.tail.paired_stage;
-        tail.exact_material_reservation = accepted.front().second.tail.exact_material_reservation;
         const bool retain_thermal = tail.paired_stage ||
                                     (thermal_configuration && std::ranges::any_of(accepted,
                                         [](const auto& item) { return !item.second.tail.reservoirs.empty(); }));

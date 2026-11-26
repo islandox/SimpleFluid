@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <array>
 #include <cmath>
 #include <concepts>
 
@@ -34,6 +35,9 @@ public:
     }
 
     [[nodiscard]] Scalar value() const { return d_sum + d_correction; }
+
+    /** Preserve both native components when handing off a raw subtotal. */
+    [[nodiscard]] std::array<Scalar, 2> components() const noexcept { return {d_sum, d_correction}; }
 
 private:
     Scalar d_sum{};

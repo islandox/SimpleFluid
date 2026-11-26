@@ -25,7 +25,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline PoolGross pool_gross(const QbmmBulkGasPoolBindi
     const auto& catalog = pool.catalog();
     const size_t ns = catalog.species().size(), width = Flow::qbmm_pool_gross_width(ns), stride = width / 2;
     std::vector<double> local, global;
-    std::array<std::vector<double>, 2> energy_terms;
+    std::array<double, 2> local_energy{}, global_energy{};
     std::uint64_t evaluations_count = 0;
     collective_detail::collective_local_validation(mesh, "QBMM directional pool packets",
         [&]
@@ -36,7 +36,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline PoolGross pool_gross(const QbmmBulkGasPoolBindi
                     {Flow::GrossResidualStage::QbmmPoolConversion, d, d == 0 ? 1 : -1});
             result.rows.resize(cells.size());
             std::vector<SourceReceiptSum> total(width);
-            std::array<qbmm_face_detail::ScaledFaceSum, 2> signed_energy;
+            std::array<SourceReceiptSum, 2> signed_energy;
             for (size_t c = 0; c < cells.size(); ++c)
             {
                 std::vector<SourceReceiptSum> row(width);
@@ -80,9 +80,10 @@ SIMPLEFLUID_SOLVERS_LOCAL inline PoolGross pool_gross(const QbmmBulkGasPoolBindi
                         if (slot.donor != pool.phase_index() && slot.recipient != pool.phase_index())
                             continue;
                         const size_t direction = slot.donor == pool.phase_index() ? 1 : 0;
+                        require(std::isfinite(event.carried_energy), "QBMM pool carried enthalpy must be finite.");
                         row[direction * stride + ns + 4 + (event.carried_energy < 0)] +=
                             std::abs(event.carried_energy);
-                        signed_energy[direction].add_unrounded_value(event.carried_energy);
+                        signed_energy[direction] += event.carried_energy;
                     }
                 auto& values = result.rows[c];
                 values.resize(width);
@@ -105,32 +106,19 @@ SIMPLEFLUID_SOLVERS_LOCAL inline PoolGross pool_gross(const QbmmBulkGasPoolBindi
             for (auto& direction : result.totals.directions)
                 direction.species_moles.resize(ns);
             for (size_t d = 0; d < signed_energy.size(); ++d)
-                signed_energy[d].append_scaled_terms(energy_terms[d]);
+            {
+                const auto raw = signed_energy[d].value();
+                local_energy[d] = static_cast<double>(raw);
+                require(std::isfinite(raw) && std::isfinite(local_energy[d]),
+                    "QBMM signed local pool enthalpy is not representable.");
+            }
         });
     const auto comm = mesh.owned_cell_map()->getComm();
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, int(width), local.data(), global.data());
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &evaluations_count, &result.totals.law_evaluations);
     require(std::ranges::all_of(global, [](double x) { return std::isfinite(x) && x >= 0; }),
         "QBMM global pool diagnostics are not representable.");
-    // Reduce the signed energy before rounding either sign or the owner's subtotal.
-    const size_t local_width = std::max(energy_terms[0].size(), energy_terms[1].size());
-    size_t term_width = 0;
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_width, &term_width);
-    std::vector<double> signed_send, signed_all;
-    if (term_width)
-    {
-        collective_detail::collective_local_validation(mesh, "QBMM signed pool energy reduction",
-            [&]
-            {
-                require(term_width <= size_t(std::numeric_limits<int>::max()) / 2 / comm->getSize(),
-                    "QBMM signed pool energy reduction exceeds MPI limits.");
-                signed_send.resize(2 * term_width);
-                signed_all.resize(signed_send.size() * comm->getSize());
-                for (size_t d = 0; d < energy_terms.size(); ++d)
-                    std::ranges::copy(energy_terms[d], signed_send.begin() + d * term_width);
-            });
-        Teuchos::gatherAll(*comm, int(signed_send.size()), signed_send.data(), int(signed_all.size()), signed_all.data());
-    }
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, int(local_energy.size()), local_energy.data(), global_energy.data());
     collective_detail::collective_local_validation(mesh, "QBMM global pool totals",
         [&]
         {
@@ -143,11 +131,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline PoolGross pool_gross(const QbmmBulkGasPoolBindi
                 out.mass_kg = global[offset + ns + 1];
                 out.H2 = global[offset + ns + 2];
                 out.H3 = global[offset + ns + 3];
-                qbmm_face_detail::ScaledFaceSum signed_energy;
-                for (size_t rank = 0; rank < size_t(comm->getSize()); ++rank)
-                    for (size_t i = (2 * rank + d) * term_width; i < (2 * rank + d + 1) * term_width; i += 2)
-                        signed_energy.add_scaled_value(signed_all[i], static_cast<int>(signed_all[i + 1]));
-                out.carried_enthalpy_j = signed_energy.rounded();
+                out.carried_enthalpy_j = global_energy[d];
                 require(std::isfinite(out.carried_enthalpy_j), "QBMM signed pool enthalpy is not representable.");
             }
         });

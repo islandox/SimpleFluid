@@ -1,11 +1,10 @@
 /** Pressure-conditioned local interphase thermal recovery and conservative receipts. */
 #include "equations/PressureConditionedThermal.hh"
-#include "equations/details/LowMachScaledFaceSum.hh"
+#include "utils/CompensatedSum.hh"
 #include <algorithm>
 #include <cmath>
 #include <numeric>
 #include <set>
-#include <variant>
 
 namespace SimpleFluid::Reacting
 {
@@ -138,46 +137,25 @@ template<class Tail> MaterialPackets material_packets(const Tail& tail)
     return {tail.paired_amounts, tail.reservoirs};
 }
 
-using ExactMaterialStock = qbmm_face_detail::ScaledFaceSum;
-
-template<class Stock> struct MaterialStocks
+class ThermalMaterialStocks
 {
+    using Sum = SimpleFluid::detail::CompensatedSum<long double>;
     const SpeciesCatalog& catalog;
-    std::vector<std::vector<Stock>> amounts;
+    std::vector<std::vector<Sum>> amounts;
 
-    static void add(Stock& stock, long double value)
+    static void add(Sum& stock, long double value)
     {
-        if constexpr (std::is_same_v<Stock, ExactMaterialStock>)
-            stock.add_unrounded_value(value);
-        else
-            stock.add(value);
+        require(std::isfinite(value), "Nonfinite raw thermal operand.");
+        stock += value;
+        require(std::isfinite(stock.value()), "Raw thermal accumulator overflow.");
     }
 
-    static bool negative(const Stock& stock)
+public:
+    ThermalMaterialStocks(const SpeciesCatalog& schema, const FrozenInterphasePlan& plan)
+        : catalog(schema), amounts(plan.pre_moles.size())
     {
-        if constexpr (std::is_same_v<Stock, ExactMaterialStock>)
-            return stock.sign() < 0;
-        else
-            return stock.value() < 0;
-    }
-
-    static double rounded(const Stock& stock)
-    {
-        if constexpr (std::is_same_v<Stock, ExactMaterialStock>)
-        {
-            const double value = stock.rounded();
-            require(std::isfinite(value) && (value != 0 || stock.sign() == 0),
-                "Exact thermal material stock cannot be represented.");
-            return value;
-        }
-        else
-            return narrow(stock.value());
-    }
-
-    MaterialStocks(const SpeciesCatalog& schema, std::span<const std::vector<double>> before,
-        std::span<const std::vector<std::array<long double, 2>>> raw)
-        : catalog(schema), amounts(before.size())
-    {
+        const auto& before = plan.pre_moles;
+        const auto& raw = plan.raw_pre_moles;
         require(raw.empty() || raw.size() == before.size(), "Raw thermal predecessor phase layout differs.");
         for (size_t p = 0; p < before.size(); ++p)
         {
@@ -194,7 +172,8 @@ template<class Stock> struct MaterialStocks
                 {
                     add(amounts[p][s], raw[p][s][0]);
                     add(amounts[p][s], raw[p][s][1]);
-                    require(!negative(amounts[p][s]) && rounded(amounts[p][s]) == before[p][s],
+                    const auto value = amounts[p][s].value();
+                    require(value >= 0 && narrow(value) == before[p][s],
                         "Raw thermal predecessor does not project to its actual represented phase.");
                 }
             }
@@ -209,7 +188,7 @@ template<class Stock> struct MaterialStocks
             result[p].resize(amounts[p].size());
             for (size_t s = 0; s < amounts[p].size(); ++s)
             {
-                result[p][s] = rounded(amounts[p][s]);
+                result[p][s] = narrow(amounts[p][s].value());
                 require(result[p][s] >= 0, "Negative interphase material endpoint.");
             }
         }
@@ -266,34 +245,9 @@ template<class Stock> struct MaterialStocks
         for (const auto& phase : margins)
             for (const auto& stock : phase)
                 require(
-                    !negative(stock), "Interphase gross outgoing events overdraw their actual predecessor donor.");
+                    stock.value() >= 0, "Interphase gross outgoing events overdraw their actual predecessor donor.");
         amounts = std::move(next);
         return project();
-    }
-};
-
-class ThermalMaterialStocks
-{
-    std::variant<MaterialStocks<Acc>, MaterialStocks<ExactMaterialStock>> stocks;
-
-public:
-    ThermalMaterialStocks(const SpeciesCatalog& catalog, const FrozenInterphasePlan& plan)
-        : stocks(plan.material_tail.exact_material_reservation
-                ? decltype(stocks)(std::in_place_type<MaterialStocks<ExactMaterialStock>>,
-                      catalog, plan.pre_moles, plan.raw_pre_moles)
-                : decltype(stocks)(std::in_place_type<MaterialStocks<Acc>>, catalog, plan.pre_moles, plan.raw_pre_moles))
-    {
-    }
-
-    std::vector<std::vector<double>> project() const
-    {
-        return std::visit([](const auto& state) { return state.project(); }, stocks);
-    }
-
-    std::vector<std::vector<double>> apply(
-        const ConfiguredInterphaseStage* stage, std::span<const double> events, std::optional<MaterialPackets> packets)
-    {
-        return std::visit([&](auto& state) { return state.apply(stage, events, packets); }, stocks);
     }
 };
 

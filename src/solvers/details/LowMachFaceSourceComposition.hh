@@ -3,7 +3,6 @@
  */
 #pragma once
 #include "equations/CollectiveValidation.hh"
-#include "equations/details/LowMachScaledFaceSum.hh"
 #include "solvers/details/LowMachFaceTransportAdapter.hh"
 #include "solvers/details/LowMachRawSpeciesInventory.hh"
 #include "solvers/details/LowMachSourceStage.hh"
@@ -24,7 +23,6 @@ class SIMPLEFLUID_SOLVERS_LOCAL LocalSourceAccumulator
 {
     using Sum = SimpleFluid::detail::CompensatedSum<long double>;
     std::vector<std::vector<std::vector<Sum>>> material_;
-    std::vector<std::vector<std::vector<qbmm_face_detail::ScaledFaceSum>>> exact_material_;
     std::vector<std::vector<Sum>> energy_;
     std::vector<Sum> declared_energy_;
     std::vector<std::vector<std::vector<long double>>> raw_energy_;
@@ -40,12 +38,9 @@ class SIMPLEFLUID_SOLVERS_LOCAL LocalSourceAccumulator
     }
 
 public:
-    void reset(std::size_t cells, std::size_t phases, std::size_t species, bool exact_material = false)
+    void reset(std::size_t cells, std::size_t phases, std::size_t species)
     {
         material_.assign(cells, std::vector<std::vector<Sum>>(phases, std::vector<Sum>(species)));
-        exact_material_.clear();
-        if (exact_material)
-            exact_material_.assign(cells, std::vector(phases, std::vector<qbmm_face_detail::ScaledFaceSum>(species)));
         energy_.assign(cells, std::vector<Sum>(phases));
         declared_energy_.assign(cells, {});
         raw_energy_.assign(cells, std::vector<std::vector<long double>>(phases));
@@ -57,10 +52,7 @@ public:
     {
         if (!std::isfinite(moles))
             throw std::invalid_argument("Nonfinite raw material source.");
-        if (exact_material_.empty())
-            material_.at(c).at(phase).at(species) += moles;
-        else
-            exact_material_.at(c).at(phase).at(species).add_unrounded_value(moles);
+        material_.at(c).at(phase).at(species) += moles;
     }
     /** Declare a physical raw energy channel before optional user allocation. */
     void declare_energy(std::size_t c, long double joules)
@@ -129,18 +121,7 @@ public:
             {
                 result[c].species_moles[p].resize(material_[c][p].size());
                 for (std::size_t s = 0; s < material_[c][p].size(); ++s)
-                {
-                    if (exact_material_.empty())
-                        result[c].species_moles[p][s] = narrow(material_[c][p][s].value());
-                    else
-                    {
-                        const auto& stock = exact_material_[c][p][s];
-                        const double value = stock.rounded();
-                        if (!std::isfinite(value) || (value == 0 && stock.sign() != 0))
-                            throw std::invalid_argument("Exact composed material packet is unrepresentable.");
-                        result[c].species_moles[p][s] = value;
-                    }
-                }
+                    result[c].species_moles[p][s] = narrow(material_[c][p][s].value());
                 result[c].internal_energy[p] = narrow(energy_[c][p].value());
                 applied_energy += result[c].internal_energy[p];
                 applied_scale += std::abs(static_cast<long double>(result[c].internal_energy[p]));

@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 #include <numeric>
 #include <ranges>
 #include <stdexcept>
@@ -19,14 +18,15 @@ namespace
 using Status = QbmmEventStatus;
 using Sum = detail::CompensatedSum<long double>;
 using MomentSums = std::array<Sum, 4>;
-using ExactStock = qbmm_face_detail::ScaledFaceSum;
+using RawSpecies = std::span<const std::array<long double, 2>>;
+using qbmm_event_detail::RawSpeciesStocks;
 
 struct JointStocks
 {
-    std::vector<ExactStock> original_remaining, credits;
+    // Named families are disjoint. Unnamed credits stay separate until every family has reserved its debits.
+    RawSpeciesStocks remaining, credits;
     const QbmmBulkGasPoolBinding* pool;
     CellSpeciesState& proposed;
-    qbmm_event_detail::RawSpeciesExactStocks* exact;
 };
 
 struct Rejection
@@ -45,19 +45,10 @@ std::optional<StockShortfall> reserve_stock(Sum& stock, double requested)
 {
     const auto available = stock.value();
     stock += -static_cast<long double>(requested);
-    if (!std::isfinite(stock.value()) || stock.value() < 0)
-        return StockShortfall{available, -stock.value()};
+    const auto remaining = stock.value();
+    if (!std::isfinite(remaining) || remaining < 0)
+        return StockShortfall{available, -remaining};
     return std::nullopt;
-}
-
-std::optional<StockShortfall> reserve_stock(ExactStock& stock, double requested)
-{
-    stock.add_scaled_value(-requested, 0);
-    if (stock.sign() >= 0)
-        return std::nullopt;
-    const double missing = -stock.rounded();
-    stock.add_scaled_value(requested, 0);
-    return StockShortfall{stock.rounded(), missing};
 }
 
 void require(bool condition, Status status, std::string_view diagnostic)
@@ -83,14 +74,6 @@ double narrow_nonnegative(long double value)
     require(value >= 0 && (value == 0 || narrowed > 0) && close(value, narrowed), Status::UnrepresentableEndpoint,
         "QBMM endpoint or product cannot be represented as a nonnegative stock.");
     return narrowed;
-}
-
-double narrow_exact_stock(const ExactStock& stock)
-{
-    const double rounded = stock.rounded();
-    require(stock.sign() >= 0 && (stock.sign() == 0 || rounded > 0), Status::UnrepresentableEndpoint,
-        "QBMM exact species stock cannot be represented as a nonnegative endpoint.");
-    return narrow_nonnegative(rounded);
 }
 
 QbmmEventMoments atom_moments(long double count, double mass_over_scale)
@@ -364,46 +347,36 @@ QbmmEventReceipt make_receipt(const QbmmPopulationSchema& schema, const QbmmQuad
     return receipt;
 }
 
-using RawSpecies = std::span<const std::array<long double, 2>>;
-
-std::vector<Sum> make_stocks(
-    const CellSpeciesState& initial, const SpeciesPopulationState& family, std::optional<RawSpecies> raw)
+RawSpeciesStocks make_stocks(const CellSpeciesState& initial, std::optional<RawSpecies> raw)
 {
-    const auto& base = initial.amounts;
-    std::vector<Sum> result(base.size() + family.amounts.size());
-    if (!raw)
-    {
-        for (std::size_t i = 0; i < base.size(); ++i)
-            result[i] += base[i];
-        for (std::size_t s = 0; s < family.amounts.size(); ++s)
-            result[base.size() + s] += family.amounts[s];
-        return result;
-    }
-
-    std::size_t index = 0;
+    auto size = initial.amounts.size();
+    for (const auto& population : initial.dispersedPopulations)
+        size += population.amounts.size();
+    require(!raw || raw->size() == size, Status::InvalidState, "QBMM raw species predecessor layout differs.");
+    RawSpeciesStocks result;
+    result.reserve(size);
     const auto seed = [&](double represented)
     {
-        require(index < raw->size(), Status::InvalidState, "QBMM raw species predecessor layout differs.");
-        const auto& parts = (*raw)[index++];
-        Sum stock;
-        stock += parts[0];
-        stock += parts[1];
-        const auto value = stock.value();
-        require(std::isfinite(parts[0]) && std::isfinite(parts[1]) && std::isfinite(value) && value >= 0 &&
-                    (value == 0) == (represented == 0) && static_cast<double>(value) == represented,
-            Status::InvalidState, "QBMM raw species predecessor does not represent its original inventory.");
-        return stock;
-    };
-    for (std::size_t i = 0; i < base.size(); ++i)
-        result[i] = seed(base[i]);
-    for (const auto& population : initial.dispersedPopulations)
-        for (std::size_t s = 0; s < population.amounts.size(); ++s)
+        const auto index = result.size();
+        auto& stock = result.emplace_back();
+        if (raw)
         {
-            auto stock = seed(population.amounts[s]);
-            if (&population == &family)
-                result[base.size() + s] = stock;
+            const auto& parts = (*raw)[index];
+            stock += parts[0];
+            stock += parts[1];
+            const auto value = stock.value();
+            require(std::isfinite(parts[0]) && std::isfinite(parts[1]) && std::isfinite(value) && value >= 0 &&
+                        (value == 0) == (represented == 0) && static_cast<double>(value) == represented,
+                Status::InvalidState, "QBMM raw species predecessor does not represent its original inventory.");
         }
-    require(index == raw->size(), Status::InvalidState, "QBMM raw species predecessor layout differs.");
+        else
+            stock += represented;
+    };
+    for (const double amount : initial.amounts)
+        seed(amount);
+    for (const auto& population : initial.dispersedPopulations)
+        for (const double amount : population.amounts)
+            seed(amount);
     return result;
 }
 
@@ -426,29 +399,24 @@ QbmmMomentBlock cell_moments(const QbmmPopulationSchema& schema, QbmmCellView ce
     }
 }
 
-void add_count(Sum& sum, double count) { sum += count; }
-void add_count(ExactStock& sum, double count) { sum.add_scaled_value(count, 0); }
-long double count_value(const Sum& sum) { return sum.value(); }
-double count_value(const ExactStock& sum) { return sum.rounded(); }
-
-template<class Stock> void check_endpoint_changes(
+void check_endpoint_changes(
     const QbmmQuadrature& pre, const QbmmEventMoments& constructive, const QbmmPopulationEndpoint& endpoint)
 {
     MomentSums replay;
-    std::array<Stock, 2> retained;
+    std::array<Sum, 2> retained;
     for (std::size_t i = 0; i < pre.active_atoms; ++i)
-        add_count(retained[i], pre.atoms[i].count);
+        retained[i] += pre.atoms[i].count;
     // Replay debits in count space before weighting them. Weighting two large
     // competing debits separately could obscure exact depletion of an atom.
     for (const auto& receipt : endpoint.receipts)
     {
         for (const auto& donor : receipt.donors)
-            add_count(retained[donor.index], -donor.atom.count);
+            retained[donor.index] += -donor.atom.count;
         for (const auto product : receipt.products)
             accumulate(replay, atom_moments(product));
     }
     for (std::size_t i = 0; i < pre.active_atoms; ++i)
-        if (const auto count = count_value(retained[i]); count > 0)
+        if (const auto count = retained[i].value(); count > 0)
             accumulate(replay, atom_moments(count, pre.atoms[i].mass_over_scale));
     const auto expected = finite_values(replay);
     for (std::size_t k = 0; k < expected.size(); ++k)
@@ -491,9 +459,9 @@ QbmmPopulationAdvance advance_population(const QbmmPopulationSchema& schema, con
 
         QbmmPopulationEndpoint next{joint ? CellSpeciesState{} : initial, pre_cell.number, pre_cell.shape, pre, {}, {},
             {}, {}, schema.fingerprint()};
-        if (batch.events.empty() && !raw_species)
-            return {Status::Accepted, std::move(next), std::nullopt, {}, std::nullopt};
-        auto stocks = joint ? std::vector<Sum>{} : make_stocks(initial, *family, raw_species);
+        RawSpeciesStocks local_stocks;
+        if (!joint && (raw_species || !batch.events.empty()))
+            local_stocks = make_stocks(initial, raw_species);
         if (batch.events.empty())
         {
             if (adaptive_changes)
@@ -501,26 +469,16 @@ QbmmPopulationAdvance advance_population(const QbmmPopulationSchema& schema, con
             return {Status::Accepted, std::move(next), std::nullopt, {}, std::nullopt};
         }
 
+        const auto family_index = family - initial.dispersedPopulations.begin();
+        const auto unnamed_size = initial.amounts.size();
+        const auto species_count = family->amounts.size();
+        const auto stocks = std::span{joint ? joint->remaining : local_stocks};
+        const auto family_stocks = stocks.subspan(unnamed_size + family_index * species_count, species_count);
+        const auto unnamed_remaining = stocks.first(unnamed_size);
+        const auto unnamed_credits = joint ? std::span{joint->credits} : unnamed_remaining;
         std::array<Sum, 2> remaining_count;
-        std::array<ExactStock, 2> joint_counts;
-        std::vector<ExactStock> joint_family;
-        if (joint)
-        {
-            joint_family.resize(family->amounts.size());
-            const auto offset =
-                initial.amounts.size() + (family - initial.dispersedPopulations.begin()) * joint_family.size();
-            for (std::size_t s = 0; s < joint_family.size(); ++s)
-                if (joint->exact)
-                    joint_family[s] = (*joint->exact)[offset + s];
-                else
-                    joint_family[s].add_scaled_value(family->amounts[s], 0);
-        }
         for (std::size_t i = 0; i < pre.active_atoms; ++i)
-            if (joint)
-                joint_counts[i].add_scaled_value(pre.atoms[i].count, 0);
-            else
-                remaining_count[i] += pre.atoms[i].count;
-        const auto family_offset = initial.amounts.size();
+            remaining_count[i] += pre.atoms[i].count;
         bool checked_pool_withdrawal = false;
         next.receipts.reserve(batch.events.size());
 
@@ -530,16 +488,15 @@ QbmmPopulationAdvance advance_population(const QbmmPopulationSchema& schema, con
             auto receipt = make_receipt(schema, pre, batch, batch.events[i], adaptive_changes != nullptr, joint);
             for (const auto& donor : receipt.donors)
             {
-                const auto shortfall = joint ? reserve_stock(joint_counts[donor.index], donor.atom.count)
-                                             : reserve_stock(remaining_count[donor.index], donor.atom.count);
+                const auto shortfall = reserve_stock(remaining_count[donor.index], donor.atom.count);
                 if (shortfall)
                     throw Rejection{Status::CountDonorOverdraw, "QBMM events exceed an original atom count donor.",
                         QbmmDonorShortfall{donor.index, shortfall->available, donor.atom.count, shortfall->missing}};
             }
             for (const auto& raw : receipt.transfers)
             {
-                const auto donor = raw.into_family ? counterparty_offset(raw) : family_offset;
-                if (donor)
+                const auto counterpart = counterparty_offset(raw);
+                if (!raw.into_family || counterpart)
                 {
                     const auto* phase = std::get_if<QbmmPhaseExchange>(&raw.transfer.counterpart);
                     if (!checked_pool_withdrawal && raw.into_family && phase && phase->resolved_pool)
@@ -547,7 +504,7 @@ QbmmPopulationAdvance advance_population(const QbmmPopulationSchema& schema, con
                         try
                         {
                             (void) schema.scaled_mass(
-                                std::span{initial.amounts}.subspan(*donor, raw.transfer.moles.size()));
+                                std::span{initial.amounts}.subspan(*counterpart, raw.transfer.moles.size()));
                         }
                         catch (const std::invalid_argument& error)
                         {
@@ -555,13 +512,11 @@ QbmmPopulationAdvance advance_population(const QbmmPopulationSchema& schema, con
                         }
                         checked_pool_withdrawal = true;
                     }
+                    const auto donors = raw.into_family ? unnamed_remaining.subspan(*counterpart) : family_stocks;
                     for (std::size_t s = 0; s < raw.transfer.moles.size(); ++s)
                     {
                         const auto requested = raw.transfer.moles[s];
-                        const auto shortfall = joint
-                            ? reserve_stock(raw.into_family ? joint->original_remaining[*donor + s] : joint_family[s],
-                                  requested)
-                            : reserve_stock(stocks[*donor + s], requested);
+                        const auto shortfall = reserve_stock(donors[s], requested);
                         if (shortfall)
                         {
                             const auto donor_phase = raw.into_family ? phase->phase : SpeciesPhase::Dispersed;
@@ -581,17 +536,13 @@ QbmmPopulationAdvance advance_population(const QbmmPopulationSchema& schema, con
         MomentSums measure;
         for (std::size_t i = 0; i < pre.active_atoms; ++i)
         {
-            const auto count = joint ? joint_counts[i].rounded() : narrow_nonnegative(remaining_count[i].value());
+            const auto count = narrow_nonnegative(remaining_count[i].value());
             if (count > 0)
                 accumulate(measure, atom_moments({count, pre.atoms[i].mass_over_scale}));
         }
         MomentSums changes, consumed, created;
         Sum next_count;
-        ExactStock joint_next_count;
-        if (joint)
-            add_count(joint_next_count, pre_cell.number);
-        else
-            add_count(next_count, pre_cell.number);
+        next_count += pre_cell.number;
         for (const auto& receipt : next.receipts)
         {
             if (receipt.kind == QbmmEventKind::Birth || receipt.kind == QbmmEventKind::Breakup)
@@ -601,32 +552,21 @@ QbmmPopulationAdvance advance_population(const QbmmPopulationSchema& schema, con
             accumulate(consumed, receipt.gross_consumed);
             accumulate(created, receipt.gross_created);
             for (const auto& donor : receipt.donors)
-                if (joint)
-                    add_count(joint_next_count, -donor.atom.count);
-                else
-                    add_count(next_count, -donor.atom.count);
+                next_count += -donor.atom.count;
             for (const auto product : receipt.products)
             {
-                if (joint)
-                    add_count(joint_next_count, product.count);
-                else
-                    add_count(next_count, product.count);
+                next_count += product.count;
                 accumulate(measure, atom_moments(product));
             }
             for (const auto& raw : receipt.transfers)
             {
-                const auto receiver = raw.into_family ? family_offset : counterparty_offset(raw);
-                if (receiver)
+                const auto counterpart = counterparty_offset(raw);
+                if (raw.into_family || counterpart)
+                {
+                    const auto receivers = raw.into_family ? family_stocks : unnamed_credits.subspan(*counterpart);
                     for (std::size_t s = 0; s < raw.transfer.moles.size(); ++s)
-                    {
-                        if (joint)
-                        {
-                            auto& stock = raw.into_family ? joint_family[s] : joint->credits[*receiver + s];
-                            stock.add_scaled_value(raw.transfer.moles[s], 0);
-                        }
-                        else
-                            stocks[*receiver + s] += raw.transfer.moles[s];
-                    }
+                        receivers[s] += raw.transfer.moles[s];
+                }
             }
         }
         // Evaluate H0 + delta by its well-conditioned form. If more than half of
@@ -634,51 +574,29 @@ QbmmPopulationAdvance advance_population(const QbmmPopulationSchema& schema, con
         // Subtracting rounded reconstructed donors from H0 can otherwise leave
         // the initial inversion residual larger than the entire surviving stock.
         // For small changes keep the compensated signed update from canonical H0.
-        Sum count_change;
         if (measure[0].value() < .5L * pre_cell.number)
-        {
             next_count = measure[0];
-            count_change = next_count;
-            count_change += -pre_cell.number;
-        }
-        else if (joint)
-        {
-            next_count += count_value(joint_next_count);
-            // Subtract in the expansion before rounding. A resulting net change can be
-            // representable even when adding it to the original count rounds away.
-            add_count(joint_next_count, -pre_cell.number);
-            const auto high = count_value(joint_next_count);
-            count_change += high;
-            add_count(joint_next_count, -high);
-            count_change += count_value(joint_next_count);
-        }
-        else
-        {
-            count_change = next_count;
-            count_change += -pre_cell.number;
-        }
+        // Subtract from the compensated total before rounding the endpoint to double.
+        auto count_change = next_count;
+        count_change += -pre_cell.number;
         next.moment_change = finite_values(changes);
         next.moment_change[0] = count_change.value();
         next.gross_consumed = finite_values(consumed);
         next.gross_created = finite_values(created);
 
         const auto constructive_raw = finite_values(measure);
-        if (joint)
-            check_endpoint_changes<ExactStock>(pre, constructive_raw, next);
-        else
-            check_endpoint_changes<Sum>(pre, constructive_raw, next);
+        check_endpoint_changes(pre, constructive_raw, next);
         QbmmMomentBlock constructive;
         std::ranges::transform(constructive_raw, constructive.begin(), narrow_nonnegative);
         next.count = narrow_nonnegative(next_count.value());
         next.shape = {constructive[2], constructive[3]};
         auto& next_species = joint ? joint->proposed : next.species;
-        auto& next_family = next_species.dispersedPopulations[family - initial.dispersedPopulations.begin()].amounts;
+        auto& next_family = next_species.dispersedPopulations[family_index].amounts;
         if (!joint)
-            for (std::size_t i = 0; i < next.species.amounts.size(); ++i)
-                next.species.amounts[i] = narrow_nonnegative(stocks[i].value());
+            for (std::size_t i = 0; i < unnamed_size; ++i)
+                next.species.amounts[i] = narrow_nonnegative(unnamed_remaining[i].value());
         for (std::size_t s = 0; s < next_family.size(); ++s)
-            next_family[s] = joint ? narrow_exact_stock(joint_family[s])
-                                   : narrow_nonnegative(stocks[family_offset + s].value());
+            next_family[s] = narrow_nonnegative(family_stocks[s].value());
         const QbmmCellView post_cell{schema.population(), next_species.schemaFingerprint, next_family, next.count,
             next.shape, next.family_fingerprint};
         const auto post = cell_moments(schema, post_cell, Status::InconsistentEndpoint);
@@ -694,12 +612,6 @@ QbmmPopulationAdvance advance_population(const QbmmPopulationSchema& schema, con
                 std::nullopt};
         if (adaptive_changes)
             *adaptive_changes = {count_change, {changes[2], changes[3]}};
-        if (joint && joint->exact)
-        {
-            const auto offset = initial.amounts.size() +
-                                (family - initial.dispersedPopulations.begin()) * joint_family.size();
-            std::ranges::move(joint_family, joint->exact->begin() + offset);
-        }
         return {Status::Accepted, std::move(next), std::nullopt, {}, std::nullopt};
     }
     catch (const Rejection& error)
@@ -724,7 +636,7 @@ namespace
 {
 QbmmJointPopulationAdvance advance_populations(const CellSpeciesState& initial,
     std::span<const QbmmFamilyEventInput> families, const QbmmBulkGasPoolBinding* resolved_pool,
-    std::optional<RawSpecies> raw, qbmm_event_detail::RawSpeciesExactStocks* exact_stocks,
+    std::optional<RawSpecies> raw, RawSpeciesStocks* accepted_stocks,
     std::span<qbmm_event_detail::StageMomentChanges> adaptive_changes,
     std::span<std::array<long double, 4>> moment_changes)
 {
@@ -752,36 +664,25 @@ QbmmJointPopulationAdvance advance_populations(const CellSpeciesState& initial,
         return {Status::InvalidState, std::nullopt, std::nullopt, std::nullopt, error.what(), std::nullopt};
     }
 
-    const auto unnamed_size = initial.amounts.size();
-    const auto raw_size =
-        unnamed_size + initial.dispersedPopulations.size() * families.front().schema.catalog().species().size();
-    if ((raw && raw->size() != raw_size) ||
-        (exact_stocks && !exact_stocks->empty() && exact_stocks->size() != raw_size) ||
-        (!adaptive_changes.empty() && adaptive_changes.size() != families.size()) ||
+    if ((!adaptive_changes.empty() && adaptive_changes.size() != families.size()) ||
         (!moment_changes.empty() && moment_changes.size() != families.size()))
-        return {Status::InvalidState, std::nullopt, std::nullopt, std::nullopt,
-            "QBMM joint raw species or moment layout differs.", std::nullopt};
+        return {Status::InvalidState, std::nullopt, std::nullopt, std::nullopt, "QBMM joint moment layout differs.",
+            std::nullopt};
 
-    qbmm_event_detail::RawSpeciesExactStocks exact;
-    if (exact_stocks)
+    RawSpeciesStocks remaining;
+    try
     {
-        exact = *exact_stocks;
-        if (exact.empty())
-        {
-            exact.resize(raw_size);
-            for (std::size_t i = 0; i < raw_size; ++i)
-                for (const long double part : (*raw)[i])
-                    exact[i].add_unrounded_value(part);
-        }
+        remaining = make_stocks(initial, raw);
+    }
+    catch (const Rejection& error)
+    {
+        return {error.status, std::nullopt, std::nullopt, std::nullopt, error.diagnostic, std::nullopt};
     }
     QbmmJointPopulationEndpoint next{initial, std::vector<QbmmFamilyEventEndpoint>(families.size())};
-    JointStocks stocks{std::vector<ExactStock>(unnamed_size), std::vector<ExactStock>(unnamed_size), resolved_pool,
-        next.species, exact_stocks ? &exact : nullptr};
-    for (std::size_t i = 0; i < unnamed_size; ++i)
-        if (exact_stocks)
-            stocks.original_remaining[i] = exact[i];
-        else
-            stocks.original_remaining[i].add_scaled_value(initial.amounts[i], 0);
+    const auto unnamed_size = initial.amounts.size();
+    JointStocks stocks{std::move(remaining), RawSpeciesStocks(unnamed_size), resolved_pool, next.species};
+    std::vector<qbmm_event_detail::StageMomentChanges> next_adaptive_changes(adaptive_changes.size());
+    std::vector<QbmmEventMoments> next_moment_changes(moment_changes.size());
 
     const auto& stage = families[order.front()].batch;
     for (const auto i : order)
@@ -791,14 +692,14 @@ QbmmJointPopulationAdvance advance_populations(const CellSpeciesState& initial,
             return {Status::InvalidProvenance, std::nullopt, i, std::nullopt,
                 "QBMM joint families must share the same substep and duration.", std::nullopt};
         auto advance = advance_population(input.schema, initial, input.pre_cell, input.batch, std::nullopt,
-            adaptive_changes.empty() ? nullptr : &adaptive_changes[i], &stocks);
+            next_adaptive_changes.empty() ? nullptr : &next_adaptive_changes[i], &stocks);
         if (!advance.endpoint)
             return {advance.status, std::nullopt, i, advance.failed_event, std::move(advance.diagnostic),
                 std::move(advance.rejected_event)};
 
         auto& family = *advance.endpoint;
-        if (!moment_changes.empty())
-            moment_changes[i] = family.moment_change;
+        if (!next_moment_changes.empty())
+            next_moment_changes[i] = family.moment_change;
         next.families[i] = {
             family.count, family.shape, family.quadrature, std::move(family.receipts), family.family_fingerprint};
     }
@@ -807,19 +708,19 @@ QbmmJointPopulationAdvance advance_populations(const CellSpeciesState& initial,
     {
         for (std::size_t i = 0; i < unnamed_size; ++i)
         {
-            auto& stock = stocks.original_remaining[i];
-            stock.add_weighted(stocks.credits[i], 1.0);
-            next.species.amounts[i] = narrow_exact_stock(stock);
-            if (exact_stocks)
-                exact[i] = std::move(stock);
+            auto& stock = stocks.remaining[i];
+            stock.append(stocks.credits[i]);
+            next.species.amounts[i] = narrow_nonnegative(stock.value());
         }
     }
     catch (const Rejection& error)
     {
         return {error.status, std::nullopt, std::nullopt, std::nullopt, error.diagnostic, std::nullopt};
     }
-    if (exact_stocks)
-        *exact_stocks = std::move(exact);
+    if (accepted_stocks)
+        *accepted_stocks = std::move(stocks.remaining);
+    std::ranges::copy(next_adaptive_changes, adaptive_changes.begin());
+    std::ranges::copy(next_moment_changes, moment_changes.begin());
     return {Status::Accepted, std::move(next), std::nullopt, std::nullopt, {}, std::nullopt};
 }
 
@@ -833,9 +734,11 @@ QbmmJointPopulationAdvance advance_qbmm_populations(const CellSpeciesState& init
 
 QbmmJointPopulationAdvance qbmm_event_detail::advance_joint_with_raw_species(const CellSpeciesState& initial,
     std::span<const QbmmFamilyEventInput> families, const QbmmBulkGasPoolBinding& pool, RawSpecies raw_species,
-    RawSpeciesExactStocks& exact_stocks, std::span<StageMomentChanges> adaptive_changes, std::span<std::array<long double, 4>> moment_changes)
+    RawSpeciesStocks& accepted_stocks, std::span<StageMomentChanges> adaptive_changes,
+    std::span<std::array<long double, 4>> moment_changes)
 {
-    return advance_populations(initial, families, &pool, raw_species, &exact_stocks, adaptive_changes, moment_changes);
+    return advance_populations(
+        initial, families, &pool, raw_species, &accepted_stocks, adaptive_changes, moment_changes);
 }
 
 QbmmPopulationAdvance qbmm_event_detail::advance_with_raw_species(const QbmmPopulationSchema& schema,
