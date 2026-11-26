@@ -264,6 +264,93 @@ TEST(ReactionMechanismTest, ZeroLiquidVolumeHasZeroLiquidBasedProduction)
     EXPECT_NO_THROW((void) R::advance_reactions(mechanism, state(*schema, 0.0), context, 2.0, input));
 }
 
+TEST(ReactionMechanismTest, LiquidPrerequisiteSkipsBothCallbacksAndPreservesBulkHeating)
+{
+    const auto schema = catalog();
+    const R::ReactionMechanism mechanism(schema, {split_reaction()});
+    auto context = environment();
+    context.liquidVolume = 0.0;
+    R::ReactionSourceInput input;
+    input.rates = constant_rate(*schema, 0.25);
+    input.rates->requiresLiquid = true;
+    int validations = 0, evaluations = 0;
+    input.rates->validate = [&](const R::ReactionContext& stage)
+    {
+        ++validations;
+        EXPECT_GT(stage.environment.liquidVolume, 0.0);
+    };
+    input.rates->evaluate = [&](const R::ReactionContext& stage)
+    {
+        ++evaluations;
+        EXPECT_GT(stage.environment.liquidVolume, 0.0);
+        return std::vector<R::ReactionRate>{{split, 0.25, R::SourceVolumeBasis::LiquidVolume}};
+    };
+    input.heat.rate = R::VolumetricHeatRate{12.0, R::SourceVolumeBasis::BulkVolume};
+    const auto dry = R::advance_reactions(mechanism, state(*schema, 0.0), context, 2.0, input);
+    EXPECT_EQ(validations, 0);
+    EXPECT_EQ(evaluations, 0);
+    EXPECT_EQ(dry.ledger.substeps, 0);
+    EXPECT_EQ(dry.ledger.reactionExtents[0], 0.0);
+    EXPECT_EQ(dry.ledger.externalHeat, 12.0);
+
+    auto residual = state(*schema, 0.0);
+    residual.set_amount(*schema, G1, R::SpeciesPhase::Dissolved, std::numeric_limits<double>::denorm_min());
+    EXPECT_THROW((void) R::advance_reactions(mechanism, residual, context, 2.0, input), std::invalid_argument);
+    EXPECT_EQ(validations, 0);
+    EXPECT_EQ(evaluations, 0);
+
+    context.liquidVolume = 0.25;
+    const auto wet = R::advance_reactions(mechanism, state(*schema), context, 2.0, input);
+    EXPECT_EQ(validations, 2);
+    EXPECT_EQ(evaluations, 2);
+    EXPECT_EQ(wet.ledger.reactionExtents[0], 0.125);
+}
+
+TEST(ReactionMechanismTest, DryGasReactionUsesPhysicalGasOrBulkVolume)
+{
+    using P = R::SpeciesPhase;
+    using Basis = R::SourceVolumeBasis;
+    const auto schema = catalog();
+    const R::ReactionMechanism mechanism(
+        schema, {{split, "gas dimerization", {{G1, P::Resolved, -2}, {G2, P::Resolved, 1}}, 2.0}});
+    auto context = environment();
+    context.liquidVolume = 0.0;
+    auto initial = state(*schema, 0.0);
+    initial.set_amount(*schema, G1, P::Resolved, 4.0);
+    const auto run = [&](Basis basis)
+    {
+        R::ReactionSourceInput input;
+        input.rates = constant_rate(*schema, 0.5, basis);
+        input.heat.rate = R::VolumetricHeatRate{10.0, basis};
+        return R::advance_reactions(mechanism, initial, context, 2.0, input);
+    };
+    const auto bulk = run(Basis::BulkVolume);
+    EXPECT_EQ(bulk.ledger.reactionExtents[0], 0.5);
+    EXPECT_EQ(bulk.state.amount(*schema, G1, P::Resolved), 3.0);
+    EXPECT_EQ(bulk.state.amount(*schema, G2, P::Resolved), 0.5);
+    EXPECT_EQ(bulk.ledger.reactionHeat, 1.0);
+    EXPECT_EQ(bulk.ledger.externalHeat, 10.0);
+    EXPECT_THROW((void) run(Basis::GasVolume), std::invalid_argument);
+    context.gasVolume = 0.25;
+    const auto gas = run(Basis::GasVolume);
+    EXPECT_EQ(gas.ledger.reactionExtents[0], 0.25);
+    EXPECT_EQ(gas.state.amount(*schema, G1, P::Resolved), 3.5);
+    EXPECT_EQ(gas.state.amount(*schema, G2, P::Resolved), 0.25);
+    EXPECT_EQ(gas.ledger.reactionHeat, 0.5);
+    EXPECT_EQ(gas.ledger.externalHeat, 5.0);
+    context.gasVolume = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW((void) run(Basis::GasVolume), std::invalid_argument);
+    context.gasVolume = 0.75;
+    EXPECT_THROW((void) run(Basis::GasVolume), std::invalid_argument);
+    context.volumeClosure = R::ReactionVolumeClosure::ThermodynamicPredictor;
+    EXPECT_EQ(run(Basis::GasVolume).ledger.reactionExtents[0], 0.75);
+    context.bulkVolume = 0.0;
+    R::ReactionSourceInput heating;
+    heating.heat.rate = R::VolumetricHeatRate{10.0, Basis::GasVolume};
+    EXPECT_THROW((void) R::advance_reactions(mechanism, state(*schema, 0.0), context, 2.0, heating),
+        std::invalid_argument);
+}
+
 TEST(ReactionMechanismTest, HeatOnlyAndReactionOnlyAreIndependent)
 {
     const auto schema = catalog();

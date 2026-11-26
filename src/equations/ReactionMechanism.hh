@@ -131,7 +131,8 @@ private:
 enum class SourceVolumeBasis
 {
     LiquidVolume,
-    BulkVolume
+    BulkVolume,
+    GasVolume
 };
 
 struct ReactionRate
@@ -186,6 +187,7 @@ struct ReactionEnvironment
     double bulkVolume = 0.0;       ///< Actual geometric m3, including during a predictor.
     ReactionVolumeClosure volumeClosure = ReactionVolumeClosure::Accepted;
     std::optional<ReactionLocation> location; ///< Optional for pure kernels; spatial laws explicitly require it.
+    std::optional<double> gasVolume{}; ///< Physical m3, required by rates based on GasVolume.
 };
 
 struct ReactionContext
@@ -209,6 +211,7 @@ struct ReactionRateProvider
     std::string parameterUnits;
     std::function<void(const ReactionContext&)> validate;
     std::function<std::vector<ReactionRate>(const ReactionContext&)> evaluate;
+    bool requiresLiquid = false; ///< Skip both callbacks when the physical liquid volume is exactly zero.
 };
 
 struct ExternalSpeciesTransfer

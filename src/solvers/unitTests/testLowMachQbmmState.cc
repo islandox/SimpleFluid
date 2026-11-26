@@ -1394,6 +1394,29 @@ TEST(LowMachQbmmStateTest, DeferredModelRequestsRejectCollectivelyBeforeAdvance)
     EXPECT_NO_THROW(supported->initialize(f.initial()));
 }
 
+TEST(LowMachQbmmStateTest, PurePoolLawContractRejectsRuntimeAdmissionEvenWithConversionFlagDisabled)
+{
+    Fixture f;
+    const auto comm = f.mesh->owned_cell_map()->getComm();
+    for (const bool declare_pool_kind : {true, false})
+    {
+        auto options = f.options;
+        if (comm->getRank() == comm->getSize() - 1)
+        {
+            R::QbmmClosureVersions closures;
+            R::QbmmLawMetadata law{"Q9a contract", 1,
+                declare_pool_kind ? R::QbmmLawKind::BulkGasConversion : R::QbmmLawKind::MassTransfer,
+                "prescribed transfer", "mol/cell", R::QbmmApplicabilityGate::ReportOnly, true, {}};
+            if (!declare_pool_kind)
+                law.ranges.push_back({R::QbmmRangeVariable::BulkGasPoolVolumeFraction, 0, 1, {}});
+            closures.laws.push_back(std::move(law));
+            options.qbmm_families[1] =
+                Fixture::make_family(f.catalog, options.phase_roles[1], f.family->mass_scale_kg(), closures);
+        }
+        EXPECT_THROW((void) Flow(f.mesh, f.eos, options), std::exception);
+    }
+}
+
 TEST(LowMachQbmmStateTest, RealizableLinearRequiresSharedCarrierAndUniformControls)
 {
     Fixture f;

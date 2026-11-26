@@ -3,6 +3,7 @@
  */
 #pragma once
 
+#include "equations/QbmmBulkGasPool.hh"
 #include "equations/QbmmPopulationEvents.hh"
 #include "utils/CompensatedSum.hh"
 
@@ -32,13 +33,15 @@ inline double narrow(long double value)
     return result;
 }
 
-inline double duration(const QbmmLawInputs& input)
+inline void validate_event_inputs(const QbmmLawInputs& input)
 {
-    if (!input.quadrature.valid() || input.quadrature.active_atoms > input.quadrature.atoms.size() ||
-        !input.time_step_s || !std::isfinite(*input.time_step_s) || *input.time_step_s <= 0 ||
+    const auto status = input.quadrature.status;
+    const unsigned expected_atoms =
+        status == InversionStatus::Absent ? 0 : (status == InversionStatus::RankOne ? 1 : 2);
+    if (!input.quadrature.valid() || input.quadrature.active_atoms != expected_atoms ||
         !std::isfinite(input.bulk_volume_m3) || input.bulk_volume_m3 <= 0 || !std::isfinite(input.mass_scale_kg) ||
         input.mass_scale_kg <= 0)
-        throw std::invalid_argument("QBMM event adapter requires valid frozen quadrature, volume, scale and dt.");
+        throw std::invalid_argument("QBMM event adapter requires valid frozen quadrature, volume and mass scale.");
     for (unsigned a = 0; a < input.quadrature.active_atoms; ++a)
     {
         const auto& atom = input.quadrature.atoms[a];
@@ -46,6 +49,13 @@ inline double duration(const QbmmLawInputs& input)
             atom.mass_over_scale <= 0)
             throw std::invalid_argument("QBMM event adapter requires positive finite active atoms.");
     }
+}
+
+inline double duration(const QbmmLawInputs& input)
+{
+    validate_event_inputs(input);
+    if (!input.time_step_s || !std::isfinite(*input.time_step_s) || *input.time_step_s <= 0)
+        throw std::invalid_argument("QBMM rate adapter requires a finite positive duration.");
     return *input.time_step_s;
 }
 
@@ -436,5 +446,182 @@ struct QbmmBirthRate
     if (event.atoms.empty())
         return {};
     return {std::move(event)};
+}
+namespace qbmm_law_detail
+{
+inline QbmmPhaseExchange pool_counterpart(const QbmmBulkGasPoolBinding& binding, const QbmmPopulationSchema& family,
+    const QbmmLawInputs& input, QbmmPoolConversionDirection direction)
+{
+    validate_family_binding(family, input);
+    binding.validate_family(family, direction);
+    if (input.bulk_gas_pool_fingerprint != binding.fingerprint())
+        throw std::invalid_argument("QBMM pool adapter reevaluation requires the same frozen pool binding.");
+    return {SpeciesPhase::Resolved, QbmmResolvedPoolConversion{binding.fingerprint(), direction}};
+}
+
+inline void require_occupied_pool(
+    const QbmmBulkGasPoolBinding& binding, const QbmmPopulationSchema& family, const QbmmLawInputs& input)
+{
+    const auto& volume = input.bulk_gas_pool_volume_m3;
+    const auto& moles = input.bulk_gas_pool_moles;
+    const auto& temperature = input.bulk_gas_pool_temperature_K;
+    if (!volume || *volume <= 0 || !temperature || !std::isfinite(*temperature) || *temperature <= 0 || !moles ||
+        moles->size() != family.catalog().species().size() ||
+        qbmm_phase_concentrations(*moles, *volume) != input.bulk_gas_pool_concentration_mol_per_m3)
+        throw std::invalid_argument("QBMM pool birth requires an occupied frozen Resolved trace.");
+    for (std::size_t i = 0; i < moles->size(); ++i)
+        if ((*moles)[i] != 0 && !binding.permits(family.catalog().species()[i].id))
+            throw std::invalid_argument("QBMM pool birth requires compatible frozen Resolved species.");
+    (void) family.scaled_mass(*moles);
+}
+
+/** Split the original species stock without a residual when every original atom is removed. */
+inline void allocate_complete_pool_drain(const QbmmPopulationSchema& family, const QbmmLawInputs& input,
+    std::span<QbmmEventOperation> operations)
+{
+    if (!input.authoritative_family_moles)
+        throw std::invalid_argument("Complete QBMM pool drainage needs frozen original family moles.");
+    const auto& original = *input.authoritative_family_moles;
+    (void) family.scaled_mass(original);
+    const auto scaled_mass = [&](std::size_t i)
+    {
+        const auto& atom = input.quadrature.atoms[i];
+        return static_cast<long double>(atom.count) * atom.mass_over_scale;
+    };
+    const std::size_t small = operations.size() == 2 && scaled_mass(0) > scaled_mass(1) ? 1 : 0;
+    auto& moles = std::get<QbmmDisappearance>(operations[small]).transfer.moles;
+    if (operations.size() == 1)
+        moles = original;
+    else
+    {
+        const auto& larger = std::get<QbmmDisappearance>(operations[1 - small]).transfer.moles;
+        for (std::size_t s = 0; s < original.size(); ++s)
+        {
+            detail::CompensatedSum<long double> remainder;
+            remainder += original[s];
+            remainder += -larger[s];
+            moles[s] = narrow(remainder.value());
+            remainder += -moles[s];
+            if (moles[s] < 0 || (original[s] > 0 && moles[s] == 0) || remainder.value() != 0)
+                throw std::invalid_argument("QBMM complete drain cannot exactly partition the original species stock.");
+        }
+    }
+    const auto expected = scaled_mass(small);
+    const long double represented = family.scaled_mass(moles);
+    if (represented <= 0 ||
+        std::abs(represented - expected) > qbmm_reconstruction_tolerance * std::max(represented, expected))
+        throw std::invalid_argument("QBMM complete drain material does not match the original node mass.");
+}
+
+inline std::vector<QbmmEventOperation> drain_from_fraction(const QbmmPopulationSchema& family,
+    const QbmmLawInputs& input, const QbmmBulkGasPoolBinding& binding, std::span<const long double> fractions)
+{
+    const auto counterpart = pool_counterpart(binding, family, input, QbmmPoolConversionDirection::DispersedToPool);
+    std::vector<QbmmEventOperation> result;
+    for (std::size_t i = 0; i < fractions.size(); ++i)
+    {
+        const auto fraction = fractions[i];
+        if (fraction == 0)
+            continue;
+        const auto& atom = input.quadrature.atoms[i];
+        const auto count = fraction == 1 ? atom.count : narrow(fraction * atom.count);
+        if (fraction < 1 && count == atom.count)
+            throw std::invalid_argument("QBMM fractional pool drain cannot represent its retained count.");
+        const auto scaled_mass = narrow(static_cast<long double>(count) * atom.mass_over_scale);
+        result.emplace_back(QbmmDisappearance{i, count, {counterpart, family.species_moles(scaled_mass)}});
+    }
+    if (!result.empty() && std::ranges::all_of(fractions, [](long double fraction) { return fraction == 1; }))
+        allocate_complete_pool_drain(family, input, result);
+    return result;
+}
+} // namespace qbmm_law_detail
+
+/** Transfer a supplied fraction of the original count at each active node to Resolved. */
+[[nodiscard]] inline std::vector<QbmmEventOperation> qbmm_pool_drain_from_fraction(const QbmmPopulationSchema& family,
+    const QbmmLawInputs& input, const QbmmBulkGasPoolBinding& binding, std::span<const double> fractions)
+{
+    qbmm_law_detail::validate_event_inputs(input);
+    if (fractions.size() != input.quadrature.active_atoms ||
+        !std::ranges::all_of(
+            fractions, [](double fraction) { return std::isfinite(fraction) && fraction >= 0 && fraction <= 1; }))
+        throw std::invalid_argument("QBMM pool drain requires a finite fraction in [0, 1] per active atom.");
+    const std::vector<long double> promoted(fractions.begin(), fractions.end());
+    return qbmm_law_detail::drain_from_fraction(family, input, binding, promoted);
+}
+
+/** Transfer the first-order integrated fraction from each original node, given a supplied frequency in s^-1. */
+[[nodiscard]] inline std::vector<QbmmEventOperation> qbmm_pool_drain_from_frequency(const QbmmPopulationSchema& family,
+    const QbmmLawInputs& input, const QbmmBulkGasPoolBinding& binding, std::span<const double> frequency_per_s)
+{
+    const double dt = qbmm_law_detail::duration(input);
+    if (frequency_per_s.size() != input.quadrature.active_atoms)
+        throw std::invalid_argument("QBMM pool drain requires one frequency per active atom.");
+    std::vector<long double> fractions;
+    fractions.reserve(frequency_per_s.size());
+    for (const auto frequency : frequency_per_s)
+    {
+        if (!std::isfinite(frequency) || frequency < 0)
+            throw std::invalid_argument("QBMM pool drain frequency must be finite and nonnegative.");
+        const long double fraction = -std::expm1(-static_cast<long double>(frequency) * dt);
+        if (frequency > 0 && (fraction == 0 || fraction == 1))
+            throw std::invalid_argument(
+                "QBMM pool drain frequency cannot represent both transferred and retained stock.");
+        fractions.push_back(fraction);
+    }
+    return qbmm_law_detail::drain_from_fraction(family, input, binding, fractions);
+}
+
+struct QbmmPoolBirthAtom
+{
+    double count, mass_kg_per_bubble;
+};
+
+/** Construct an explicit birth spectrum with material in the family's fixed composition. */
+[[nodiscard]] inline std::vector<QbmmEventOperation> qbmm_pool_birth_from_spectrum(const QbmmPopulationSchema& family,
+    const QbmmLawInputs& input, const QbmmBulkGasPoolBinding& binding, std::span<const QbmmPoolBirthAtom> spectrum)
+{
+    using namespace qbmm_law_detail;
+    validate_event_inputs(input);
+    const auto counterpart = pool_counterpart(binding, family, input, QbmmPoolConversionDirection::PoolToDispersed);
+    if (spectrum.empty())
+        return {};
+    require_occupied_pool(binding, family, input);
+    QbmmBirth event;
+    event.atoms.reserve(spectrum.size());
+    for (const auto& birth : spectrum)
+    {
+        if (!std::isfinite(birth.count) || birth.count <= 0 || !std::isfinite(birth.mass_kg_per_bubble) ||
+            birth.mass_kg_per_bubble <= 0)
+            throw std::invalid_argument("QBMM pool spectral birth needs positive finite count and SI mass.");
+        const double size = narrow(static_cast<long double>(birth.mass_kg_per_bubble) / input.mass_scale_kg);
+        const double scaled_mass = narrow(static_cast<long double>(birth.count) * size);
+        event.atoms.push_back({{birth.count, size}, {counterpart, family.species_moles(scaled_mass)}});
+    }
+    return {std::move(event)};
+}
+
+struct QbmmPoolBirthRate
+{
+    double number_per_bulk_m3_s, mass_kg_per_bubble;
+};
+
+/** Integrate explicit SI number rates against the frozen bulk volume and duration. */
+[[nodiscard]] inline std::vector<QbmmEventOperation> qbmm_pool_birth_from_rate(const QbmmPopulationSchema& family,
+    const QbmmLawInputs& input, const QbmmBulkGasPoolBinding& binding, std::span<const QbmmPoolBirthRate> births)
+{
+    using namespace qbmm_law_detail;
+    const auto counterpart = pool_counterpart(binding, family, input, QbmmPoolConversionDirection::PoolToDispersed);
+    std::vector<QbmmBirthRate> rates;
+    rates.reserve(births.size());
+    for (const auto& birth : births)
+    {
+        if (!std::isfinite(birth.number_per_bulk_m3_s) || birth.number_per_bulk_m3_s <= 0)
+            throw std::invalid_argument("QBMM pool birth requires a positive finite SI number rate.");
+        rates.push_back({birth.number_per_bulk_m3_s, birth.mass_kg_per_bubble, counterpart});
+    }
+    auto events = qbmm_birth_from_rate(family, input, rates);
+    if (!events.empty())
+        require_occupied_pool(binding, family, input);
+    return events;
 }
 } // namespace SimpleFluid::Reacting

@@ -1529,3 +1529,55 @@ global maximum grid size in the final corrector, and
 `qbmm_source_substep_retries` sums its local grid doublings. The controls
 enter the existing controller restart signature only when enabled. The
 preview schedule and live counters are outside the portable payload.
+
+## Q9a pure BulkGas pool conversion
+
+`QbmmBulkGasPoolBinding` designates one unbound physical `BulkGas` phase as
+the unnamed chemical `Resolved` compartment. It binds the catalog, permitted
+species, and conversion direction. The host supplies the actual EOS volume
+and temperature to `make_qbmm_bulk_gas_pool_state`. A pool has no bubble
+count or shape. A material-empty pool has exactly zero volume, with no
+temperature or concentration. A frozen law input distinguishes a bound
+empty pool, with a catalog-sized row of zeros, from an unbound pool, with
+all pool fields disengaged. Pool volume and volume fraction can be observed
+at zero occupancy. Pool temperature and concentration are undefined there.
+The pool state supplies the binding fingerprint to
+`make_qbmm_law_inputs`, and conversion adapters require a matching binding.
+
+The pure adapters `qbmm_pool_drain_from_fraction` and
+`qbmm_pool_drain_from_frequency` construct disappearance events from the
+original node counts. Frequencies use the integrated fraction
+`-expm1(-lambda * dt)`. A unit fraction uses the original donor count
+directly. A finite positive frequency must represent both a nonzero
+transfer and a positive retained count. For complete depletion, the
+packets partition the frozen authoritative species stock exactly, subject
+to each node's mass and composition checks. `qbmm_pool_birth_from_spectrum` constructs
+births from prescribed positive counts and masses per bubble.
+`qbmm_pool_birth_from_rate` integrates supplied number rates on the frozen
+bulk volume and duration. Birth draws from an occupied pool whose composition
+matches the receiving family's fixed mass fractions. Each birth has its own
+explicit spectrum. The pool stores species inventory and carries no record
+of the moments that entered it.
+
+`advance_qbmm_populations` validates tagged pool events and reserves each
+original atom count and each original species stock across the whole joint
+batch before spending any incoming credits. A deposit into the pool cannot
+fund a same-stage birth. The joint endpoint contains the common species
+state and each family's constructive count, shape, quadrature, and event
+receipts. A transfer receipt identifies the pool binding and direction.
+The kernel returns paired material only. A host can use the accepted
+packets as ordered material slots for pressure-conditioned donor
+partial-molar enthalpy and phase-work recovery.
+
+For local chemistry, `ReactionRateProvider::requiresLiquid` opts into a
+pre-call prerequisite. At exactly zero physical liquid volume both rate
+callbacks are skipped. Independent heating and gas-phase reactions still
+use their declared bases. A `GasVolume` source uses the supplied physical
+`ReactionEnvironment::gasVolume`. A dry predecessor with positive liquid
+or dissolved inventory is invalid. In pure QBMM applicability, an explicit
+carrier liquid volume of zero makes liquid-dependent ranges inapplicable,
+with no temperature or concentration supplied.
+
+The low-Mach runtime rejects `bulk_gas_conversion = true` and pure pool law
+declarations. Passive background gas keeps its ordinary phase contract.
+Runtime pool coupling and its portable restart contract belong to Q9b.

@@ -916,9 +916,9 @@ foreach(simplefluid_surface_rtti IN ITEMS "typeinfo for" "typeinfo name for" "vt
 endforeach()
 
 # QBMM Q1. The public delegating schema constructor needs both compiled ABI
-# entries. Three schema methods, five migrations and five numerical kernels
-# account for the remaining exports. Keep the Reacting namespace exact audit.
-set(simplefluid_qbmm_public_symbol_budget 15)
+# entries. Q9a adds one pure joint event entry point. Keep the Reacting namespace
+# exact audit.
+set(simplefluid_qbmm_public_symbol_budget 16)
 set(qbmm_ns "SimpleFluid::Reacting::")
 set(qbmm_schema "${qbmm_ns}QbmmPopulationSchema")
 set(qbmm_block "${simplefluid_stage3_std}array<double, 4u?l*>")
@@ -946,6 +946,8 @@ simplefluid_require_reacting_api(
     "^${qbmm_ns}qbmm_geometry[(]${qbmm_schema} const&, ${qbmm_ns}QbmmCellView, double, ${simplefluid_stage3_std}optional<double>[)]$" 1)
 simplefluid_require_reacting_api(
     "^${qbmm_ns}advance_qbmm_population[(]${qbmm_schema} const&, ${qbmm_ns}CellSpeciesState const&, ${qbmm_ns}QbmmCellView, ${qbmm_ns}QbmmEventBatch const&[)]$" 1)
+simplefluid_require_reacting_api(
+    "^${qbmm_ns}advance_qbmm_populations[(]${qbmm_ns}CellSpeciesState const&, ${simplefluid_stage3_std}span<${qbmm_ns}QbmmFamilyEventInput const, [0-9]+u?l*>, ${qbmm_ns}QbmmBulkGasPoolBinding const[*][)]$" 1)
 
 # Q2 initialization, migration and fixed-mesh restart, plus four Q7a restart entry points.
 set(simplefluid_qbmm_state_public_symbol_budget 9)

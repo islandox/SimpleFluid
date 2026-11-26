@@ -179,6 +179,9 @@ double volume(const ReactionEnvironment& environment, SourceVolumeBasis basis)
             return environment.liquidVolume;
         case SourceVolumeBasis::BulkVolume:
             return environment.bulkVolume;
+        case SourceVolumeBasis::GasVolume:
+            require(environment.gasVolume.has_value(), "A gas-volume source requires a physical gas volume.");
+            return *environment.gasVolume;
     }
     throw std::invalid_argument("Invalid source volume basis.");
 }
@@ -484,17 +487,19 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
     const ReactionAdvanceOptions& options)
 {
     initial.validate(mechanism.catalog());
+    const double gasVolume = environment.gasVolume.value_or(0.0);
     require(std::isfinite(environment.time) && std::isfinite(environment.temperature) &&
                 environment.temperature > 0.0 && std::isfinite(environment.absolutePressure) &&
                 environment.absolutePressure > 0.0 && nonnegative(environment.liquidVolume) &&
-                nonnegative(environment.bulkVolume) &&
+                nonnegative(environment.bulkVolume) && nonnegative(gasVolume) &&
                 (environment.volumeClosure == ReactionVolumeClosure::Accepted ||
                     environment.volumeClosure == ReactionVolumeClosure::ThermodynamicPredictor ||
                     environment.volumeClosure == ReactionVolumeClosure::ReferenceControlVolume) &&
                 (environment.volumeClosure == ReactionVolumeClosure::ThermodynamicPredictor ||
                     environment.volumeClosure == ReactionVolumeClosure::ReferenceControlVolume ||
-                    environment.liquidVolume <= environment.bulkVolume) &&
-                (environment.liquidVolume == 0 || environment.bulkVolume > 0) && nonnegative(duration) &&
+                    environment.liquidVolume + gasVolume <= environment.bulkVolume) &&
+                ((environment.liquidVolume == 0 && gasVolume == 0) || environment.bulkVolume > 0) &&
+                nonnegative(duration) &&
                 std::isfinite(environment.time + duration) &&
                 (duration == 0.0 || environment.time + duration > environment.time),
         "Reaction context needs finite time, positive temperature/pressure and valid volumes/duration.");
@@ -598,7 +603,8 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
     std::size_t substeps = 0, retries = 0;
     double elapsed = 0.0;
     double nextStep = std::min(duration, options.maximumSubstep);
-    while (input.rates && elapsed < duration)
+    const bool integrateRates = input.rates && (!input.rates->requiresLiquid || environment.liquidVolume > 0.0);
+    while (integrateRates && elapsed < duration)
     {
         require(substeps < options.maximumSubsteps, "Reaction local subcycle limit exceeded.");
         double step = std::min(nextStep, duration - elapsed);

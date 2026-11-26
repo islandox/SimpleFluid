@@ -75,6 +75,8 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_configuration(
                     eos[a]->catalog().fingerprint() == family->catalog().fingerprint(),
             "A native QBMM family must bind to its named dispersed-gas EOS phase and ordered catalog.");
         const auto& declared = family->closure_versions().laws;
+        require(std::ranges::none_of(declared, qbmm_uses_bulk_gas_pool),
+            "QBMM BulkGas pool law contracts are available only in the pure event kernel.");
         const auto node_law_count = std::ranges::count(declared, QbmmLawKind::NodeSlip, &QbmmLawMetadata::kind);
         require(kinetic ? node_law_count == 1 && node_laws[a]->metadata.kind == QbmmLawKind::NodeSlip &&
                               family->declares_law(node_laws[a]->metadata) && bool(node_laws[a]->evaluate) &&
@@ -104,7 +106,8 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_capability(const Flow::Options& o
                 (model.family_transport == QbmmModelOptions::FamilyTransport::NativeImplicit &&
                     (model.velocity == Velocity::SharedCarrier || model.velocity == Velocity::SuppliedPhaseSlip)),
         "Native QBMM requires a compatible family integrator and velocity mode.");
-    require(!model.variable_composition && !model.cross_family_coalescence && !model.bulk_gas_conversion,
+    require(!model.bulk_gas_conversion, "Runtime QBMM BulkGas conversion is deferred to Phase Q9b.");
+    require(!model.variable_composition && !model.cross_family_coalescence,
         "Native QBMM requires fixed family composition and within-family population events.");
     require(!model.capillarity && !model.independent_node_temperatures,
         "Native QBMM requires common pressure and temperature with zero surface tension.");
@@ -471,6 +474,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_source_transfer(
     {
         require(static_cast<size_t>(phase->phase) < static_cast<size_t>(SpeciesPhase::Count),
             "QBMM receipt specifies an invalid phase counterpart.");
+        require(!phase->resolved_pool, "Runtime QBMM receipts cannot bind a BulkGas pool.");
         const auto& catalog = family.catalog();
         for (size_t s = 0; s < transfer.moles.size(); ++s)
             require(transfer.moles[s] == 0 || catalog.allows(catalog.species()[s].id, phase->phase),

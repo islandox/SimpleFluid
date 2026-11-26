@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <variant>
 #include <vector>
@@ -17,12 +18,22 @@
 namespace SimpleFluid::Reacting
 {
 
+class QbmmBulkGasPoolBinding;
+enum class QbmmPoolConversionDirection;
+
+struct QbmmResolvedPoolConversion
+{
+    std::uint64_t pool_fingerprint;
+    QbmmPoolConversionDirection direction;
+};
+
 /** An unnamed cell compartment. The host owns partial-molar enthalpy and momentum transfer.
  * The bubble kernel supplies paired material only and creates no heat or pressure work.
  */
 struct QbmmPhaseExchange
 {
     SpeciesPhase phase = SpeciesPhase::Dissolved;
+    std::optional<QbmmResolvedPoolConversion> resolved_pool{};
 };
 
 /** Net external energy and momentum to this cell for this allocation, independent of pressure work. */
@@ -203,5 +214,47 @@ struct QbmmPopulationAdvance
 [[nodiscard]] SIMPLEFLUID_EQUATIONS_EXPORT QbmmPopulationAdvance advance_qbmm_population(
     const QbmmPopulationSchema& schema, const CellSpeciesState& initial, QbmmCellView pre_cell,
     const QbmmEventBatch& batch);
+
+struct QbmmFamilyEventInput
+{
+    const QbmmPopulationSchema& schema;
+    QbmmCellView pre_cell;
+    const QbmmEventBatch& batch;
+};
+
+struct QbmmFamilyEventEndpoint
+{
+    double count = 0;
+    QbmmShapeState shape{};
+    QbmmQuadrature quadrature;
+    std::vector<QbmmEventReceipt> receipts;
+    std::uint64_t family_fingerprint = 0;
+};
+
+struct QbmmJointPopulationEndpoint
+{
+    CellSpeciesState species;
+    std::vector<QbmmFamilyEventEndpoint> families; ///< Same order as the request.
+};
+
+struct QbmmJointPopulationAdvance
+{
+    QbmmEventStatus status = QbmmEventStatus::InvalidState;
+    std::optional<QbmmJointPopulationEndpoint> endpoint;
+    std::optional<std::size_t> failed_family; ///< Index in the request.
+    std::optional<std::size_t> failed_event;
+    std::string diagnostic;
+    std::optional<QbmmRejectedEventReceipt> rejected_event;
+};
+
+/** Pure cell transaction for one or more distinct named families sharing one authoritative predecessor and substep.
+ * Gross withdrawals reserve original atom and species stocks before any credits can fund them.
+ * Families are processed by identity, with accepted results and failed indices in request order.
+ * Resolved exchanges use Birth and Disappearance with the matching pool identity and direction.
+ * A birth requires the original occupied pool to match the fixed family composition.
+ */
+[[nodiscard]] SIMPLEFLUID_EQUATIONS_EXPORT QbmmJointPopulationAdvance advance_qbmm_populations(
+    const CellSpeciesState& initial, std::span<const QbmmFamilyEventInput> families,
+    const QbmmBulkGasPoolBinding* resolved_pool = nullptr);
 
 } // namespace SimpleFluid::Reacting

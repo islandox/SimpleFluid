@@ -34,7 +34,8 @@ enum class QbmmLawKind
     Breakup,
     PhaseSlip,
     TransportProperty,
-    NodeSlip
+    NodeSlip,
+    BulkGasConversion
 };
 
 /** Each variable fixes its SI basis. Diameter bounds apply to every active atom. */
@@ -53,7 +54,11 @@ enum class QbmmRangeVariable
     CarrierLiquidConcentrationMolPerM3,
     CarrierLiquidTemperatureK,
     SlipSpeedMPerS,
-    NodeMassKgPerBubble
+    NodeMassKgPerBubble,
+    BulkGasPoolVolumeM3,
+    BulkGasPoolConcentrationMolPerM3,
+    BulkGasPoolTemperatureK,
+    BulkGasPoolVolumeFraction
 };
 enum class QbmmApplicabilityGate
 {
@@ -72,7 +77,7 @@ struct QbmmSiRange
 {
     QbmmRangeVariable variable = QbmmRangeVariable::AbsolutePressurePa;
     double minimum = 0, maximum = 0;          ///< Inclusive, finite bounds, without numerical tolerance or clipping.
-    std::optional<std::size_t> species_index; ///< Required only for a phase concentration, in catalog order.
+    std::optional<std::size_t> species_index; ///< Required for a concentration range, in catalog order.
     bool operator==(const QbmmSiRange&) const = default;
 };
 
@@ -92,19 +97,43 @@ struct QbmmLawMetadata
     bool operator==(const QbmmLawMetadata&) const = default;
 };
 
+[[nodiscard]] inline bool qbmm_uses_carrier_liquid(const QbmmLawMetadata& law)
+{
+    return std::ranges::any_of(law.ranges,
+        [](const auto& range)
+        {
+            return range.variable == QbmmRangeVariable::CarrierLiquidConcentrationMolPerM3 ||
+                   range.variable == QbmmRangeVariable::CarrierLiquidTemperatureK;
+        });
+}
+
+[[nodiscard]] inline bool qbmm_uses_bulk_gas_pool(const QbmmLawMetadata& law)
+{
+    return law.kind == QbmmLawKind::BulkGasConversion ||
+           std::ranges::any_of(law.ranges,
+               [](const auto& range)
+               {
+                   return range.variable == QbmmRangeVariable::BulkGasPoolVolumeM3 ||
+                          range.variable == QbmmRangeVariable::BulkGasPoolConcentrationMolPerM3 ||
+                          range.variable == QbmmRangeVariable::BulkGasPoolTemperatureK ||
+                          range.variable == QbmmRangeVariable::BulkGasPoolVolumeFraction;
+               });
+}
+
 inline void validate_qbmm_law_metadata(const QbmmLawMetadata& law, std::size_t species_count)
 {
     if (law.identity.empty() || law.revision == 0 || law.input_basis.empty() || law.output_units.empty() ||
-        law.kind < QbmmLawKind::IntegratedPopulation || law.kind > QbmmLawKind::NodeSlip ||
+        law.kind < QbmmLawKind::IntegratedPopulation || law.kind > QbmmLawKind::BulkGasConversion ||
         (law.kind == QbmmLawKind::NodeSlip && (!law.requires_population || law.output_units != "m/s")) ||
         (law.gate != QbmmApplicabilityGate::ReportOnly && law.gate != QbmmApplicabilityGate::RejectOutside))
         throw std::invalid_argument("QBMM law needs an identity, revision and explicit SI input/output basis.");
     for (const auto& range : law.ranges)
     {
         const bool concentration = range.variable == QbmmRangeVariable::PhaseConcentrationMolPerM3 ||
-                                   range.variable == QbmmRangeVariable::CarrierLiquidConcentrationMolPerM3;
+                                   range.variable == QbmmRangeVariable::CarrierLiquidConcentrationMolPerM3 ||
+                                   range.variable == QbmmRangeVariable::BulkGasPoolConcentrationMolPerM3;
         if (range.variable < QbmmRangeVariable::AbsolutePressurePa ||
-            range.variable > QbmmRangeVariable::NodeMassKgPerBubble ||
+            range.variable > QbmmRangeVariable::BulkGasPoolVolumeFraction ||
             (range.variable == QbmmRangeVariable::NodeMassKgPerBubble && law.kind != QbmmLawKind::NodeSlip) ||
             !std::isfinite(range.minimum) || !std::isfinite(range.maximum) || range.minimum < 0 ||
             range.maximum < range.minimum || concentration != range.species_index.has_value() ||
@@ -170,6 +199,12 @@ struct QbmmLawInputs
     const std::optional<double> node_mass_kg_per_bubble{}, node_diameter_m{};
     const std::optional<double> carrier_liquid_volume_m3{};                    ///< Occupied physical liquid EOS volume.
     const std::optional<std::vector<double>> carrier_liquid_dissolved_moles{}; ///< Original Dissolved mol/cell.
+    const std::optional<double> bulk_gas_pool_volume_m3{};                     ///< Occupied physical pool EOS volume.
+    const std::optional<std::vector<double>> bulk_gas_pool_moles{};            ///< All zeros for a bound, absent pool.
+    const std::optional<std::vector<double>> bulk_gas_pool_concentration_mol_per_m3{};
+    const std::optional<double> bulk_gas_pool_temperature_K{};
+    const std::optional<std::vector<double>> authoritative_family_moles{}; ///< Original stock for exact pool drainage.
+    const std::optional<std::uint64_t> bulk_gas_pool_fingerprint{}; ///< Explicit authority for conversion events.
 };
 
 /** Instantaneous SI input for a single active atom. Concentration spans are borrowed for this call.
@@ -267,12 +302,21 @@ struct QbmmApplicabilityEvaluation
     validate_qbmm_law_metadata(law, std::numeric_limits<std::size_t>::max());
     QbmmApplicabilityEvaluation result{law, {}, true, true};
     const bool absent = input.quadrature.status == InversionStatus::Absent;
-    if (absent && law.requires_population)
+    const bool dryout = input.carrier_liquid_volume_m3 == 0.0 && qbmm_uses_carrier_liquid(law);
+    const bool inactive = (absent && law.requires_population) || dryout;
+    const bool absent_pool = !input.bulk_gas_pool_volume_m3 && input.bulk_gas_pool_moles &&
+                             std::ranges::all_of(*input.bulk_gas_pool_moles, [](double amount) { return amount == 0; });
+    if (inactive)
         result.applicable = false;
     for (const auto& range : law.ranges)
     {
         QbmmRangeEvaluation evaluation{range, QbmmRangeStatus::MissingInput, {}, {}};
-        if ((absent && law.requires_population) ||
+        const bool absent_pool_range =
+            absent_pool && (range.variable == QbmmRangeVariable::BulkGasPoolConcentrationMolPerM3 ||
+                               range.variable == QbmmRangeVariable::BulkGasPoolTemperatureK);
+        if (absent_pool_range)
+            result.applicable = false;
+        if (inactive || absent_pool_range ||
             (law.kind == QbmmLawKind::NodeSlip &&
                 ((range.variable == QbmmRangeVariable::TimeStepS && !input.time_step_s) ||
                     (range.variable == QbmmRangeVariable::SlipSpeedMPerS && !input.slip_speed_m_per_s))))
@@ -336,6 +380,23 @@ struct QbmmApplicabilityEvaluation
                 case QbmmRangeVariable::NodeMassKgPerBubble:
                     lo = input.node_mass_kg_per_bubble;
                     break;
+                case QbmmRangeVariable::BulkGasPoolVolumeM3:
+                    lo = absent_pool ? std::optional<double>{0} : input.bulk_gas_pool_volume_m3;
+                    break;
+                case QbmmRangeVariable::BulkGasPoolConcentrationMolPerM3:
+                    if (input.bulk_gas_pool_concentration_mol_per_m3 && range.species_index &&
+                        *range.species_index < input.bulk_gas_pool_concentration_mol_per_m3->size())
+                        lo = input.bulk_gas_pool_concentration_mol_per_m3->at(*range.species_index);
+                    break;
+                case QbmmRangeVariable::BulkGasPoolTemperatureK:
+                    lo = input.bulk_gas_pool_temperature_K;
+                    break;
+                case QbmmRangeVariable::BulkGasPoolVolumeFraction:
+                    if (absent_pool)
+                        lo = 0;
+                    else if (input.bulk_gas_pool_volume_m3 && input.bulk_volume_m3 > 0)
+                        lo = *input.bulk_gas_pool_volume_m3 / input.bulk_volume_m3;
+                    break;
             }
             if (!hi)
                 hi = lo;
@@ -382,7 +443,9 @@ struct QbmmSlipEvaluation
         input.absolute_pressure_pa, input.temperature_K, input.time_step_s, input.phase_volume_fraction,
         input.gas_volume_fraction, input.phase_concentration_mol_per_m3, input.carrier_liquid_concentration_mol_per_m3,
         input.carrier_liquid_temperature_K, speed, input.family_fingerprint, input.catalog_fingerprint,
-        input.population, input.location, {}, {}, input.carrier_liquid_volume_m3, input.carrier_liquid_dissolved_moles};
+        input.population, input.location, {}, {}, input.carrier_liquid_volume_m3, input.carrier_liquid_dissolved_moles,
+        input.bulk_gas_pool_volume_m3, input.bulk_gas_pool_moles, input.bulk_gas_pool_concentration_mol_per_m3,
+        input.bulk_gas_pool_temperature_K, input.authoritative_family_moles, input.bulk_gas_pool_fingerprint};
     auto applicability = evaluate_qbmm_applicability(metadata, frozen);
     if (!applicability.gate_passed)
         throw std::invalid_argument(
