@@ -1578,6 +1578,41 @@ or dissolved inventory is invalid. In pure QBMM applicability, an explicit
 carrier liquid volume of zero makes liquid-dependent ranges inapplicable,
 with no temperature or concentration supplied.
 
-The low-Mach runtime rejects `bulk_gas_conversion = true` and pure pool law
-declarations. Passive background gas keeps its ordinary phase contract.
-Runtime pool coupling and its portable restart contract belong to Q9b.
+## Q9b fixed-mesh BulkGas pool conversion
+
+The low-Mach runtime admits `bulk_gas_conversion = true` with an explicit
+`Options::qbmm_bulk_gas_pool` binding on fixed supported orthogonal meshes
+using `NativeImplicit` and `SharedCarrier`. Prescribed planar ALE,
+`SuppliedPhaseSlip`, `KineticEuler`, `RealizableLinearSSPRK2`, and supplied
+body acceleration are rejected, including a supplied zero vector. Passive
+background gas retains its own transport and thermodynamic inventory.
+
+One unbound physical gas phase owns the unnamed chemical `Resolved`
+pool. A paired QBMM material slot needs a permitted species and direction
+on that binding. A source law declares `BulkGasConversion`, and its
+birth or disappearance carries the binding fingerprint and direction.
+All enabled provider styles reserve original counts and species jointly
+within each cell and accepted source substep. Pressure-conditioned
+recovery uses the actual donor partial-molar enthalpy for each slot.
+The pool uses the ordinary gas EOS and unbound-phase transport, including
+the batched and scalar paths. Dry liquid contacts skip their callbacks.
+Gas-based chemistry uses actual occupied gas volume, and independent
+heating is available on occupied gas. An absent phase has zero physical
+volume and undefined temperature and concentration.
+
+The corrector appends both directions of pool gross activity to the
+ordinary family channels. Each direction includes count, catalog-ordered
+species, mass, the transferred family-coordinate H2 and H3, and separate
+positive and negative carried energy from the resolved thermal plan.
+These channels use the configured gross source tolerance. The report
+includes pool diagnostics and separate dispersed, designated-pool,
+passive, and total gas fractions on the same bulk cell volume.
+Pool-law evaluation is recorded independently of the closure flags.
+
+Portable restart v10 tag 8 binds the fixed runtime pool configuration,
+law contracts, controller signature, and directional interval totals.
+Restore of coupled history requires an initialized receiving controller,
+which validates the decoded chemical inventory before the solver publishes it.
+The archived interval totals are available after restore. Its detailed
+cell-local event and thermal receipts become available on the next
+accepted interval. Legacy v5–v9 payloads use their original encodings.

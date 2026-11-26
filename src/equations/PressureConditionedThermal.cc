@@ -1,9 +1,11 @@
 /** Pressure-conditioned local interphase thermal recovery and conservative receipts. */
 #include "equations/PressureConditionedThermal.hh"
+#include "equations/details/LowMachScaledFaceSum.hh"
 #include <algorithm>
 #include <cmath>
 #include <numeric>
 #include <set>
+#include <variant>
 
 namespace SimpleFluid::Reacting
 {
@@ -136,13 +138,44 @@ template<class Tail> MaterialPackets material_packets(const Tail& tail)
     return {tail.paired_amounts, tail.reservoirs};
 }
 
-struct MaterialStocks
+using ExactMaterialStock = qbmm_face_detail::ScaledFaceSum;
+
+template<class Stock> struct MaterialStocks
 {
     const SpeciesCatalog& catalog;
-    std::vector<std::vector<Acc>> amounts;
+    std::vector<std::vector<Stock>> amounts;
+
+    static void add(Stock& stock, long double value)
+    {
+        if constexpr (std::is_same_v<Stock, ExactMaterialStock>)
+            stock.add_unrounded_value(value);
+        else
+            stock.add(value);
+    }
+
+    static bool negative(const Stock& stock)
+    {
+        if constexpr (std::is_same_v<Stock, ExactMaterialStock>)
+            return stock.sign() < 0;
+        else
+            return stock.value() < 0;
+    }
+
+    static double rounded(const Stock& stock)
+    {
+        if constexpr (std::is_same_v<Stock, ExactMaterialStock>)
+        {
+            const double value = stock.rounded();
+            require(std::isfinite(value) && (value != 0 || stock.sign() == 0),
+                "Exact thermal material stock cannot be represented.");
+            return value;
+        }
+        else
+            return narrow(stock.value());
+    }
 
     MaterialStocks(const SpeciesCatalog& schema, std::span<const std::vector<double>> before,
-        std::span<const std::vector<std::array<long double, 2>>> raw = {})
+        std::span<const std::vector<std::array<long double, 2>>> raw)
         : catalog(schema), amounts(before.size())
     {
         require(raw.empty() || raw.size() == before.size(), "Raw thermal predecessor phase layout differs.");
@@ -156,12 +189,12 @@ struct MaterialStocks
             {
                 require(std::isfinite(before[p][s]) && before[p][s] >= 0, "Invalid material predecessor stock.");
                 if (raw.empty())
-                    amounts[p][s].add(before[p][s]);
+                    add(amounts[p][s], before[p][s]);
                 else
                 {
-                    amounts[p][s].add(raw[p][s][0]);
-                    amounts[p][s].add(raw[p][s][1]);
-                    require(amounts[p][s].value() >= 0 && narrow(amounts[p][s].value()) == before[p][s],
+                    add(amounts[p][s], raw[p][s][0]);
+                    add(amounts[p][s], raw[p][s][1]);
+                    require(!negative(amounts[p][s]) && rounded(amounts[p][s]) == before[p][s],
                         "Raw thermal predecessor does not project to its actual represented phase.");
                 }
             }
@@ -176,7 +209,7 @@ struct MaterialStocks
             result[p].resize(amounts[p].size());
             for (size_t s = 0; s < amounts[p].size(); ++s)
             {
-                result[p][s] = narrow(amounts[p][s].value());
+                result[p][s] = rounded(amounts[p][s]);
                 require(result[p][s] >= 0, "Negative interphase material endpoint.");
             }
         }
@@ -195,9 +228,9 @@ struct MaterialStocks
         {
             require(std::isfinite(amount) && amount >= 0, "Material event amount must be finite nonnegative mol.");
             const auto s = catalog.index(slot.species);
-            margins.at(slot.donor).at(s).add(-static_cast<long double>(amount));
-            next.at(slot.donor).at(s).add(-static_cast<long double>(amount));
-            next.at(slot.recipient).at(s).add(amount);
+            add(margins.at(slot.donor).at(s), -static_cast<long double>(amount));
+            add(next.at(slot.donor).at(s), -static_cast<long double>(amount));
+            add(next.at(slot.recipient).at(s), amount);
         };
         for (size_t i = 0; i < events.size(); ++i)
         {
@@ -226,16 +259,41 @@ struct MaterialStocks
                 {
                     const double amount = exchange.signed_moles[s];
                     if (amount < 0)
-                        margins[exchange.phase][s].add(amount);
-                    next[exchange.phase][s].add(amount);
+                        add(margins[exchange.phase][s], amount);
+                    add(next[exchange.phase][s], amount);
                 }
             }
         for (const auto& phase : margins)
             for (const auto& stock : phase)
                 require(
-                    stock.value() >= 0, "Interphase gross outgoing events overdraw their actual predecessor donor.");
+                    !negative(stock), "Interphase gross outgoing events overdraw their actual predecessor donor.");
         amounts = std::move(next);
         return project();
+    }
+};
+
+class ThermalMaterialStocks
+{
+    std::variant<MaterialStocks<Acc>, MaterialStocks<ExactMaterialStock>> stocks;
+
+public:
+    ThermalMaterialStocks(const SpeciesCatalog& catalog, const FrozenInterphasePlan& plan)
+        : stocks(plan.material_tail.exact_material_reservation
+                ? decltype(stocks)(std::in_place_type<MaterialStocks<ExactMaterialStock>>,
+                      catalog, plan.pre_moles, plan.raw_pre_moles)
+                : decltype(stocks)(std::in_place_type<MaterialStocks<Acc>>, catalog, plan.pre_moles, plan.raw_pre_moles))
+    {
+    }
+
+    std::vector<std::vector<double>> project() const
+    {
+        return std::visit([](const auto& state) { return state.project(); }, stocks);
+    }
+
+    std::vector<std::vector<double>> apply(
+        const ConfiguredInterphaseStage* stage, std::span<const double> events, std::optional<MaterialPackets> packets)
+    {
+        return std::visit([&](auto& state) { return state.apply(stage, events, packets); }, stocks);
     }
 };
 
@@ -408,7 +466,7 @@ FrozenInterphasePlan compile_interphase_plan(std::shared_ptr<const InterphaseCon
     require(std::abs(mismatch.value()) <=
                 64 * std::numeric_limits<double>::epsilon() * (allocated.magnitude + declared.magnitude),
         "Raw allocated static energy differs from its declared physical channels.");
-    MaterialStocks stocks(pre_phases.front().thermodynamics->catalog(), result.pre_moles, result.raw_pre_moles);
+    ThermalMaterialStocks stocks(pre_phases.front().thermodynamics->catalog(), result);
     result.final_moles = stocks.project();
     const auto& tail = result.material_tail;
     for (size_t j = 0; j < result.amounts.size(); ++j)
@@ -466,7 +524,7 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
     result.raw_equilibrium_redistribution.resize(np);
     std::vector<Acc> sources(np), targets(np), material(np), heat(np), equilibrium(np), empty_roundoff(np);
     std::vector<long double> target_derivative(np), last_caloric(np), temperature_derivative(np);
-    MaterialStocks stocks(catalog, plan.pre_moles, plan.raw_pre_moles);
+    ThermalMaterialStocks stocks(catalog, plan);
     auto moles = stocks.project();
     for (size_t a = 0; a < np; ++a)
     {
@@ -902,7 +960,7 @@ CaloricPressureInterval interphase_pressure_bounds(
     validate_tail_layout(plan);
     CaloricPressureInterval result{0, std::numeric_limits<double>::infinity()};
     const auto& catalog = phases.front().thermodynamics->catalog();
-    MaterialStocks stocks(catalog, plan.pre_moles, plan.raw_pre_moles);
+    ThermalMaterialStocks stocks(catalog, plan);
     auto moles = stocks.project();
     auto include_phases = [&]()
     {

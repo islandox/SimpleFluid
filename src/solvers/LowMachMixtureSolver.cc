@@ -17,6 +17,7 @@
 #include "solvers/details/LowMachQbmmKineticTransport.hh"
 #include "solvers/details/LowMachQbmmLawInputs.hh"
 #include "solvers/details/LowMachQbmmLinearTransport.hh"
+#include "solvers/details/LowMachQbmmPoolGross.hh"
 #include "solvers/details/LowMachQbmmState.hh"
 #include "solvers/details/LowMachQbmmTransport.hh"
 #include "solvers/details/LowMachSourceStage.hh"
@@ -710,6 +711,7 @@ struct LowMachMixtureSolver::Implementation
     bool requires_matching_qbmm_controller() const noexcept
     {
         return needs_restart_controller || has_forced_family_provenance() || has_tvd_mc_controller_history() ||
+               (options.qbmm_bulk_gas_pool && diagnostics.correctors > 0) ||
                (accepted_qbmm_controller && diagnostics.kinetic_substeps > 0 &&
                    qbmm_detail::uses_axial_kinetic_transport(options, *mesh));
     }
@@ -933,6 +935,10 @@ struct LowMachMixtureSolver::Implementation
         collective_detail::require_uniform_value(
             *mesh, eos.front()->catalog().fingerprint(), "Low-Mach species schema fingerprint");
         collective_detail::require_uniform_value(*mesh, options.qbmm_families.size(), "Native QBMM phase layout");
+        collective_detail::require_uniform_value(*mesh, int(bool(options.qbmm_bulk_gas_pool)), "QBMM pool presence");
+        if (options.qbmm_bulk_gas_pool)
+            collective_detail::require_uniform_value(
+                *mesh, options.qbmm_bulk_gas_pool->fingerprint(), "QBMM pool binding");
         if (!options.qbmm_families.empty())
         {
             collective_detail::require_uniform_value(
@@ -2094,6 +2100,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 "Explicit QBMM preview requires the accepted body acceleration configuration.");
             check(!coherent_qbmm || (has_qbmm && controller && controller->reacting_source_authority && provider),
                 "Coherent QBMM sources require the reacting controller and an immutable source provider.");
+            check(!d->options.qbmm_bulk_gas_pool || coherent_qbmm,
+                "QBMM BulkGas conversion advancement requires its reacting controller.");
             check(!has_qbmm || !provider || coherent_qbmm,
                 "Native QBMM source providers require the coherent reacting controller.");
             check(!has_qbmm || ale || !d->accepted_planar_motion,
@@ -2206,7 +2214,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
     std::vector<QbmmKineticLawReceipt> last_kinetic_law_receipts;
     std::optional<TransportSnapshot> previous_transport;
     std::vector<CellSources> previous_sources;
-    std::vector<std::vector<double>> gross_events, previous_events;
+    std::vector<std::vector<double>> gross_events, previous_events, previous_pool_events;
     FourierGrossResolutions previous_fourier_resolution;
     std::vector<GrossChannelMetadata> previous_gross_metadata;
     QbmmSourceCells qbmm_cells;
@@ -2757,7 +2765,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                                         evaluated.thermal_receipt->configuration.get(),
                                 "Conditioned source replaced its configured law object within one preview.");
                             conditioned_thermal_detail::validate_batch(*evaluated.thermal_receipt,
-                                SourceStageContext{last_transport, thermodynamic_guess, mesh}, evaluated.sources);
+                                SourceStageContext{last_transport, thermodynamic_guess, mesh}, evaluated.sources,
+                                bool(d->options.qbmm_bulk_gas_pool));
                             thermal_signature =
                                 conditioned_thermal_detail::signature(*evaluated.thermal_receipt->configuration);
                             check(thermal_signature.size() <= size_t(std::numeric_limits<int>::max()),
@@ -2891,6 +2900,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             const bool qbmm_bound = !qbmm_families.empty() && qbmm_families[a];
                             auto& cell = trial.cells[c];
                             auto& phase = cell.phases[a];
+                            const bool material_plan_owns_stock = d->options.qbmm_bulk_gas_pool && thermal_batch;
                             if (coherent_qbmm && qbmm_bound)
                             {
                                 const auto& endpoint = *qbmm_cells[c][a];
@@ -2898,9 +2908,12 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                 cell.phase_numbers[a] = endpoint.final_count;
                                 cell.qbmm_shape[a] = endpoint.final_shape;
                             }
+                            else if (material_plan_owns_stock)
+                                phase.moles = thermal_batch->cells[c].final_moles[a];
                             for (size_t s = 0; s < ns; ++s)
                             {
-                                if (!qbmm_bound && !sources.empty() && !sources[c].species_moles.empty())
+                                if (!qbmm_bound && !material_plan_owns_stock && !sources.empty() &&
+                                    !sources[c].species_moles.empty())
                                     phase.moles[s] += sources[c].species_moles[a][s];
                                 check(std::isfinite(phase.moles[s]) && phase.moles[s] >= 0,
                                     "Low-Mach source/transport overdraws phase species.");
@@ -3706,6 +3719,36 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 result.maximum_conditioned_thermal_residual = d->maximum(local_conditioned);
                 result.maximum_source_residual =
                     std::max(result.maximum_source_residual, result.maximum_conditioned_thermal_residual);
+            }
+            if (const auto& pool = d->options.qbmm_bulk_gas_pool)
+            {
+                auto conversion = qbmm_detail::pool_gross(
+                    *pool, mesh, qbmm_cells, thermal_batch.get(), last_thermal_evaluations);
+                source_stage_detail::GrossComparison comparison;
+                collective_detail::collective_local_validation(mesh, "QBMM pool gross convergence",
+                    [&]
+                    {
+                        if (iteration > 0)
+                        {
+                            comparison = source_stage_detail::event_error(conversion.rows, previous_pool_events,
+                                source_options.source_relative_tolerance, {}, {}, mesh, conversion.metadata);
+                            if (comparison.winner)
+                                comparison.winner->channel += gross_events.front().size();
+                        }
+                        for (size_t c = 0; c < nc; ++c)
+                            gross_events[c].insert(
+                                gross_events[c].end(), conversion.rows[c].begin(), conversion.rows[c].end());
+                    });
+                const double residual = d->maximum(comparison.residual);
+                if (residual > result.maximum_event_residual)
+                {
+                    gross_residual_evaluations.back().winner = select_gross_residual_winner(
+                        *mesh.owned_cell_map()->getComm(), comparison.winner, comparison.residual, residual);
+                    result.maximum_event_residual = residual;
+                    gross_residual_evaluations.back().normalized_residual = residual;
+                }
+                previous_pool_events = std::move(conversion.rows);
+                result.pool_conversion = std::move(conversion.totals);
             }
             const bool physical_convergence =
                 result.maximum_occupancy_error <= d->options.volume_relative_tolerance &&

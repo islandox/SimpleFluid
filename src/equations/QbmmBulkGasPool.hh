@@ -34,6 +34,7 @@ public:
             throw std::invalid_argument(
                 "QBMM pool requires one unbound BulkGas phase and an explicit Resolved binding.");
 
+        d_phase_identity = phases[pool_phase].identity;
         d_species.resize(d_catalog->species().size());
         for (const auto id : species)
         {
@@ -66,6 +67,8 @@ public:
 
     [[nodiscard]] const SpeciesCatalog& catalog() const noexcept { return *d_catalog; }
     [[nodiscard]] std::size_t phase_index() const noexcept { return d_phase_index; }
+    [[nodiscard]] const std::string& phase_identity() const noexcept { return d_phase_identity; }
+    [[nodiscard]] QbmmPoolConversionDirection direction() const noexcept { return d_direction; }
     [[nodiscard]] std::uint64_t fingerprint() const noexcept { return d_fingerprint; }
     [[nodiscard]] bool permits(SpeciesId id) const { return d_species[d_catalog->index(id)]; }
 
@@ -98,6 +101,7 @@ private:
     std::shared_ptr<const SpeciesCatalog> d_catalog;
     std::size_t d_phase_index;
     QbmmPoolConversionDirection d_direction;
+    std::string d_phase_identity;
     std::vector<bool> d_species;
     std::uint64_t d_fingerprint = 14695981039346656037ULL;
 };

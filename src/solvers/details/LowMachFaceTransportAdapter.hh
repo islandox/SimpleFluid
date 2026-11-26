@@ -110,7 +110,7 @@ class SIMPLEFLUID_SOLVERS_LOCAL LowMachFaceTransportAdapter
 public:
     LowMachFaceTransportAdapter(std::shared_ptr<const Mesh> mesh, std::shared_ptr<const SpeciesCatalog> catalog,
         Options options, PhaseBindings compartments, std::optional<PhaseThermalMode> thermal_mode = std::nullopt,
-        FaceTopology topology = FaceTopology::NonPeriodic);
+        FaceTopology topology = FaceTopology::NonPeriodic, bool require_occupied_liquid = false);
     Receipt preview(const Flow::SourceStageContext& context, std::span<const CellSpeciesState> post_chemistry) const;
     /** Explicit prepared T/p/EOS guesses, e.g. arriving-phase T recovered from transported U by SourceEngine.
      * Donor composition STILL comes only from post_chemistry, never these cells' moles.
@@ -133,6 +133,7 @@ private:
     PhaseBindings compartments_;
     std::optional<PhaseThermalMode> thermal_mode_;
     FaceTopology topology_;
+    bool require_occupied_liquid_;
     Teuchos::RCP<const Pack::map_type> owned_cells_, overlap_cells_, owned_faces_, overlap_faces_;
     std::unique_ptr<Pack::import_type> cell_import_, face_import_;
 };

@@ -52,6 +52,12 @@ SpeciesPhase compartment(const MixturePhaseBinding& binding, size_t species)
 {
     return binding.species_phases.empty() ? binding.phase : binding.species_phases.at(species);
 }
+bool passive_bulk_gas(const Solver& flow, size_t phase)
+{
+    const auto& pool = flow.options().qbmm_bulk_gas_pool;
+    return pool && phase != pool->phase_index() &&
+           flow.options().phase_roles.at(phase).role == Solver::PhaseRole::BulkGas;
+}
 void uniform_text(const Solver::Mesh& mesh, const std::string& text)
 {
     collective_detail::collective_local_validation(mesh, "Reacting mixture schema length", [&]
@@ -127,12 +133,26 @@ struct SourceEngine
         std::vector<MixturePopulationEventReceipt> population_events;
         std::size_t maximum_qbmm_source_substeps = 0, qbmm_source_substep_retries = 0;
     };
+    void validate_liquid_inventory(const CellSpeciesState& state) const
+    {
+        if (!flow->options().qbmm_bulk_gas_pool)
+            return;
+        const auto ns = options.mechanism->catalog().species().size();
+        const auto liquid_end = state.amounts.begin() + ns;
+        const auto occupied = [](double moles) { return moles > 0; };
+        require(std::ranges::any_of(state.amounts.begin(), liquid_end, occupied) ||
+                    std::ranges::none_of(liquid_end, liquid_end + ns, occupied),
+            "Dissolved stock needs an occupied liquid solvent in the QBMM pool conversion path.");
+    }
+
     CellSpeciesState species(const Solver::CellState& cell) const
     {
         const auto& catalog = options.mechanism->catalog();
         CellSpeciesState result(catalog);
         for (size_t p = 0; p < options.phases.size(); ++p)
         {
+            if (passive_bulk_gas(*flow, p))
+                continue;
             const auto& binding = options.phases[p];
             if (binding.phase == SpeciesPhase::Dispersed && !binding.population.empty())
                 result.dispersedPopulations.push_back(
@@ -144,6 +164,7 @@ struct SourceEngine
                     binding.population);
         }
         result.validate(catalog);
+        validate_liquid_inventory(result);
         return result;
     }
 
@@ -151,9 +172,20 @@ struct SourceEngine
     {
         const auto i = options.mechanism->catalog().index(species_id);
         for (size_t p = 0; p < options.phases.size(); ++p)
-            if (compartment(options.phases[p], i) == phase && options.phases[p].population == population)
+            if (!passive_bulk_gas(*flow, p) && compartment(options.phases[p], i) == phase &&
+                options.phases[p].population == population)
                 return p;
         throw std::invalid_argument("External transfer references an unbound physical compartment.");
+    }
+
+    double physical_material_amount(const CellSpeciesState& material, const Solver::TransportCellInventory& transported,
+        size_t phase, size_t species) const
+    {
+        if (passive_bulk_gas(*flow, phase))
+            return transported.phases[phase].moles[species];
+        const auto& catalog = options.mechanism->catalog();
+        const auto& binding = options.phases[phase];
+        return material.amount(catalog, catalog.species()[species].id, compartment(binding, species), binding.population);
     }
 
     bool qbmm_bound(size_t phase) const
@@ -184,7 +216,8 @@ struct SourceEngine
         require(
             transport.cells.size() == trial.cells.size() && transport.cells.size() == flow->mesh()->num_owned_cells(),
             "Transport/source cell counts do not agree.");
-        stage.sums.reset(transport.cells.size(), np, ns);
+        const auto& pool = flow->options().qbmm_bulk_gas_pool;
+        stage.sums.reset(transport.cells.size(), np, ns, bool(pool));
         stage.gross_events.resize(transport.cells.size());
         stage.ledgers.reserve(transport.cells.size());
         stage.post_chemistry.reserve(transport.cells.size());
@@ -196,15 +229,18 @@ struct SourceEngine
             require(transport.cells[c].phases.size() == np && cell.phases.size() == np,
                 "Transport/source physical phase counts do not agree.");
             cell.phase_numbers.resize(np);
+            for (size_t p = 0; p < np; ++p)
+                cell.phases[p].moles = transport.cells[c].phases[p].moles;
+            const auto initial = species(cell);
             const bool kinetic = uses_qbmm_kinetic_transport(flow->options().qbmm_model);
-            std::vector<double> kinetic_volumes(kinetic ? np : 0);
+            std::vector<double> physical_volumes(kinetic || pool ? np : 0);
+            double liquid_volume = 0;
             for (size_t p = 0; p < np; ++p)
             {
                 cell.phase_numbers[p] = transport.cells[c].phases[p].population_number;
                 if (qbmm_bound(p))
                     cell.qbmm_shape.at(p) = transport.cells[c].phases[p].qbmm_shape;
                 auto& phase = cell.phases[p];
-                phase.moles = transport.cells[c].phases[p].moles;
                 Sum moles, phase_mass;
                 for (size_t i = 0; i < ns; ++i)
                 {
@@ -239,8 +275,10 @@ struct SourceEngine
                     }
                     const auto point = phase.thermodynamics->evaluate(phase.temperature, phase.absolute_pressure, x);
                     phase.internal_energy = double(phase_mass.value() * point.internal_energy);
-                    if (kinetic)
-                        kinetic_volumes[p] = static_cast<double>(phase_mass.value() / point.density);
+                    if (kinetic || pool)
+                        physical_volumes[p] = static_cast<double>(phase_mass.value() / point.density);
+                    if (p == options.liquid_phase)
+                        liquid_volume = static_cast<double>(phase_mass.value() / point.density);
                     require(std::isfinite(phase.internal_energy), "Rate-state phase energy overflow.");
                 }
                 else
@@ -251,8 +289,7 @@ struct SourceEngine
             }
             if (kinetic)
                 qbmm_native_law_detail::evaluate_kinetic_closure(flow->options(), *flow->mesh(), cell,
-                    transport.new_control_volumes.at(c), kinetic_volumes, source_location(context, c));
-            const auto initial = species(cell);
+                    transport.new_control_volumes.at(c), physical_volumes, source_location(context, c));
             for (size_t p = 0; p < np; ++p)
                 if (qbmm_bound(p))
                 {
@@ -263,22 +300,6 @@ struct SourceEngine
                     qbmm.pre_material[c][p] = std::move(quadrature);
                 }
             const auto& liquid = cell.phases.at(options.liquid_phase);
-            Sum amount, mass;
-            for (size_t i = 0; i < ns; ++i)
-            {
-                amount += liquid.moles[i];
-                mass += static_cast<long double>(liquid.moles[i]) * catalog.species()[i].molarMass;
-            }
-            double liquid_volume = 0;
-            if (amount.value() > 0)
-            {
-                std::vector<double> fractions(ns);
-                for (size_t i = 0; i < ns; ++i)
-                    fractions[i] = double(liquid.moles[i] / amount.value());
-                liquid_volume = double(
-                    mass.value() /
-                    liquid.thermodynamics->evaluate(liquid.temperature, liquid.absolute_pressure, fractions).density);
-            }
             double temperature = liquid.temperature;
             if (!(temperature > 0))
                 for (const auto& phase : cell.phases)
@@ -290,16 +311,28 @@ struct SourceEngine
             ReactionEnvironment environment{transport.accepted_time, temperature, liquid.absolute_pressure,
                 liquid_volume, transport.new_control_volumes.at(c), ReactionVolumeClosure::ThermodynamicPredictor};
             environment.location = source_location(context, c);
+            if (pool)
+            {
+                Sum gas_volume;
+                for (size_t p = 0; p < np; ++p)
+                    if (cell.phases[p].thermodynamics->kind() == EOSKind::Gas)
+                        gas_volume += physical_volumes[p];
+                environment.gasVolume = static_cast<double>(gas_volume.value());
+            }
 
             ReactionContext reaction{catalog, initial, environment};
             const auto input =
                 options.source ? options.source({reaction, cell, c, transport.cells[c]}, dt) : ReactionSourceInput{};
             if (!flow->options().qbmm_families.empty())
                 for (const auto& transfer : input.externalTransfers)
-                    require(!qbmm_bound(phase_for(transfer.species, transfer.phase, transfer.population)),
-                        "Chemistry reservoir transfers cannot touch a QBMM family.");
+                {
+                    const auto phase = phase_for(transfer.species, transfer.phase, transfer.population);
+                    require(!qbmm_bound(phase) && (!pool || phase != pool->phase_index()),
+                        "Chemistry reservoir transfers cannot touch a QBMM family or designated gas pool.");
+                }
             auto chemistry =
                 advance_reactions(*options.mechanism, initial, environment, dt, input, options.integration);
+            validate_liquid_inventory(chemistry.state);
             // Retain actual pure-kernel state for the first face stage, not an endpoint reconstruction.
             stage.post_chemistry.push_back(chemistry.state);
             auto caloric = cell;
@@ -364,11 +397,24 @@ struct SourceEngine
             }
             else
             {
+                size_t heat_phase = options.heat_phase;
+                if (pool && heat_phase == options.liquid_phase && liquid_volume == 0)
+                {
+                    const auto& roles = flow->options().phase_roles;
+                    std::optional<size_t> occupied_gas;
+                    for (size_t p = 0; p < np; ++p)
+                        if (physical_volumes[p] > 0 && cell.phases[p].thermodynamics->kind() == EOSKind::Gas &&
+                            (!occupied_gas || std::tie(roles[p].role, roles[p].identity) <
+                                                  std::tie(roles[*occupied_gas].role, roles[*occupied_gas].identity)))
+                            occupied_gas = p;
+                    require(occupied_gas.has_value(), "A dry mixture needs an occupied gas phase for heating.");
+                    heat_phase = *occupied_gas;
+                }
                 for (const auto part : raw.externalHeat)
-                    stage.sums.add_energy(c, options.heat_phase, part);
+                    stage.sums.add_energy(c, heat_phase, part);
                 for (const auto& heat : raw.reactionHeatContributions)
                     for (const auto part : heat)
-                        stage.sums.add_energy(c, options.heat_phase, part);
+                        stage.sums.add_energy(c, heat_phase, part);
             }
             for (const auto& transfer : chemistry.ledger.externalTransfers)
             {
@@ -396,8 +442,7 @@ struct SourceEngine
                 result.qbmm_shape.at(p) = transported.phases[p].qbmm_shape;
             auto& phase = result.phases.at(p);
             for (size_t i = 0; i < catalog.species().size(); ++i)
-                phase.moles.at(i) = material.amount(
-                    catalog, catalog.species()[i].id, compartment(options.phases[p], i), options.phases[p].population);
+                phase.moles.at(i) = physical_material_amount(material, transported, p, i);
             if (std::ranges::none_of(phase.moles, [](double n) { return n > 0; }))
             {
                 phase.temperature = 0;
@@ -494,6 +539,7 @@ struct SourceEngine
         double bulk_volume, gas_fraction;
         ReactionLocation location;
         std::optional<std::vector<double>> carrier_liquid_dissolved_moles;
+        std::optional<QbmmBulkGasPoolState> pool;
     };
 
     QbmmRateState qbmm_rate_state(const Solver::SourceStageContext& context, size_t c,
@@ -509,7 +555,7 @@ struct SourceEngine
                 flow->options(), *flow->mesh(), guess, bulk_volume, phase_volumes, location);
         const bool joint = options.qbmm_population && options.qbmm_population->evaluate_joint;
         double gas_fraction;
-        if (joint)
+        if (joint || flow->options().qbmm_bulk_gas_pool)
         {
             // The frozen gas fraction must not depend on physical phase slots.
             gas_fraction = qbmm_native_law_detail::kinetic_gas_fraction(guess, phase_volumes, bulk_volume);
@@ -534,7 +580,16 @@ struct SourceEngine
                     (*dissolved)[s] = material.amount(catalog, species, SpeciesPhase::Dissolved);
             }
         }
-        return {std::move(guess), std::move(phase_volumes), bulk_volume, gas_fraction, location, std::move(dissolved)};
+        std::optional<QbmmBulkGasPoolState> pool;
+        if (const auto& binding = flow->options().qbmm_bulk_gas_pool)
+        {
+            const auto p = binding->phase_index();
+            const double volume = phase_volumes[p];
+            pool.emplace(make_qbmm_bulk_gas_pool_state(
+                *binding, material, volume, volume > 0 ? std::optional{guess.phases[p].temperature} : std::nullopt));
+        }
+        return {std::move(guess), std::move(phase_volumes), bulk_volume, gas_fraction, location, std::move(dissolved),
+            std::move(pool)};
     }
 
     QbmmLawInputs qbmm_source_inputs(const QbmmPopulationSchema& family, size_t p, const QbmmCellView& pre,
@@ -555,13 +610,16 @@ struct SourceEngine
             liquid_volume = physical_liquid_volume;
             liquid_temperature = liquid.temperature;
         }
+        else if (rate.pool)
+            liquid_volume = 0;
         const auto drift = qbmm_native_law_detail::mean_drift_velocity(rate.guess, p);
-        return make_qbmm_law_inputs(family,
-            {quadrature, qbmm_geometry(family, pre, rate.bulk_volume, specific_volume), pre.species_moles,
-                rate.bulk_volume, rate.phase_volumes[p], rate.guess.phases[p].absolute_pressure, temperature, dt,
-                rate.gas_fraction, qbmm_phase_concentrations(liquid.moles, physical_liquid_volume), liquid_temperature,
-                {drift.component(0), drift.component(1), drift.component(2)}, rate.location, liquid_volume,
-                rate.carrier_liquid_dissolved_moles});
+        QbmmFrozenLawState frozen{quadrature, qbmm_geometry(family, pre, rate.bulk_volume, specific_volume),
+            pre.species_moles, rate.bulk_volume, rate.phase_volumes[p], rate.guess.phases[p].absolute_pressure,
+            temperature, dt, rate.gas_fraction, qbmm_phase_concentrations(liquid.moles, physical_liquid_volume),
+            liquid_temperature, {drift.component(0), drift.component(1), drift.component(2)}, rate.location,
+            liquid_volume, rate.carrier_liquid_dissolved_moles};
+        return rate.pool ? make_qbmm_law_inputs(family, std::move(frozen), *rate.pool)
+                         : make_qbmm_law_inputs(family, std::move(frozen));
     }
 
     struct QbmmSourceRetry : std::runtime_error
@@ -607,6 +665,7 @@ struct SourceEngine
     {
         size_t phase;
         std::vector<QbmmEventOperation> operations;
+        bool pool_law_evaluated;
     };
 
     std::vector<JointEventRow> evaluate_joint_qbmm(const Solver::SourceStageContext& context, size_t c,
@@ -627,6 +686,8 @@ struct SourceEngine
         std::vector<MixtureQbmmFamilyInput> rows;
         inputs.reserve(phases.size());
         rows.reserve(phases.size());
+        std::vector<bool> active_pool_laws;
+        bool any_dryout = false;
         for (const size_t p : phases)
         {
             const auto& family = *families[p];
@@ -634,32 +695,38 @@ struct SourceEngine
             const auto pre = step.provisional ? qbmm_view(family, material, before)
                                               : qbmm_predecessor(family, material, before, raw_material);
             const auto& quadrature = *quadratures[p];
-            const auto& input =
-                inputs.emplace_back(checked_qbmm_source_inputs(family, p, pre, quadrature, rate, step));
+            const auto& input = inputs.emplace_back(checked_qbmm_source_inputs(family, p, pre, quadrature, rate, step));
             const bool occupied = quadrature.status != InversionStatus::Absent;
-            bool scoped = false, allowed_at_absence = false;
+            bool scoped = false, active = false, pool_active = false;
             for (const auto& law : family.closure_versions().laws)
                 if (!qbmm_is_transport_law(law))
                 {
                     scoped = true;
-                    allowed_at_absence = allowed_at_absence || !law.requires_population;
+                    const bool dryout = input.carrier_liquid_volume_m3 == 0.0 && qbmm_uses_carrier_liquid(law);
+                    any_dryout = any_dryout || dryout;
+                    const bool ready = !dryout && (occupied || !law.requires_population);
+                    active = active || ready;
+                    pool_active = pool_active || (ready && law.kind == QbmmLawKind::BulkGasConversion);
                     auto& observed = applicability[p].emplace_back(evaluate_qbmm_applicability(law, input));
                     validate_qbmm_gate(family, observed, step.provisional);
                 }
-            rows.push_back({family, p, input, applicability[p], occupied || !scoped || allowed_at_absence});
+            rows.push_back({family, p, input, applicability[p], !scoped || active});
+            active_pool_laws.push_back(pool_active);
         }
         if (step.validate_only)
             return {};
-        auto operations =
-            options.qbmm_population->evaluate_joint({rows, material, c, transport.stage, step.duration, step.time});
+        const bool invoke = !any_dryout || std::ranges::any_of(rows, &MixtureQbmmFamilyInput::events_allowed);
+        auto operations = invoke ? options.qbmm_population->evaluate_joint(
+                                       {rows, material, c, transport.stage, step.duration, step.time})
+                                 : std::vector<std::vector<QbmmEventOperation>>(rows.size());
         require(operations.size() == rows.size(), "Joint QBMM evaluation must return one event row per bound family.");
         std::vector<JointEventRow> events;
         events.reserve(rows.size());
         for (size_t i = 0; i < rows.size(); ++i)
         {
             require(rows[i].events_allowed || operations[i].empty(),
-                "Joint QBMM events at absence require a population law that allows absent families.");
-            events.push_back({rows[i].phase, std::move(operations[i])});
+                "Joint QBMM events require an active population law when the family or carrier is absent.");
+            events.push_back({rows[i].phase, std::move(operations[i]), invoke && active_pool_laws[i]});
         }
         return events;
     }
@@ -677,7 +744,8 @@ struct SourceEngine
     QbmmSourceStepResult apply_qbmm_step(const Solver::SourceStageContext& context, size_t c,
         const QbmmSourceStep& step, const Solver::CellState& caloric_guess,
         const Solver::TransportCellInventory& predecessor, std::span<const std::optional<QbmmQuadrature>> quadratures,
-        CellSpeciesState& material, Faces::RawAmounts& raw_material, std::span<double> number_changes = {}) const
+        CellSpeciesState& material, Faces::RawAmounts& raw_material, std::span<double> number_changes = {},
+        qbmm_event_detail::RawSpeciesExactStocks* substep_stocks = nullptr) const
     {
         const auto& transport = context.transport;
         const auto& catalog = options.mechanism->catalog();
@@ -685,6 +753,7 @@ struct SourceEngine
         Faces::validate_raw_inventory(catalog, material, raw_material);
         QbmmSourceStepResult result;
         auto& tail = result.tail;
+        tail.exact_material_reservation = bool(flow->options().qbmm_bulk_gas_pool);
         result.cells.resize(families.size());
         if (step.adaptive && !step.validate_only)
             result.moment_changes.resize(families.size());
@@ -728,7 +797,21 @@ struct SourceEngine
             if (step.validate_only)
                 return result;
         }
+        const auto& pool = flow->options().qbmm_bulk_gas_pool;
         const size_t phase_count = joint ? joint_events.size() : families.size();
+        struct FamilyBatch
+        {
+            size_t phase;
+            QbmmCellView predecessor;
+            QbmmEventBatch batch;
+            bool pool_law_evaluated = false;
+            std::vector<bool> pool_event_authority;
+        };
+        std::vector<FamilyBatch> batches;
+        batches.reserve(phase_count);
+        const auto liquid_end = material.amounts.begin() + 2 * catalog.species().size();
+        const bool dryout =
+            pool && std::ranges::none_of(material.amounts.begin(), liquid_end, [](double n) { return n > 0; });
         for (size_t i = 0; i < phase_count; ++i)
         {
             const size_t p = joint ? joint_events[i].phase : i;
@@ -736,15 +819,25 @@ struct SourceEngine
                 continue;
             const auto& family = *families[p];
             const auto& before = predecessor.phases[p];
-            const auto pre = joint || step.provisional
-                                 ? qbmm_view(family, material, before)
-                                 : qbmm_predecessor(family, material, before, raw_material);
-            QbmmEventBatch batch{family.fingerprint(), step.index, step.duration, {}};
+            const auto pre = joint || step.provisional ? qbmm_view(family, material, before)
+                                                       : qbmm_predecessor(family, material, before, raw_material);
+            auto& row = batches.emplace_back(
+                FamilyBatch{p, pre, {family.fingerprint(), step.index, step.duration, {}}, false, {}});
+            auto& pool_active = row.pool_law_evaluated;
+            const auto add_events = [&](const auto& metadata, auto operations, bool authorizes_pool)
+            {
+                for (auto& operation : operations)
+                {
+                    row.batch.events.push_back({metadata.identity, metadata.revision, std::move(operation)});
+                    if (pool)
+                        row.pool_event_authority.push_back(authorizes_pool);
+                }
+            };
             if (joint)
             {
                 const auto& metadata = options.qbmm_population->metadata;
-                for (auto& operation : joint_events[i].operations)
-                    batch.events.push_back({metadata.identity, metadata.revision, std::move(operation)});
+                pool_active = joint_events[i].pool_law_evaluated;
+                add_events(metadata, std::move(joint_events[i].operations), pool_active);
             }
             else if (options.qbmm_population)
             {
@@ -752,7 +845,10 @@ struct SourceEngine
                 const auto& quadrature = *quadratures[p];
                 const bool occupied = quadrature.status != InversionStatus::Absent;
                 const auto in_scope = [&](const QbmmLawMetadata& law)
-                { return !qbmm_is_transport_law(law) && (occupied || !law.requires_population); };
+                {
+                    return !qbmm_is_transport_law(law) && (occupied || !law.requires_population) &&
+                           (!dryout || !qbmm_uses_carrier_liquid(law));
+                };
                 const auto& declared = family.closure_versions().laws;
                 const bool scoped =
                     std::ranges::any_of(declared, [](const auto& law) { return !qbmm_is_transport_law(law); });
@@ -771,42 +867,79 @@ struct SourceEngine
                         continue;
                     if (integrated)
                     {
-                        auto operations = provider.evaluate(
-                            {family, p, c, quadrature, material, rate->phase_volumes, rate->guess.phases,
-                                transport.stage, step.duration, step.time, &inputs});
-                        for (auto& operation : operations)
-                            batch.events.push_back(
-                                {provider.metadata.identity, provider.metadata.revision, std::move(operation)});
+                        pool_active = std::ranges::any_of(declared, [&](const auto& law)
+                            { return in_scope(law) && law.kind == QbmmLawKind::BulkGasConversion; });
+                        auto operations = provider.evaluate({family, p, c, quadrature, material, rate->phase_volumes,
+                            rate->guess.phases, transport.stage, step.duration, step.time, &inputs});
+                        add_events(provider.metadata, std::move(operations), pool_active);
                     }
                     for (const auto& law : provider.laws)
                     {
                         if (!selected(law))
                             continue;
-                        for (auto& operation : law->evaluate(inputs))
-                            batch.events.push_back(
-                                {law->metadata.identity, law->metadata.revision, std::move(operation)});
+                        const bool converts_pool = law->metadata.kind == QbmmLawKind::BulkGasConversion;
+                        pool_active = pool_active || converts_pool;
+                        add_events(law->metadata, law->evaluate(inputs), converts_pool);
                     }
                 }
             }
-            if (step.validate_only)
-                continue;
-            auto advance = qbmm_event_detail::advance_with_raw_species(family, material, pre, batch, raw_material,
-                step.adaptive ? &result.moment_changes[p] : nullptr);
+        }
+        if (step.validate_only)
+            return result;
+
+        const auto reject_advance = [&](std::string_view population, QbmmEventStatus status,
+                                        std::optional<size_t> failed_event, const std::string& diagnostic)
+        {
+            const auto message = "QBMM population event rejected for " + std::string(population) + ". " + diagnostic;
+            using Status = QbmmEventStatus;
+            if (step.adaptive && (status == Status::SpeciesDonorOverdraw || status == Status::CountDonorOverdraw ||
+                                     status == Status::UnrepresentableEndpoint ||
+                                     (status == Status::InconsistentEndpoint && !failed_event)))
+                throw QbmmSourceRetry(message);
+            throw std::invalid_argument(message);
+        };
+        std::optional<QbmmJointPopulationEndpoint> joint_endpoint;
+        std::vector<std::array<long double, 4>> joint_moments;
+        if (pool)
+        {
+            std::vector<QbmmFamilyEventInput> inputs;
+            inputs.reserve(batches.size());
+            std::vector<qbmm_event_detail::StageMomentChanges> adaptive_moments(step.adaptive ? batches.size() : 0);
+            joint_moments.resize(batches.size());
+            for (const auto& row : batches)
+                inputs.push_back({*families[row.phase], row.predecessor, row.batch});
+            qbmm_event_detail::RawSpeciesExactStocks single_step_stocks;
+            auto& exact_stocks = substep_stocks ? *substep_stocks : single_step_stocks;
+            auto advance = qbmm_event_detail::advance_joint_with_raw_species(
+                material, inputs, *pool, raw_material, exact_stocks, adaptive_moments, joint_moments);
             if (!advance.endpoint)
+                reject_advance(
+                    advance.failed_family ? inputs[*advance.failed_family].schema.population() : "joint stage",
+                    advance.status, advance.failed_event, advance.diagnostic);
+            joint_endpoint = std::move(advance.endpoint);
+            for (size_t i = 0; i < adaptive_moments.size(); ++i)
+                result.moment_changes[batches[i].phase] = std::move(adaptive_moments[i]);
+        }
+        for (size_t i = 0; i < batches.size(); ++i)
+        {
+            const auto& row = batches[i];
+            const auto p = row.phase;
+            const auto& family = *families[p];
+            QbmmPopulationAdvance advance;
+            if (!joint_endpoint)
             {
-                const auto message =
-                    "QBMM population event rejected for " + family.population() + ". " + advance.diagnostic;
-                using Status = QbmmEventStatus;
-                if (step.adaptive &&
-                    (advance.status == Status::SpeciesDonorOverdraw || advance.status == Status::CountDonorOverdraw ||
-                        advance.status == Status::UnrepresentableEndpoint ||
-                        (advance.status == Status::InconsistentEndpoint && !advance.failed_event)))
-                    throw QbmmSourceRetry(message);
-                throw std::invalid_argument(message);
+                advance = qbmm_event_detail::advance_with_raw_species(family, material, row.predecessor, row.batch,
+                    raw_material, step.adaptive ? &result.moment_changes[p] : nullptr);
+                if (!advance.endpoint)
+                    reject_advance(family.population(), advance.status, advance.failed_event, advance.diagnostic);
             }
-            auto& endpoint = *advance.endpoint;
-            for (const auto& event : endpoint.receipts)
-                for (const auto& receipt : event.transfers)
+            auto& events = joint_endpoint ? joint_endpoint->families[i].receipts : advance.endpoint->receipts;
+            const auto count = joint_endpoint ? joint_endpoint->families[i].count : advance.endpoint->count;
+            const auto shape = joint_endpoint ? joint_endpoint->families[i].shape : advance.endpoint->shape;
+            const auto& moments = joint_endpoint ? joint_moments[i] : advance.endpoint->moment_change;
+            auto& endpoint_species = joint_endpoint ? joint_endpoint->species : advance.endpoint->species;
+            for (size_t e = 0; e < events.size(); ++e)
+                for (const auto& receipt : events[e].transfers)
                 {
                     const auto& transfer = receipt.transfer;
                     const auto* counterpart = std::get_if<QbmmPhaseExchange>(&transfer.counterpart);
@@ -828,6 +961,9 @@ struct SourceEngine
                         require(slots, "QBMM paired material requires configured partial enthalpy transfer slots.");
                         const auto id = catalog.species()[s].id;
                         const auto other = phase_for(id, counterpart->phase, {});
+                        if (counterpart->resolved_pool)
+                            require(pool && other == pool->phase_index() && row.pool_event_authority[e],
+                                "QBMM gas conversion requires a declared active pool law and the designated slot.");
                         require(
                             !qbmm_bound(other), "QBMM material counterparts must be unnamed physical compartments.");
                         const MaterialTransferSlot key{
@@ -845,17 +981,22 @@ struct SourceEngine
                     }
                 }
             if (!number_changes.empty())
-                number_changes[p] = population_source_detail::narrow(endpoint.moment_change[0]);
+                number_changes[p] = population_source_detail::narrow(moments[0]);
             const auto final = std::ranges::find(
-                endpoint.species.dispersedPopulations, family.population(), &SpeciesPopulationState::id);
-            require(final != endpoint.species.dispersedPopulations.end(), "Missing constructive QBMM family endpoint.");
-            result.cells[p] =
-                Solver::QbmmSourceReceipt{std::move(endpoint.receipts), endpoint.count, std::move(final->amounts),
-                    endpoint.shape, family.fingerprint(), {endpoint.moment_change[2], endpoint.moment_change[3]}, {}};
+                endpoint_species.dispersedPopulations, family.population(), &SpeciesPopulationState::id);
+            require(final != endpoint_species.dispersedPopulations.end(), "Missing constructive QBMM family endpoint.");
+            result.cells[p] = Solver::QbmmSourceReceipt{std::move(events), count, final->amounts, shape,
+                family.fingerprint(), {moments[2], moments[3]}, {}, row.pool_law_evaluated};
         }
-        if (step.validate_only)
+        if (joint_endpoint)
+        {
+            // The joint reserve/replay owns the exact result. An expansion is retained in substep_stocks,
+            // while the legacy material view exposes its checked binary64 projection.
+            material = std::move(joint_endpoint->species);
+            raw_material = Faces::raw_amounts_from_state(material);
             return result;
-        // Replay all families together against one uncollapsed predecessor. No family can borrow another's credits.
+        }
+        // Replay all legacy families together against one uncollapsed predecessor.
         try
         {
             material = Faces::apply_raw_material(catalog, material, raw_material, result.terms);
@@ -922,6 +1063,7 @@ struct SourceEngine
         Faces::RawAmounts raw_material;
         Solver::TransportCellInventory inventory;
         std::vector<std::optional<QbmmQuadrature>> quadratures;
+        qbmm_event_detail::RawSpeciesExactStocks exact_stocks;
     };
 
     QbmmSourceStepResult advance_qbmm_source(const Solver::SourceStageContext& context, size_t c,
@@ -930,7 +1072,7 @@ struct SourceEngine
         try
         {
             auto result = apply_qbmm_step(context, c, step, caloric_guess, state.inventory, state.quadratures,
-                state.material, state.raw_material);
+                state.material, state.raw_material, {}, &state.exact_stocks);
             const auto& families = flow->options().qbmm_families;
             for (size_t p = 0; p < families.size(); ++p)
                 if (const auto& receipt = result.cells[p])
@@ -990,6 +1132,16 @@ struct SourceEngine
             stock += before;
             auto maximum_error = std::abs(full - halves);
             auto maximum_endpoint = std::max(full, halves);
+            if (const auto& pool = flow->options().qbmm_bulk_gas_pool; pool && pool->permits(id))
+            {
+                const auto resolved_stock = [&](const auto& state)
+                { return state.material.amount(catalog, id, SpeciesPhase::Resolved); };
+                stock += resolved_stock(initial);
+                const long double a = resolved_stock(coarse);
+                const long double b = resolved_stock(fine);
+                maximum_error = std::max(maximum_error, std::abs(a - b));
+                maximum_endpoint = std::max({maximum_endpoint, a, b});
+            }
             for (const auto& family : flow->options().qbmm_families)
             {
                 if (!family)
@@ -1030,7 +1182,7 @@ struct SourceEngine
     {
         const auto& transport = context.transport;
         const double dt = transport.time_step;
-        const QbmmSourceState initial{material, raw_material, transport.cells[c], qbmm.pre_material[c]};
+        const QbmmSourceState initial{material, raw_material, transport.cells[c], qbmm.pre_material[c], {}};
         require(schedule > 0 && schedule <= options.qbmm_source_maximum_substeps,
             "Invalid retained QBMM source substep schedule.");
         auto stages = schedule;
@@ -1049,8 +1201,8 @@ struct SourceEngine
         // Check the original predecessor and all applicable gates before retrying dt-dependent proposals.
         auto first_step = advancing_step(0, dt * (1. / static_cast<double>(stages)), 0);
         first_step.validate_only = true;
-        apply_qbmm_step(context, c, first_step, caloric_guess, state.inventory, state.quadratures,
-            state.material, state.raw_material);
+        apply_qbmm_step(context, c, first_step, caloric_guess, state.inventory, state.quadratures, state.material,
+            state.raw_material);
         retries = 0;
         for (;;)
         {
@@ -1089,6 +1241,7 @@ struct SourceEngine
 
         FrozenMaterialSourceTail tail;
         tail.paired_stage = accepted.front().second.tail.paired_stage;
+        tail.exact_material_reservation = accepted.front().second.tail.exact_material_reservation;
         const bool retain_thermal = tail.paired_stage ||
                                     (thermal_configuration && std::ranges::any_of(accepted,
                                         [](const auto& item) { return !item.second.tail.reservoirs.empty(); }));
@@ -1099,8 +1252,7 @@ struct SourceEngine
             auto& [duration, result] = accepted[n];
             book_qbmm_step(c, result, sums);
             if (retain_thermal)
-                tail.substeps.push_back(
-                    {std::move(result.tail.paired_amounts), std::move(result.tail.reservoirs), {}});
+                tail.substeps.push_back({std::move(result.tail.paired_amounts), std::move(result.tail.reservoirs), {}});
             for (size_t p = 0; p < cells.size(); ++p)
                 if (auto& receipt = result.cells[p])
                 {
@@ -1115,6 +1267,8 @@ struct SourceEngine
                     total.final_moles = std::move(receipt->final_moles);
                     total.final_shape = receipt->final_shape;
                     total.family_fingerprint = receipt->family_fingerprint;
+                    total.pool_conversion_law_evaluated =
+                        total.pool_conversion_law_evaluated || receipt->pool_conversion_law_evaluated;
                     auto& changes = moment_changes[p];
                     const auto& step_changes = result.moment_changes[p];
                     changes.count.append(step_changes.count);
@@ -1149,6 +1303,7 @@ struct SourceEngine
         const bool has_qbmm = !flow->options().qbmm_families.empty();
         for (size_t c = 0; c < donors.size(); ++c)
         {
+            validate_liquid_inventory(donors[c]);
             Solver::CellState guess;
             std::vector<std::vector<std::array<long double, 2>>> phase_parts;
             std::vector<std::vector<long double>> raw_energy;
@@ -1159,9 +1314,12 @@ struct SourceEngine
                 phase_parts.assign(np, std::vector<std::array<long double, 2>>(ns));
                 for (size_t p = 0; p < np; ++p)
                     for (size_t s = 0; s < ns; ++s)
-                        phase_parts[p][s] =
-                            raw_donors[c].at(Faces::raw_amount_slot(catalog, donors[c], catalog.species()[s].id,
-                                {compartment(options.phases[p], s), options.phases[p].population}));
+                        if (passive_bulk_gas(*flow, p))
+                            phase_parts[p][s] = {guess.phases[p].moles[s], 0};
+                        else
+                            phase_parts[p][s] =
+                                raw_donors[c].at(Faces::raw_amount_slot(catalog, donors[c], catalog.species()[s].id,
+                                    {compartment(options.phases[p], s), options.phases[p].population}));
                 raw_energy = sums.raw_energy(c);
                 raw_declared = sums.raw_declared(c);
             }
@@ -1169,9 +1327,24 @@ struct SourceEngine
             if (options.interphase)
             {
                 refresh_kinetic_source_closure(context, c, guess);
-                auto amounts = options.interphase->integrate(
-                    {catalog, donors[c], context.transport.cells[c], guess, context.transport.stage, c,
-                        context.transport.time_step, context.transport.accepted_time, source_location(context, c)});
+                const auto liquid = options.liquid_phase;
+                const auto& stages = options.interphase->configuration->stages;
+                const bool dry_liquid_heat = flow->options().qbmm_bulk_gas_pool &&
+                    std::ranges::none_of(guess.phases[liquid].moles, [](double moles) { return moles > 0; }) &&
+                    std::ranges::all_of(stages, [&](const auto& stage)
+                        {
+                            return stage.kind == InterphaseStageKind::Heat &&
+                                   std::ranges::all_of(stage.heat,
+                                       [&](const auto& slot) { return slot.first == liquid || slot.second == liquid; });
+                        });
+                std::vector<std::vector<double>> amounts;
+                if (dry_liquid_heat)
+                    for (const auto& stage : stages)
+                        amounts.emplace_back(stage.heat.size(), 0);
+                else
+                    amounts = options.interphase->integrate(
+                        {catalog, donors[c], context.transport.cells[c], guess, context.transport.stage, c,
+                            context.transport.time_step, context.transport.accepted_time, source_location(context, c)});
                 generic = compile_interphase_plan(options.interphase->configuration, guess.phases, std::move(amounts),
                     raw_energy, raw_declared, phase_parts);
                 for (size_t j = 0; j < generic.amounts.size(); ++j)
@@ -1190,6 +1363,7 @@ struct SourceEngine
                             gross[c].push_back(amount);
                         }
                         donors[c] = Faces::apply_raw_material(catalog, donors[c], raw_donors[c], terms);
+                        validate_liquid_inventory(donors[c]);
                     }
                     else
                         for (double amount : generic.amounts[j])
@@ -1200,8 +1374,8 @@ struct SourceEngine
                 }
                 for (size_t p = 0; p < np; ++p)
                     for (size_t s = 0; s < ns; ++s)
-                        require(donors[c].amount(catalog, catalog.species()[s].id, compartment(options.phases[p], s),
-                                    options.phases[p].population) == generic.final_moles[p][s],
+                        require(physical_material_amount(donors[c], context.transport.cells[c], p, s) ==
+                                    generic.final_moles[p][s],
                             "Raw interphase replay differs from its frozen material plan.");
             }
             if (!has_qbmm)
@@ -1213,6 +1387,7 @@ struct SourceEngine
             auto tail = schedule.empty() ? apply_qbmm(context, c, guesses[c], donors[c], raw_donors[c], sums, qbmm)
                                          : apply_qbmm_subcycled(context, c, guesses[c], donors[c], raw_donors[c], sums,
                                                qbmm, schedule[c], cell_retries);
+            validate_liquid_inventory(donors[c]);
             require(cell_retries <= std::numeric_limits<size_t>::max() - retries,
                 "QBMM source substep retry count overflows.");
             retries += cell_retries;
@@ -1241,8 +1416,7 @@ struct SourceEngine
             for (size_t p = 0; p < np; ++p)
                 for (size_t s = 0; s < ns; ++s)
                     Faces::validate_source_endpoint(0,
-                        donors[c].amount(catalog, catalog.species()[s].id, compartment(options.phases[p], s),
-                            options.phases[p].population),
+                        physical_material_amount(donors[c], context.transport.cells[c], p, s),
                         plan.final_moles[p][s]);
             thermal->cells.push_back(std::move(plan));
         }
@@ -1316,6 +1490,9 @@ struct SourceEngine
                 result.post_faces = std::move(composed.post_faces);
                 result.population_events.reserve(result.post_faces.size());
                 const auto& roles = flow->options().phase_roles;
+                const auto validate_packet = flow->options().qbmm_bulk_gas_pool
+                                                 ? source_stage_detail::validate_source_projection
+                                                 : Faces::validate_source_endpoint;
                 const auto& population_catalog = options.mechanism->catalog();
                 const bool has_qbmm = !flow->options().qbmm_families.empty();
                 result.maximum_qbmm_source_substeps = !schedule.empty() ? *std::ranges::max_element(schedule)
@@ -1344,8 +1521,8 @@ struct SourceEngine
                                     static_cast<long double>(receipt.final_shape.H2) - before.H2),
                                 population_source_detail::narrow(
                                     static_cast<long double>(receipt.final_shape.H3) - before.H3)};
-                            Faces::validate_source_endpoint(before.H2, delta.H2, receipt.final_shape.H2);
-                            Faces::validate_source_endpoint(before.H3, delta.H3, receipt.final_shape.H3);
+                            validate_packet(before.H2, delta.H2, receipt.final_shape.H2);
+                            validate_packet(before.H3, delta.H3, receipt.final_shape.H3);
                             source.qbmm_shape_changes[p] = delta;
                             guess.phase_numbers[p] = receipt.final_count;
                             guess.qbmm_shape[p] = receipt.final_shape;
@@ -1387,7 +1564,7 @@ struct SourceEngine
                             continue;
                         const auto& receipt = *result.result.qbmm_cells[c][p];
                         source.population_number_changes[p] = qbmm.number_changes[c][p];
-                        Faces::validate_source_endpoint(*transported.phases[p].population_number,
+                        validate_packet(*transported.phases[p].population_number,
                             source.population_number_changes[p], receipt.final_count);
                     }
                     result.population_events.push_back(std::move(number));
@@ -1402,9 +1579,13 @@ struct SourceEngine
                     for (size_t p = 0; p < options.phases.size(); ++p)
                         for (size_t s = 0; s < catalog.species().size(); ++s)
                         {
-                            const auto actual = result.post_faces[c].amount(catalog, catalog.species()[s].id,
-                                compartment(options.phases[p], s), options.phases[p].population);
-                            Faces::validate_source_endpoint(context.transport.cells[c].phases[p].moles.at(s),
+                            const auto actual = physical_material_amount(
+                                result.post_faces[c], context.transport.cells[c], p, s);
+                            const auto validate_material =
+                                flow->options().qbmm_bulk_gas_pool && (qbmm_bound(p) || result.result.thermal_receipt)
+                                    ? source_stage_detail::validate_source_projection
+                                    : Faces::validate_source_endpoint;
+                            validate_material(context.transport.cells[c].phases[p].moles.at(s),
                                 result.result.sources[c].species_moles.at(p).at(s), actual);
                         }
             });
@@ -1628,8 +1809,9 @@ struct ReactingMixtureCoupler::Implementation
                         "Population provider needs explicit immutable identity/revision/schema and a pure local law.");
                 }
                 std::set<std::tuple<SpeciesId, SpeciesPhase, std::string>> mapped;
-                for (const auto& phase : options.phases)
+                for (size_t p = 0; p < options.phases.size(); ++p)
                 {
+                    const auto& phase = options.phases[p];
                     require(static_cast<size_t>(phase.phase) < static_cast<size_t>(SpeciesPhase::Count) &&
                                 (phase.species_phases.empty() || phase.species_phases.size() == ns) &&
                                 (phase.population.empty() || phase.phase == SpeciesPhase::Dispersed),
@@ -1642,8 +1824,9 @@ struct ReactingMixtureCoupler::Implementation
                                          (target == SpeciesPhase::Liquid || target == SpeciesPhase::Dissolved)) ||
                                         target == phase.phase),
                             "Physical liquid may contain liquid and dissolved inventories only.");
-                        require(mapped.emplace(catalog.species()[i].id, target, phase.population).second,
-                            "A chemical compartment cannot belong to two physical phases.");
+                        if (!passive_bulk_gas(*flow, p))
+                            require(mapped.emplace(catalog.species()[i].id, target, phase.population).second,
+                                "A chemical compartment cannot belong to two physical phases.");
                     }
                 }
                 require(options.phases[options.liquid_phase].phase == SpeciesPhase::Liquid,
@@ -1833,6 +2016,8 @@ struct ReactingMixtureCoupler::Implementation
                         signature << ":balanced-linear-pressure:" << Solver::balanced_linear_pressure_revision
                                   << ":forced-linear-thermal:" << Solver::forced_linear_thermal_revision;
                 }
+                if (const auto& pool = flow->options().qbmm_bulk_gas_pool)
+                    signature << ":qbmm-bulk-gas-conversion-v1:" << pool->fingerprint();
                 signature << ":qbmm:" << bool(options.qbmm_population);
                 if (options.qbmm_population)
                 {
@@ -1891,8 +2076,9 @@ struct ReactingMixtureCoupler::Implementation
                         std::shared_ptr<const SpeciesCatalog>(options.mechanism, &options.mechanism->catalog());
                     bindings.resize(options.phases.size());
                     for (size_t p = 0; p < options.phases.size(); ++p)
-                        for (size_t s = 0; s < options.mechanism->catalog().species().size(); ++s)
-                            bindings[p].push_back({compartment(options.phases[p], s), options.phases[p].population});
+                        if (!passive_bulk_gas(*flow, p))
+                            for (size_t s = 0; s < catalog_alias->species().size(); ++s)
+                                bindings[p].push_back({compartment(options.phases[p], s), options.phases[p].population});
                 });
             // Collective constructors run only after all phase/source/ordered-stage metadata agrees.
             const auto* cylinder = std::get_if<Solver::Mesh::CylindricalPtr>(&mesh.variant());
@@ -1914,7 +2100,8 @@ struct ReactingMixtureCoupler::Implementation
                     flow->mesh(), catalog_alias, std::move(prepared_options), std::move(prepared_bindings),
                     flow->options().thermal_mode,
                     fixed_kinetic_seam && face.fourier && !face.diffusion ? Faces::FaceTopology::ClosedAzimuthalFourier
-                                                                          : Faces::FaceTopology::NonPeriodic);
+                                                                          : Faces::FaceTopology::NonPeriodic,
+                    flow->options().qbmm_bulk_gas_pool && face.physical_phase == options.liquid_phase);
                 // Aliasing does not allocate; the reserved vector preserves this exact immutable stage association.
                 engine->face_stages.emplace_back(storage, storage->value);
             }
@@ -1929,7 +2116,8 @@ struct ReactingMixtureCoupler::Implementation
                 Solver::PlanarMotion(options.planar_motion->mesh, options.planar_motion->options);
             motion = std::shared_ptr<Solver::PlanarMotion>(storage, storage->value);
         }
-        const bool legacy_compatible = !options.planar_motion && !options.body_acceleration &&
+        const bool legacy_compatible =
+            !flow->options().qbmm_bulk_gas_pool && !options.planar_motion && !options.body_acceleration &&
             options.qbmm_source_substep_relative_tolerance == 0 &&
             (!options.qbmm_population ||
                 (options.qbmm_population->laws.empty() && !options.qbmm_population->evaluate_joint)) &&
@@ -2200,6 +2388,9 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
                                   d->options.qbmm_population->metadata.identity + ":" +
                                   std::to_string(d->options.qbmm_population->metadata.revision))
                             : std::string{}) +
+                    (d->flow->options().qbmm_bulk_gas_pool
+                            ? (":qbmm-pool:" + std::to_string(d->flow->options().qbmm_bulk_gas_pool->fingerprint()))
+                            : std::string{}) +
                     (d->options.planar_motion
                             ? (":motion:" + std::to_string(d->options.planar_motion->identity.size()) + ":" +
                                   d->options.planar_motion->identity + ":" +
@@ -2268,7 +2459,12 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
             require(events.size() == supplied.size(), "Reaction receipt gross cell layout differs.");
             const auto enabled = std::ranges::count_if(
                 d->flow->options().qbmm_families, [](const auto& family) { return bool(family); });
-            const auto native_width = Solver::QbmmSourceReceipt::gross_channels * static_cast<size_t>(enabled);
+            const auto pool_width =
+                d->flow->options().qbmm_bulk_gas_pool
+                    ? Solver::qbmm_pool_gross_width(d->options.mechanism->catalog().species().size())
+                    : 0;
+            const auto native_width =
+                Solver::QbmmSourceReceipt::gross_channels * static_cast<size_t>(enabled) + pool_width;
             for (size_t c = 0; c < events.size(); ++c)
                 require(events[c].size() == supplied[c].size() + native_width &&
                             std::ranges::equal(std::span(events[c]).first(supplied[c].size()), supplied[c]),
@@ -2373,7 +2569,8 @@ void ReactingMixtureCoupler::restore(const Checkpoint& checkpoint)
 
 std::vector<std::byte> ReactingMixtureCoupler::serialize_qbmm_restart() const
 {
-    if (!d->motion && !uses_qbmm_explicit_transport(d->flow->options().qbmm_model))
+    if (!d->motion && !d->flow->options().qbmm_model.bulk_gas_conversion &&
+        !uses_qbmm_explicit_transport(d->flow->options().qbmm_model))
         return d->flow->serialize_qbmm_restart();
     const auto* target = d->options.planar_motion.get();
     const Solver::ControllerRestartDiagnostics diagnostics{d->options.mechanism->reactions().size(), &d->diagnostics};
@@ -2389,8 +2586,14 @@ void ReactingMixtureCoupler::restore_qbmm_restart(std::span<const std::byte> pay
         "Reacting mixture controller generation exhausted.");
     Diagnostics restored;
     const auto* target = d->options.planar_motion.get();
-    const Solver::ControllerRestartDiagnostics diagnostics{
-        d->options.mechanism->reactions().size(), nullptr, &restored};
+    const Solver::ControllerRestartDiagnostics diagnostics{d->options.mechanism->reactions().size(), nullptr,
+        &restored, d->source_engine.get(),
+        [](const void* context, const Solver::State& candidate)
+        {
+            const auto& engine = *static_cast<const SourceEngine*>(context);
+            for (const auto& cell : candidate.cells)
+                (void) engine.species(cell);
+        }};
     d->flow->restore_qbmm_restart_impl(payload, d->motion.get(), target ? std::string_view(target->identity) : "",
         target ? target->revision : 0, &*d->lease, &diagnostics);
     d->diagnostics = std::move(restored);

@@ -84,6 +84,7 @@ struct FrozenMaterialSourceTail
     std::vector<std::vector<double>> paired_amounts; ///< Original nonnegative packets by configured slot.
     std::vector<ReservoirExchange> reservoirs;
     std::vector<Substep> substeps; ///< Chronological alternatives to the single raw tail.
+    bool exact_material_reservation = false;
 };
 struct FrozenInterphasePlan
 {

@@ -209,6 +209,21 @@ class SIMPLEFLUID_EQUATIONS_LOCAL ScaledFaceSum
     }
 
 public:
+    /** Append exact (significand, exponent) pairs for an owner reduction. */
+    void append_scaled_terms(std::vector<double>& values) const
+    {
+        for (const auto term : d_lower)
+        {
+            values.push_back(term.fraction);
+            values.push_back(term.exponent);
+        }
+        if (d_top.fraction != 0)
+        {
+            values.push_back(d_top.fraction);
+            values.push_back(d_top.exponent);
+        }
+    }
+
     // Admit a finite significand whose binary64 value may require multiplication
     // by another operand before it can be stored as a double.
     void add_scaled_value(double fraction, int exponent)
@@ -216,6 +231,21 @@ public:
         auto term = operand(fraction);
         term.exponent += exponent;
         add(term);
+    }
+
+    /** Import each significand component of a host raw stock before rounding to binary64. */
+    void add_unrounded_value(long double value)
+    {
+        if (!std::isfinite(value))
+            throw std::invalid_argument("Nonfinite QBMM stock operand.");
+        int exponent;
+        auto fraction = std::frexp(value, &exponent);
+        while (fraction != 0)
+        {
+            const auto leading = static_cast<double>(fraction);
+            add_scaled_value(leading, exponent);
+            fraction -= leading;
+        }
     }
 
     [[nodiscard]] int sign() const noexcept { return (d_top.fraction > 0) - (d_top.fraction < 0); }

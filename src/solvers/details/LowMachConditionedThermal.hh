@@ -57,7 +57,8 @@ SIMPLEFLUID_SOLVERS_LOCAL inline std::string signature(const InterphaseConfigura
     return out.str();
 }
 SIMPLEFLUID_SOLVERS_LOCAL inline void validate_batch(const PressureConditionedThermalBatch& batch,
-    const Flow::SourceStageContext& context, std::span<const Flow::CellSources> sources)
+    const Flow::SourceStageContext& context, std::span<const Flow::CellSources> sources,
+    bool authoritative_material = false)
 {
     using source_stage_detail::require;
     require(batch.configuration && batch.source == identity(context.transport) &&
@@ -105,6 +106,12 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_batch(const PressureConditionedTh
             for (size_t i = 0; i < plan.final_moles[a].size(); ++i)
             {
                 const auto before = context.transport.cells[c].phases[a].moles[i];
+                if (authoritative_material)
+                {
+                    source_stage_detail::validate_source_projection(before,
+                        source_stage_detail::species_packet(sources, c, a, i), plan.final_moles[a][i]);
+                    continue;
+                }
                 const double actual = before + source_stage_detail::species_packet(sources, c, a, i),
                              expected = plan.final_moles[a][i];
                 const long double scale =

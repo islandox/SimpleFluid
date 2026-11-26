@@ -12,5 +12,7 @@ struct LowMachMixtureSolver::ControllerRestartDiagnostics
     size_t reaction_count = 0;
     const ReactingMixtureCoupler::Diagnostics* saved = nullptr;
     ReactingMixtureCoupler::Diagnostics* restored = nullptr;
+    const void* source_context = nullptr;
+    void (*validate_pool_state)(const void*, const State&) = nullptr;
 };
 } // namespace SimpleFluid::Reacting

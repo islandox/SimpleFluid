@@ -2,6 +2,8 @@
  * @brief Private validation of native QBMM phase bindings and canonical stock.
  */
 #pragma once
+#include "equations/QbmmBulkGasPool.hh"
+#include "equations/details/LowMachScaledFaceSum.hh"
 #include "solvers/LowMachMixtureSolver.hh"
 #include "solvers/details/LowMachQbmmExplicitTransport.hh"
 #include "solvers/details/LowMachSourceStage.hh"
@@ -42,6 +44,17 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_configuration(
     const auto& model = options.qbmm_model;
     const bool kinetic = uses_qbmm_kinetic_transport(model);
     const bool linear = uses_qbmm_linear_transport(model);
+    const auto& pool = options.qbmm_bulk_gas_pool;
+    require(model.bulk_gas_conversion == bool(pool), "QBMM pool conversion requires exactly one explicit pool binding.");
+    if (pool)
+    {
+        const auto p = pool->phase_index();
+        require(families.size() == eos.size() && options.phase_roles.size() == eos.size() && p < eos.size() &&
+                    !families[p] && options.phase_roles[p].role == Flow::PhaseRole::BulkGas &&
+                    options.phase_roles[p].identity == pool->phase_identity() &&
+                    eos[p]->kind() == EOSKind::Gas && pool->catalog().fingerprint() == catalog,
+            "QBMM pool must bind its designated unbound BulkGas phase and EOS catalog.");
+    }
     require(model.transport.mode == FVM::AssemblyMode::Transient &&
                 model.transport.time == FVM::ScalarTimeScheme::BackwardEuler &&
                 model.transport.convection == FVM::ScalarConvectionScheme::Upwind,
@@ -75,8 +88,8 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_configuration(
                     eos[a]->catalog().fingerprint() == family->catalog().fingerprint(),
             "A native QBMM family must bind to its named dispersed-gas EOS phase and ordered catalog.");
         const auto& declared = family->closure_versions().laws;
-        require(std::ranges::none_of(declared, qbmm_uses_bulk_gas_pool),
-            "QBMM BulkGas pool law contracts are available only in the pure event kernel.");
+        require(pool || std::ranges::none_of(declared, qbmm_uses_bulk_gas_pool),
+            "QBMM BulkGas pool law contracts require an enabled pool binding.");
         const auto node_law_count = std::ranges::count(declared, QbmmLawKind::NodeSlip, &QbmmLawMetadata::kind);
         require(kinetic ? node_law_count == 1 && node_laws[a]->metadata.kind == QbmmLawKind::NodeSlip &&
                               family->declares_law(node_laws[a]->metadata) && bool(node_laws[a]->evaluate) &&
@@ -106,7 +119,10 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_capability(const Flow::Options& o
                 (model.family_transport == QbmmModelOptions::FamilyTransport::NativeImplicit &&
                     (model.velocity == Velocity::SharedCarrier || model.velocity == Velocity::SuppliedPhaseSlip)),
         "Native QBMM requires a compatible family integrator and velocity mode.");
-    require(!model.bulk_gas_conversion, "Runtime QBMM BulkGas conversion is deferred to Phase Q9b.");
+    require(!model.bulk_gas_conversion ||
+                (!moving && !force && model.family_transport == QbmmModelOptions::FamilyTransport::NativeImplicit &&
+                    model.velocity == Velocity::SharedCarrier),
+        "QBMM BulkGas conversion requires fixed NativeImplicit SharedCarrier without supplied acceleration.");
     require(!model.variable_composition && !model.cross_family_coalescence,
         "Native QBMM requires fixed family composition and within-family population events.");
     require(!model.capillarity && !model.independent_node_temperatures,
@@ -227,6 +243,17 @@ SIMPLEFLUID_SOLVERS_LOCAL inline std::vector<std::optional<InversionStatus>> val
         const auto& family = families[a];
         const auto& shape = cell.qbmm_shape[a];
         require(bool(shape) == bool(family), "Native QBMM requires shape precisely for each bound family.");
+        const auto& pool = options.qbmm_bulk_gas_pool;
+        if (pool && a == pool->phase_index())
+        {
+            const auto& moles = cell.phases[a].moles;
+            const auto& species = pool->catalog().species();
+            require(!cell.phase_numbers[a] && moles.size() == species.size(),
+                "QBMM BulkGas pool carries only catalogued material.");
+            for (size_t s = 0; s < species.size(); ++s)
+                require(std::isfinite(moles[s]) && moles[s] >= 0 && (moles[s] == 0 || pool->permits(species[s].id)),
+                    "QBMM BulkGas pool contains invalid or unbound species stock.");
+        }
         if (!family)
             continue;
         const auto& number = cell.phase_numbers[a];
@@ -367,17 +394,24 @@ struct SourceReceiptGross
     }
 };
 
-struct SourceReceiptReplay
+struct SIMPLEFLUID_SOLVERS_LOCAL SourceReceiptReplay
 {
+    using ExactStock = qbmm_face_detail::ScaledFaceSum;
     SourceReceiptGross gross;
     std::vector<SourceReceiptSum> species_changes, species_stocks;
+    std::vector<ExactStock> exact_changes, exact_stocks;
     std::array<SourceReceiptSum, 2> event_shape_change;
 
-    explicit SourceReceiptReplay(std::span<const double> moles)
-        : species_changes(moles.size()), species_stocks(moles.size())
+    explicit SourceReceiptReplay(std::span<const double> moles, bool exact = false)
+        : species_changes(moles.size()), species_stocks(moles.size()),
+          exact_changes(exact ? moles.size() : 0), exact_stocks(exact ? moles.size() : 0)
     {
         for (size_t s = 0; s < moles.size(); ++s)
+        {
             species_stocks[s] += moles[s];
+            if (exact)
+                exact_stocks[s].add_scaled_value(moles[s], 0);
+        }
     }
 };
 
@@ -468,13 +502,26 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void replay_source_event_moments(
 }
 
 SIMPLEFLUID_SOLVERS_LOCAL inline void validate_source_transfer(
-    const QbmmMaterialTransfer& transfer, const QbmmPopulationSchema& family)
+    const QbmmMaterialTransferReceipt& allocation, const QbmmPopulationSchema& family, QbmmEventKind kind,
+    const QbmmBulkGasPoolBinding* pool)
 {
+    const auto& transfer = allocation.transfer;
     if (const auto* phase = std::get_if<QbmmPhaseExchange>(&transfer.counterpart))
     {
         require(static_cast<size_t>(phase->phase) < static_cast<size_t>(SpeciesPhase::Count),
             "QBMM receipt specifies an invalid phase counterpart.");
-        require(!phase->resolved_pool, "Runtime QBMM receipts cannot bind a BulkGas pool.");
+        if (phase->phase == SpeciesPhase::Resolved)
+        {
+            const auto direction = allocation.into_family ? QbmmPoolConversionDirection::PoolToDispersed
+                                                          : QbmmPoolConversionDirection::DispersedToPool;
+            require(pool && phase->resolved_pool && phase->resolved_pool->pool_fingerprint == pool->fingerprint() &&
+                        phase->resolved_pool->direction == direction &&
+                        kind == (allocation.into_family ? QbmmEventKind::Birth : QbmmEventKind::Disappearance),
+                "Runtime QBMM Resolved exchanges require an authorized pool birth or disappearance.");
+            pool->validate_family(family, direction);
+        }
+        else
+            require(!phase->resolved_pool, "Pool conversion stamp requires a Resolved exchange.");
         const auto& catalog = family.catalog();
         for (size_t s = 0; s < transfer.moles.size(); ++s)
             require(transfer.moles[s] == 0 || catalog.allows(catalog.species()[s].id, phase->phase),
@@ -493,7 +540,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_source_transfer(
 SIMPLEFLUID_SOLVERS_LOCAL inline SourceReceiptSum replay_source_substep(const QbmmPopulationSchema& family,
     std::uint64_t catalog, SourceReceiptEndpoint initial, SourceReceiptEndpoint final,
     std::span<const QbmmEventReceipt> events, std::uint64_t substep, double duration, SourceReceiptReplay& replay,
-    bool substepped)
+    bool substepped, const QbmmBulkGasPoolBinding* pool = nullptr)
 {
     if (events.empty())
     {
@@ -507,13 +554,20 @@ SIMPLEFLUID_SOLVERS_LOCAL inline SourceReceiptSum replay_source_substep(const Qb
         family, {family.population(), catalog, initial.moles, initial.count, initial.shape, family.fingerprint()}));
     require(pre.valid(), "QBMM source receipt predecessor has no supported quadrature.");
     std::array<SourceReceiptSum, 2> remaining;
+    std::array<SourceReceiptReplay::ExactStock, 2> exact_remaining;
     std::array<SourceReceiptSum, 2> shape_changes;
     SourceReceiptSum count, represented_count, H1, H2, H3;
+    SourceReceiptReplay::ExactStock exact_count;
     if (substepped)
         count += initial.count;
     auto margins = substepped ? replay.species_stocks : std::vector<SourceReceiptSum>{};
+    auto exact_margins = replay.exact_stocks;
     for (size_t i = 0; i < pre.active_atoms; ++i)
+    {
         remaining[i] += pre.atoms[i].count;
+        if (pool)
+            exact_remaining[i].add_scaled_value(pre.atoms[i].count, 0);
+    }
     for (const auto& event : events)
     {
         require(event.population == family.population() && event.family_fingerprint == family.fingerprint() &&
@@ -530,7 +584,13 @@ SIMPLEFLUID_SOLVERS_LOCAL inline SourceReceiptSum replay_source_substep(const Qb
                         std::isfinite(donor.atom.count) && donor.atom.count > 0,
                 "QBMM event donor differs from the substep predecessor quadrature.");
             remaining[donor.index] += -static_cast<long double>(donor.atom.count);
-            require(remaining[donor.index].value() >= 0, "QBMM source overdraws an original donor count.");
+            if (pool)
+            {
+                exact_remaining[donor.index].add_scaled_value(-donor.atom.count, 0);
+                exact_count.add_scaled_value(-donor.atom.count, 0);
+            }
+            require(pool ? exact_remaining[donor.index].sign() >= 0 : remaining[donor.index].value() >= 0,
+                "QBMM source overdraws an original donor count.");
             count += -static_cast<long double>(donor.atom.count);
         }
         for (const auto& product : event.products)
@@ -539,6 +599,8 @@ SIMPLEFLUID_SOLVERS_LOCAL inline SourceReceiptSum replay_source_substep(const Qb
                         product.mass_over_scale > 0,
                 "QBMM event product requires finite positive count and size.");
             count += product.count;
+            if (pool)
+                exact_count.add_scaled_value(product.count, 0);
             if (!substepped)
                 represented_count += product.count;
             const auto mass = static_cast<long double>(product.count) * product.mass_over_scale;
@@ -557,7 +619,18 @@ SIMPLEFLUID_SOLVERS_LOCAL inline SourceReceiptSum replay_source_substep(const Qb
                 require(std::isfinite(moles[s]) && moles[s] >= 0, "QBMM event material transfer is invalid.");
                 const long double change = allocation.into_family ? moles[s] : -static_cast<long double>(moles[s]);
                 replay.species_changes[s] += change;
-                if (substepped)
+                if (pool)
+                {
+                    const double signed_amount = allocation.into_family ? moles[s] : -moles[s];
+                    replay.exact_changes[s].add_scaled_value(signed_amount, 0);
+                    replay.exact_stocks[s].add_scaled_value(signed_amount, 0);
+                    if (signed_amount < 0)
+                    {
+                        exact_margins[s].add_scaled_value(signed_amount, 0);
+                        require(exact_margins[s].sign() >= 0, "QBMM source overdraws original family species.");
+                    }
+                }
+                else if (substepped)
                 {
                     replay.species_stocks[s] += change;
                     if (change < 0)
@@ -568,9 +641,9 @@ SIMPLEFLUID_SOLVERS_LOCAL inline SourceReceiptSum replay_source_substep(const Qb
                     }
                 }
             }
-            if (substepped)
+            if (substepped || pool)
             {
-                validate_source_transfer(allocation.transfer, family);
+                validate_source_transfer(allocation, family, event.kind, pool);
                 const auto mass = family.scaled_mass(moles);
                 require(mass > 0, "QBMM event material transfer must have positive mass.");
                 material_change += allocation.into_family ? mass : -static_cast<long double>(mass);
@@ -589,8 +662,9 @@ SIMPLEFLUID_SOLVERS_LOCAL inline SourceReceiptSum replay_source_substep(const Qb
     for (size_t i = 0; i < pre.active_atoms; ++i)
     {
         const long double size = pre.atoms[i].mass_over_scale;
-        represented_count += substepped ? static_cast<double>(remaining[i].value()) : remaining[i].value();
-        const auto mass = remaining[i].value() * size;
+        const long double retained = pool ? exact_remaining[i].rounded() : remaining[i].value();
+        represented_count += substepped ? static_cast<double>(retained) : retained;
+        const auto mass = retained * size;
         H1 += mass;
         const auto sized = mass * size;
         H2 += sized;
@@ -607,7 +681,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline SourceReceiptSum replay_source_substep(const Qb
                 represented_count += product.count;
         for (size_t s = 0; s < final.moles.size(); ++s)
         {
-            const auto stock = replay.species_stocks[s].value();
+            const long double stock = pool ? replay.exact_stocks[s].rounded() : replay.species_stocks[s].value();
             require(std::isfinite(stock) && stock >= 0 && static_cast<double>(stock) == final.moles[s] &&
                         (stock == 0) == (final.moles[s] == 0),
                 "QBMM substep species endpoint differs from the sequential raw transfers.");
@@ -622,6 +696,18 @@ SIMPLEFLUID_SOLVERS_LOCAL inline SourceReceiptSum replay_source_substep(const Qb
             replay.event_shape_change[k].append(shape_changes[k]);
     }
     const bool depleted = represented_count.value() < .5L * initial.count;
+    if (pool && !depleted)
+    {
+        SourceReceiptSum change;
+        const double high = exact_count.rounded();
+        change += high;
+        exact_count.add_scaled_value(-high, 0);
+        change += exact_count.rounded();
+        exact_count.add_scaled_value(high, 0);
+        exact_count.add_scaled_value(initial.count, 0);
+        validate_raw_value(final.count, exact_count.rounded(), "QBMM constructive count disagrees with raw atoms.");
+        return change;
+    }
     if (substepped)
     {
         // Keep the compensated accumulator through the subtraction, including changes below the stored count's ULP.
@@ -646,7 +732,8 @@ SIMPLEFLUID_SOLVERS_LOCAL inline SourceReceiptSum replay_source_substep(const Qb
 
 /** Check the constructive Q1 endpoints against the transport predecessor and integrated packets. */
 SIMPLEFLUID_SOLVERS_LOCAL inline void validate_source_receipt(const QbmmPopulationSchema& family,
-    const Flow::TransportSnapshot& transport, Flow::SourceStageResult& result, size_t c, size_t a)
+    const Flow::TransportSnapshot& transport, Flow::SourceStageResult& result, size_t c, size_t a,
+    const QbmmBulkGasPoolBinding* pool)
 {
     using source_stage_detail::number_packet;
     using source_stage_detail::shape_packet;
@@ -663,19 +750,20 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_source_receipt(const QbmmPopulati
     const SourceReceiptEndpoint final{receipt.final_moles, receipt.final_count, receipt.final_shape};
     const auto number_change = number_packet(result.sources, c, a);
     const auto shape_change = shape_packet(result.sources, c, a);
-    validate_source_endpoint(initial.count, number_change, final.count);
-    validate_source_endpoint(initial.shape.H2, shape_change.H2, final.shape.H2);
-    validate_source_endpoint(initial.shape.H3, shape_change.H3, final.shape.H3);
+    const auto validate_packet = pool ? source_stage_detail::validate_source_projection : validate_source_endpoint;
+    validate_packet(initial.count, number_change, final.count);
+    validate_packet(initial.shape.H2, shape_change.H2, final.shape.H2);
+    validate_packet(initial.shape.H3, shape_change.H3, final.shape.H3);
     validate_raw_value(shape_change.H2, static_cast<long double>(final.shape.H2) - initial.shape.H2,
         "QBMM signed H2 packet disagrees with the constructive delta.");
     validate_raw_value(shape_change.H3, static_cast<long double>(final.shape.H3) - initial.shape.H3,
         "QBMM signed H3 packet disagrees with the constructive delta.");
 
-    SourceReceiptReplay replay(initial.moles);
+    SourceReceiptReplay replay(initial.moles, pool != nullptr);
     if (receipt.substeps.empty())
     {
         const auto change = replay_source_substep(family, transport.schema_fingerprint, initial, final, receipt.events,
-            0, transport.time_step, replay, false);
+            0, transport.time_step, replay, false, pool);
         validate_raw_value(number_change, change.value(),
             "QBMM signed count packet disagrees with the raw event receipt.");
     }
@@ -696,7 +784,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_source_receipt(const QbmmPopulati
                 "QBMM source substep chronology, duration or inventory layout differs.");
             const SourceReceiptEndpoint endpoint{stage.final_moles, stage.final_count, stage.final_shape};
             count_change.append(replay_source_substep(family, transport.schema_fingerprint, previous, endpoint,
-                events.subspan(begin, stage.event_end - begin), stage.substep, stage.duration, replay, true));
+                events.subspan(begin, stage.event_end - begin), stage.substep, stage.duration, replay, true, pool));
             previous = endpoint;
             elapsed = end;
             begin = stage.event_end;
@@ -715,13 +803,14 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_source_receipt(const QbmmPopulati
     {
         auto change = replay.species_changes[s];
         const auto packet = species_packet(result.sources, c, a, s);
-        validate_source_endpoint(initial.moles[s], packet, final.moles[s]);
-        validate_raw_value(packet, change.value(), "QBMM signed species packet disagrees with raw transfers.");
+        validate_packet(initial.moles[s], packet, final.moles[s]);
+        const long double raw = pool ? replay.exact_changes[s].rounded() : change.value();
+        validate_raw_value(packet, raw, "QBMM signed species packet disagrees with raw transfers.");
         if (receipt.substeps.empty())
         {
             change += initial.moles[s];
-            validate_raw_value(
-                final.moles[s], change.value(), "QBMM constructive species disagrees with raw transfers.");
+            const long double stock = pool ? replay.exact_stocks[s].rounded() : change.value();
+            validate_raw_value(final.moles[s], stock, "QBMM constructive species disagrees with raw transfers.");
         }
     }
     // Per-family gross layout stays fixed through rank changes, empty states and changes of event kind.
@@ -759,7 +848,7 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_source_receipts(
                 require(!substeps || *substeps == receipt->substeps.size(),
                     "QBMM source substep schedule differs across families in this cell.");
                 substeps = receipt->substeps.size();
-                validate_source_receipt(*family, transport, result, c, a);
+                validate_source_receipt(*family, transport, result, c, a, options.qbmm_bulk_gas_pool.get());
             }
         }
     }

@@ -37,6 +37,19 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_source_endpoint(double transporte
                 std::isfinite(error.value()) && std::isfinite(bound) && std::abs(error.value()) <= bound,
         "Rounded source packet cannot replay its actual sequential endpoint.");
 }
+/** Check the binary64 net projection of an independently replayed material endpoint. */
+SIMPLEFLUID_SOLVERS_LOCAL inline void validate_source_projection(double transported, double packet, double endpoint)
+{
+    SimpleFluid::detail::CompensatedSum<long double> error;
+    error += transported;
+    error += packet;
+    error += -static_cast<long double>(endpoint);
+    const auto bound = 64 * std::numeric_limits<double>::epsilon() *
+                       std::max({std::abs(transported), std::abs(packet), std::abs(endpoint)});
+    require(std::isfinite(transported) && transported >= 0 && std::isfinite(packet) &&
+                std::isfinite(endpoint) && endpoint >= 0 && std::abs(error.value()) <= bound,
+        "Rounded source packet differs from the authoritative material endpoint.");
+}
 SIMPLEFLUID_SOLVERS_LOCAL inline long double mass(std::span<const double> moles, const SpeciesCatalog& catalog)
 {
     long double total = 0;

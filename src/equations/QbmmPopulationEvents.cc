@@ -1,7 +1,6 @@
 #include "equations/details/QbmmPopulationEvents.hh"
 
 #include "equations/QbmmBulkGasPool.hh"
-#include "equations/details/LowMachScaledFaceSum.hh"
 #include "utils/CompensatedSum.hh"
 
 #include <algorithm>
@@ -27,6 +26,7 @@ struct JointStocks
     std::vector<ExactStock> original_remaining, credits;
     const QbmmBulkGasPoolBinding* pool;
     CellSpeciesState& proposed;
+    qbmm_event_detail::RawSpeciesExactStocks* exact;
 };
 
 struct Rejection
@@ -83,6 +83,14 @@ double narrow_nonnegative(long double value)
     require(value >= 0 && (value == 0 || narrowed > 0) && close(value, narrowed), Status::UnrepresentableEndpoint,
         "QBMM endpoint or product cannot be represented as a nonnegative stock.");
     return narrowed;
+}
+
+double narrow_exact_stock(const ExactStock& stock)
+{
+    const double rounded = stock.rounded();
+    require(stock.sign() >= 0 && (stock.sign() == 0 || rounded > 0), Status::UnrepresentableEndpoint,
+        "QBMM exact species stock cannot be represented as a nonnegative endpoint.");
+    return narrow_nonnegative(rounded);
 }
 
 QbmmEventMoments atom_moments(long double count, double mass_over_scale)
@@ -499,8 +507,13 @@ QbmmPopulationAdvance advance_population(const QbmmPopulationSchema& schema, con
         if (joint)
         {
             joint_family.resize(family->amounts.size());
+            const auto offset =
+                initial.amounts.size() + (family - initial.dispersedPopulations.begin()) * joint_family.size();
             for (std::size_t s = 0; s < joint_family.size(); ++s)
-                joint_family[s].add_scaled_value(family->amounts[s], 0);
+                if (joint->exact)
+                    joint_family[s] = (*joint->exact)[offset + s];
+                else
+                    joint_family[s].add_scaled_value(family->amounts[s], 0);
         }
         for (std::size_t i = 0; i < pre.active_atoms; ++i)
             if (joint)
@@ -621,13 +634,30 @@ QbmmPopulationAdvance advance_population(const QbmmPopulationSchema& schema, con
         // Subtracting rounded reconstructed donors from H0 can otherwise leave
         // the initial inversion residual larger than the entire surviving stock.
         // For small changes keep the compensated signed update from canonical H0.
+        Sum count_change;
         if (measure[0].value() < .5L * pre_cell.number)
+        {
             next_count = measure[0];
+            count_change = next_count;
+            count_change += -pre_cell.number;
+        }
         else if (joint)
+        {
             next_count += count_value(joint_next_count);
+            // Subtract in the expansion before rounding. A resulting net change can be
+            // representable even when adding it to the original count rounds away.
+            add_count(joint_next_count, -pre_cell.number);
+            const auto high = count_value(joint_next_count);
+            count_change += high;
+            add_count(joint_next_count, -high);
+            count_change += count_value(joint_next_count);
+        }
+        else
+        {
+            count_change = next_count;
+            count_change += -pre_cell.number;
+        }
         next.moment_change = finite_values(changes);
-        auto count_change = next_count;
-        count_change += -pre_cell.number;
         next.moment_change[0] = count_change.value();
         next.gross_consumed = finite_values(consumed);
         next.gross_created = finite_values(created);
@@ -647,8 +677,8 @@ QbmmPopulationAdvance advance_population(const QbmmPopulationSchema& schema, con
             for (std::size_t i = 0; i < next.species.amounts.size(); ++i)
                 next.species.amounts[i] = narrow_nonnegative(stocks[i].value());
         for (std::size_t s = 0; s < next_family.size(); ++s)
-            next_family[s] =
-                narrow_nonnegative(joint ? joint_family[s].rounded() : stocks[family_offset + s].value());
+            next_family[s] = joint ? narrow_exact_stock(joint_family[s])
+                                   : narrow_nonnegative(stocks[family_offset + s].value());
         const QbmmCellView post_cell{schema.population(), next_species.schemaFingerprint, next_family, next.count,
             next.shape, next.family_fingerprint};
         const auto post = cell_moments(schema, post_cell, Status::InconsistentEndpoint);
@@ -664,6 +694,12 @@ QbmmPopulationAdvance advance_population(const QbmmPopulationSchema& schema, con
                 std::nullopt};
         if (adaptive_changes)
             *adaptive_changes = {count_change, {changes[2], changes[3]}};
+        if (joint && joint->exact)
+        {
+            const auto offset = initial.amounts.size() +
+                                (family - initial.dispersedPopulations.begin()) * joint_family.size();
+            std::ranges::move(joint_family, joint->exact->begin() + offset);
+        }
         return {Status::Accepted, std::move(next), std::nullopt, {}, std::nullopt};
     }
     catch (const Rejection& error)
@@ -684,8 +720,13 @@ QbmmPopulationAdvance advance_qbmm_population(const QbmmPopulationSchema& schema
     return advance_population(schema, initial, pre_cell, batch, std::nullopt, nullptr);
 }
 
-QbmmJointPopulationAdvance advance_qbmm_populations(const CellSpeciesState& initial,
-    std::span<const QbmmFamilyEventInput> families, const QbmmBulkGasPoolBinding* resolved_pool)
+namespace
+{
+QbmmJointPopulationAdvance advance_populations(const CellSpeciesState& initial,
+    std::span<const QbmmFamilyEventInput> families, const QbmmBulkGasPoolBinding* resolved_pool,
+    std::optional<RawSpecies> raw, qbmm_event_detail::RawSpeciesExactStocks* exact_stocks,
+    std::span<qbmm_event_detail::StageMomentChanges> adaptive_changes,
+    std::span<std::array<long double, 4>> moment_changes)
 {
     if (families.empty())
         return {Status::InvalidProvenance, std::nullopt, std::nullopt, std::nullopt,
@@ -711,12 +752,36 @@ QbmmJointPopulationAdvance advance_qbmm_populations(const CellSpeciesState& init
         return {Status::InvalidState, std::nullopt, std::nullopt, std::nullopt, error.what(), std::nullopt};
     }
 
-    QbmmJointPopulationEndpoint next{initial, std::vector<QbmmFamilyEventEndpoint>(families.size())};
     const auto unnamed_size = initial.amounts.size();
-    JointStocks stocks{
-        std::vector<ExactStock>(unnamed_size), std::vector<ExactStock>(unnamed_size), resolved_pool, next.species};
+    const auto raw_size =
+        unnamed_size + initial.dispersedPopulations.size() * families.front().schema.catalog().species().size();
+    if ((raw && raw->size() != raw_size) ||
+        (exact_stocks && !exact_stocks->empty() && exact_stocks->size() != raw_size) ||
+        (!adaptive_changes.empty() && adaptive_changes.size() != families.size()) ||
+        (!moment_changes.empty() && moment_changes.size() != families.size()))
+        return {Status::InvalidState, std::nullopt, std::nullopt, std::nullopt,
+            "QBMM joint raw species or moment layout differs.", std::nullopt};
+
+    qbmm_event_detail::RawSpeciesExactStocks exact;
+    if (exact_stocks)
+    {
+        exact = *exact_stocks;
+        if (exact.empty())
+        {
+            exact.resize(raw_size);
+            for (std::size_t i = 0; i < raw_size; ++i)
+                for (const long double part : (*raw)[i])
+                    exact[i].add_unrounded_value(part);
+        }
+    }
+    QbmmJointPopulationEndpoint next{initial, std::vector<QbmmFamilyEventEndpoint>(families.size())};
+    JointStocks stocks{std::vector<ExactStock>(unnamed_size), std::vector<ExactStock>(unnamed_size), resolved_pool,
+        next.species, exact_stocks ? &exact : nullptr};
     for (std::size_t i = 0; i < unnamed_size; ++i)
-        stocks.original_remaining[i].add_scaled_value(initial.amounts[i], 0);
+        if (exact_stocks)
+            stocks.original_remaining[i] = exact[i];
+        else
+            stocks.original_remaining[i].add_scaled_value(initial.amounts[i], 0);
 
     const auto& stage = families[order.front()].batch;
     for (const auto i : order)
@@ -725,13 +790,15 @@ QbmmJointPopulationAdvance advance_qbmm_populations(const CellSpeciesState& init
         if (input.batch.substep != stage.substep || input.batch.duration != stage.duration)
             return {Status::InvalidProvenance, std::nullopt, i, std::nullopt,
                 "QBMM joint families must share the same substep and duration.", std::nullopt};
-        auto advance =
-            advance_population(input.schema, initial, input.pre_cell, input.batch, std::nullopt, nullptr, &stocks);
+        auto advance = advance_population(input.schema, initial, input.pre_cell, input.batch, std::nullopt,
+            adaptive_changes.empty() ? nullptr : &adaptive_changes[i], &stocks);
         if (!advance.endpoint)
             return {advance.status, std::nullopt, i, advance.failed_event, std::move(advance.diagnostic),
                 std::move(advance.rejected_event)};
 
         auto& family = *advance.endpoint;
+        if (!moment_changes.empty())
+            moment_changes[i] = family.moment_change;
         next.families[i] = {
             family.count, family.shape, family.quadrature, std::move(family.receipts), family.family_fingerprint};
     }
@@ -742,14 +809,33 @@ QbmmJointPopulationAdvance advance_qbmm_populations(const CellSpeciesState& init
         {
             auto& stock = stocks.original_remaining[i];
             stock.add_weighted(stocks.credits[i], 1.0);
-            next.species.amounts[i] = narrow_nonnegative(stock.rounded());
+            next.species.amounts[i] = narrow_exact_stock(stock);
+            if (exact_stocks)
+                exact[i] = std::move(stock);
         }
     }
     catch (const Rejection& error)
     {
         return {error.status, std::nullopt, std::nullopt, std::nullopt, error.diagnostic, std::nullopt};
     }
+    if (exact_stocks)
+        *exact_stocks = std::move(exact);
     return {Status::Accepted, std::move(next), std::nullopt, std::nullopt, {}, std::nullopt};
+}
+
+} // namespace
+
+QbmmJointPopulationAdvance advance_qbmm_populations(const CellSpeciesState& initial,
+    std::span<const QbmmFamilyEventInput> families, const QbmmBulkGasPoolBinding* resolved_pool)
+{
+    return advance_populations(initial, families, resolved_pool, std::nullopt, nullptr, {}, {});
+}
+
+QbmmJointPopulationAdvance qbmm_event_detail::advance_joint_with_raw_species(const CellSpeciesState& initial,
+    std::span<const QbmmFamilyEventInput> families, const QbmmBulkGasPoolBinding& pool, RawSpecies raw_species,
+    RawSpeciesExactStocks& exact_stocks, std::span<StageMomentChanges> adaptive_changes, std::span<std::array<long double, 4>> moment_changes)
+{
+    return advance_populations(initial, families, &pool, raw_species, &exact_stocks, adaptive_changes, moment_changes);
 }
 
 QbmmPopulationAdvance qbmm_event_detail::advance_with_raw_species(const QbmmPopulationSchema& schema,

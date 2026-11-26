@@ -196,6 +196,18 @@ function(add_qbmm_restart_tests name target filter environment_prefix labels)
     endforeach()
 endfunction()
 
+add_qbmm_restart_tests(QbmmPoolRestart testReactingMixtureQbmmPool ReactingMixtureQbmmPool.PortableContinuation
+    SIMPLEFLUID_Q9B "qbmm;reacting;pool;restart;conservation;empty_rank")
+foreach(ranks IN ITEMS 1 2 4)
+    set(test "QbmmPoolContracts_${ranks}procs")
+    simplefluid_add_mpi_test(NAME "${test}" TARGET testReactingMixtureQbmmPool PROCS ${ranks}
+        ARGS "--gtest_filter=ReactingMixtureQbmmPool.*-*.PortableContinuation"
+        LABELS "mpi;qbmm;reacting;pool;multi_rhs;conservation;transaction;empty_rank" TIMEOUT 240)
+    if(TEST "${test}")
+        set_tests_properties("${test}" PROPERTIES ENVIRONMENT "SIMPLEFLUID_Q9B_RANKS=${ranks}")
+    endif()
+endforeach()
+
 foreach(geometry IN ITEMS Fixed Planar)
     add_qbmm_restart_tests(QbmmSourceSubsteps${geometry}Restart testReactingMixtureQbmmSubstepping
         ReactingMixtureQbmmSubstepping.${geometry}PortableContinuation

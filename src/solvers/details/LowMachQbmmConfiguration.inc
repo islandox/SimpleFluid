@@ -4,6 +4,8 @@ std::shared_ptr<const InterphaseConfiguration> configure_qbmm_sources(
 {
     auto thermal = options.interphase ? options.interphase->configuration : nullptr;
     const auto& families = flow.options().qbmm_families;
+    const auto& pool = flow.options().qbmm_bulk_gas_pool;
+    const auto is_pool = [&](size_t p) { return pool && p == pool->phase_index(); };
     const double tolerance = options.qbmm_source_substep_relative_tolerance;
     require(std::isfinite(tolerance) && tolerance >= 0 && tolerance < 1 &&
                 options.qbmm_source_maximum_substeps >= 1,
@@ -17,6 +19,14 @@ std::shared_ptr<const InterphaseConfiguration> configure_qbmm_sources(
     }
     const auto& catalog = options.mechanism->catalog();
     require(options.phases.size() == families.size(), "QBMM physical and chemical phase layouts differ.");
+    if (pool)
+    {
+        const auto& chemical = options.phases.at(pool->phase_index());
+        require(pool->catalog().fingerprint() == catalog.fingerprint() && chemical.phase == SpeciesPhase::Resolved &&
+                    chemical.population.empty() &&
+                    std::ranges::all_of(chemical.species_phases, [](auto phase) { return phase == SpeciesPhase::Resolved; }),
+            "The designated QBMM gas pool must bind the controller's unnamed Resolved compartment.");
+    }
     if (options.population_events)
     {
         std::set<std::string> selected;
@@ -32,19 +42,35 @@ std::shared_ptr<const InterphaseConfiguration> configure_qbmm_sources(
         }
     }
     for (const auto& reaction : options.mechanism->reactions())
+    {
+        if (pool && std::ranges::any_of(reaction.changes,
+                        [](const auto& term) { return term.phase == SpeciesPhase::Resolved; }))
+            require(std::ranges::all_of(reaction.changes,
+                        [&](const auto& term)
+                        { return term.phase == SpeciesPhase::Resolved && pool->permits(term.species); }),
+                "Reactions involving the designated gas pool must stay within its permitted species.");
         for (const auto& term : reaction.changes)
             for (const auto& family : families)
                 require(!family || term.phase != SpeciesPhase::Dispersed || term.population != family->population(),
                     "Reaction stoichiometry on a QBMM family requires a paired allocation.");
+    }
     for (const auto& face : options.face_transport)
-        require(face.physical_phase < families.size() && (!face.diffusion || !families[face.physical_phase]),
-            "Unpaired species diffusion on a QBMM phase is unsupported.");
+        require(face.physical_phase < families.size() && !passive_bulk_gas(flow, face.physical_phase) &&
+                    (!face.diffusion || (!families[face.physical_phase] && !is_pool(face.physical_phase))),
+            "Face contact on an unbound gas phase and unpaired QBMM family or pool diffusion are unsupported.");
     if (thermal)
         for (const auto& stage : thermal->stages)
+        {
             for (const auto& slot : stage.material)
                 require(slot.donor < families.size() && slot.recipient < families.size() && !families[slot.donor] &&
-                            !families[slot.recipient],
-                    "Generic interphase material slots cannot change a QBMM family.");
+                            !families[slot.recipient] && !is_pool(slot.donor) && !is_pool(slot.recipient) &&
+                            !passive_bulk_gas(flow, slot.donor) && !passive_bulk_gas(flow, slot.recipient),
+                    "Generic material slots require chemically bound phases outside the QBMM family and pool.");
+            for (const auto& slot : stage.heat)
+                require(slot.first < families.size() && slot.second < families.size() &&
+                            !passive_bulk_gas(flow, slot.first) && !passive_bulk_gas(flow, slot.second),
+                    "Generic interphase heat slots require physically bound counterparts.");
+        }
     if (!options.qbmm_population)
         return thermal;
     const auto& provider = *options.qbmm_population;
@@ -108,12 +134,24 @@ std::shared_ptr<const InterphaseConfiguration> configure_qbmm_sources(
                     catalog.allows(slot.species, compartment(options.phases[slot.recipient], s)),
             "QBMM material slots must link a bound family and a compatible counterpart.");
         const auto other = families[slot.donor] ? slot.recipient : slot.donor;
-        require(flow.options().phase_roles[other].role == Solver::PhaseRole::BulkLiquid,
-            "Native QBMM internal material exchange requires the liquid carrier; bulk-gas conversion is unsupported.");
+        if (is_pool(other))
+        {
+            const bool into_family = other == slot.donor;
+            const auto direction = into_family ? QbmmPoolConversionDirection::PoolToDispersed
+                                               : QbmmPoolConversionDirection::DispersedToPool;
+            const auto& family = *families[into_family ? slot.recipient : slot.donor];
+            pool->validate_family(family, direction);
+            require(pool->permits(slot.species) && family.mass_fractions()[s] > 0,
+                "QBMM pool slots must bind species in the family's fixed composition.");
+        }
+        else
+            require(flow.options().phase_roles[other].role == Solver::PhaseRole::BulkLiquid,
+                pool ? "Native QBMM bulk-gas conversion requires the designated gas pool."
+                     : "Native QBMM internal material exchange requires the liquid carrier; bulk-gas conversion is unsupported.");
         require(options.phases[other].population.empty(),
             "A QBMM material counterpart must match the unnamed chemical compartment in the Q1 transfer.");
     }
-    if (provider.evaluate_joint)
+    if (provider.evaluate_joint || pool)
     {
         // A simultaneous joint stage uses the same thermal visitation order
         // when the physical phase slots or supplied transfer slots are permuted.

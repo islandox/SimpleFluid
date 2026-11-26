@@ -100,6 +100,7 @@ public:
          */
         std::vector<std::optional<ThermalLawIdentity>> qbmm_eos_law_identities;
         std::optional<ThermalLawIdentity> qbmm_mixture_viscosity_identity; ///< Binds supplied viscosity in v9.
+        std::shared_ptr<const QbmmBulkGasPoolBinding> qbmm_bulk_gas_pool;
     };
     struct QbmmKineticClosure
     {
@@ -208,6 +209,7 @@ public:
         std::uint64_t family_fingerprint = 0;
         std::array<long double, 2> event_shape_change{}; ///< Q1 signed H2,H3 before canonical endpoint rounding.
         std::vector<QbmmSourceSubstep> substeps; ///< Accepted stages with source substepping enabled.
+        bool pool_conversion_law_evaluated = false;
     };
     using QbmmSourceCells = std::vector<std::vector<std::optional<QbmmSourceReceipt>>>;
     enum class GrossResidualStage
@@ -218,7 +220,8 @@ public:
         Interphase,
         BodyImpulse,
         PopulationNumbers,
-        QbmmPopulation
+        QbmmPopulation,
+        QbmmPoolConversion
     };
     struct GrossChannelMetadata
     {
@@ -385,6 +388,22 @@ public:
             return evaluations_;
         }
     };
+    struct QbmmPoolDirectionDiagnostics
+    {
+        double count = 0, mass_kg = 0, H2 = 0, H3 = 0, carried_enthalpy_j = 0;
+        std::vector<double> species_moles;
+        bool operator==(const QbmmPoolDirectionDiagnostics&) const = default;
+    };
+    struct QbmmPoolDiagnostics
+    {
+        std::array<QbmmPoolDirectionDiagnostics, 2> directions; ///< Dispersed to pool, then pool to dispersed.
+        std::uint64_t law_evaluations = 0; ///< Family cells with a pool law evaluated on the final corrector.
+        bool operator==(const QbmmPoolDiagnostics&) const = default;
+    };
+    [[nodiscard]] static constexpr size_t qbmm_pool_gross_width(size_t species) noexcept
+    {
+        return 2 * (species + 6); // Count, moles, mass, H2/H3, positive and negative enthalpy.
+    }
     struct Diagnostics
     {
         int correctors = 0, source_evaluations = 0;
@@ -470,6 +489,7 @@ public:
         std::vector<GrossResidualEvaluation> gross_residual_evaluations; ///< Live source trace; omitted by restart.
         std::optional<Vector> body_acceleration_m_per_s2;
         std::optional<ExternalImpulseParts> impulse_parts; ///< Accepted global body and other impulses in kg m/s.
+        std::optional<QbmmPoolDiagnostics> pool_conversion;
     };
     enum class QbmmStateKind
     {
@@ -519,6 +539,7 @@ public:
         std::optional<QbmmKineticClosure> kinetic_closure;
         std::optional<Vector> mean_node_slip_m_per_s; ///< D/M for an occupied kinetic family.
         std::array<std::optional<QbmmApplicabilityEvaluation>, 2> node_slip_applicability;
+        std::optional<bool> pool_conversion_law_evaluated; ///< Local interval provenance, if available.
     };
     struct QbmmCellReport
     {
@@ -529,6 +550,7 @@ public:
         Vector mass_weighted_drift{};                              ///< sum(M_phase * drift_phase) / sum(M_phase), m/s.
         std::optional<double> temperature_K;                       ///< Shared temperature of the occupied phases.
         std::vector<std::optional<QbmmCellFamilyReport>> families; ///< EOS order.
+        double dispersed_gas_volume_fraction = 0, bulk_gas_pool_volume_fraction = 0, passive_gas_volume_fraction = 0;
     };
     struct QbmmFamilyReport
     {
@@ -575,6 +597,7 @@ public:
         std::uint64_t family_fingerprint = 0;
         std::array<double, 2> event_shape_change{};
         std::vector<QbmmSourceSubstep> substeps;
+        bool pool_conversion_law_evaluated = false;
     };
     struct QbmmIntervalReport
     {
@@ -654,6 +677,7 @@ public:
         QbmmModelOptions::LinearSlopeLimiter linear_slope_limiter =
             QbmmModelOptions::LinearSlopeLimiter::RealizabilityOnly;
         std::uint64_t linear_upstream_returned_packets = 0;
+        std::optional<QbmmPoolDiagnostics> pool_conversion;
     };
     class Checkpoint
     {

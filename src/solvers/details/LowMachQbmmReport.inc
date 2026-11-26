@@ -239,7 +239,8 @@ void qbmm_reduce_aggregate(const Teuchos::Comm<int>& comm, Solver::QbmmFamilyRep
 
 void qbmm_report_applicability(const QbmmPopulationSchema& schema, const Solver::CellState& state,
     std::size_t phase_index, double bulk_volume, double gas_fraction, std::optional<double> duration,
-    Solver::QbmmCellFamilyReport& report, Solver::QbmmFamilyReport& aggregate)
+    Solver::QbmmCellFamilyReport& report, Solver::QbmmFamilyReport& aggregate,
+    const QbmmBulkGasPoolState* pool)
 {
     if (aggregate.law_metadata.empty())
         return;
@@ -266,11 +267,13 @@ void qbmm_report_applicability(const QbmmPopulationSchema& schema, const Solver:
     const auto drift = qbmm_native_law_detail::mean_drift_velocity(state, phase_index);
     const auto make_inputs = [&](std::optional<double> interval_duration)
     {
-        return make_qbmm_law_inputs(
-            schema, {report.quadrature, report.geometry, report.species_moles, bulk_volume, report.phase_volume_m3,
-                        report.absolute_pressure_pa, report.temperature_K, interval_duration, gas_fraction,
-                        liquid_concentrations, liquid_temperature,
-                        {drift.component(0), drift.component(1), drift.component(2)}});
+        QbmmFrozenLawState frozen{report.quadrature, report.geometry, report.species_moles, bulk_volume,
+            report.phase_volume_m3, report.absolute_pressure_pa, report.temperature_K, interval_duration, gas_fraction,
+            liquid_concentrations, liquid_temperature, {drift.component(0), drift.component(1), drift.component(2)}};
+        if (pool && needs_liquid && !liquid_concentrations)
+            frozen.carrier_liquid_volume_m3 = 0;
+        return pool ? make_qbmm_law_inputs(schema, std::move(frozen), *pool)
+                    : make_qbmm_law_inputs(schema, std::move(frozen));
     };
     const auto inputs = make_inputs(duration);
     for (std::size_t i = 0; i < aggregate.law_metadata.size(); ++i)
@@ -326,7 +329,8 @@ template<size_t N> std::array<double, N> report_moments(const std::array<long do
 Solver::QbmmSourceReport qbmm_source_report(const Solver::QbmmSourceReceipt& receipt)
 {
     Solver::QbmmSourceReport report{{}, receipt.final_count, receipt.final_moles, receipt.final_shape,
-        receipt.family_fingerprint, report_moments(receipt.event_shape_change), receipt.substeps};
+        receipt.family_fingerprint, report_moments(receipt.event_shape_change), receipt.substeps,
+        receipt.pool_conversion_law_evaluated};
     report.events.reserve(receipt.events.size());
     for (const auto& event : receipt.events)
         report.events.push_back({event.population, event.provider, event.family_fingerprint, event.catalog_fingerprint,
@@ -391,7 +395,8 @@ std::shared_ptr<const LowMachMixtureSolver::QbmmPublication> LowMachMixtureSolve
     const bool axial_kinetic = qbmm_detail::uses_axial_kinetic_transport(d->options, *d->mesh);
     const bool planar_linear = trial.ale_geometry && uses_qbmm_linear_transport(d->options.qbmm_model);
     const bool tvd_mc = d->options.qbmm_model.linear_slope_limiter == QbmmModelOptions::LinearSlopeLimiter::TvdMc;
-    const bool retains_controller = planar_linear || ((axial_kinetic || tvd_mc) && controller_diagnostics);
+    const bool retains_controller = planar_linear || d->options.qbmm_bulk_gas_pool ||
+                                    ((axial_kinetic || tvd_mc) && controller_diagnostics);
     if (forced || (retains_controller && d->active_qbmm_controller))
     {
         check(controller_diagnostics && controller_diagnostics->saved && d->active_qbmm_controller,
@@ -550,7 +555,9 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                 cell.mechanical_pressure_pa = state.cells[c].mechanical_pressure;
                 cell.carrier_velocity = state.cells[c].velocity;
                 check(std::isfinite(cell.bulk_volume_m3) && cell.bulk_volume_m3 > 0, "QBMM report needs bulk volume.");
-                double mixture_mass = 0, gas_volume = 0;
+                double mixture_mass = 0, gas_volume = 0, dispersed_volume = 0, passive_volume = 0, pool_volume = 0;
+                const auto& pool = d->options.qbmm_bulk_gas_pool;
+                const auto interval = trial ? nullptr : d->qbmm_publication ? d->qbmm_publication->interval : nullptr;
                 FaceSum total_mass;
                 std::array<FaceSum, 3> drift_momentum, absolute_momentum;
                 cell.families.resize(families.size());
@@ -572,6 +579,12 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                     if (families[a])
                     {
                         cell.families[a] = qbmm_cell_report(*families[a], state.cells[c], a, mass, cell.bulk_volume_m3);
+                        if (pool && trial)
+                            cell.families[a]->pool_conversion_law_evaluated =
+                                trial->qbmm_cells.at(c).at(a)->pool_conversion_law_evaluated;
+                        else if (pool && interval)
+                            cell.families[a]->pool_conversion_law_evaluated =
+                                interval->local_receipts.at(c).at(a)->pool_conversion_law_evaluated;
                         if (uses_qbmm_kinetic_transport(d->options.qbmm_model))
                         {
                             auto& family_report = *cell.families[a];
@@ -584,13 +597,21 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                         }
                         qbmm_update_aggregate(*report.families[a], cell.families[a]->quadrature);
                         gas_volume += cell.families[a]->phase_volume_m3;
+                        dispersed_volume += cell.families[a]->phase_volume_m3;
                     }
                     else if (mass > 0 && phase.thermodynamics->kind() == EOSKind::Gas)
                     {
                         const auto point = phase.thermodynamics->evaluate(
                             phase.temperature, phase.absolute_pressure, fractions(phase));
-                        gas_volume += qbmm_report_quotient(
+                        const auto volume = qbmm_report_quotient(
                             mass, point.density, "QBMM report gas phase volume is not representable.");
+                        gas_volume += volume;
+                        if (pool && pool->phase_index() == a)
+                            pool_volume = volume;
+                        else if (d->options.phase_roles[a].role == PhaseRole::DispersedGas)
+                            dispersed_volume += volume;
+                        else
+                            passive_volume += volume;
                     }
                 }
                 cell.mixture_density_kg_per_m3 = qbmm_report_quotient(
@@ -600,14 +621,25 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                                                      state.cells[c].qbmm_kinetic_eos_volumes, cell.bulk_volume_m3)
                                                : qbmm_report_quotient(gas_volume, cell.bulk_volume_m3,
                                                      "QBMM report gas volume fraction is not representable.");
-                const auto interval = trial ? nullptr : d->qbmm_publication ? d->qbmm_publication->interval : nullptr;
+                cell.dispersed_gas_volume_fraction = dispersed_volume / cell.bulk_volume_m3;
+                cell.bulk_gas_pool_volume_fraction = pool_volume / cell.bulk_volume_m3;
+                cell.passive_gas_volume_fraction = passive_volume / cell.bulk_volume_m3;
+                std::optional<QbmmBulkGasPoolState> pool_trace;
+                if (pool)
+                {
+                    const auto& phase = state.cells[c].phases[pool->phase_index()];
+                    pool_trace.emplace(QbmmBulkGasPoolState{pool_volume, phase.moles,
+                        qbmm_phase_concentrations(phase.moles, pool_volume),
+                        pool_volume > 0 ? std::optional{phase.temperature} : std::nullopt, pool->fingerprint()});
+                }
                 const std::optional<double> duration = trial      ? std::optional<double>(trial->transport.time_step)
                                                        : interval ? std::optional<double>(interval->time_step)
                                                                   : std::nullopt;
                 for (std::size_t a = 0; a < families.size(); ++a)
                     if (families[a] && !families[a]->closure_versions().laws.empty())
                         qbmm_report_applicability(*families[a], state.cells[c], a, cell.bulk_volume_m3,
-                            cell.gas_volume_fraction, duration, *cell.families[a], *report.families[a]);
+                            cell.gas_volume_fraction, duration, *cell.families[a], *report.families[a],
+                            pool_trace ? &*pool_trace : nullptr);
                 check(mixture_mass > 0, "QBMM report barycentric velocity requires positive finite mixture mass.");
                 for (std::size_t axis = 0; axis < 3; ++axis)
                 {
@@ -669,6 +701,7 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
             report.maximum_linear_stage_residual = diagnostics.maximum_linear_stage_residual;
             report.maximum_linear_step_residual = diagnostics.maximum_linear_step_residual;
             report.linear_upstream_returned_packets = diagnostics.linear_upstream_returned_packets;
+            report.pool_conversion = diagnostics.pool_conversion;
             if (diagnostics.correctors > 0)
             {
                 auto& convergence = report.convergence.emplace();

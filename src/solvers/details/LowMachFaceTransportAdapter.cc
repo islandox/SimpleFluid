@@ -170,9 +170,10 @@ CellSpeciesState zero_like(const CellSpeciesState& state)
 
 LowMachFaceTransportAdapter::LowMachFaceTransportAdapter(std::shared_ptr<const Mesh> mesh,
     std::shared_ptr<const SpeciesCatalog> catalog, Options options, PhaseBindings compartments,
-    std::optional<PhaseThermalMode> thermal_mode, FaceTopology topology)
+    std::optional<PhaseThermalMode> thermal_mode, FaceTopology topology, bool require_occupied_liquid)
     : mesh_(std::move(mesh)), catalog_(std::move(catalog)), options_(std::move(options)),
-      compartments_(std::move(compartments)), thermal_mode_(thermal_mode), topology_(topology)
+      compartments_(std::move(compartments)), thermal_mode_(thermal_mode), topology_(topology),
+      require_occupied_liquid_(require_occupied_liquid)
 {
     if (!mesh_)
         throw std::invalid_argument("Face adapter requires a communicator-bearing mesh.");
@@ -187,11 +188,14 @@ LowMachFaceTransportAdapter::LowMachFaceTransportAdapter(std::shared_ptr<const M
                 "Face adapter needs immutable identity/revision/schema and explicit laws.");
             const auto ns = catalog_->species().size();
             require(ns <= (std::numeric_limits<std::size_t>::max() - 8) / 3 &&
-                        options_.physical_phase < compartments_.size(),
+                        options_.physical_phase < compartments_.size() &&
+                        compartments_[options_.physical_phase].size() == ns,
                 "Face packet schema/phase is invalid.");
             std::set<std::tuple<SpeciesId, SpeciesPhase, std::string>> roles;
             for (const auto& phase : compartments_)
             {
+                if (phase.empty())
+                    continue; // Chemically passive physical gas, never the contact phase.
                 require(phase.size() == ns, "Face phase bindings must explicitly cover catalog order.");
                 for (std::size_t s = 0; s < ns; ++s)
                     require(static_cast<std::size_t>(phase[s].phase) < 4 &&
@@ -205,6 +209,9 @@ LowMachFaceTransportAdapter::LowMachFaceTransportAdapter(std::shared_ptr<const M
             for (const auto& phase : compartments_)
                 for (const auto& c : phase)
                     text << ':' << int(c.phase) << ':' << c.population.size() << ':' << c.population;
+            for (size_t p = 0; p < compartments_.size(); ++p)
+                if (compartments_[p].empty())
+                    text << ":passive:" << p;
             text << ':' << bool(options_.diffusion) << ':' << bool(options_.fourier);
             if (options_.diffusion)
             {
@@ -368,8 +375,8 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
                 post_chemistry[c].validate(*catalog_);
                 const auto bound = [&](std::size_t s, const DiffusionCompartment& role)
                 {
-                    return std::ranges::any_of(
-                        compartments_, [&](const auto& physical_roles) { return same(physical_roles[s], role); });
+                    return std::ranges::any_of(compartments_, [&](const auto& physical_roles)
+                        { return !physical_roles.empty() && same(physical_roles[s], role); });
                 };
                 for (std::size_t s = 0; s < ns; ++s)
                 {
@@ -524,6 +531,8 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
                 const auto row = owned_faces_->getLocalElement(law.algebraic_identity);
                 require(row != Teuchos::OrdinalTraits<LO>::invalid(), "Canonical face owned map is inconsistent.");
                 owned_packets->replaceLocalValue(row, 0, 1.); // Numerical active flag only, never an encoded entity ID.
+                if (require_occupied_liquid_ && (a.phase_volume == 0 || b.phase_volume == 0))
+                    continue;
                 if (options_.diffusion)
                 {
                     const auto& d = *options_.diffusion;
@@ -654,9 +663,14 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
                         SimpleFluid::detail::CompensatedSum<double> total, mass;
                         for (std::size_t s = 0; s < ns; ++s)
                         {
-                            const auto& role = compartments_[a][s];
-                            x[s] = post_chemistry[c].amount(
-                                *catalog_, catalog_->species()[s].id, role.phase, role.population);
+                            if (compartments_[a].empty())
+                                x[s] = context.transport.cells[c].phases[a].moles[s];
+                            else
+                            {
+                                const auto& role = compartments_[a][s];
+                                x[s] = post_chemistry[c].amount(
+                                    *catalog_, catalog_->species()[s].id, role.phase, role.population);
+                            }
                             total += x[s];
                             mass += x[s] * catalog_->species()[s].molarMass;
                         }
