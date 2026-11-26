@@ -1485,3 +1485,47 @@ Joint evaluation has distinct controller provenance. The signature marker
 is present only for the joint hook. The existing v5–v9 payload layouts and
 non-joint signatures retain their wire encoding. Legacy default-only
 admission requires the non-joint provider mode.
+
+
+## Upstream adaptation #4 for local QBMM source step doubling
+
+`ReactingMixtureOptions::qbmm_source_substep_relative_tolerance` enables local
+source refinement when positive. It accepts finite values in \([0,1)\).
+`qbmm_source_maximum_substeps` defaults to 64 and bounds the accepted coarse
+grid. Both controls are collective. With zero tolerance, QBMM takes the
+original single source stage.
+
+Each owned cell starts with a one-stage grid on a new preview. When a local
+trial fails the estimate or a provisional stage exhausts a donor, the
+controller discards the entire grid and tries twice as many equal intervals.
+An invalid original material state or initial applicability gate rejects the
+preview directly. Integrated, typed and joint providers receive the actual
+substep duration and refreshed local EOS volume, quadrature and geometry.
+The integrated and joint contexts also carry the absolute start of the
+evaluated substep. The fine comparison evaluates a second half-stage from the
+first half's endpoint.
+
+The local error is the difference between one full source stage and two half
+stages. For each dispersed species, the largest difference among its dissolved
+and participating family inventories is compared with the original stock.
+Counts and the independent shape moments \(H_2,H_3\) use a relative stock
+test and a relative increment test. The increment test multiplies the error
+by the substep fraction of the flow interval. It also resolves births from
+zero stock. The accepted interval uses the full-stage solution on the passing
+grid.
+
+Each accepted receipt records the substep duration, end of its event range,
+and family endpoint. Replay starts from the transported state and checks
+each stage's original donors, products, signed inventory and moments before
+using its endpoint for the next stage. Empty substeps retain their clock and
+endpoint. Paired enthalpy recovery uses the chronological material stages
+and their donor temperatures, allowing earlier stages to supply later
+material donors. Gross source channels account for accepted events across
+the interval.
+
+The preview retains each cell's largest accepted grid across correctors. A
+new preview starts at one again. `maximum_qbmm_source_substeps` reports the
+global maximum grid size in the final corrector, and
+`qbmm_source_substep_retries` sums its local grid doublings. The controls
+enter the existing controller restart signature only when enabled. The
+preview schedule and live counters are outside the portable payload.

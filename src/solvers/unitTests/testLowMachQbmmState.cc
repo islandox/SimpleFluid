@@ -1040,12 +1040,32 @@ TEST(LowMachQbmmStateTest, LegacyDefaultOnlyRestrictionSurvivesRestoreAdvanceAnd
     int calls = 0;
     auto forced = restart_controller_options(f, calls);
     forced.body_acceleration = Flow::Vector{}; // Engaged zero is an explicit force configuration too.
+    auto substepped = restart_controller_options(f, calls);
+    const auto& closures = f.family->closure_versions();
+    substepped.qbmm_population = std::make_shared<const R::MixtureQbmmProvider>(R::MixtureQbmmProvider{
+        {closures.source_identity, closures.source, f.catalog->fingerprint()}, nullptr,
+        [](const R::MixtureQbmmContext&) { return std::vector<R::QbmmEventOperation>{}; }});
+    substepped.qbmm_source_substep_relative_tolerance = .01;
+    {
+        auto modern = f.solver();
+        modern->initialize(f.initial());
+        EXPECT_NO_THROW((void) R::ReactingMixtureCoupler(modern, substepped));
+    }
     for (const unsigned version : {1u, 2u, 3u, 4u})
     {
         auto restored = f.solver();
         restored->restore_qbmm_restart(earlier_restart(f, current, version));
         auto before = restored->serialize_qbmm_restart();
         EXPECT_THROW((void) R::ReactingMixtureCoupler(restored, forced), std::exception);
+        try
+        {
+            (void) R::ReactingMixtureCoupler(restored, substepped);
+            ADD_FAILURE() << "Legacy default-only provenance admitted QBMM substepping.";
+        }
+        catch (const std::exception& error)
+        {
+            EXPECT_NE(std::string_view(error.what()).find("Legacy QBMM restart requires default"), std::string::npos);
+        }
         EXPECT_EQ(restored->serialize_qbmm_restart(), before);
         restored->advance(.01);
         const auto saved = restored->checkpoint();

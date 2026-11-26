@@ -168,7 +168,7 @@ QbmmEventMoments resize_change(QbmmAtom donor, QbmmAtom product)
 }
 
 QbmmEventReceipt make_receipt(const QbmmPopulationSchema& schema, const QbmmQuadrature& initial,
-    const QbmmEventBatch& batch, const QbmmPopulationEvent& event)
+    const QbmmEventBatch& batch, const QbmmPopulationEvent& event, bool adaptive)
 {
     require(!event.provider.empty() && event.provider_revision > 0, Status::InvalidProvenance,
         "QBMM event requires a provider identity and positive revision.");
@@ -197,6 +197,15 @@ QbmmEventReceipt make_receipt(const QbmmPopulationSchema& schema, const QbmmQuad
     {
         const auto donor = donor_atom(initial, resize->donor, resize->count);
         const QbmmAtom product{resize->count, resize->mass_over_scale};
+        if (adaptive && std::isfinite(product.mass_over_scale) && product.mass_over_scale <= 0)
+        {
+            const long double loss =
+                (static_cast<long double>(donor.atom.mass_over_scale) - product.mass_over_scale) * donor.atom.count;
+            (void) validate_transfer(schema, resize->transfer, loss);
+            throw Rejection{Status::UnrepresentableEndpoint,
+                "QBMM resize exceeds the donor size at this duration. Use explicit disappearance at zero.",
+                std::nullopt};
+        }
         require(positive(product.mass_over_scale) && product.mass_over_scale != donor.atom.mass_over_scale,
             Status::InvalidEvent,
             "QBMM resizing requires a distinct positive product mass. Use explicit disappearance at zero.");
@@ -374,7 +383,8 @@ void check_endpoint_changes(
             "QBMM signed event moments do not reproduce the constructive endpoint.");
 }
 QbmmPopulationAdvance advance_population(const QbmmPopulationSchema& schema, const CellSpeciesState& initial,
-    QbmmCellView pre_cell, const QbmmEventBatch& batch, std::optional<RawSpecies> raw_species)
+    QbmmCellView pre_cell, const QbmmEventBatch& batch, std::optional<RawSpecies> raw_species,
+    qbmm_event_detail::StageMomentChanges* adaptive_changes)
 {
     std::optional<std::size_t> failed_event;
     try
@@ -412,7 +422,11 @@ QbmmPopulationAdvance advance_population(const QbmmPopulationSchema& schema, con
             return {Status::Accepted, std::move(next), std::nullopt, {}, std::nullopt};
         auto stocks = make_stocks(initial, *family, raw_species);
         if (batch.events.empty())
+        {
+            if (adaptive_changes)
+                *adaptive_changes = {};
             return {Status::Accepted, std::move(next), std::nullopt, {}, std::nullopt};
+        }
 
         std::array<Sum, 2> remaining_count;
         for (std::size_t i = 0; i < pre.active_atoms; ++i)
@@ -423,7 +437,7 @@ QbmmPopulationAdvance advance_population(const QbmmPopulationSchema& schema, con
         for (std::size_t i = 0; i < batch.events.size(); ++i)
         {
             failed_event = i;
-            auto receipt = make_receipt(schema, pre, batch, batch.events[i]);
+            auto receipt = make_receipt(schema, pre, batch, batch.events[i], adaptive_changes != nullptr);
             for (const auto& donor : receipt.donors)
             {
                 auto& stock = remaining_count[donor.index];
@@ -535,6 +549,8 @@ QbmmPopulationAdvance advance_population(const QbmmPopulationSchema& schema, con
                 "QBMM endpoint '" + schema.population() + "' failed inversion (" +
                     qbmm_inversion_status_name(next.quadrature.status) + ").",
                 std::nullopt};
+        if (adaptive_changes)
+            *adaptive_changes = {count_change, {changes[2], changes[3]}};
         return {Status::Accepted, std::move(next), std::nullopt, {}, std::nullopt};
     }
     catch (const Rejection& error)
@@ -552,13 +568,14 @@ QbmmPopulationAdvance advance_population(const QbmmPopulationSchema& schema, con
 QbmmPopulationAdvance advance_qbmm_population(const QbmmPopulationSchema& schema, const CellSpeciesState& initial,
     QbmmCellView pre_cell, const QbmmEventBatch& batch)
 {
-    return advance_population(schema, initial, pre_cell, batch, std::nullopt);
+    return advance_population(schema, initial, pre_cell, batch, std::nullopt, nullptr);
 }
 
 QbmmPopulationAdvance qbmm_event_detail::advance_with_raw_species(const QbmmPopulationSchema& schema,
-    const CellSpeciesState& initial, QbmmCellView pre_cell, const QbmmEventBatch& batch, RawSpecies raw_species)
+    const CellSpeciesState& initial, QbmmCellView pre_cell, const QbmmEventBatch& batch, RawSpecies raw_species,
+    StageMomentChanges* adaptive_changes)
 {
-    return advance_population(schema, initial, pre_cell, batch, raw_species);
+    return advance_population(schema, initial, pre_cell, batch, raw_species, adaptive_changes);
 }
 
 } // namespace SimpleFluid::Reacting

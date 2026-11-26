@@ -125,6 +125,17 @@ void endpoint_matches(double applied, double raw)
 /** Persistent predecessor stock for every configured material stage. Rounded
  * phase/EOS views never seed a later donor reservation.
  */
+struct MaterialPackets
+{
+    std::span<const std::vector<double>> paired_amounts;
+    std::span<const FrozenMaterialSourceTail::ReservoirExchange> reservoirs;
+};
+
+template<class Tail> MaterialPackets material_packets(const Tail& tail)
+{
+    return {tail.paired_amounts, tail.reservoirs};
+}
+
 struct MaterialStocks
 {
     const SpeciesCatalog& catalog;
@@ -173,7 +184,7 @@ struct MaterialStocks
     }
 
     std::vector<std::vector<double>> apply(
-        const ConfiguredInterphaseStage* stage, std::span<const double> events, const FrozenMaterialSourceTail* tail)
+        const ConfiguredInterphaseStage* stage, std::span<const double> events, std::optional<MaterialPackets> packets)
     {
         require(stage ? stage->kind == InterphaseStageKind::Material && stage->material.size() == events.size()
                       : events.empty(),
@@ -191,12 +202,13 @@ struct MaterialStocks
         for (size_t i = 0; i < events.size(); ++i)
         {
             const auto& slot = stage->material[i];
-            if (!tail)
+            if (!packets)
                 apply_pair(slot, events[i]);
             else
             {
                 Acc total;
-                for (double amount : tail->paired_amounts.at(i))
+                require(i < packets->paired_amounts.size(), "Raw paired material slot layout differs.");
+                for (double amount : packets->paired_amounts[i])
                 {
                     apply_pair(slot, amount);
                     total.add(amount);
@@ -204,8 +216,8 @@ struct MaterialStocks
                 require(narrow(total.value()) == events[i], "Raw final material does not project to its slot amount.");
             }
         }
-        if (tail)
-            for (const auto& exchange : tail->reservoirs)
+        if (packets)
+            for (const auto& exchange : packets->reservoirs)
             {
                 require(exchange.phase < amounts.size() && exchange.signed_moles.size() == catalog.species().size() &&
                             std::isfinite(exchange.energy),
@@ -230,15 +242,55 @@ struct MaterialStocks
 void validate_tail_layout(const FrozenInterphasePlan& plan)
 {
     const auto& tail = plan.material_tail;
+    const auto& substeps = tail.substeps;
     if (tail.paired_stage)
     {
         require(!plan.amounts.empty() && *tail.paired_stage == plan.amounts.size() - 1 &&
                     plan.configuration->stages.back().kind == InterphaseStageKind::Material &&
-                    tail.paired_amounts.size() == plan.amounts.back().size(),
+                    (substeps.empty() ? tail.paired_amounts.size() == plan.amounts.back().size()
+                                      : tail.paired_amounts.empty()),
             "Raw paired material requires a matching configured final material stage.");
     }
     else
         require(tail.paired_amounts.empty(), "Raw paired material is missing a configured final material stage.");
+    if (!substeps.empty())
+    {
+        require(tail.reservoirs.empty(), "Sequential and simultaneous final material packets cannot be mixed.");
+        const auto slots = tail.paired_stage ? plan.amounts.back().size() : 0;
+        for (const auto& step : substeps)
+            require(step.paired_amounts.size() == slots, "Raw QBMM thermal substep slot layout differs.");
+    }
+}
+
+void prepare_substep_amounts(FrozenInterphasePlan& plan)
+{
+    auto& tail = plan.material_tail;
+    if (tail.substeps.empty())
+        return;
+    const auto slots = tail.paired_stage ? plan.amounts.back().size() : 0;
+    std::vector<Acc> totals(slots);
+    for (auto& step : tail.substeps)
+    {
+        step.amounts.resize(slots);
+        for (size_t i = 0; i < slots; ++i)
+        {
+            Acc sum;
+            for (double amount : step.paired_amounts[i])
+            {
+                sum.add(amount);
+                totals[i].add(amount);
+            }
+            step.amounts[i] = narrow(sum.value());
+        }
+    }
+    for (size_t i = 0; i < slots; ++i)
+        require(narrow(totals[i].value()) == plan.amounts.back()[i],
+            "Raw sequential material does not project to its integrated slot amount.");
+}
+
+const ConfiguredInterphaseStage* paired_substep_stage(const FrozenInterphasePlan& plan)
+{
+    return plan.material_tail.paired_stage ? &plan.configuration->stages.back() : nullptr;
 }
 } // namespace
 void validate_interphase_configuration(const InterphaseConfiguration& config, std::span<const PhaseThermalState> phases)
@@ -340,6 +392,7 @@ FrozenInterphasePlan compile_interphase_plan(std::shared_ptr<const InterphaseCon
     result.raw_pre_moles.assign(predecessor_parts.begin(), predecessor_parts.end());
     result.material_tail = std::move(material_tail);
     validate_tail_layout(result);
+    prepare_substep_amounts(result);
     Acc allocated, declared;
     for (size_t p = 0; p < pre_phases.size(); ++p)
     {
@@ -357,12 +410,17 @@ FrozenInterphasePlan compile_interphase_plan(std::shared_ptr<const InterphaseCon
         "Raw allocated static energy differs from its declared physical channels.");
     MaterialStocks stocks(pre_phases.front().thermodynamics->catalog(), result.pre_moles, result.raw_pre_moles);
     result.final_moles = stocks.project();
+    const auto& tail = result.material_tail;
     for (size_t j = 0; j < result.amounts.size(); ++j)
     {
         const auto& stage = result.configuration->stages[j];
         if (stage.kind == InterphaseStageKind::Material)
-            result.final_moles = stocks.apply(
-                &stage, result.amounts[j], result.material_tail.paired_stage == j ? &result.material_tail : nullptr);
+        {
+            if (tail.paired_stage == j && !tail.substeps.empty())
+                continue;
+            result.final_moles = stocks.apply(&stage, result.amounts[j],
+                tail.paired_stage == j ? std::optional{material_packets(tail)} : std::nullopt);
+        }
         else
         {
             require(result.amounts[j].size() == stage.heat.size(), "Configured heat amount layout differs.");
@@ -370,8 +428,10 @@ FrozenInterphasePlan compile_interphase_plan(std::shared_ptr<const InterphaseCon
                 require(std::isfinite(q), "Nonfinite supplied integrated interphase heat.");
         }
     }
-    if (!result.material_tail.paired_stage && !result.material_tail.reservoirs.empty())
-        result.final_moles = stocks.apply(nullptr, {}, &result.material_tail);
+    if (!tail.paired_stage && !tail.reservoirs.empty())
+        result.final_moles = stocks.apply(nullptr, {}, material_packets(tail));
+    for (const auto& step : tail.substeps)
+        result.final_moles = stocks.apply(paired_substep_stage(result), step.amounts, material_packets(step));
     return result;
 }
 
@@ -578,9 +638,9 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
     recover();
     const auto& material_tail = plan.material_tail;
     const bool detached_tail = !material_tail.paired_stage && !material_tail.reservoirs.empty();
-    const auto add_reservoir_energy = [&]
+    const auto add_reservoir_energy = [&](std::span<const FrozenMaterialSourceTail::ReservoirExchange> reservoirs)
     {
-        for (const auto& exchange : material_tail.reservoirs)
+        for (const auto& exchange : reservoirs)
         {
             sources[exchange.phase].add(exchange.energy);
             targets[exchange.phase].add(exchange.energy);
@@ -592,8 +652,99 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
         for (size_t a = 0; a < np; ++a)
             moles[a] = final_templates[a].moles;
     };
+    const auto apply_material = [&](size_t j, const ConfiguredInterphaseStage* stage, std::span<const double> amounts,
+                                    std::optional<MaterialPackets> packets, std::optional<size_t> substep)
+    {
+        const auto after = stocks.apply(stage, amounts, packets);
+        std::vector<PartialMolarEnthalpyPoint> properties(np);
+        std::vector<int> evaluated(np, 0);
+        for (size_t i = 0; i < amounts.size(); ++i)
+        {
+            if (amounts[i] == 0)
+                continue;
+            const auto& slot = stage->material[i];
+            const auto a = slot.donor;
+            if (!evaluated[a])
+            {
+                require(points[a].amount > 0, "Material donor has no actual anchor stock.");
+                const auto& law = *plan.configuration->phase_enthalpy[a];
+                const auto t = result.phases[a].temperature;
+                if (t < law.bounds.minimum_temperature || t > law.bounds.maximum_temperature ||
+                    pressure < law.bounds.minimum_pressure || pressure > law.bounds.maximum_pressure)
+                    throw ThermalCaloricRangeError(
+                        "Occupied donor anchor lies outside supplied partial-h law domain.");
+                properties[a] = law.evaluate(t, pressure, points[a].x);
+                const auto& h = properties[a];
+                require(h.value.size() == catalog.species().size() && h.temperature.size() == h.value.size() &&
+                            h.pressure.size() == h.value.size(),
+                    "Supplied partial-h species/derivative layout differs.");
+                Acc euler, temperature, pressure_partial;
+                for (size_t k = 0; k < h.value.size(); ++k)
+                {
+                    require(std::isfinite(h.value[k]) && std::isfinite(h.temperature[k]) &&
+                                std::isfinite(h.pressure[k]),
+                        "Nonfinite supplied partial enthalpy or derivative.");
+                    euler.add(static_cast<long double>(moles[a][k]) * h.value[k]);
+                    temperature.add(static_cast<long double>(moles[a][k]) * h.temperature[k]);
+                    pressure_partial.add(static_cast<long double>(moles[a][k]) * h.pressure[k]);
+                }
+                const auto compatible = [&](const Acc& sum, long double expected, long double physical)
+                {
+                    Acc residual;
+                    residual.append(sum);
+                    residual.add(-expected);
+                    const auto roundoff = 64 * std::numeric_limits<double>::epsilon() *
+                                              std::max(std::abs(expected), std::abs(sum.value())) +
+                                          residual.error_bound();
+                    require(roundoff <= .25L * controls.physical_relative_tolerance * physical,
+                        "Partial-h consistency is too poorly conditioned for requested caloric accuracy.");
+                    require(
+                        std::abs(residual.value()) <= controls.physical_relative_tolerance * physical + roundoff,
+                        "Supplied partial-h violates full donor Euler or temperature/pressure derivative "
+                        "identity.");
+                };
+                compatible(euler, points[a].H, points[a].caloric);
+                compatible(temperature, points[a].Ht, points[a].Ht);
+                // A genuinely zero pressure derivative must be zero within its independent operand roundoff.
+                compatible(pressure_partial, points[a].Hp, std::max(std::abs(points[a].Hp), std::abs(points[a].V)));
+                evaluated[a] = 1;
+            }
+            const auto species = catalog.index(slot.species);
+            const auto& h = properties[a];
+            Acc slot_energy, slot_tangent;
+            const auto transfer = [&](double amount)
+            {
+                const long double energy = static_cast<long double>(amount) * h.value[species];
+                const long double tangent =
+                    static_cast<long double>(amount) *
+                    (h.temperature[species] * temperature_derivative[a] + h.pressure[species]);
+                targets[a].add(-energy);
+                targets[slot.recipient].add(energy);
+                sources[a].add(-energy);
+                sources[slot.recipient].add(energy);
+                material[a].add(-energy);
+                material[slot.recipient].add(energy);
+                slot_energy.add(energy);
+                slot_tangent.add(tangent);
+            };
+            if (packets)
+                for (double amount : packets->paired_amounts[i])
+                    transfer(amount);
+            else
+                transfer(amounts[i]);
+            target_derivative[a] -= slot_tangent.value();
+            target_derivative[slot.recipient] += slot_tangent.value();
+            result.material_events.push_back({j, i, h.value[species], h.temperature[species], h.pressure[species],
+                narrow(temperature_derivative[a]), slot_energy.value(), slot_tangent.value(), substep});
+        }
+        moles = after;
+        if (packets)
+            add_reservoir_energy(packets->reservoirs);
+    };
     for (size_t j = 0; j < plan.amounts.size(); ++j)
     {
+        if (material_tail.paired_stage == j && !material_tail.substeps.empty())
+            continue;
         const auto& stage = plan.configuration->stages[j];
         const auto& amounts = plan.amounts[j];
         if (stage.kind == InterphaseStageKind::Heat)
@@ -650,103 +801,26 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
             }
         }
         else
-        {
-            const bool raw_final = material_tail.paired_stage == j;
-            const auto after = stocks.apply(&stage, amounts, raw_final ? &material_tail : nullptr);
-            std::vector<PartialMolarEnthalpyPoint> properties(np);
-            std::vector<int> evaluated(np, 0);
-            for (size_t i = 0; i < amounts.size(); ++i)
-            {
-                if (amounts[i] == 0)
-                    continue;
-                const auto& slot = stage.material[i];
-                const auto a = slot.donor;
-                if (!evaluated[a])
-                {
-                    require(points[a].amount > 0, "Material donor has no actual anchor stock.");
-                    const auto& law = *plan.configuration->phase_enthalpy[a];
-                    const auto t = result.phases[a].temperature;
-                    if (t < law.bounds.minimum_temperature || t > law.bounds.maximum_temperature ||
-                        pressure < law.bounds.minimum_pressure || pressure > law.bounds.maximum_pressure)
-                        throw ThermalCaloricRangeError(
-                            "Occupied donor anchor lies outside supplied partial-h law domain.");
-                    properties[a] = law.evaluate(t, pressure, points[a].x);
-                    const auto& h = properties[a];
-                    require(h.value.size() == catalog.species().size() && h.temperature.size() == h.value.size() &&
-                                h.pressure.size() == h.value.size(),
-                        "Supplied partial-h species/derivative layout differs.");
-                    Acc euler, temperature, pressure_partial;
-                    for (size_t k = 0; k < h.value.size(); ++k)
-                    {
-                        require(std::isfinite(h.value[k]) && std::isfinite(h.temperature[k]) &&
-                                    std::isfinite(h.pressure[k]),
-                            "Nonfinite supplied partial enthalpy or derivative.");
-                        euler.add(static_cast<long double>(moles[a][k]) * h.value[k]);
-                        temperature.add(static_cast<long double>(moles[a][k]) * h.temperature[k]);
-                        pressure_partial.add(static_cast<long double>(moles[a][k]) * h.pressure[k]);
-                    }
-                    const auto compatible = [&](const Acc& sum, long double expected, long double physical)
-                    {
-                        Acc residual;
-                        residual.append(sum);
-                        residual.add(-expected);
-                        const auto roundoff = 64 * std::numeric_limits<double>::epsilon() *
-                                                  std::max(std::abs(expected), std::abs(sum.value())) +
-                                              residual.error_bound();
-                        require(roundoff <= .25L * controls.physical_relative_tolerance * physical,
-                            "Partial-h consistency is too poorly conditioned for requested caloric accuracy.");
-                        require(
-                            std::abs(residual.value()) <= controls.physical_relative_tolerance * physical + roundoff,
-                            "Supplied partial-h violates full donor Euler or temperature/pressure derivative "
-                            "identity.");
-                    };
-                    compatible(euler, points[a].H, points[a].caloric);
-                    compatible(temperature, points[a].Ht, points[a].Ht);
-                    // A genuinely zero pressure derivative must be zero within its independent operand roundoff.
-                    compatible(pressure_partial, points[a].Hp, std::max(std::abs(points[a].Hp), std::abs(points[a].V)));
-                    evaluated[a] = 1;
-                }
-                const auto species = catalog.index(slot.species);
-                const auto& h = properties[a];
-                Acc slot_energy, slot_tangent;
-                const auto transfer = [&](double amount)
-                {
-                    const long double energy = static_cast<long double>(amount) * h.value[species];
-                    const long double tangent =
-                        static_cast<long double>(amount) *
-                        (h.temperature[species] * temperature_derivative[a] + h.pressure[species]);
-                    targets[a].add(-energy);
-                    targets[slot.recipient].add(energy);
-                    sources[a].add(-energy);
-                    sources[slot.recipient].add(energy);
-                    material[a].add(-energy);
-                    material[slot.recipient].add(energy);
-                    slot_energy.add(energy);
-                    slot_tangent.add(tangent);
-                };
-                if (raw_final)
-                    for (double amount : material_tail.paired_amounts[i])
-                        transfer(amount);
-                else
-                    transfer(amounts[i]);
-                target_derivative[a] -= slot_tangent.value();
-                target_derivative[slot.recipient] += slot_tangent.value();
-                result.material_events.push_back({j, i, h.value[species], h.temperature[species], h.pressure[species],
-                    narrow(temperature_derivative[a]), slot_energy.value(), slot_tangent.value()});
-            }
-            moles = after;
-            if (raw_final)
-                add_reservoir_energy();
-        }
-        if (j + 1 == plan.amounts.size() && !detached_tail)
+            apply_material(j, &stage, amounts,
+                material_tail.paired_stage == j ? std::optional{material_packets(material_tail)} : std::nullopt,
+                std::nullopt);
+        if (j + 1 == plan.amounts.size() && !detached_tail && material_tail.substeps.empty())
             project_final_moles();
         recover();
     }
     if (detached_tail)
     {
-        moles = stocks.apply(nullptr, {}, &material_tail);
-        add_reservoir_energy();
+        apply_material(plan.amounts.size(), nullptr, {}, material_packets(material_tail), std::nullopt);
         project_final_moles();
+        recover();
+    }
+    for (size_t i = 0; i < material_tail.substeps.size(); ++i)
+    {
+        const auto& step = material_tail.substeps[i];
+        apply_material(material_tail.paired_stage.value_or(plan.amounts.size()), paired_substep_stage(plan),
+            step.amounts, material_packets(step), i);
+        if (i + 1 == material_tail.substeps.size())
+            project_final_moles();
         recover();
     }
     Acc energy_error, total_roundoff, operand_bound, caloric, work, work_magnitude, pressure_operands;
@@ -756,6 +830,9 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
         declared_total.add(e);
     for (const auto& exchange : material_tail.reservoirs)
         declared_total.add(exchange.energy);
+    for (const auto& step : material_tail.substeps)
+        for (const auto& exchange : step.reservoirs)
+            declared_total.add(exchange.energy);
     for (size_t a = 0; a < np; ++a)
     {
         result.volumes[a] = narrow(points[a].V);
@@ -838,27 +915,42 @@ CaloricPressureInterval interphase_pressure_bounds(
             }
     };
     include_phases();
+    const auto& tail = plan.material_tail;
+    const auto include_donors = [&](const ConfiguredInterphaseStage& stage, std::span<const double> amounts)
+    {
+        require(amounts.size() == stage.material.size(), "Frozen pressure-domain material layout differs.");
+        for (size_t i = 0; i < stage.material.size(); ++i)
+            if (amounts[i] > 0)
+            {
+                const auto& b = plan.configuration->phase_enthalpy[stage.material[i].donor]->bounds;
+                result.lower = std::max(result.lower, b.minimum_pressure);
+                result.upper = std::min(result.upper, b.maximum_pressure);
+            }
+    };
     for (size_t j = 0; j < plan.amounts.size(); ++j)
     {
         const auto& stage = plan.configuration->stages[j];
         if (stage.kind == InterphaseStageKind::Material)
         {
-            require(plan.amounts[j].size() == stage.material.size(), "Frozen pressure-domain material layout differs.");
-            for (size_t i = 0; i < stage.material.size(); ++i)
-                if (plan.amounts[j][i] > 0)
-                {
-                    const auto& b = plan.configuration->phase_enthalpy[stage.material[i].donor]->bounds;
-                    result.lower = std::max(result.lower, b.minimum_pressure);
-                    result.upper = std::min(result.upper, b.maximum_pressure);
-                }
-            moles = stocks.apply(
-                &stage, plan.amounts[j], plan.material_tail.paired_stage == j ? &plan.material_tail : nullptr);
+            if (tail.paired_stage == j && !tail.substeps.empty())
+                continue;
+            include_donors(stage, plan.amounts[j]);
+            moles = stocks.apply(&stage, plan.amounts[j],
+                tail.paired_stage == j ? std::optional{material_packets(tail)} : std::nullopt);
         }
         include_phases();
     }
-    if (!plan.material_tail.paired_stage && !plan.material_tail.reservoirs.empty())
+    if (!tail.paired_stage && !tail.reservoirs.empty())
     {
-        moles = stocks.apply(nullptr, {}, &plan.material_tail);
+        moles = stocks.apply(nullptr, {}, material_packets(tail));
+        include_phases();
+    }
+    const auto* stage = paired_substep_stage(plan);
+    for (const auto& step : tail.substeps)
+    {
+        if (stage)
+            include_donors(*stage, step.amounts);
+        moles = stocks.apply(stage, step.amounts, material_packets(step));
         include_phases();
     }
     require(std::isfinite(result.lower) && std::isfinite(result.upper) && result.lower <= result.upper,

@@ -24,6 +24,15 @@ public:
         d_sum = next;
     }
 
+    void append(const CompensatedSum& other)
+    {
+        // Preserve a subtotal's correction when its leading value later cancels.
+        const auto sum = other.d_sum;
+        const auto correction = other.d_correction;
+        *this += sum;
+        *this += correction;
+    }
+
     [[nodiscard]] Scalar value() const { return d_sum + d_correction; }
 
 private:

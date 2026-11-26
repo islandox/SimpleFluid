@@ -729,6 +729,19 @@ foreach(simplefluid_source_corrector_rtti IN ITEMS "typeinfo for" "typeinfo name
         "^${simplefluid_source_corrector_rtti} ${simplefluid_source_corrector_error}$" 1)
 endforeach()
 
+# Inline QBMM resize adapters can throw in a consumer and be caught in the
+# source integrator. Review the cross-DSO RTTI without exposing other internals.
+set(simplefluid_qbmm_step_size_error "SimpleFluid::Reacting::qbmm_law_detail::StepSizeError")
+set(simplefluid_qbmm_step_size_rtti_budget 3)
+foreach(simplefluid_step_rtti IN ITEMS "typeinfo for" "typeinfo name for" "vtable for")
+    set(simplefluid_step_rtti_count 1)
+    if(simplefluid_step_rtti STREQUAL "vtable for")
+        set(simplefluid_step_rtti_count "0|1")
+    endif()
+    simplefluid_require_exact_api(
+        "^${simplefluid_step_rtti} ${simplefluid_qbmm_step_size_error}$" "${simplefluid_step_rtti_count}")
+endforeach()
+
 # Final schema-only field API: exactly one heat-independent advance and one
 # accepted number-escape query per supported mesh. No old heat/void overload remains.
 set(simplefluid_final_species_native_cell "${simplefluid_stage3_scalar_cell}")
@@ -1388,6 +1401,7 @@ foreach(simplefluid_demangled_symbol IN LISTS simplefluid_demangled_symbols)
 
     if(simplefluid_demangled_symbol MATCHES "^(typeinfo( name)? for|vtable for) SimpleFluid::Reacting::"
        AND NOT simplefluid_demangled_symbol MATCHES "^(typeinfo( name)? for|vtable for) SimpleFluid::Reacting::(CaloricDomainUnresolved|ThermalCaloricRangeError)$"
+       AND NOT simplefluid_demangled_symbol MATCHES "^(typeinfo( name)? for|vtable for) ${simplefluid_qbmm_step_size_error}$"
        AND NOT simplefluid_demangled_symbol MATCHES "^(typeinfo( name)? for|vtable for) ${simplefluid_source_corrector_error}$")
         message(FATAL_ERROR
             "Unreviewed reacting RTTI definition: ${simplefluid_demangled_symbol}")
@@ -1436,7 +1450,7 @@ math(EXPR simplefluid_retired_mesh_total_symbol_budget
 math(EXPR simplefluid_api_symbol_lower_bound
     "${simplefluid_pre_retirement_api_symbol_lower_bound} - ${simplefluid_retired_mesh_total_symbol_budget}")
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_qbmm_report_public_symbol_budget} + ${simplefluid_qbmm_transport_public_symbol_budget} + ${simplefluid_qbmm_source_public_symbol_budget} + ${simplefluid_qbmm_state_public_symbol_budget} + ${simplefluid_qbmm_public_symbol_budget} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_source_corrector_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_population_process_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget} - ${simplefluid_retired_mesh_exact_symbol_budget}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_qbmm_report_public_symbol_budget} + ${simplefluid_qbmm_transport_public_symbol_budget} + ${simplefluid_qbmm_source_public_symbol_budget} + ${simplefluid_qbmm_state_public_symbol_budget} + ${simplefluid_qbmm_public_symbol_budget} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_source_corrector_public_symbol_budget} + ${simplefluid_qbmm_step_size_rtti_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_population_process_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget} - ${simplefluid_retired_mesh_exact_symbol_budget}")
 math(EXPR simplefluid_api_symbol_reviewed_maximum
     "${simplefluid_api_symbol_upper_bound} - 3")
 math(EXPR simplefluid_api_symbol_upper_bound

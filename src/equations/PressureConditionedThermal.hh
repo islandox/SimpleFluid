@@ -74,9 +74,16 @@ struct FrozenMaterialSourceTail
         std::vector<double> signed_moles; ///< Cell-side mol, catalog order.
         double energy;                    ///< Cell-side J applied with the material.
     };
+    struct Substep
+    {
+        std::vector<std::vector<double>> paired_amounts; ///< Original packets in configured slot order.
+        std::vector<ReservoirExchange> reservoirs;
+        std::vector<double> amounts; ///< Slot totals prepared by the thermal compiler.
+    };
     std::optional<std::size_t> paired_stage;
     std::vector<std::vector<double>> paired_amounts; ///< Original nonnegative packets by configured slot.
     std::vector<ReservoirExchange> reservoirs;
+    std::vector<Substep> substeps; ///< Chronological alternatives to the single raw tail.
 };
 struct FrozenInterphasePlan
 {
@@ -137,6 +144,7 @@ struct MaterialThermalReceipt
     std::size_t stage = 0, slot = 0;
     double molar_enthalpy = 0, enthalpy_temperature = 0, enthalpy_pressure = 0, donor_temperature_pressure = 0;
     long double carried_energy = 0, carried_energy_pressure_derivative = 0;
+    std::optional<std::size_t> substep{}; ///< If present, the donor anchor is stage + substep.
 };
 struct PressureConditionedThermalEvaluation
 {

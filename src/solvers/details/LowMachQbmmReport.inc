@@ -326,7 +326,7 @@ template<size_t N> std::array<double, N> report_moments(const std::array<long do
 Solver::QbmmSourceReport qbmm_source_report(const Solver::QbmmSourceReceipt& receipt)
 {
     Solver::QbmmSourceReport report{{}, receipt.final_count, receipt.final_moles, receipt.final_shape,
-        receipt.family_fingerprint, report_moments(receipt.event_shape_change)};
+        receipt.family_fingerprint, report_moments(receipt.event_shape_change), receipt.substeps};
     report.events.reserve(receipt.events.size());
     for (const auto& event : receipt.events)
         report.events.push_back({event.population, event.provider, event.family_fingerprint, event.catalog_fingerprint,

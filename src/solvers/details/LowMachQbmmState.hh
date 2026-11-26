@@ -286,187 +286,442 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_sources(
     }
 }
 
-SIMPLEFLUID_SOLVERS_LOCAL inline void validate_raw_value(double actual, long double expected, const char* message)
+SIMPLEFLUID_SOLVERS_LOCAL inline void validate_raw_value(long double actual, long double expected, const char* message)
 {
     require(std::isfinite(actual) && std::isfinite(expected) && (actual == 0) == (expected == 0) &&
-                std::abs(static_cast<long double>(actual) - expected) <=
-                    qbmm_reconstruction_tolerance *
-                        std::max(std::abs(static_cast<long double>(actual)), std::abs(expected)),
+                std::abs(actual - expected) <=
+                    qbmm_reconstruction_tolerance * std::max(std::abs(actual), std::abs(expected)),
         message);
 }
 
-/** Check one constructive Q1 endpoint against the exact native transport predecessor and packets. */
+using SourceReceiptSum = SimpleFluid::detail::CompensatedSum<long double>;
+
+struct SourceReceiptEndpoint
+{
+    std::span<const double> moles;
+    double count;
+    QbmmShapeState shape;
+};
+
+struct SourceReceiptGross
+{
+    SourceReceiptSum births, deaths, coalescence_pairs, breakup_parents, incoming_mass, outgoing_mass;
+    SourceReceiptSum produced_H2, consumed_H2, produced_H3, consumed_H3;
+    std::array<SourceReceiptSum, 8> reservoir_activity{};
+
+    void add(const QbmmEventReceipt& event, const SpeciesCatalog& catalog)
+    {
+        for (const auto& allocation : event.transfers)
+        {
+            (allocation.into_family ? incoming_mass : outgoing_mass) +=
+                source_stage_detail::mass(allocation.transfer.moles, catalog);
+            if (const auto* reservoir = std::get_if<QbmmReservoirExchange>(&allocation.transfer.counterpart))
+            {
+                const std::array channels{
+                    reservoir->energy_j, reservoir->momentum[0], reservoir->momentum[1], reservoir->momentum[2]};
+                for (size_t i = 0; i < channels.size(); ++i)
+                    reservoir_activity[2 * i + (channels[i] < 0)] += std::abs(channels[i]);
+            }
+        }
+        switch (event.kind)
+        {
+            case QbmmEventKind::Birth:
+                births += event.gross_created[0];
+                break;
+            case QbmmEventKind::Disappearance:
+                deaths += event.gross_consumed[0];
+                break;
+            case QbmmEventKind::Coalescence:
+                coalescence_pairs += event.gross_created[0];
+                break;
+            case QbmmEventKind::Breakup:
+                breakup_parents += event.gross_consumed[0];
+                break;
+            case QbmmEventKind::Growth:
+            case QbmmEventKind::Shrinkage:
+                break;
+        }
+        produced_H2 += event.gross_created[2];
+        consumed_H2 += event.gross_consumed[2];
+        produced_H3 += event.gross_created[3];
+        consumed_H3 += event.gross_consumed[3];
+    }
+
+    void append(std::vector<double>& row) const
+    {
+        const auto append_gross = [&](const SourceReceiptSum& sum)
+        {
+            const double narrowed = static_cast<double>(sum.value());
+            require(narrowed >= 0, "QBMM gross activity must be nonnegative.");
+            validate_raw_value(narrowed, sum.value(), "QBMM gross activity is not representable.");
+            row.push_back(narrowed);
+        };
+        for (const auto& sum : {births, deaths, coalescence_pairs, breakup_parents, incoming_mass, outgoing_mass,
+                 produced_H2, consumed_H2, produced_H3, consumed_H3})
+            append_gross(sum);
+        for (const auto& sum : reservoir_activity)
+            append_gross(sum);
+    }
+};
+
+struct SourceReceiptReplay
+{
+    SourceReceiptGross gross;
+    std::vector<SourceReceiptSum> species_changes, species_stocks;
+    std::array<SourceReceiptSum, 2> event_shape_change;
+
+    explicit SourceReceiptReplay(std::span<const double> moles)
+        : species_changes(moles.size()), species_stocks(moles.size())
+    {
+        for (size_t s = 0; s < moles.size(); ++s)
+            species_stocks[s] += moles[s];
+    }
+};
+
+SIMPLEFLUID_SOLVERS_LOCAL inline QbmmEventMoments source_atom_moments(long double count, double size)
+{
+    QbmmEventMoments moments{count};
+    for (size_t i = 1; i < moments.size(); ++i)
+        moments[i] = moments[i - 1] * size;
+    return moments;
+}
+
+/** Reconstruct the gross moments and signed shape evidence used across accepted stages. */
+SIMPLEFLUID_SOLVERS_LOCAL inline void replay_source_event_moments(
+    const QbmmEventReceipt& event, std::array<SourceReceiptSum, 2>& changes)
+{
+    std::array<SourceReceiptSum, 4> consumed, created, signed_moments;
+    const bool use_atoms = event.kind == QbmmEventKind::Birth || event.kind == QbmmEventKind::Breakup;
+    for (const auto& donor : event.donors)
+    {
+        const auto moments = source_atom_moments(donor.atom.count, donor.atom.mass_over_scale);
+        for (size_t k = 0; k < moments.size(); ++k)
+        {
+            consumed[k] += moments[k];
+            signed_moments[k] += -moments[k];
+        }
+        if (use_atoms)
+            for (size_t k = 0; k < changes.size(); ++k)
+                changes[k] += -moments[k + 2];
+    }
+    for (const auto& product : event.products)
+    {
+        const auto moments = source_atom_moments(product.count, product.mass_over_scale);
+        for (size_t k = 0; k < moments.size(); ++k)
+        {
+            created[k] += moments[k];
+            signed_moments[k] += moments[k];
+        }
+        if (use_atoms)
+            for (size_t k = 0; k < changes.size(); ++k)
+                changes[k] += moments[k + 2];
+    }
+    for (size_t k = 0; k < signed_moments.size(); ++k)
+    {
+        require(consumed[k].value() >= 0 && created[k].value() >= 0, "QBMM gross atom moments must be nonnegative.");
+        validate_raw_value(event.gross_consumed[k], consumed[k].value(), "QBMM gross donor moments differ.");
+        validate_raw_value(event.gross_created[k], created[k].value(), "QBMM gross product moments differ.");
+        const auto scale = std::max(consumed[k].value(), created[k].value());
+        require(std::isfinite(event.moment_change[k]) && std::abs(event.moment_change[k] - signed_moments[k].value()) <=
+                                                             qbmm_reconstruction_tolerance * scale,
+            "QBMM signed event moments disagree with the supplied atom allocations.");
+    }
+    if (use_atoms)
+        return;
+
+    std::array<long double, 2> shape_change{signed_moments[2].value(), signed_moments[3].value()};
+    if (event.kind == QbmmEventKind::Growth || event.kind == QbmmEventKind::Shrinkage)
+    {
+        require(event.donors.size() == 1 && event.products.size() == 1,
+            "QBMM resizing requires one donor and one product.");
+        const auto& donor = event.donors.front().atom;
+        const auto& product = event.products.front();
+        const long double a = donor.mass_over_scale, b = product.mass_over_scale;
+        require(donor.count == product.count && (event.kind == QbmmEventKind::Growth ? b > a : b < a),
+            "QBMM resizing must preserve count and change size in the specified direction.");
+        const long double dm = (b - a) * donor.count;
+        const auto left = dm * a, right = dm * b;
+        shape_change = {left + right, left * a + left * b + right * b};
+    }
+    else if (event.kind == QbmmEventKind::Coalescence)
+    {
+        require(event.donors.size() == 2 && event.products.size() == 1,
+            "QBMM coalescence requires two donors and one product.");
+        const auto& first = event.donors.front().atom;
+        const auto& second = event.donors.back().atom;
+        const auto& product = event.products.front();
+        const long double a = first.mass_over_scale, b = second.mass_over_scale;
+        require(first.count == product.count && second.count == product.count &&
+                    static_cast<double>(a + b) == product.mass_over_scale,
+            "QBMM coalescence must preserve pair count and combine both donor masses.");
+        const long double cross = (first.count * a) * b;
+        shape_change = {2 * cross, 3 * (cross * a + cross * b)};
+    }
+    for (size_t k = 0; k < changes.size(); ++k)
+    {
+        validate_raw_value(event.moment_change[k + 2], shape_change[k], "QBMM signed event shape change differs.");
+        changes[k] += shape_change[k];
+    }
+}
+
+SIMPLEFLUID_SOLVERS_LOCAL inline void validate_source_transfer(
+    const QbmmMaterialTransfer& transfer, const QbmmPopulationSchema& family)
+{
+    if (const auto* phase = std::get_if<QbmmPhaseExchange>(&transfer.counterpart))
+    {
+        require(static_cast<size_t>(phase->phase) < static_cast<size_t>(SpeciesPhase::Count),
+            "QBMM receipt specifies an invalid phase counterpart.");
+        const auto& catalog = family.catalog();
+        for (size_t s = 0; s < transfer.moles.size(); ++s)
+            require(transfer.moles[s] == 0 || catalog.allows(catalog.species()[s].id, phase->phase),
+                "QBMM receipt species is disallowed in the phase counterpart.");
+    }
+    else
+    {
+        const auto& reservoir = std::get<QbmmReservoirExchange>(transfer.counterpart);
+        require(!reservoir.reservoir.empty() && std::isfinite(reservoir.energy_j) &&
+                    std::ranges::all_of(reservoir.momentum, [](double value) { return std::isfinite(value); }),
+            "QBMM receipt reservoir, energy or impulse is invalid.");
+    }
+}
+
+/** Replay one event batch against its own original atoms and material donor stocks. */
+SIMPLEFLUID_SOLVERS_LOCAL inline SourceReceiptSum replay_source_substep(const QbmmPopulationSchema& family,
+    std::uint64_t catalog, SourceReceiptEndpoint initial, SourceReceiptEndpoint final,
+    std::span<const QbmmEventReceipt> events, std::uint64_t substep, double duration, SourceReceiptReplay& replay,
+    bool substepped)
+{
+    if (events.empty())
+    {
+        require(std::ranges::equal(final.moles, initial.moles) && final.count == initial.count &&
+                    final.shape == initial.shape,
+            "QBMM source changed a family without a constructive event receipt.");
+        return {};
+    }
+
+    const auto pre = invert_qbmm_moments(qbmm_cell_moments(
+        family, {family.population(), catalog, initial.moles, initial.count, initial.shape, family.fingerprint()}));
+    require(pre.valid(), "QBMM source receipt predecessor has no supported quadrature.");
+    std::array<SourceReceiptSum, 2> remaining;
+    std::array<SourceReceiptSum, 2> shape_changes;
+    SourceReceiptSum count, represented_count, H1, H2, H3;
+    if (substepped)
+        count += initial.count;
+    auto margins = substepped ? replay.species_stocks : std::vector<SourceReceiptSum>{};
+    for (size_t i = 0; i < pre.active_atoms; ++i)
+        remaining[i] += pre.atoms[i].count;
+    for (const auto& event : events)
+    {
+        require(event.population == family.population() && event.family_fingerprint == family.fingerprint() &&
+                    event.catalog_fingerprint == catalog && !event.provider.empty() && event.provider_revision > 0 &&
+                    event.substep == substep && event.duration == duration,
+            "QBMM event provenance differs from the family and source substep.");
+        require(event.kind >= QbmmEventKind::Birth && event.kind <= QbmmEventKind::Breakup &&
+                    (!event.donors.empty() || !event.products.empty()),
+            "QBMM event receipt requires a supported event kind and a constructive atom allocation.");
+        for (const auto& donor : event.donors)
+        {
+            require(donor.index < pre.active_atoms &&
+                        donor.atom.mass_over_scale == pre.atoms[donor.index].mass_over_scale &&
+                        std::isfinite(donor.atom.count) && donor.atom.count > 0,
+                "QBMM event donor differs from the substep predecessor quadrature.");
+            remaining[donor.index] += -static_cast<long double>(donor.atom.count);
+            require(remaining[donor.index].value() >= 0, "QBMM source overdraws an original donor count.");
+            count += -static_cast<long double>(donor.atom.count);
+        }
+        for (const auto& product : event.products)
+        {
+            require(std::isfinite(product.count) && product.count > 0 && std::isfinite(product.mass_over_scale) &&
+                        product.mass_over_scale > 0,
+                "QBMM event product requires finite positive count and size.");
+            count += product.count;
+            if (!substepped)
+                represented_count += product.count;
+            const auto mass = static_cast<long double>(product.count) * product.mass_over_scale;
+            H1 += mass;
+            const auto sized = mass * product.mass_over_scale;
+            H2 += sized;
+            H3 += sized * product.mass_over_scale;
+        }
+        SourceReceiptSum material_change;
+        for (const auto& allocation : event.transfers)
+        {
+            const auto& moles = allocation.transfer.moles;
+            require(moles.size() == initial.moles.size(), "QBMM event material catalog layout differs.");
+            for (size_t s = 0; s < moles.size(); ++s)
+            {
+                require(std::isfinite(moles[s]) && moles[s] >= 0, "QBMM event material transfer is invalid.");
+                const long double change = allocation.into_family ? moles[s] : -static_cast<long double>(moles[s]);
+                replay.species_changes[s] += change;
+                if (substepped)
+                {
+                    replay.species_stocks[s] += change;
+                    if (change < 0)
+                    {
+                        margins[s] += change;
+                        require(std::isfinite(margins[s].value()) && margins[s].value() >= 0,
+                            "QBMM source overdraws an original family species donor.");
+                    }
+                }
+            }
+            if (substepped)
+            {
+                validate_source_transfer(allocation.transfer, family);
+                const auto mass = family.scaled_mass(moles);
+                require(mass > 0, "QBMM event material transfer must have positive mass.");
+                material_change += allocation.into_family ? mass : -static_cast<long double>(mass);
+            }
+        }
+        if (substepped)
+        {
+            replay_source_event_moments(event, shape_changes);
+            validate_raw_value(event.material_mass_change_over_scale, material_change.value(),
+                "QBMM event material mass differs from the signed raw moles.");
+            validate_raw_value(event.moment_change[1], material_change.value(),
+                "QBMM event atom mass change differs from the signed raw moles.");
+        }
+        replay.gross.add(event, family.catalog());
+    }
+    for (size_t i = 0; i < pre.active_atoms; ++i)
+    {
+        const long double size = pre.atoms[i].mass_over_scale;
+        represented_count += substepped ? static_cast<double>(remaining[i].value()) : remaining[i].value();
+        const auto mass = remaining[i].value() * size;
+        H1 += mass;
+        const auto sized = mass * size;
+        H2 += sized;
+        H3 += sized * size;
+    }
+
+    validate_raw_value(final.shape.H2, H2.value(), "QBMM constructive H2 disagrees with raw atoms.");
+    validate_raw_value(final.shape.H3, H3.value(), "QBMM constructive H3 disagrees with raw atoms.");
+    if (substepped)
+    {
+        // The Q1 kernel sums the rounded survivor weights before adding products.
+        for (const auto& event : events)
+            for (const auto& product : event.products)
+                represented_count += product.count;
+        for (size_t s = 0; s < final.moles.size(); ++s)
+        {
+            const auto stock = replay.species_stocks[s].value();
+            require(std::isfinite(stock) && stock >= 0 && static_cast<double>(stock) == final.moles[s] &&
+                        (stock == 0) == (final.moles[s] == 0),
+                "QBMM substep species endpoint differs from the sequential raw transfers.");
+        }
+        validate_raw_value(
+            family.scaled_mass(final.moles), H1.value(), "QBMM constructive H1 disagrees with raw atoms.");
+        require(invert_qbmm_moments(qbmm_cell_moments(family, {family.population(), catalog, final.moles, final.count,
+                                                                  final.shape, family.fingerprint()}))
+                    .valid(),
+            "QBMM source receipt endpoint has no supported quadrature.");
+        for (size_t k = 0; k < shape_changes.size(); ++k)
+            replay.event_shape_change[k].append(shape_changes[k]);
+    }
+    const bool depleted = represented_count.value() < .5L * initial.count;
+    if (substepped)
+    {
+        // Keep the compensated accumulator through the subtraction, including changes below the stored count's ULP.
+        if (depleted)
+            count = represented_count;
+        validate_raw_value(final.count, count.value(), "QBMM constructive count disagrees with raw atoms.");
+        count += -static_cast<long double>(initial.count);
+        return count;
+    }
+    if (depleted)
+    {
+        // Replay a large depletion from its small positive remainder, as in the Q1 kernel.
+        validate_raw_value(final.count, represented_count.value(), "QBMM remaining count disagrees with raw products.");
+        represented_count += -static_cast<long double>(initial.count);
+        return represented_count;
+    }
+    const auto change = count;
+    count += initial.count;
+    validate_raw_value(final.count, count.value(), "QBMM constructive count disagrees with raw atoms.");
+    return change;
+}
+
+/** Check the constructive Q1 endpoints against the transport predecessor and integrated packets. */
 SIMPLEFLUID_SOLVERS_LOCAL inline void validate_source_receipt(const QbmmPopulationSchema& family,
     const Flow::TransportSnapshot& transport, Flow::SourceStageResult& result, size_t c, size_t a)
 {
-    using Sum = SimpleFluid::detail::CompensatedSum<long double>;
-    using source_stage_detail::mass;
     using source_stage_detail::number_packet;
     using source_stage_detail::shape_packet;
     using source_stage_detail::species_packet;
     using source_stage_detail::validate_source_endpoint;
     const auto& receipt = *result.qbmm_cells[c][a];
-    const auto& initial = transport.cells[c].phases[a];
-    const auto species = initial.moles.size();
-    require(transport.qbmm_families[a] == Flow::qbmm_family_stamp(family) && initial.population_number &&
-                initial.qbmm_shape && receipt.family_fingerprint == family.fingerprint() &&
+    const auto& transported = transport.cells[c].phases[a];
+    const auto species = transported.moles.size();
+    require(transport.qbmm_families[a] == Flow::qbmm_family_stamp(family) && transported.population_number &&
+                transported.qbmm_shape && receipt.family_fingerprint == family.fingerprint() &&
                 receipt.final_moles.size() == species,
         "QBMM source receipt family or inventory layout differs from the transport snapshot.");
-
+    const SourceReceiptEndpoint initial{transported.moles, *transported.population_number, *transported.qbmm_shape};
+    const SourceReceiptEndpoint final{receipt.final_moles, receipt.final_count, receipt.final_shape};
     const auto number_change = number_packet(result.sources, c, a);
     const auto shape_change = shape_packet(result.sources, c, a);
-    validate_source_endpoint(*initial.population_number, number_change, receipt.final_count);
-    validate_source_endpoint(initial.qbmm_shape->H2, shape_change.H2, receipt.final_shape.H2);
-    validate_source_endpoint(initial.qbmm_shape->H3, shape_change.H3, receipt.final_shape.H3);
-    validate_raw_value(shape_change.H2, static_cast<long double>(receipt.final_shape.H2) - initial.qbmm_shape->H2,
+    validate_source_endpoint(initial.count, number_change, final.count);
+    validate_source_endpoint(initial.shape.H2, shape_change.H2, final.shape.H2);
+    validate_source_endpoint(initial.shape.H3, shape_change.H3, final.shape.H3);
+    validate_raw_value(shape_change.H2, static_cast<long double>(final.shape.H2) - initial.shape.H2,
         "QBMM signed H2 packet disagrees with the constructive delta.");
-    validate_raw_value(shape_change.H3, static_cast<long double>(receipt.final_shape.H3) - initial.qbmm_shape->H3,
+    validate_raw_value(shape_change.H3, static_cast<long double>(final.shape.H3) - initial.shape.H3,
         "QBMM signed H3 packet disagrees with the constructive delta.");
-    for (size_t s = 0; s < species; ++s)
-        validate_source_endpoint(initial.moles[s], species_packet(result.sources, c, a, s), receipt.final_moles[s]);
 
-    // Per-family gross layout stays fixed through rank changes, empty states and changes of event kind.
-    Sum births, deaths, coalescence_pairs, breakup_parents, incoming_mass, outgoing_mass;
-    Sum produced_H2, consumed_H2, produced_H3, consumed_H3;
-    std::array<Sum, 8> reservoir_activity{};
-    if (receipt.events.empty())
+    SourceReceiptReplay replay(initial.moles);
+    if (receipt.substeps.empty())
     {
-        require(receipt.final_moles == initial.moles && receipt.final_count == *initial.population_number &&
-                    receipt.final_shape == *initial.qbmm_shape && number_change == 0 &&
-                    shape_change == QbmmShapeState{},
-            "QBMM source changed a family without a constructive event receipt.");
-        for (size_t s = 0; s < species; ++s)
-            require(species_packet(result.sources, c, a, s) == 0,
-                "QBMM source contains material without a constructive event receipt.");
+        const auto change = replay_source_substep(family, transport.schema_fingerprint, initial, final, receipt.events,
+            0, transport.time_step, replay, false);
+        validate_raw_value(number_change, change.value(),
+            "QBMM signed count packet disagrees with the raw event receipt.");
     }
     else
     {
-        const auto pre = invert_qbmm_moments(qbmm_cell_moments(
-            family, {family.population(), transport.schema_fingerprint, initial.moles, *initial.population_number,
-                        *initial.qbmm_shape, receipt.family_fingerprint}));
-        require(pre.valid(), "QBMM source receipt predecessor has no supported quadrature.");
-        std::array<Sum, 2> remaining;
-        Sum raw_count_change, represented_count, H2, H3;
-        std::vector<Sum> raw_moles(species);
-        for (size_t i = 0; i < pre.active_atoms; ++i)
-            remaining[i] += pre.atoms[i].count;
-        for (const auto& event : receipt.events)
+        const std::span<const QbmmEventReceipt> events(receipt.events);
+        auto previous = initial;
+        SourceReceiptSum count_change;
+        size_t begin = 0;
+        double elapsed = 0;
+        for (size_t i = 0; i < receipt.substeps.size(); ++i)
         {
-            require(event.population == family.population() && event.family_fingerprint == family.fingerprint() &&
-                        event.catalog_fingerprint == transport.schema_fingerprint && !event.provider.empty() &&
-                        event.provider_revision > 0 && event.substep == 0 && event.duration == transport.time_step,
-                "QBMM event provenance differs from the family and fixed source interval.");
-            for (const auto& donor : event.donors)
-            {
-                require(donor.index < pre.active_atoms &&
-                            donor.atom.mass_over_scale == pre.atoms[donor.index].mass_over_scale &&
-                            std::isfinite(donor.atom.count) && donor.atom.count > 0,
-                    "QBMM event donor differs from the transported quadrature.");
-                remaining[donor.index] += -static_cast<long double>(donor.atom.count);
-                require(remaining[donor.index].value() >= 0, "QBMM source overdraws an original donor count.");
-                raw_count_change += -static_cast<long double>(donor.atom.count);
-            }
-            for (const auto& product : event.products)
-            {
-                require(std::isfinite(product.count) && product.count > 0 && std::isfinite(product.mass_over_scale) &&
-                            product.mass_over_scale > 0,
-                    "QBMM event product requires finite positive count and size.");
-                raw_count_change += product.count;
-                represented_count += product.count;
-                const long double sized =
-                    static_cast<long double>(product.count) * product.mass_over_scale * product.mass_over_scale;
-                H2 += sized;
-                H3 += sized * product.mass_over_scale;
-            }
-            for (const auto& allocation : event.transfers)
-            {
-                const auto& moles = allocation.transfer.moles;
-                require(moles.size() == species, "QBMM event material catalog layout differs.");
-                for (size_t s = 0; s < species; ++s)
-                {
-                    require(std::isfinite(moles[s]) && moles[s] >= 0, "QBMM event material transfer is invalid.");
-                    raw_moles[s] += allocation.into_family ? moles[s] : -static_cast<long double>(moles[s]);
-                }
-                (allocation.into_family ? incoming_mass : outgoing_mass) += mass(moles, family.catalog());
-                if (const auto* reservoir = std::get_if<QbmmReservoirExchange>(&allocation.transfer.counterpart))
-                {
-                    const std::array channels{
-                        reservoir->energy_j, reservoir->momentum[0], reservoir->momentum[1], reservoir->momentum[2]};
-                    for (size_t i = 0; i < channels.size(); ++i)
-                        reservoir_activity[2 * i + (channels[i] < 0)] += std::abs(channels[i]);
-                }
-            }
-            switch (event.kind)
-            {
-                case QbmmEventKind::Birth:
-                    births += event.gross_created[0];
-                    break;
-                case QbmmEventKind::Disappearance:
-                    deaths += event.gross_consumed[0];
-                    break;
-                case QbmmEventKind::Coalescence:
-                    coalescence_pairs += event.gross_created[0];
-                    break;
-                case QbmmEventKind::Breakup:
-                    breakup_parents += event.gross_consumed[0];
-                    break;
-                case QbmmEventKind::Growth:
-                case QbmmEventKind::Shrinkage:
-                    break;
-            }
-            produced_H2 += event.gross_created[2];
-            consumed_H2 += event.gross_consumed[2];
-            produced_H3 += event.gross_created[3];
-            consumed_H3 += event.gross_consumed[3];
+            const auto& stage = receipt.substeps[i];
+            const double end = transport.time_step * (double(i + 1) / double(receipt.substeps.size()));
+            require(stage.substep == i && std::isfinite(stage.duration) && stage.duration > 0 &&
+                        stage.duration == end - elapsed && stage.event_end >= begin &&
+                        stage.event_end <= events.size() && stage.final_moles.size() == species,
+                "QBMM source substep chronology, duration or inventory layout differs.");
+            const SourceReceiptEndpoint endpoint{stage.final_moles, stage.final_count, stage.final_shape};
+            count_change.append(replay_source_substep(family, transport.schema_fingerprint, previous, endpoint,
+                events.subspan(begin, stage.event_end - begin), stage.substep, stage.duration, replay, true));
+            previous = endpoint;
+            elapsed = end;
+            begin = stage.event_end;
         }
-        for (size_t i = 0; i < pre.active_atoms; ++i)
+        require(elapsed == transport.time_step && begin == events.size() &&
+                    std::ranges::equal(previous.moles, final.moles) && previous.count == final.count &&
+                    previous.shape == final.shape,
+            "QBMM source substeps do not cover the interval and reproduce its endpoint.");
+        validate_raw_value(number_change, count_change.value(),
+            "QBMM signed count packet disagrees with the chronological event receipts.");
+        for (size_t k = 0; k < replay.event_shape_change.size(); ++k)
+            validate_raw_value(receipt.event_shape_change[k], replay.event_shape_change[k].value(),
+                "QBMM signed event shape change differs from the chronological event receipts.");
+    }
+    for (size_t s = 0; s < species; ++s)
+    {
+        auto change = replay.species_changes[s];
+        const auto packet = species_packet(result.sources, c, a, s);
+        validate_source_endpoint(initial.moles[s], packet, final.moles[s]);
+        validate_raw_value(packet, change.value(), "QBMM signed species packet disagrees with raw transfers.");
+        if (receipt.substeps.empty())
         {
-            const long double size = pre.atoms[i].mass_over_scale;
-            represented_count += remaining[i].value();
-            const long double sized = remaining[i].value() * size * size;
-            H2 += sized;
-            H3 += sized * size;
-        }
-        validate_raw_value(receipt.final_shape.H2, H2.value(), "QBMM constructive H2 disagrees with raw atoms.");
-        validate_raw_value(receipt.final_shape.H3, H3.value(), "QBMM constructive H3 disagrees with raw atoms.");
-        if (represented_count.value() < .5L * *initial.population_number)
-        {
-            // Replay a large depletion from its small positive remainder, as in the Q1 kernel.
+            change += initial.moles[s];
             validate_raw_value(
-                receipt.final_count, represented_count.value(), "QBMM remaining count disagrees with raw products.");
-            represented_count += -static_cast<long double>(*initial.population_number);
-            validate_raw_value(number_change, represented_count.value(),
-                "QBMM signed count packet disagrees with the retained measure.");
-        }
-        else
-        {
-            validate_raw_value(
-                number_change, raw_count_change.value(), "QBMM signed count packet disagrees with raw atoms.");
-            raw_count_change += *initial.population_number;
-            validate_raw_value(
-                receipt.final_count, raw_count_change.value(), "QBMM constructive count disagrees with raw atoms.");
-        }
-        for (size_t s = 0; s < species; ++s)
-        {
-            validate_raw_value(species_packet(result.sources, c, a, s), raw_moles[s].value(),
-                "QBMM signed species packet disagrees with raw transfers.");
-            raw_moles[s] += initial.moles[s];
-            validate_raw_value(receipt.final_moles[s], raw_moles[s].value(),
-                "QBMM constructive species disagrees with raw transfers.");
+                final.moles[s], change.value(), "QBMM constructive species disagrees with raw transfers.");
         }
     }
-    const auto append_gross = [&](const Sum& sum)
-    {
-        const double narrowed = static_cast<double>(sum.value());
-        require(narrowed >= 0, "QBMM gross activity must be nonnegative.");
-        validate_raw_value(narrowed, sum.value(), "QBMM gross activity is not representable.");
-        result.gross_events[c].push_back(narrowed);
-    };
-    for (const auto& sum : {births, deaths, coalescence_pairs, breakup_parents, incoming_mass, outgoing_mass,
-             produced_H2, consumed_H2, produced_H3, consumed_H3})
-        append_gross(sum);
-    for (const auto& sum : reservoir_activity)
-        append_gross(sum);
+    // Per-family gross layout stays fixed through rank changes, empty states and changes of event kind.
+    replay.gross.append(result.gross_events[c]);
 }
 
 SIMPLEFLUID_SOLVERS_LOCAL inline void validate_source_receipts(
@@ -489,13 +744,19 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_source_receipts(
     for (size_t c = 0; c < cells; ++c)
     {
         require(result.qbmm_cells[c].size() == families.size(), "QBMM source receipt phase layout differs.");
+        std::optional<size_t> substeps;
         for (size_t a = 0; a < families.size(); ++a)
         {
             const auto& family = families[a];
             const auto& receipt = result.qbmm_cells[c][a];
             require(bool(family) == bool(receipt), "QBMM source receipts must match the bound families.");
             if (family)
+            {
+                require(!substeps || *substeps == receipt->substeps.size(),
+                    "QBMM source substep schedule differs across families in this cell.");
+                substeps = receipt->substeps.size();
                 validate_source_receipt(*family, transport, result, c, a);
+            }
         }
     }
 }

@@ -65,12 +65,12 @@ struct MixtureQbmmContext
 {
     const QbmmPopulationSchema& family;
     std::size_t phase, owned_cell;
-    const QbmmQuadrature& quadrature;      ///< Transported pre-material family, with extensive weights.
+    const QbmmQuadrature& quadrature;      ///< Predecessor family at the current source substep.
     const CellSpeciesState& material;      ///< Actual predecessor of this material stage.
     std::span<const double> phase_volumes; ///< EOS occupied m3/cell at the current trial pressure and temperature.
     std::span<const PhaseThermalState> phases;
     const LowMachMixtureSolver::SourceStageMetadata& stage;
-    double time_step, accepted_time;
+    double time_step, accepted_time; ///< Duration and absolute start of this source substep.
     const QbmmLawInputs* law_inputs = nullptr; ///< Frozen SI values for this exact source evaluation.
 };
 
@@ -100,7 +100,7 @@ struct MixtureQbmmJointContext
     const CellSpeciesState& material;
     std::size_t owned_cell;
     const LowMachMixtureSolver::SourceStageMetadata& stage;
-    double time_step, accepted_time;
+    double time_step, accepted_time; ///< Duration and absolute start of this source substep.
 };
 
 /** Integrated local allocation law. Its optional material slots use pressure-conditioned donor enthalpy.
@@ -114,7 +114,7 @@ struct MixtureQbmmProvider
     const std::function<std::vector<QbmmEventOperation>(const MixtureQbmmContext&)> evaluate;
     const std::vector<std::shared_ptr<const MixtureQbmmLaw>> laws{}; ///< Ordered, additionally supplied local laws.
     /** Deterministic, MPI-free alternative to the per-family evaluators.
-     * Called once per owned cell and source evaluation.
+     * Called once per local source or error-check substep.
      * Return one event row per input family. All gross debits reserve the shared predecessor inventory.
      */
     const std::function<std::vector<std::vector<QbmmEventOperation>>(const MixtureQbmmJointContext&)> evaluate_joint{};
@@ -199,6 +199,8 @@ struct ReactingMixtureOptions
      * Cylindrical kinetic transport requires exactly zero transverse components.
      */
     std::optional<LowMachMixtureSolver::Vector> body_acceleration;
+    double qbmm_source_substep_relative_tolerance = 0.; ///< Zero retains the single source stage.
+    std::size_t qbmm_source_maximum_substeps = 64;
 };
 
 class SIMPLEFLUID_SOLVERS_EXPORT ReactingMixtureCoupler
@@ -214,6 +216,8 @@ public:
         std::vector<double> population_births, population_deaths,
             population_number_changes; ///< Global per-phase counts.
         LowMachMixtureSolver::Diagnostics flow;
+        std::size_t maximum_qbmm_source_substeps = 0;
+        std::size_t qbmm_source_substep_retries = 0;
     };
     class Trial
     {

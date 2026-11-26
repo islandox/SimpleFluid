@@ -186,6 +186,18 @@ public:
         const State& thermodynamic_trial; ///< Rates use this T/p together with actual stage composition.
         const Mesh& mesh; ///< Borrowed read-only mesh for collective halo/face stages; epochs are in transport.
     };
+    /** Accepted cell-local source stage. Its initial state is the preceding stage's endpoint, or the transport
+     * snapshot at index zero. A repeated event_end retains a stage with no events for this family.
+     */
+    struct QbmmSourceSubstep
+    {
+        std::uint64_t substep = 0; ///< Zero-based accepted stage index in this cell.
+        double duration = 0;       ///< Accepted stage duration in seconds.
+        std::size_t event_end = 0; ///< Exclusive end in the owning receipt's chronological event list.
+        double final_count = 0;
+        std::vector<double> final_moles;
+        QbmmShapeState final_shape;
+    };
     struct QbmmSourceReceipt
     {
         static constexpr size_t gross_channels = 18;
@@ -195,6 +207,7 @@ public:
         QbmmShapeState final_shape;
         std::uint64_t family_fingerprint = 0;
         std::array<long double, 2> event_shape_change{}; ///< Q1 signed H2,H3 before canonical endpoint rounding.
+        std::vector<QbmmSourceSubstep> substeps; ///< Accepted stages with source substepping enabled.
     };
     using QbmmSourceCells = std::vector<std::vector<std::optional<QbmmSourceReceipt>>>;
     enum class GrossResidualStage
@@ -561,6 +574,7 @@ public:
         QbmmShapeState final_shape;
         std::uint64_t family_fingerprint = 0;
         std::array<double, 2> event_shape_change{};
+        std::vector<QbmmSourceSubstep> substeps;
     };
     struct QbmmIntervalReport
     {

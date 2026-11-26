@@ -4,6 +4,12 @@ std::shared_ptr<const InterphaseConfiguration> configure_qbmm_sources(
 {
     auto thermal = options.interphase ? options.interphase->configuration : nullptr;
     const auto& families = flow.options().qbmm_families;
+    const double tolerance = options.qbmm_source_substep_relative_tolerance;
+    require(std::isfinite(tolerance) && tolerance >= 0 && tolerance < 1 &&
+                options.qbmm_source_maximum_substeps >= 1,
+        "QBMM source substep tolerance must be in [0, 1) and its stage budget positive.");
+    require(tolerance == 0 || (!families.empty() && options.qbmm_population),
+        "QBMM source substeps require bound families and a QBMM source provider.");
     if (families.empty())
     {
         require(!options.qbmm_population, "A QBMM law requires native QBMM family bindings.");

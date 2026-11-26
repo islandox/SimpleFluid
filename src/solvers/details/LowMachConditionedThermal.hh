@@ -73,9 +73,15 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_batch(const PressureConditionedTh
                     plan.amounts.size() == batch.configuration->stages.size(),
             "Conditioned cell plan phase/event layout differs.");
         validate_interphase_configuration(*batch.configuration, context.thermodynamic_trial.cells.at(c).phases);
-        for (const auto& exchange : plan.material_tail.reservoirs)
-            require(exchange.phase < np && std::isfinite(exchange.energy),
-                "Conditioned reservoir energy has an invalid phase or value.");
+        const auto validate_reservoirs = [&](const auto& reservoirs)
+        {
+            for (const auto& exchange : reservoirs)
+                require(exchange.phase < np && std::isfinite(exchange.energy),
+                    "Conditioned reservoir energy has an invalid phase or value.");
+        };
+        validate_reservoirs(plan.material_tail.reservoirs);
+        for (const auto& step : plan.material_tail.substeps)
+            validate_reservoirs(step.reservoirs);
         for (size_t a = 0; a < np; ++a)
         {
             SimpleFluid::detail::CompensatedSum<long double> raw;
@@ -87,6 +93,10 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_batch(const PressureConditionedTh
             for (const auto& exchange : plan.material_tail.reservoirs)
                 if (exchange.phase == a)
                     raw += exchange.energy;
+            for (const auto& step : plan.material_tail.substeps)
+                for (const auto& exchange : step.reservoirs)
+                    if (exchange.phase == a)
+                        raw += exchange.energy;
             const auto projection = static_cast<double>(raw.value());
             require(std::isfinite(projection) && projection == source_stage_detail::energy_packet(sources, c, a),
                 "Conditioned raw static energy does not project to the exact provider-returned packet.");

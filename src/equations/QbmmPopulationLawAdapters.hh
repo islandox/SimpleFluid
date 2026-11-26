@@ -16,6 +16,13 @@ namespace SimpleFluid::Reacting
 {
 namespace qbmm_law_detail
 {
+/** A valid resize rate requests a destination that a shorter step can represent. */
+class SIMPLEFLUID_EQUATIONS_EXPORT StepSizeError : public std::invalid_argument
+{
+public:
+    using std::invalid_argument::invalid_argument;
+};
+
 inline double narrow(long double value)
 {
     const double result = static_cast<double>(value);
@@ -55,8 +62,13 @@ inline QbmmResize resize_from_mass_change(const QbmmPopulationSchema& family, co
     long double requested_per_bubble, const QbmmTransferCounterpart& counterpart)
 {
     const auto& atom = input.quadrature.atoms[a];
-    const double destination = narrow(atom.mass_over_scale + requested_per_bubble / input.mass_scale_kg);
-    if (destination <= 0 || destination == atom.mass_over_scale)
+    const auto proposed = atom.mass_over_scale + requested_per_bubble / input.mass_scale_kg;
+    if (std::isinf(static_cast<double>(proposed)))
+        throw StepSizeError("QBMM supplied law result is not representable.");
+    const double destination = narrow(proposed);
+    if (destination <= 0)
+        throw StepSizeError("QBMM growth needs a representable positive destination or explicit disappearance.");
+    if (destination == atom.mass_over_scale)
         throw std::invalid_argument(
             "QBMM growth needs a representable positive destination or explicit disappearance.");
     const long double scaled_mass = (static_cast<long double>(destination) - atom.mass_over_scale) * atom.count;
