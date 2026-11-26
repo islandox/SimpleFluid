@@ -94,7 +94,7 @@ public:
         QbmmModelOptions qbmm_model;
         std::vector<std::shared_ptr<const QbmmNodeSlipLaw>>
             qbmm_node_slip_laws; ///< Kinetic-only, EOS-indexed and nonnull precisely for bound families.
-        /** Forced explicit-family and implicit-pool provider identities in EOS phase order, including empty phases.
+        /** Physical provider identities for forced restart, in EOS phase order including empty phases.
          * A built-in ideal gas supplies its intrinsic data. Declare the immutable evaluator for any other EOS,
          * including a liquid property evaluator, and for a built-in ideal gas's optional transport law.
          */
@@ -898,7 +898,8 @@ private:
         const ControllerLease* controller, bool coherent_qbmm = false);
     SIMPLEFLUID_SOLVERS_LOCAL std::shared_ptr<ALEGeometryCertificate> capture_accepted_geometry(
         const PlanarMotion& motion) const;
-    SIMPLEFLUID_SOLVERS_LOCAL PlanarMotionFrame capture_planar_motion_frame(const PlanarMotion& motion) const;
+    SIMPLEFLUID_SOLVERS_LOCAL PlanarMotionFrame capture_planar_motion_frame(
+        const PlanarMotion& motion, bool forced = false) const;
     SIMPLEFLUID_SOLVERS_LOCAL void restore_accepted_after_motion(
         PlanarMotion& motion, std::span<const double> absolute_flux, PlanarMotionFrame& accepted_frame);
     SIMPLEFLUID_SOLVERS_LOCAL void rollback_planar_geometry(PlanarMotion& motion, PlanarMotionFrame& accepted_frame);

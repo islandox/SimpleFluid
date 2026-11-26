@@ -194,8 +194,9 @@ struct ReactingMixtureOptions
     std::shared_ptr<const MixtureInterphaseEventProvider>
         interphase; ///< Frozen material amounts before explicit number law.
     std::shared_ptr<const MixtureQbmmProvider> qbmm_population;
-    /** Uniform fixed-grid acceleration in m/s². Each acceleration-dependent node-slip law must bind this vector.
-     * Fixed explicit family transport selects balanced pressure for any engaged vector, including zero.
+    /** Uniform acceleration in m/s². Each acceleration-dependent node-slip law must bind this vector.
+     * Forced explicit transport and the admitted forced planar implicit modes use balanced pressure
+     * for any engaged vector, including zero.
      * Cylindrical kinetic transport requires exactly zero transverse components.
      */
     std::optional<LowMachMixtureSolver::Vector> body_acceleration;

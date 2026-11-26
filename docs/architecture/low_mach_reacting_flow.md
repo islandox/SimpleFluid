@@ -392,13 +392,27 @@ same live motion authority and restages the retained old/new volumes and swept
 rates exactly. It publishes without invoking source, EOS or target laws. The
 ordinary fixed-grid commit rejects moving candidates.
 
+Supplied acceleration, including an engaged zero vector, is supported for
+count-only flow and native implicit QBMM with either prescribed velocity
+mode. Forced moving material projection uses the interior cell gradient.
+Its absolute continuity target includes the divergence of the material
+fraction times the swept mesh rate. Pressure correction retains the
+prescribed absolute wall flux. Forced pool conversion and forced explicit
+family transport remain outside this moving capability.
+
 Geometry epochs invalidate numerical caches on motion and rollback. A separate
 logical accepted-geometry identity lets earlier valid candidates survive a
 later failed preview; it does not authorize arbitrary external geometry edits.
+Forced planar previews also restore the accepted epoch and the motion's
+retained volume and swept-rate history.
 Moving checkpoint/restore requires the explicit motion authority and restores
 geometry, all physical fields, accepted absolute flux, diagnostics and time.
 Trials retain owned geometry certificates, not a borrowed active ALE view or a
 lease that outlives the controller.
+
+Portable v9 tag 12 binds the forced planar reacting controller, acceleration,
+physical provider identities, accepted motion interval, and split impulse
+ledger. The receiving controller must be initialized with matching authority.
 
 Species, phase internal energy, population number and momentum use accepted-old
 and trial-new control-volume storage with mesh-relative phase advection. The

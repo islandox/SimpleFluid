@@ -2,15 +2,18 @@
 struct LowMachMixtureSolver::PlanarMotionFrame
 {
     std::uint64_t epoch;
+    bool preserve = false;
     std::vector<double> old_volumes, new_volumes, swept_rates;
     MeshMotionDiagnostics diagnostics;
 };
 
-LowMachMixtureSolver::PlanarMotionFrame LowMachMixtureSolver::capture_planar_motion_frame(const PlanarMotion& motion) const
+LowMachMixtureSolver::PlanarMotionFrame LowMachMixtureSolver::capture_planar_motion_frame(
+    const PlanarMotion& motion, bool forced) const
 {
     PlanarMotionFrame frame{};
     frame.epoch = mesh_geometry_epoch(*d->mesh);
-    if (d->preserves_planar_trial())
+    frame.preserve = forced || d->preserves_planar_trial();
+    if (frame.preserve)
         collective_detail::collective_local_validation(*d->mesh, "Accepted planar motion history",
             [&]
             {
@@ -108,6 +111,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_planar_impl(double dt,
 {
     require_controller(controller);
     const auto& mesh = *d->mesh;
+    const auto force = d->active_body_acceleration ? acceleration_vector(d->active_body_acceleration)
+                                                   : (provider ? provider->body_acceleration : std::nullopt);
     collective_detail::collective_local_validation(mesh, "Prescribed planar preview input",
         [&]
         {
@@ -115,9 +120,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_planar_impl(double dt,
                       !motion.has_active_trial(),
                 "Planar preview requires initialized accepted geometry and its explicit idle motion authority.");
             const bool has_qbmm = !d->options.qbmm_families.empty();
-            qbmm_detail::validate_capability(d->options, mesh, true,
-                d->active_body_acceleration ? acceleration_vector(d->active_body_acceleration)
-                                            : (provider ? provider->body_acceleration : std::nullopt));
+            qbmm_detail::validate_capability(d->options, mesh, true, force);
             check(!has_qbmm || !provider || coherent_qbmm,
                 "Planar QBMM source providers require the coherent reacting controller.");
             check(!coherent_qbmm || (has_qbmm && controller && controller->reacting_source_authority && provider),
@@ -136,6 +139,10 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_planar_impl(double dt,
         });
     collective_detail::require_uniform_value(mesh, dt, "Prescribed planar timestep");
     collective_detail::require_uniform_value(mesh, target_surface, "Prescribed planar target");
+    collective_detail::require_uniform_value(mesh, int(force.has_value()), "Prescribed planar acceleration presence");
+    if (force)
+        for (size_t axis = 0; axis < 3; ++axis)
+            collective_detail::require_uniform_value(mesh, force->component(axis), "Prescribed planar acceleration");
     auto certificate = capture_accepted_geometry(motion);
     std::vector<double> accepted_flux;
     const bool linear = uses_qbmm_linear_transport(d->options.qbmm_model);
@@ -151,11 +158,11 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_planar_impl(double dt,
             certificate->target_surface = target_surface;
             certificate->time_step = dt;
         });
-    auto accepted_frame = capture_planar_motion_frame(motion);
+    auto accepted_frame = capture_planar_motion_frame(motion, force.has_value());
     Trial result;
     try
     {
-        motion.begin_trial_impl(target_surface, dt, d->preserves_planar_trial());
+        motion.begin_trial_impl(target_surface, dt, accepted_frame.preserve);
         const auto ale = FVM::make_validated_planar_ale_control_volume_state(mesh, motion);
         collective_detail::collective_local_validation(mesh, "Planar accepted-old storage match",
             [&]
@@ -228,10 +235,10 @@ void LowMachMixtureSolver::commit_planar_impl(const Trial& trial, PlanarMotion& 
                 accepted_flux[f] = d->flux.local_value(static_cast<LO>(f));
         });
     collective_detail::require_uniform_value(mesh, trial.preview_id, "Planar collective trial selection");
-    auto accepted_frame = capture_planar_motion_frame(motion);
+    auto accepted_frame = capture_planar_motion_frame(motion, statistics.body_acceleration_m_per_s2.has_value());
     try
     {
-        motion.begin_trial_impl(certificate->target_surface, certificate->time_step, d->preserves_planar_trial());
+        motion.begin_trial_impl(certificate->target_surface, certificate->time_step, accepted_frame.preserve);
         const auto ale = FVM::make_validated_planar_ale_control_volume_state(mesh, motion);
         collective_detail::collective_local_validation(mesh, "Exact retained planar geometry restaging",
             [&]
@@ -265,6 +272,11 @@ void LowMachMixtureSolver::commit_planar_impl(const Trial& trial, PlanarMotion& 
         d->explicit_family_force_recorded = d->preserves_planar_trial();
         d->needs_restart_controller = false;
     }
+    if (d->options.qbmm_families.empty())
+    {
+        d->accepted_count_only_body_acceleration = acceleration_components(d->diagnostics.body_acceleration_m_per_s2);
+        d->count_only_force_provenance_recorded = true;
+    }
     ++d->logical_geometry;
     ++d->trial_nonce;
 }
@@ -286,7 +298,7 @@ LowMachMixtureSolver::Checkpoint LowMachMixtureSolver::checkpoint(const PlanarMo
 void LowMachMixtureSolver::rollback_planar_geometry(PlanarMotion& motion, PlanarMotionFrame& accepted_frame)
 {
     const bool active = motion.has_active_trial();
-    const bool preserve = d->preserves_planar_trial();
+    const bool preserve = accepted_frame.preserve;
     if (active)
     {
         if (preserve)
@@ -317,7 +329,12 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, PlanarMotion& motion
         [&]
         {
             d->validate_planar_controller_authority(motion);
-            qbmm_detail::validate_capability(d->options, mesh, true, acceleration_vector(d->active_body_acceleration));
+            const auto active_force = acceleration_vector(d->active_body_acceleration);
+            const auto force = saved.explicit_family_force_recorded ? saved.diagnostics.body_acceleration_m_per_s2
+                                                                    : active_force;
+            qbmm_detail::validate_capability(d->options, mesh, true, force);
+            check(!d->controller_active || force == active_force,
+                "Planar checkpoint belongs to a different acceleration configuration.");
             check(saved.owner == this && saved.ale_geometry && saved.ale_geometry->owner == d->planar_owner &&
                       saved.ale_geometry->motion_identity == motion.d_authority &&
                       saved.ale_geometry->geometry_identity == mesh.geometry_identity() &&
@@ -336,7 +353,7 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, PlanarMotion& motion
             qbmm_detail::validate_state(d->options, saved.state);
             candidate = saved.state;
             statistics = saved.diagnostics;
-            if (!d->options.qbmm_families.empty())
+            if (!d->options.qbmm_families.empty() || saved.qbmm_publication)
             {
                 auto metadata = saved.qbmm_publication ? std::make_shared<QbmmPublication>(*saved.qbmm_publication)
                                                        : std::make_shared<QbmmPublication>();
@@ -355,10 +372,10 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, PlanarMotion& motion
         mesh, saved.qbmm_controller_signature.value_or(0), "Planar checkpoint controller signature");
     collective_detail::require_uniform_value(
         mesh, int(saved.qbmm_legacy_default_only), "Planar checkpoint legacy configuration restriction");
-    auto accepted_frame = capture_planar_motion_frame(motion);
+    auto accepted_frame = capture_planar_motion_frame(motion, statistics.body_acceleration_m_per_s2.has_value());
     try
     {
-        motion.stage_restart_geometry(saved.ale_geometry->source.surface_elevation(), d->preserves_planar_trial());
+        motion.stage_restart_geometry(saved.ale_geometry->source.surface_elevation(), accepted_frame.preserve);
         collective_detail::collective_local_validation(mesh, "Planar checkpoint storage geometry",
             [&]
             {
@@ -387,7 +404,7 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, PlanarMotion& motion
     d->needs_restart_controller = saved.qbmm_controller_signature.has_value();
     d->qbmm_legacy_default_only = saved.qbmm_legacy_default_only;
     d->explicit_family_force_recorded = saved.explicit_family_force_recorded;
-    if (!d->options.qbmm_families.empty())
+    if (!d->options.qbmm_families.empty() || d->qbmm_publication)
         d->accepted_planar_motion = motion.d_authority;
     ++d->logical_geometry;
     ++d->trial_nonce;

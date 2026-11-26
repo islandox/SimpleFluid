@@ -783,7 +783,7 @@ simplefluid_require_exact_api(
 
 # Native prescribed closed planar ALE adds exactly six public entry points.
 # Trial geometry certificates and replay helpers remain private implementation.
-set(simplefluid_native_ale_public_symbol_budget 6)
+set(simplefluid_native_ale_public_symbol_budget 7)
 set(simplefluid_native_ale_motion
     "SimpleFluid::PlanarALEMeshMotion<SimpleFluid::TpetraTypes<.*>[ ]*>")
 simplefluid_require_reacting_api(
@@ -798,6 +798,8 @@ simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::LowMachMixtureSolver::restore[(]SimpleFluid::Reacting::LowMachMixtureSolver::Checkpoint const&, ${simplefluid_native_ale_motion}&, ${simplefluid_stage3_controller_pointer}[)]$" 1)
 simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::LowMachPressureEquation::project_material_ale_with_eos[(]${simplefluid_stage3_scalar_cell} const&, double, ${simplefluid_reacting_const_double_span}, ${simplefluid_reacting_const_double_span}, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face}&, ${simplefluid_stage3_scalar_cell}&, ${simplefluid_stage3_vector_cell}&, SimpleFluid::FVM::ALEControlVolumeState const&, SimpleFluid::LinearSolverOptions const&, double[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachPressureEquation::project_material_ale_with_eos[(]${simplefluid_stage3_scalar_cell} const&, double, ${simplefluid_reacting_const_double_span}, ${simplefluid_reacting_const_double_span}, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face}&, ${simplefluid_stage3_scalar_cell}&, ${simplefluid_stage3_vector_cell}&, SimpleFluid::FVM::ALEControlVolumeState const&, SimpleFluid::LinearSolverOptions const&, double, SimpleFluid::Reacting::LowMachPressureEquation::CellPressureGradient[)]$" 1)
 
 # Pressure-conditioned local thermal transfer: four pure kernels, two receipt
 # queries and the three definitions of the typed caloric-range error.

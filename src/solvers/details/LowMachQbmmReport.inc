@@ -383,15 +383,20 @@ std::shared_ptr<const LowMachMixtureSolver::QbmmIntervalReport> LowMachMixtureSo
 std::shared_ptr<const LowMachMixtureSolver::QbmmPublication> LowMachMixtureSolver::prepare_qbmm_publication(
     const Trial& trial, const ControllerRestartDiagnostics* controller_diagnostics) const
 {
-    if (d->options.qbmm_families.empty())
+    const bool bound_families = !d->options.qbmm_families.empty();
+    const bool forced_planar =
+        trial.ale_geometry && trial.statistics.body_acceleration_m_per_s2 && controller_diagnostics;
+    if (!bound_families && !forced_planar)
         return {};
-    check(trial.qbmm_balances.has_value(), "Native QBMM trial lacks physical report balances.");
+    check(!bound_families || trial.qbmm_balances.has_value(), "Native QBMM trial lacks physical report balances.");
     auto publication = std::make_shared<QbmmPublication>();
     publication->balances = trial.qbmm_balances;
     publication->history = QbmmReceiptHistory::Available;
-    publication->interval = qbmm_interval(trial);
-    const bool forced = (uses_qbmm_explicit_transport(d->options.qbmm_model) || d->options.qbmm_bulk_gas_pool) &&
-                        trial.statistics.body_acceleration_m_per_s2.has_value();
+    if (bound_families)
+        publication->interval = qbmm_interval(trial);
+    const bool forced = forced_planar ||
+        ((uses_qbmm_explicit_transport(d->options.qbmm_model) || d->options.qbmm_bulk_gas_pool) &&
+            trial.statistics.body_acceleration_m_per_s2.has_value());
     const bool axial_kinetic = qbmm_detail::uses_axial_kinetic_transport(d->options, *d->mesh);
     const bool planar_linear = trial.ale_geometry && uses_qbmm_linear_transport(d->options.qbmm_model);
     const bool tvd_mc = d->options.qbmm_model.linear_slope_limiter == QbmmModelOptions::LinearSlopeLimiter::TvdMc;

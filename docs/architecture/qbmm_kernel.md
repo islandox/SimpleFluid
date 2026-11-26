@@ -318,11 +318,11 @@ fraction and an energy-balanced timestep give no empirical validity range for a 
 | --- | --- |
 | Native mesh and boundaries | Closed, supported orthogonal native geometry with common pressure and equilibrium temperature. Prescribed fixed-topology planar ALE supports Cartesian X/Y/Z, cylindrical axial Z on a nonperiodic sector, and `SemiStructuredXY_Z` axial Z. Moving geometry requires nonperiodic topology, zero mixture viscosity and native slip walls. General remap, AMR and open-reservoir face transport are outside this capability. |
 | Velocity and order | `NativeImplicit` admits `SharedCarrier` (default) and `SuppliedPhaseSlip`. Fixed closed Cartesian meshes and qualified cylinders admit `NodeDependentSlip` with `KineticEuler`. Cylindrical kinetic drift is axial. Closed orthogonal Cartesian, native cylindrical and cylindrical `SemiStructuredXY_Z` meshes admit `SharedCarrier` with `RealizableLinearSSPRK2` and either linear slope limiter. Prescribed planar motion is supported with this pairing and absent acceleration. Unbound phases use transient backward Euler and upwind with carrier-grouped linear solves or scalar opt-out. Independent phase momentum, steady assembly, BDF2 and ordinary scalar high-order limiters reject. |
-| Gravity and applicability | Fixed native implicit transport, fixed closed Cartesian kinetic Euler, and fixed shared-carrier SSPRK2 on Cartesian or qualified cylindrical meshes admit optional SI acceleration. Fixed cylindrical kinetic Euler admits optional axial acceleration. A supplied zero vector selects the forced policy. Planar ALE requires absent acceleration. Applicability ranges come from the supplied laws. |
+| Gravity and applicability | Fixed native implicit transport, fixed closed Cartesian kinetic Euler, and fixed shared-carrier SSPRK2 on Cartesian or qualified cylindrical meshes admit optional SI acceleration. Fixed cylindrical kinetic Euler admits optional axial acceleration. Prescribed planar ALE admits acceleration for count-only and native implicit QBMM flow without pool conversion. A supplied zero vector selects the forced policy. Moving explicit integrators and moving pools retain their acceleration gates. Applicability ranges come from the supplied laws. |
 | Family schema | One named fixed-composition family per dispersed gas phase; catalog, family stamp, reference scale and phase ordering agree on all ranks. Variable composition, cross-family coalescence and unmigrated count-only state reject. |
 | Local material and topology | Constructive paired birth, growth, shrinkage, disappearance, coalescence and breakup. Transfers may involve the liquid carrier, a declared external reservoir, or the designated gas pool for a tagged birth or disappearance. Family material slots targeting passive background gas reject. Generic chemistry, face transport and interphase laws can act on their admitted unbound compartments. A legacy number law must name only unbound populations. Selective or unpaired family material returned by a law rejects the preview. |
 | Thermal and pool closures | Common temperature and pressure, zero surface tension. The explicit gas pool admits both native implicit velocity modes, fixed with optional acceleration or planar with absent acceleration. Separate phase or node temperatures, pool conversion with either explicit integrator, and capillary/surface-energy closures reject. Passive background gas carries its own inventory. |
-| Transactions and restart | All owners use a common numerical configuration and controller selection. Commit publishes one retained trial. Rejection preserves accepted canonical state, histories and other compatible previews. Fixed-grid restart supports versions 1–5 under their original modes, version 7 for unforced Cartesian kinetic Euler, version 8 for unforced realizable linear SSPRK2 with the default limiter, and tagged version 9 for forced explicit, axial kinetic and TVD-MC SSPRK2 payloads. Moving implicit restart uses version 6. Moving linear restart uses version 9 tag 7. Version 10 tags 8–11 bind the admitted pool modes. Moving records bind the original and accepted geometry, motion controls, partition, target policy and supplied physics. |
+| Transactions and restart | All owners use a common numerical configuration and controller selection. Commit publishes one retained trial. Rejection preserves accepted canonical state, histories and other compatible previews. Fixed-grid restart supports versions 1–5 under their original modes, version 7 for unforced Cartesian kinetic Euler, version 8 for unforced realizable linear SSPRK2 with the default limiter, and tagged version 9 for forced explicit, axial kinetic and TVD-MC SSPRK2 payloads. Unforced moving implicit restart uses version 6. Moving linear restart uses version 9 tag 7. Forced moving implicit restart uses version 9 tag 12. Version 10 tags 8–11 bind the admitted pool modes. Moving records bind the original and accepted geometry, motion controls, partition, target policy and supplied physics. |
 
 The release suite follows circulating polydisperse gas across partition faces into exact vacuum,
 combines it with population events, unrelated mole-changing chemistry and heat, and checks the
@@ -1584,8 +1584,8 @@ The low-Mach runtime admits `bulk_gas_conversion = true` with an explicit
 `Options::qbmm_bulk_gas_pool` binding and `NativeImplicit` family transport.
 Q9c admits `SharedCarrier` and `SuppliedPhaseSlip` on fixed supported
 orthogonal meshes, with optional supplied acceleration, and on unforced
-Q7a prescribed planar ALE meshes. Planar ALE rejects any supplied
-acceleration, including an explicit zero vector, pending Q8e.
+Q7a prescribed planar ALE meshes. Planar pool conversion rejects any
+supplied acceleration, including an explicit zero vector.
 `KineticEuler` and `RealizableLinearSSPRK2` both reject pool conversion.
 Passive background gas retains its own transport and thermodynamic inventory.
 
@@ -1634,3 +1634,35 @@ which validates the decoded chemical inventory before the solver publishes it.
 The archived interval totals are available after restore. Its detailed
 cell-local event and thermal receipts become available on the next
 accepted interval. Legacy v5–v9 payloads use their original encodings.
+
+## Q8e forced prescribed planar ALE
+
+Count-only low-Mach flow and `NativeImplicit` QBMM with `SharedCarrier` or
+`SuppliedPhaseSlip` admit supplied acceleration on Q7a planar geometry.
+An explicitly supplied zero vector selects the same forced pressure policy.
+Moving `KineticEuler`, forced moving `RealizableLinearSSPRK2`, and forced
+moving pool conversion reject, including an explicitly supplied zero vector
+in the forced combinations.
+
+The implicit material projection uses absolute carrier flux and
+`CellPressureGradient::Interior` for forced moving walls. Its target
+includes the divergence of the upwind material fraction times the swept
+mesh rate. Pressure correction leaves each wall's absolute flux equal to
+its prescribed swept rate. Unforced implicit motion keeps the
+homogeneous-Neumann correction policy.
+
+Momentum uses the certified old and new storage volumes and mesh-relative
+phase rates. The balanced reacting predictor reconstructs the hydrostatic
+pressure residual on the trial mesh and records body and other impulses
+separately. Supplied slip keeps the old-to-new phase drift momentum change
+and the donor drift-momentum flux. The caloric ledger charges
+`-p (V_final - V_advected)` for each phase. The momentum ledger checks the
+sum of body, other, and pressure impulses against actual momentum change.
+Forced previews preserve the accepted geometry epoch, wall flux, and
+motion history on rollback.
+
+Portable **v9 tag 12** binds the forced implicit mode, advancement controls,
+original and accepted geometry, target law, and wall interval. It records
+the acceleration, split impulse, and controller signature. Supplied EOS or
+viscosity providers need declared identities for this portable record.
+Coupled restore requires a matching initialized reacting controller.

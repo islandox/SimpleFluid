@@ -473,6 +473,52 @@ TEST(LowMachPressureContractsTest, MovingAnchorProjectsRelativeMaterialAndKeepsA
     motion.rollback_trial();
 }
 
+TEST(LowMachPressureContractsTest, MovingAbsoluteMaterialUsesInteriorGradientAndSweptWallTarget)
+{
+    Fixture f;
+    S::PlanarALEMeshMotion<Pressure::Pack> motion(f.grid);
+    motion.begin_trial(5., 1.);
+    const auto ale = S::FVM::make_validated_planar_ale_control_volume_state(*f.grid, motion);
+    Pressure equation(f.grid);
+    constexpr double theta = .75;
+    const auto expected_flux = [&](LO face)
+    {
+        return f.grid->is_geometry_exterior_face(face) ? ale.face_mesh_fluxes()[face] : 1.25 * f.orientation(face);
+    };
+    for (const auto face : f.theta.owned_face_ids())
+    {
+        f.theta.set_owned_value(face, theta);
+        f.slip.set_owned_value(face, 0.);
+        f.predictor.set_owned_value(face,
+            f.grid->is_geometry_exterior_face(face) ? ale.face_mesh_fluxes()[face] : .5 * f.orientation(face));
+    }
+    f.theta.sync_ghosts();
+    f.slip.sync_ghosts();
+    f.predictor.sync_ghosts();
+    for (size_t c = 0; c < f.target.size(); ++c)
+    {
+        const auto cell = static_cast<LO>(c);
+        f.target[c] = 0.;
+        for (const auto face : f.grid->faces(cell))
+            f.target[c] += (f.grid->owner_cell(face) == cell ? theta : -theta) * expected_flux(face);
+    }
+    const auto result = equation.project_material_ale_with_eos(f.rho, 1., f.target, f.chi, f.theta, f.slip,
+        f.predictor, f.corrected, f.mechanical, f.velocity, ale, f.linear(), 1e-12,
+        Pressure::CellPressureGradient::Interior);
+    EXPECT_TRUE(result.linear.converged);
+    EXPECT_LE(result.maximum_continuity_residual, 1e-12);
+    for (const auto face : f.corrected.owned_face_ids())
+        if (f.grid->is_geometry_exterior_face(face))
+            EXPECT_EQ(f.corrected.owned_value(face), expected_flux(face));
+        else
+            EXPECT_NEAR(f.corrected.owned_value(face), expected_flux(face), 2e-12);
+    // Correction flux 0.75 at density 2 and unit area gives gradient -1.5 Pa/m.
+    // Both cells use the full difference across their interior edge.
+    for (size_t c = 0; c < f.target.size(); ++c)
+        EXPECT_LT((f.velocity.owned_value(static_cast<LO>(c)) - Vector{0., 0., .75}).norm(), 2e-12);
+    motion.rollback_trial();
+}
+
 TEST(LowMachPressureContractsTest, ZeroThetaWithPositiveSusceptibilityKeepsBareCarrierAndPressureResponse)
 {
     Fixture fixture;

@@ -748,7 +748,7 @@ TEST(QbmmSlipAndGravity, MovingPartitionCounterflowClosesBackwardEulerReceiptsWo
     Endpoint(*f.flow).expect_same(*restarted.flow);
 }
 
-TEST(QbmmSlipAndGravity, PlanarMotionRejectsSuppliedGravityAndWallNormalSlip)
+TEST(QbmmSlipAndGravity, PlanarMotionRejectsWallNormalSlipWithAndWithoutSuppliedGravity)
 {
     Fixture f({.layout = Layout::EmptyColumn});
     f.check_ownership();
@@ -758,13 +758,14 @@ TEST(QbmmSlipAndGravity, PlanarMotionRejectsSuppliedGravityAndWallNormalSlip)
         auto controls = f.controller_options(acceleration);
         int targets = 0;
         controls.planar_motion = std::make_shared<const R::MixturePlanarMotionProvider>(
-            R::MixturePlanarMotionProvider{f.mesh, {}, "gravity restriction", 1, [&](double, double)
+            R::MixturePlanarMotionProvider{f.mesh, {}, "closed-wall slip test", 1, [&](double, double)
                 {
                     ++targets;
                     return 1.01;
                 }});
-        EXPECT_THROW((void) Coupler(f.flow, controls), std::exception);
-        EXPECT_EQ(targets, 0);
+        Coupler controller(f.flow, controls);
+        EXPECT_THROW((void) controller.preview(dt), std::exception);
+        EXPECT_EQ(targets, 1);
         EXPECT_EQ(f.source_calls, 0);
         accepted.expect_same(*f.flow);
     }

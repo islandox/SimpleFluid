@@ -710,7 +710,8 @@ struct LowMachMixtureSolver::Implementation
     }
     bool preserves_planar_trial() const noexcept
     {
-        return uses_qbmm_linear_transport(options.qbmm_model) || bool(options.qbmm_bulk_gas_pool);
+        return uses_qbmm_linear_transport(options.qbmm_model) || options.qbmm_bulk_gas_pool ||
+               active_body_acceleration || diagnostics.body_acceleration_m_per_s2;
     }
     bool has_tvd_mc_controller_history() const noexcept
     {
@@ -747,7 +748,7 @@ struct LowMachMixtureSolver::Implementation
     }
     void validate_planar_checkpoint_provenance(const PlanarMotion& motion) const
     {
-        check(options.qbmm_families.empty() || diagnostics.correctors == 0 ||
+        check((options.qbmm_families.empty() && !has_forced_family_provenance()) || diagnostics.correctors == 0 ||
                   (accepted_planar_motion == motion.d_authority && accepted_qbmm_controller == checkpoint_controller()),
             "Planar QBMM checkpoint requires an interval accepted by its matching motion and source authority.");
     }
@@ -1951,7 +1952,8 @@ LowMachMixtureSolver::Checkpoint LowMachMixtureSolver::checkpoint_state() const
     saved.qbmm_legacy_default_only = d->qbmm_legacy_default_only;
     saved.explicit_family_force_recorded = d->explicit_family_force_recorded;
     if (!saved.explicit_family_force_recorded && d->active_qbmm_controller &&
-        (uses_qbmm_explicit_transport(d->options.qbmm_model) || d->options.qbmm_bulk_gas_pool))
+        (uses_qbmm_explicit_transport(d->options.qbmm_model) || d->options.qbmm_bulk_gas_pool ||
+            (d->active_controller_motion && d->active_body_acceleration && d->diagnostics.correctors == 0)))
     {
         saved.explicit_family_force_recorded = true;
         saved.diagnostics.body_acceleration_m_per_s2 = acceleration_vector(d->active_body_acceleration);
@@ -2090,9 +2092,14 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
     const bool forced_explicit_family = explicit_family && force.has_value();
     const bool pool_conversion = bool(d->options.qbmm_bulk_gas_pool);
     const bool forced_pool = pool_conversion && force.has_value();
-    const bool balanced_forcing = forced_explicit_family || forced_pool;
+    const bool forced_planar = ale && force.has_value();
+    // A reacting controller supplies separate body and other impulses. Bare
+    // count-only providers can use the full conservative momentum source.
+    const bool balanced_planar = forced_planar && controller && controller->reacting_source_authority;
+    const bool balanced_forcing = forced_explicit_family || forced_pool || balanced_planar;
     const bool directional_momentum = explicit_family ||
-        (pool_conversion && d->options.qbmm_model.velocity == QbmmModelOptions::Velocity::SuppliedPhaseSlip);
+        ((pool_conversion || forced_planar) &&
+            d->options.qbmm_model.velocity == QbmmModelOptions::Velocity::SuppliedPhaseSlip);
     require_controller(controller);
     collective_detail::require_uniform_value(mesh, dt, "Low-Mach mixture timestep");
     collective_detail::require_uniform_value(mesh, int(ale != nullptr), "Low-Mach ALE transport selection");
@@ -2108,7 +2115,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 "Moving linear QBMM requires both accepted and trial geometry for stage reconstruction.");
             check(!forced_explicit_family || (coherent_qbmm && d->active_qbmm_controller),
                 "Explicit QBMM body acceleration requires the matching reacting controller.");
-            check(!coherent_qbmm || acceleration_components(force) == d->active_body_acceleration,
+            check((!coherent_qbmm && !balanced_planar) || acceleration_components(force) == d->active_body_acceleration,
                 "QBMM source provider body acceleration differs from its reacting controller.");
             check(!d->explicit_family_force_recorded || force == d->diagnostics.body_acceleration_m_per_s2,
                 "Explicit QBMM preview requires the accepted body acceleration configuration.");
@@ -2123,7 +2130,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             check(!(has_qbmm || ale) || d->preview_sequence != std::numeric_limits<std::uint64_t>::max(),
                 "Low-Mach preview identity exhausted.");
             check(!d->requires_matching_qbmm_controller() ||
-                      (coherent_qbmm && d->active_qbmm_controller &&
+                      ((coherent_qbmm || balanced_planar) && d->active_qbmm_controller &&
                           d->active_qbmm_controller == d->accepted_qbmm_controller),
                 "Accepted QBMM provenance requires its matching reacting controller before advancement.");
             sources = fixed_sources;
@@ -2218,7 +2225,10 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
         stage.invocation = ++d->source_invocation;
     }
     const auto accepted = d->accepted;
-    const auto column_axis = (kinetic || forced_pool) && force ? axial_column(mesh, *force) : std::nullopt;
+    const auto column_axis =
+        (kinetic || forced_pool || balanced_planar) && force ? axial_column(mesh, *force) : std::nullopt;
+    const auto trial_volume = [&](LO cell)
+    { return ale ? ale->new_cell_volumes()[cell] : mesh.cell_volume(cell); };
     bool rounded_hydrostatic_rest = column_axis.has_value();
     const size_t nc = accepted.cells.size(), np = d->eos.size(), ns = d->eos.front()->catalog().species().size();
     const auto& qbmm_families = d->options.qbmm_families;
@@ -3418,7 +3428,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     for (size_t c = 0; c < nc; ++c)
                     {
                         const LO cell = static_cast<LO>(c);
-                        const double volume = ale ? ale->new_cell_volumes()[c] : mesh.cell_volume(cell);
+                        const double volume = trial_volume(cell);
                         trial.cells[c] = thermal[c].cell;
                         if (thermal_batch)
                         {
@@ -3478,8 +3488,9 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             pressure_operand_magnitude = d->sum(local_pressure_operands);
             result.empty_phase_energy_roundoff = d->sum(local_roundoff);
             result.conditioned_raw_energy_roundoff_bound = d->sum(local_raw_roundoff);
-            const bool body_forced = balanced_forcing || (force && (force->x != 0 || force->y != 0 || force->z != 0));
-            // Forced explicit and pool runs reconstruct the same hydrostatic residual at cells and faces.
+            const bool body_forced =
+                balanced_forcing || forced_planar || (force && (force->x != 0 || force->y != 0 || force->z != 0));
+            // Use the same hydrostatic residual at cells and faces whenever the body impulse is split.
             const bool reconstruct_residual = balanced_forcing;
             using CellPressureGradient = LowMachPressureEquation::CellPressureGradient;
             const auto cell_gradient =
@@ -3557,7 +3568,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             impulse[axis].add_product(new_drift.component(axis), -1.);
                         }
                     }
-                    const double volume = mesh.cell_volume(cell);
+                    const double volume = trial_volume(cell);
                     FaceSum storage;
                     storage.add_product(volume, dt);
                     Vector force_density{};
@@ -3656,7 +3667,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     {
                         const LO cell = static_cast<LO>(c);
                         predicted_velocity[c] = d->u.local_value(cell);
-                        const double volume = mesh.cell_volume(cell);
+                        const double volume = trial_volume(cell);
                         for (size_t axis = 0; axis < pressure_impulse.size(); ++axis)
                         {
                             pressure_impulse[axis].add_product(
@@ -3682,7 +3693,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 if (ale)
                     return d->pressure->project_material_ale_with_eos(d->rho, dt, target, volume_susceptibility,
                         carrier_fraction, material_pressure_rate, predictor, d->trial_flux, d->mechanical_pressure,
-                        d->u, *ale, d->options.linear, d->options.continuity_tolerance);
+                        d->u, *ale, d->options.linear, d->options.continuity_tolerance, cell_gradient);
                 return d->pressure->project_material_with_eos(d->rho, dt, target, volume_susceptibility,
                     carrier_fraction, material_pressure_rate, predictor, d->trial_flux, d->mechanical_pressure, d->u,
                     d->options.linear, d->options.continuity_tolerance, cell_gradient);
@@ -3705,7 +3716,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         for (size_t axis = 0; axis < pressure_impulse.size(); ++axis)
                             pressure_impulse[axis].add_product(
                                 (d->u.local_value(cell) - predicted_velocity[c]).component(axis),
-                                d->rho.local_value(cell), mesh.cell_volume(cell));
+                                d->rho.local_value(cell), trial_volume(cell));
                         smallest_volume = std::min(smallest_volume, mesh.cell_volume(cell));
                     }
                     for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
@@ -4230,7 +4241,8 @@ LowMachMixtureSolver::ControllerLease LowMachMixtureSolver::acquire_controller_f
                     qbmm_native_law_detail::validate_kinetic_closure(d->options, *d->mesh, cell);
             if (body_acceleration)
                 d->validate_forced_linear_geometry();
-            if (!d->options.qbmm_families.empty() && !signature.empty())
+            const bool forced_planar = motion && body_acceleration.has_value();
+            if ((!d->options.qbmm_families.empty() || forced_planar) && !signature.empty())
             {
                 RestartHash hash;
                 hash.string(signature);

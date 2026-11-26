@@ -3087,7 +3087,12 @@ TEST(ReactingMixtureQbmmSourcesTest, MovingLinearCapabilityRejectsUnsupportedOpt
     options.planar_motion = motion(kinetic);
     const auto checkpoint = kinetic.flow->serialize_qbmm_restart();
     const auto epoch = kinetic.mesh->geometry_epoch();
-    EXPECT_THROW((void) Coupler(kinetic.flow, options), std::exception);
+    for (const auto& force : std::array<std::optional<Flow::Vector>, 3>{
+             std::nullopt, Flow::Vector{}, Flow::Vector{0., 0., -.5}})
+    {
+        options.body_acceleration = force;
+        EXPECT_THROW((void) Coupler(kinetic.flow, options), std::exception);
+    }
     EXPECT_EQ(kinetic.flow->serialize_qbmm_restart(), checkpoint);
     EXPECT_EQ(kinetic.mesh->geometry_epoch(), epoch);
 }
