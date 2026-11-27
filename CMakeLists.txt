@@ -75,13 +75,15 @@ if(SIMPLEFLUID_ENABLE_LTO AND NOT SIMPLEFLUID_ENABLE_COVERAGE)
             message(FATAL_ERROR
                 "Clang LTO with the static Trilinos build requires LLD")
         endif()
+        set(_simplefluid_ipo_linker_option -fuse-ld=lld)
         add_link_options(
-            "$<$<CONFIG:Release,RelWithDebInfo>:-fuse-ld=lld>")
+            "$<$<CONFIG:Release,RelWithDebInfo>:${_simplefluid_ipo_linker_option}>")
     endif()
 elseif(SIMPLEFLUID_ENABLE_LTO AND SIMPLEFLUID_ENABLE_COVERAGE)
     message(STATUS "LTO is disabled for the coverage-instrumented build")
 endif()
 
+simplefluid_configure_lto_debug_compression(${_simplefluid_ipo_linker_option})
 simplefluid_configure_profile_guided_optimization()
 
 cmake_host_system_information(RESULT NCPU QUERY NUMBER_OF_LOGICAL_CORES)
@@ -283,4 +285,5 @@ endif()
 
 add_subdirectory(src)
 
-simplefluid_finalize_debug_symbols("${CMAKE_CURRENT_SOURCE_DIR}")
+simplefluid_finalize_debug_symbols("${CMAKE_CURRENT_SOURCE_DIR}" "${_simplefluid_ipo_linker_option}")
+unset(_simplefluid_ipo_linker_option)

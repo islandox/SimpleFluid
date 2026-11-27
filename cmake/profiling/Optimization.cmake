@@ -104,6 +104,7 @@ macro(simplefluid_configure_profile_guided_optimization)
             "source_fingerprint=${SIMPLEFLUID_PGO_SOURCE_FINGERPRINT}\n"
             "lto=${SIMPLEFLUID_ENABLE_LTO}\n"
             "split_debug_info=${SIMPLEFLUID_SPLIT_DEBUG_INFO}\n"
+            "compress_lto_debug_info=${SIMPLEFLUID_COMPRESS_LTO_DEBUG_INFO}\n"
             "cxx_flags=${CMAKE_CXX_FLAGS}|${${SIMPLEFLUID_PGO_CONFIG_FLAGS_VARIABLE}}\n")
         string(JOIN "" SIMPLEFLUID_PGO_EXPECTED_MANIFEST
                ${SIMPLEFLUID_PGO_EXPECTED_MANIFEST})

@@ -46,6 +46,9 @@ Focused configure, generated-command, and PCH build checks run in CI Release.
 Run them locally with `python3 cmake/testing/ipo/run.py --compiler g++` (or
 `--compiler clang++`). They cover the default/off and opt-out policies, custom
 configurations, global LTO off, testing off, and the GNU compatibility exception.
+On Linux they also check the split DWARF files and symbol lookup, plus zstd
+sections in an IPO executable and shared library. Pass `--require-zstd` to
+require the compression checks.
 
 ## Native architecture and floating-point contraction
 
@@ -133,16 +136,33 @@ run them locally with `python3 -m unittest discover -s .github/scripts/tests -v`
 Split mode preserves optimization and IPO/LTO policy. A target is eligible only
 when IPO is disabled for the active configuration: its
 `INTERPROCEDURAL_OPTIMIZATION_<CONFIG>` property takes precedence over the
-general `INTERPROCEDURAL_OPTIMIZATION` property. IPO targets retain conventional
-embedded DWARF because GCC LTO cannot provide reusable split DWARF and Clang LTO
-creates per-link debug bundles. Storage follows this target-level decision even
-when a source's numerical options include `-fno-lto`.
+general `INTERPROCEDURAL_OPTIMIZATION` property. With the defaults, Debug and
+non-IPO RelWithDebInfo targets use reusable `.dwo` files when emitting debug
+information. `SIMPLEFLUID_ENABLE_LTO` defaults to `ON` in this project. Set it
+to `OFF` to get reusable `.dwo` files in both configurations for targets
+governed by that option. Storage follows the target policy even when a source's
+numerical options include `-fno-lto`.
 
-With the defaults, Debug uses reusable split information, while RelWithDebInfo
-targets with LTO retain embedded information. Set `SIMPLEFLUID_ENABLE_LTO=OFF`
-to obtain reusable split information in both configurations for project targets
-governed by that option. PGO remains available; split mode is part of profile
-provenance, so existing profiles require fresh training.
+IPO targets keep embedded DWARF. GCC disables split DWARF during LTO compilation.
+Clang ThinLTO with ELF LLD can emit per-link `.dwo` files with
+`--plugin-opt=dwo_dir=<directory>`. Those files need a unique output directory
+per link and paths that remain available to the debugger. The reusable split
+policy uses per-object files, so IPO links use embedded DWARF and omit the
+split-DWARF linker script.
+
+`SIMPLEFLUID_COMPRESS_LTO_DEBUG_INFO` defaults to `ON` on Linux GCC and Clang
+when the compiler supports `-gz=zstd` and the IPO linker supports
+`--compress-debug-sections=zstd`. It defaults to `OFF` elsewhere. Explicit
+`ON` with an unsupported toolchain fails at configure time. Debug and
+RelWithDebInfo IPO compilations that generate debug information use `-gz=zstd`,
+including shared PCH providers when their consumers inherit the same flags.
+IPO executables, shared libraries and modules request zstd compression of their
+linked debug sections. Toolchains may leave small sections uncompressed when
+compression would increase their size. Set the option to `OFF` to use the
+toolchain's normal embedded debug format. Release, non-IPO split debug info,
+and `-g0` symbol selection keep their existing behavior. Split and compression
+settings are recorded in PGO manifests. Linux Clang builds that select LLD for
+IPO use it for compressed Debug IPO links as well.
 
 | Module | Compiled scope and fallback order before the global setting |
 | --- | --- |

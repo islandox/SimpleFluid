@@ -39,6 +39,42 @@ if(SIMPLEFLUID_SPLIT_DEBUG_INFO)
     unset(language)
 endif()
 
+# Probe the linker selected for IPO, which can differ from the driver's default.
+function(simplefluid_configure_lto_debug_compression)
+    set(supported OFF)
+    if((NOT DEFINED SIMPLEFLUID_COMPRESS_LTO_DEBUG_INFO OR SIMPLEFLUID_COMPRESS_LTO_DEBUG_INFO)
+       AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
+       AND CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
+        include(CheckCompilerFlag)
+        include(CheckLinkerFlag)
+        set(supported ON)
+        set(link_options ${ARGN} "LINKER:--compress-debug-sections=zstd")
+        string(MAKE_C_IDENTIFIER "${ARGN}" linker_suffix)
+        foreach(language IN ITEMS C CXX)
+            if(CMAKE_${language}_COMPILER_LOADED)
+                set(linker_result SIMPLEFLUID_${language}_HAS_ZSTD_DEBUG_LINK_FLAGS${linker_suffix})
+                set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+                # Clang can warn and ignore compression when built without zstd.
+                check_compiler_flag(${language} "-Werror;-g;-gz=zstd" SIMPLEFLUID_${language}_HAS_GZ_ZSTD)
+                set(CMAKE_TRY_COMPILE_TARGET_TYPE EXECUTABLE)
+                check_linker_flag(${language} "${link_options}" ${linker_result})
+                if(NOT CMAKE_${language}_COMPILER_ID MATCHES "^(GNU|Clang)$"
+                   OR NOT SIMPLEFLUID_${language}_HAS_GZ_ZSTD
+                   OR NOT ${linker_result})
+                    set(supported OFF)
+                endif()
+            endif()
+        endforeach()
+    endif()
+    option(SIMPLEFLUID_COMPRESS_LTO_DEBUG_INFO
+        "Compress embedded Debug/RelWithDebInfo DWARF in IPO artifacts with zstd" ${supported})
+    if(SIMPLEFLUID_COMPRESS_LTO_DEBUG_INFO AND NOT supported)
+        message(FATAL_ERROR
+            "SIMPLEFLUID_COMPRESS_LTO_DEBUG_INFO requires Linux GCC or Clang with -gz=zstd "
+            "and an IPO linker supporting --compress-debug-sections=zstd")
+    endif()
+endfunction()
+
 set(_simplefluid_debug_symbol_modules
     CORE IO PARALLEL MESH PLIC SWEPT_VOLUME FIELDS FVM EQUATIONS SOLVERS
     MATERIALS IF97 NOX EXPERIMENTAL_VOF TESTS BENCHMARKS EXAMPLES)
@@ -89,9 +125,10 @@ function(_simplefluid_debug_symbol_flag state result)
 endfunction()
 
 # Call once after all component numerical/source properties have been applied.
+# The root supplies the probed IPO linker choice for compressed Debug IPO links.
 # Source properties must be written in the target's directory scope, including
 # sources exported from sibling directories (IO, parallel and equations).
-function(simplefluid_finalize_debug_symbols directory)
+function(simplefluid_finalize_debug_symbols directory ipo_linker_option)
     get_property(targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
     foreach(target_name IN LISTS targets)
         get_target_property(target_type ${target_name} TYPE)
@@ -99,7 +136,12 @@ function(simplefluid_finalize_debug_symbols directory)
         if(imported OR NOT target_type MATCHES "^(STATIC_LIBRARY|SHARED_LIBRARY|MODULE_LIBRARY|OBJECT_LIBRARY|EXECUTABLE)$")
             continue()
         endif()
-        if(SIMPLEFLUID_SPLIT_DEBUG_INFO)
+        set(has_link_step OFF)
+        if(target_type MATCHES "^(SHARED_LIBRARY|MODULE_LIBRARY|EXECUTABLE)$")
+            set(has_link_step ON)
+        endif()
+        set(ipo_debug_configs)
+        if(SIMPLEFLUID_SPLIT_DEBUG_INFO OR SIMPLEFLUID_COMPRESS_LTO_DEBUG_INFO)
             # GCC LTO does not support reusable split DWARF. Clang LTO emits
             # per-link bundles instead. Preserve IPO and its embedded symbols.
             foreach(config IN ITEMS Debug RelWithDebInfo)
@@ -112,10 +154,25 @@ function(simplefluid_finalize_debug_symbols directory)
                 else()
                     get_property(ipo TARGET ${target_name} PROPERTY INTERPROCEDURAL_OPTIMIZATION)
                 endif()
-                if(NOT ipo)
+                if(ipo)
+                    if(SIMPLEFLUID_COMPRESS_LTO_DEBUG_INFO)
+                        list(APPEND ipo_debug_configs "${config}")
+                        if(NOT SIMPLEFLUID_DEBUG_SYMBOLS STREQUAL "OFF")
+                            target_compile_options(${target_name} PRIVATE
+                                "$<$<AND:$<CONFIG:${config}>,$<COMPILE_LANGUAGE:C,CXX>>:-gz=zstd>")
+                        endif()
+                        if(has_link_step)
+                            if(config STREQUAL "Debug" AND ipo_linker_option)
+                                target_link_options(${target_name} PRIVATE "$<$<CONFIG:Debug>:${ipo_linker_option}>")
+                            endif()
+                            target_link_options(${target_name} PRIVATE
+                                "$<$<CONFIG:${config}>:LINKER:--compress-debug-sections=zstd>")
+                        endif()
+                    endif()
+                elseif(SIMPLEFLUID_SPLIT_DEBUG_INFO)
                     target_compile_options(${target_name} PRIVATE
                         "$<$<AND:$<CONFIG:${config}>,$<COMPILE_LANGUAGE:C,CXX>>:-gsplit-dwarf>")
-                    if(target_type MATCHES "^(SHARED_LIBRARY|MODULE_LIBRARY|EXECUTABLE)$")
+                    if(has_link_step)
                         set(split_debug_script
                             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../linkage/SplitDebugSections.ld")
                         target_link_options(${target_name} PRIVATE
@@ -172,6 +229,14 @@ function(simplefluid_finalize_debug_symbols directory)
                 _simplefluid_debug_symbol_flag("${state}" flag)
                 set_property(SOURCE "${source}" TARGET_DIRECTORY ${target_name}
                     APPEND PROPERTY COMPILE_OPTIONS "$<$<CONFIG:Debug,RelWithDebInfo>:${flag}>")
+                if(state STREQUAL "ON" AND SIMPLEFLUID_DEBUG_SYMBOLS STREQUAL "OFF")
+                    foreach(config IN LISTS ipo_debug_configs)
+                        # A source property is shared by its directory's targets.
+                        set_property(SOURCE "${source}" TARGET_DIRECTORY ${target_name}
+                            APPEND PROPERTY COMPILE_OPTIONS
+                            "$<$<AND:$<CONFIG:${config}>,$<STREQUAL:$<TARGET_PROPERTY:NAME>,${target_name}>>:-gz=zstd>")
+                    endforeach()
+                endif()
                 # CMake 3.21 cannot make this source property config-specific.
                 set_property(SOURCE "${source}" TARGET_DIRECTORY ${target_name}
                     PROPERTY SKIP_PRECOMPILE_HEADERS TRUE)
@@ -180,6 +245,6 @@ function(simplefluid_finalize_debug_symbols directory)
     endforeach()
     get_property(subdirectories DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
     foreach(subdirectory IN LISTS subdirectories)
-        simplefluid_finalize_debug_symbols("${subdirectory}")
+        simplefluid_finalize_debug_symbols("${subdirectory}" "${ipo_linker_option}")
     endforeach()
 endfunction()
