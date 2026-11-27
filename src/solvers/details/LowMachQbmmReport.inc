@@ -3,7 +3,7 @@
  */
 namespace
 {
-using ReportSum = detail::CompensatedSum<long double>;
+using ReportSum = detail::CompensatedSum<double>;
 
 enum MaterialOperand : std::size_t
 {
@@ -16,11 +16,11 @@ enum MaterialOperand : std::size_t
 };
 using MaterialSums = std::array<ReportSum, operand_count>;
 
-long double qbmm_check_material_budget(
+double qbmm_check_material_budget(
     const MaterialSums& sums, double relative_tolerance, double roundoff_tolerance, const char* message)
 {
-    const long double before = sums[old_inventory].value(), after = sums[new_inventory].value(),
-                      external = sums[gross_external].value(), residual = sums[defect].value();
+    const double before = sums[old_inventory].value(), after = sums[new_inventory].value(),
+                 external = sums[gross_external].value(), residual = sums[defect].value();
     const auto physical_budget = relative_tolerance * std::max({before, after, external});
     const auto roundoff_budget = roundoff_tolerance * (before + after + external);
     check(std::isfinite(residual) && std::isfinite(physical_budget) && std::isfinite(roundoff_budget) &&
@@ -60,13 +60,10 @@ std::optional<Solver::QbmmBalances> qbmm_archived_native_balances(const Solver::
 
 double qbmm_report_quotient(double numerator, double denominator, const char* message)
 {
-    const auto value = static_cast<long double>(numerator) / denominator;
-    const double rounded = numerator / denominator;
-    check(
-        std::isfinite(denominator) && denominator > 0 && std::isfinite(value) && std::isfinite(rounded) &&
-            (numerator == 0 || (rounded != 0 && std::abs((rounded - value) / value) <= qbmm_reconstruction_tolerance)),
-        message);
-    return rounded;
+    check(std::isfinite(denominator) && denominator > 0, message);
+    const double value = numerator / denominator;
+    check(std::isfinite(value) && (value != 0 || numerator == 0), message);
+    return value;
 }
 
 double qbmm_report_phase_mass(const PhaseThermalState& phase)
@@ -75,28 +72,19 @@ double qbmm_report_phase_mass(const PhaseThermalState& phase)
     check(std::isfinite(mass) &&
               (mass > 0 || (mass == 0 && std::ranges::all_of(phase.moles, [](double value) { return value == 0; }))),
         "QBMM report phase mass is not representable.");
-    if (std::fpclassify(mass) == FP_SUBNORMAL)
-    {
-        ReportSum summed_mass;
-        for (std::size_t s = 0; s < phase.moles.size(); ++s)
-            summed_mass +=
-                static_cast<long double>(phase.moles[s]) * phase.thermodynamics->catalog().species()[s].molarMass;
-        const auto exact = summed_mass.value();
-        check(std::abs((mass - exact) / exact) <= qbmm_reconstruction_tolerance,
-            "QBMM report phase mass loses relative precision.");
-    }
     return mass;
 }
 
-double qbmm_report_mass_moment_density(long double fraction, int exponent)
+double qbmm_report_mass_moment_density(double fraction, int exponent)
 {
     constexpr auto unavailable = std::numeric_limits<double>::quiet_NaN();
     const auto density = std::scalbn(fraction, exponent);
-    if (!std::isfinite(density) || density <= 0 || density > std::numeric_limits<double>::max())
+    if (!std::isfinite(density) || density <= 0)
         return unavailable;
-    const auto rounded = static_cast<double>(density);
-    const auto rounded_fraction = std::scalbn(static_cast<long double>(rounded), -exponent);
-    return std::abs((rounded_fraction - fraction) / fraction) <= qbmm_reconstruction_tolerance ? rounded : unavailable;
+    const double represented_fraction = std::scalbn(density, -exponent);
+    return std::abs((represented_fraction - fraction) / fraction) <= qbmm_reconstruction_tolerance
+               ? density
+               : unavailable;
 }
 
 Solver::QbmmCellFamilyReport qbmm_cell_report(const QbmmPopulationSchema& family, const Solver::CellState& cell,
@@ -125,7 +113,7 @@ Solver::QbmmCellFamilyReport qbmm_cell_report(const QbmmPopulationSchema& family
     int scale_exponent, volume_exponent;
     const auto scale_fraction = std::frexp(family.mass_scale_kg(), &scale_exponent);
     const auto volume_fraction = std::frexp(bulk_volume, &volume_exponent);
-    long double scale_fraction_power = 1;
+    double scale_fraction_power = 1;
     for (std::size_t k = 0; k < report.moments.size(); ++k)
     {
         if (const auto moment = report.moments[k]; moment != 0)
@@ -430,12 +418,12 @@ std::shared_ptr<const LowMachMixtureSolver::QbmmPublication> LowMachMixtureSolve
         // Retain the three independent roundings entering the momentum reduction.
         for (size_t axis = 0; axis < 3; ++axis)
         {
-            interval.local_body.component(axis) = static_cast<double>(body[axis].value());
-            interval.local_other.component(axis) = static_cast<double>(other[axis].value());
+            interval.local_body.component(axis) = body[axis].value();
+            interval.local_other.component(axis) = other[axis].value();
             ReportSum external;
             external.append(body[axis]);
             external.append(other[axis]);
-            interval.local_external.component(axis) = static_cast<double>(external.value());
+            interval.local_external.component(axis) = external.value();
         }
     }
     if (const auto& geometry = trial.ale_geometry)
@@ -562,7 +550,7 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                 cell.mechanical_pressure_pa = state.cells[c].mechanical_pressure;
                 cell.carrier_velocity = state.cells[c].velocity;
                 check(std::isfinite(cell.bulk_volume_m3) && cell.bulk_volume_m3 > 0, "QBMM report needs bulk volume.");
-                double mixture_mass = 0, gas_volume = 0, dispersed_volume = 0, passive_volume = 0, pool_volume = 0;
+                double gas_volume = 0, dispersed_volume = 0, passive_volume = 0, pool_volume = 0;
                 const auto& pool = d->options.qbmm_bulk_gas_pool;
                 const auto interval = trial ? nullptr : d->qbmm_publication ? d->qbmm_publication->interval : nullptr;
                 ReportSum total_mass;
@@ -574,7 +562,6 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                 {
                     const auto& phase = state.cells[c].phases[a];
                     const auto mass = qbmm_report_phase_mass(phase);
-                    mixture_mass += mass;
                     total_mass += mass;
                     for (std::size_t axis = 0; axis < 3; ++axis)
                     {
@@ -621,8 +608,11 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                             passive_volume += volume;
                     }
                 }
+                const double mass = total_mass.value();
+                check(std::isfinite(mass) && mass > 0,
+                    "QBMM report barycentric velocity requires positive finite mixture mass.");
                 cell.mixture_density_kg_per_m3 = qbmm_report_quotient(
-                    mixture_mass, cell.bulk_volume_m3, "QBMM report mixture density is not representable.");
+                    mass, cell.bulk_volume_m3, "QBMM report mixture density is not representable.");
                 cell.gas_volume_fraction = uses_qbmm_kinetic_transport(d->options.qbmm_model)
                                                ? qbmm_native_law_detail::kinetic_gas_fraction(state.cells[c],
                                                      state.cells[c].qbmm_kinetic_eos_volumes, cell.bulk_volume_m3)
@@ -647,13 +637,11 @@ LowMachMixtureSolver::QbmmReport LowMachMixtureSolver::qbmm_report_impl(const Tr
                         qbmm_report_applicability(*families[a], state.cells[c], a, cell.bulk_volume_m3,
                             cell.gas_volume_fraction, duration, *cell.families[a], *report.families[a],
                             pool_trace ? &*pool_trace : nullptr);
-                check(mixture_mass > 0, "QBMM report barycentric velocity requires positive finite mixture mass.");
                 for (std::size_t axis = 0; axis < 3; ++axis)
                 {
-                    const double drift = qbmm_native_law_detail::rounded_kinetic_ratio(drift_momentum[axis], total_mass);
+                    const double drift = drift_momentum[axis].value() / mass;
                     absolute_momentum[axis].append(drift_momentum[axis]);
-                    const double barycentric =
-                        qbmm_native_law_detail::rounded_kinetic_ratio(absolute_momentum[axis], total_mass);
+                    const double barycentric = absolute_momentum[axis].value() / mass;
                     check(std::isfinite(drift) && std::isfinite(barycentric),
                         "QBMM report drift or barycentric velocity is not finite.");
                     cell.mass_weighted_drift.component(axis) = drift;
@@ -740,7 +728,7 @@ void LowMachMixtureSolver::finalize_qbmm_balances(
     const auto species = catalog.species().size();
     const auto cells = trial.candidate.cells.size();
     const auto comm = mesh.owned_cell_map()->getComm();
-    std::vector<long double> local, global;
+    std::vector<double> local, global;
     collective_detail::collective_local_validation(mesh, "QBMM physical report balance operands",
         [&]
         {
@@ -751,16 +739,16 @@ void LowMachMixtureSolver::finalize_qbmm_balances(
                 "QBMM report balance layout differs from the trial and accepted state.");
             std::vector<MaterialSums> material_sums(species + 1);
             auto& mass = material_sums.back();
-            const auto add_stock = [](MaterialSums& sums, long double before, long double after)
+            const auto add_stock = [](MaterialSums& sums, double before, double after)
             {
                 sums[old_inventory] += before;
                 sums[new_inventory] += after;
                 sums[defect] += after;
                 sums[defect] += -before;
             };
-            const auto add_external = [&](std::size_t s, double moles, long double kilograms)
+            const auto add_external = [&](std::size_t s, double moles, double kilograms)
             {
-                const auto add_operand = [](MaterialSums& sums, long double amount)
+                const auto add_operand = [](MaterialSums& sums, double amount)
                 {
                     sums[defect] += -amount;
                     sums[net_external] += amount;
@@ -772,7 +760,7 @@ void LowMachMixtureSolver::finalize_qbmm_balances(
             const auto add_species_packet = [&](std::size_t s, double moles)
             {
                 const auto molar_mass = catalog.species()[s].molarMass;
-                add_external(s, moles, static_cast<long double>(moles) * molar_mass);
+                add_external(s, moles, moles * molar_mass);
             };
             for (std::size_t c = 0; c < cells; ++c)
             {
@@ -784,8 +772,11 @@ void LowMachMixtureSolver::finalize_qbmm_balances(
                         const auto n_old = before.phases[a].moles[s], n_new = after.phases[a].moles[s];
                         const auto molar_mass = catalog.species()[s].molarMass;
                         add_stock(material_sums[s], n_old, n_new);
-                        add_stock(mass, static_cast<long double>(n_old) * molar_mass,
-                            static_cast<long double>(n_new) * molar_mass);
+                        mass[old_inventory] += n_old * molar_mass;
+                        mass[new_inventory] += n_new * molar_mass;
+                        // Form the species change before conversion to kilograms.
+                        // Two separately rounded mass products can hide a small change.
+                        mass[defect] += (n_new - n_old) * molar_mass;
                         if (!chemistry && !trial.sources.empty() && !trial.sources[c].species_moles.empty())
                             add_species_packet(s, trial.sources[c].species_moles[a][s]);
                     }
@@ -813,7 +804,7 @@ void LowMachMixtureSolver::finalize_qbmm_balances(
                     check(std::isfinite(operand), "QBMM local physical mass or element balance is unrepresentable.");
                 }
         });
-    transport_consistency_detail::sum_qbmm_budget(*comm, local, global);
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, static_cast<int>(local.size()), local.data(), global.data());
     collective_detail::collective_local_validation(mesh, "QBMM global physical report balances",
         [&]
         {
@@ -827,7 +818,7 @@ void LowMachMixtureSolver::finalize_qbmm_balances(
                 mass[k] += global[species * operand_count + k];
             for (std::size_t s = 0; s < species; ++s)
             {
-                const auto operands = std::span<const long double>(global).subspan(s * operand_count, operand_count);
+                const auto operands = std::span<const double>(global).subspan(s * operand_count, operand_count);
                 const auto& definition = catalog.species()[s];
                 for (const auto& [name, count] : definition.elements)
                 {
@@ -835,7 +826,7 @@ void LowMachMixtureSolver::finalize_qbmm_balances(
                     for (std::size_t k = 0; k < operand_count; ++k)
                         sums[k] += operands[k] * count;
                 }
-                balances.external_species_moles[s] = static_cast<double>(operands[net_external]);
+                balances.external_species_moles[s] = operands[net_external];
                 check(std::isfinite(balances.external_species_moles[s]),
                     "QBMM report global external species input is unrepresentable.");
             }
@@ -843,14 +834,14 @@ void LowMachMixtureSolver::finalize_qbmm_balances(
             // Canonical stocks and the source packets are binary64. Reuse the native closed transport
             // allowance for those operands and the rank reduction, independently of the physical gate.
             const double roundoff = transport_consistency_detail::qbmm_closed_budget_tolerance(comm->getSize());
-            balances.mass_defect_kg = static_cast<double>(
-                qbmm_check_material_budget(mass, tolerance, roundoff, "QBMM physical total mass budget failed."));
+            balances.mass_defect_kg = qbmm_check_material_budget(
+                mass, tolerance, roundoff, "QBMM physical total mass budget failed.");
             check(
                 std::isfinite(balances.mass_defect_kg), "QBMM report global physical mass defect is unrepresentable.");
             for (const auto& [name, sums] : elements)
             {
-                const auto residual = static_cast<double>(
-                    qbmm_check_material_budget(sums, tolerance, roundoff, "QBMM physical element budget failed."));
+                const auto residual =
+                    qbmm_check_material_budget(sums, tolerance, roundoff, "QBMM physical element budget failed.");
                 check(std::isfinite(residual), "QBMM report global physical element defect is unrepresentable.");
                 balances.element_defects_mol.emplace(name, residual);
             }

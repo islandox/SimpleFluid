@@ -7,13 +7,12 @@
 #include "solvers/details/LowMachQbmmExplicitTransport.hh"
 #include "utils/CompensatedSum.hh"
 
-#include <limits>
 #include <numeric>
 
 namespace SimpleFluid::Reacting::qbmm_native_law_detail
 {
 using Flow = LowMachMixtureSolver;
-using KineticSum = SimpleFluid::detail::CompensatedSum<long double>;
+using KineticSum = SimpleFluid::detail::CompensatedSum<double>;
 
 /** Applies also to count-only phases and native configurations with no QBMM schema. */
 SIMPLEFLUID_SOLVERS_LOCAL inline void validate_drift(const Flow::CellState& cell)
@@ -58,74 +57,23 @@ SIMPLEFLUID_SOLVERS_LOCAL inline ReactionLocation kinetic_location(
         static_cast<std::size_t>(cell)};
 }
 
-SIMPLEFLUID_SOLVERS_LOCAL inline KineticSum kinetic_operand(long double value)
+SIMPLEFLUID_SOLVERS_LOCAL inline double kinetic_ratio(double numerator, double denominator)
 {
-    KineticSum sum;
-    sum += value;
-    return sum;
-}
-
-/** Round a quotient with a positive finite denominator to binary64. */
-SIMPLEFLUID_SOLVERS_LOCAL inline double rounded_kinetic_ratio(
-    const KineticSum& numerator, const KineticSum& denominator)
-{
-    const auto dividend = numerator.value(), divisor = denominator.value();
-    const auto value = dividend / divisor;
-    double rounded = static_cast<double>(value);
-    if (std::isfinite(value) && value != rounded)
-    {
-        constexpr double infinity = std::numeric_limits<double>::infinity();
-        const double adjacent = std::nextafter(rounded, value > rounded ? infinity : -infinity);
-        const auto wide_level = [](double level) -> long double
-        {
-            // Extend the last binade by one step to locate the overflow midpoint.
-            return std::isinf(level)
-                       ? std::copysign(std::ldexp(1.L, std::numeric_limits<double>::max_exponent),
-                             static_cast<long double>(level))
-                       : level;
-        };
-        const auto midpoint = std::midpoint(wide_level(rounded), wide_level(adjacent));
-        if (value == midpoint)
-        {
-            // Compare in numerator units and include the corrections lost in the wide quotient.
-            auto residual = numerator;
-            residual += -dividend;
-            residual += std::fma(-midpoint, divisor, dividend);
-            auto divisor_tail = denominator;
-            divisor_tail += -divisor;
-            const auto tail = divisor_tail.value();
-            const auto product = midpoint * tail;
-            residual += -product;
-            residual += std::fma(-midpoint, tail, product);
-            if (adjacent > rounded ? residual.value() > 0 : residual.value() < 0)
-                rounded = adjacent;
-        }
-    }
-    return rounded;
-}
-
-SIMPLEFLUID_SOLVERS_LOCAL inline double narrow_kinetic_ratio(
-    const KineticSum& numerator, const KineticSum& denominator)
-{
-    const auto rounded = rounded_kinetic_ratio(numerator, denominator);
-    if (!std::isfinite(rounded) || (rounded == 0 && numerator.value() != 0))
+    if (!std::isfinite(denominator) || denominator <= 0)
+        throw std::invalid_argument("Kinetic QBMM constitutive quantity needs a positive finite denominator.");
+    const double value = numerator / denominator;
+    if (!std::isfinite(value) || (value == 0 && numerator != 0))
         throw std::invalid_argument("Kinetic QBMM constitutive quantity is not representable.");
-    return rounded;
+    return value;
 }
 
-SIMPLEFLUID_SOLVERS_LOCAL inline KineticSum kinetic_phase_mass(const PhaseThermalState& phase)
+SIMPLEFLUID_SOLVERS_LOCAL inline double kinetic_phase_mass(const PhaseThermalState& phase)
 {
     KineticSum mass;
     const auto& species = phase.thermodynamics->catalog().species();
     for (std::size_t s = 0; s < phase.moles.size(); ++s)
-    {
-        const auto amount = static_cast<long double>(phase.moles[s]);
-        const auto molar_mass = static_cast<long double>(species[s].molarMass);
-        const auto species_mass = amount * molar_mass;
-        mass += species_mass;
-        mass += std::fma(amount, molar_mass, -species_mass);
-    }
-    return mass;
+        mass += phase.moles[s] * species[s].molarMass;
+    return mass.value();
 }
 
 SIMPLEFLUID_SOLVERS_LOCAL inline QbmmCellView kinetic_cell_view(
@@ -144,11 +92,11 @@ SIMPLEFLUID_SOLVERS_LOCAL inline Flow::Vector mean_drift_velocity(const Flow::Ce
     if (closure.active_atoms == 0)
         return {};
     const auto mass = kinetic_phase_mass(cell.phases.at(p));
-    if (!std::isfinite(mass.value()) || mass.value() <= 0)
+    if (!std::isfinite(mass) || mass <= 0)
         throw std::invalid_argument("Kinetic QBMM mean drift needs positive finite phase mass.");
     Flow::Vector mean{};
     for (size_t axis = 0; axis < 3; ++axis)
-        mean.component(axis) = narrow_kinetic_ratio(kinetic_operand(closure.drift_momentum.component(axis)), mass);
+        mean.component(axis) = kinetic_ratio(closure.drift_momentum.component(axis), mass);
     return mean;
 }
 
@@ -176,21 +124,16 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void accumulate_kinetic_drift(const QbmmPopulat
             continue;
         }
         const auto& atom = quadrature.atoms[i];
-        const auto count = static_cast<long double>(atom.count);
-        const auto support = static_cast<long double>(atom.mass_over_scale);
-        const auto scale = static_cast<long double>(family.mass_scale_kg());
-        const auto first_moment = count * support;
-        const auto scaled_first_moment_roundoff = std::fma(count, support, -first_moment) * scale;
-        const auto mass = first_moment * scale;
-        const auto mass_roundoff = std::fma(first_moment, scale, -mass);
+        const double mass = atom.count * atom.mass_over_scale * family.mass_scale_kg();
+        if (!std::isfinite(mass) || mass <= 0)
+            throw std::invalid_argument("Kinetic QBMM atom mass is not representable.");
         for (std::size_t axis = 0; axis < sums.size(); ++axis)
         {
-            const auto slip = static_cast<long double>(velocity.component(axis));
-            const auto momentum = mass * slip;
+            const double slip = velocity.component(axis);
+            const double momentum = mass * slip;
+            if (!std::isfinite(momentum) || (momentum == 0 && slip != 0))
+                throw std::invalid_argument("Kinetic QBMM atom momentum is not representable.");
             sums[axis] += momentum;
-            sums[axis] += std::fma(mass, slip, -momentum);
-            sums[axis] += mass_roundoff * slip;
-            sums[axis] += scaled_first_moment_roundoff * slip;
         }
     }
 }
@@ -200,9 +143,10 @@ SIMPLEFLUID_SOLVERS_LOCAL inline Flow::Vector kinetic_drift_momentum(
 {
     std::array<KineticSum, 3> sums;
     accumulate_kinetic_drift(family, quadrature, closure, sums);
-    const auto unit = kinetic_operand(1.L);
-    return {narrow_kinetic_ratio(sums[0], unit), narrow_kinetic_ratio(sums[1], unit),
-        narrow_kinetic_ratio(sums[2], unit)};
+    const Flow::Vector momentum{sums[0].value(), sums[1].value(), sums[2].value()};
+    if (!std::isfinite(momentum.x) || !std::isfinite(momentum.y) || !std::isfinite(momentum.z))
+        throw std::invalid_argument("Kinetic QBMM drift momentum is not representable.");
+    return momentum;
 }
 
 SIMPLEFLUID_SOLVERS_LOCAL inline double kinetic_gas_fraction(
@@ -217,17 +161,15 @@ SIMPLEFLUID_SOLVERS_LOCAL inline double kinetic_gas_fraction(
         if (cell.phases[a].thermodynamics->kind() == EOSKind::Gas)
             gas_volume += volume;
     }
-    if (!std::isfinite(bulk_volume_m3) || bulk_volume_m3 <= 0)
-        throw std::invalid_argument("Kinetic QBMM gas fraction needs positive finite bulk volume.");
-    return narrow_kinetic_ratio(gas_volume, kinetic_operand(bulk_volume_m3));
+    return kinetic_ratio(gas_volume.value(), bulk_volume_m3);
 }
 
 SIMPLEFLUID_SOLVERS_LOCAL inline double kinetic_specific_volume(const PhaseThermalState& donor, double occupied_volume)
 {
     const auto mass = kinetic_phase_mass(donor);
-    if (!std::isfinite(mass.value()) || mass.value() <= 0 || !std::isfinite(occupied_volume) || occupied_volume <= 0)
-        throw std::invalid_argument("An active kinetic QBMM atom needs positive donor mass and EOS volume.");
-    return narrow_kinetic_ratio(kinetic_operand(occupied_volume), mass);
+    if (!std::isfinite(occupied_volume) || occupied_volume <= 0)
+        throw std::invalid_argument("An active kinetic QBMM atom needs positive finite donor EOS volume.");
+    return kinetic_ratio(occupied_volume, mass);
 }
 
 using NodeSlipObservations = std::array<QbmmApplicabilityEvaluation, 2>;
@@ -345,11 +287,12 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void evaluate_kinetic_closure(const Flow::Optio
     cell.qbmm_kinetic_closure = std::move(closures);
 }
 
-/** Check a retained endpoint using canonical moments and recorded velocities only. */
-SIMPLEFLUID_SOLVERS_LOCAL inline void validate_kinetic_closure(
-    const Flow::Options& options, const Flow::Mesh& mesh, const Flow::CellState& cell)
+/** Validate closure structure and reconstruct its support without invoking the law. */
+template<class Cell, class Check>
+SIMPLEFLUID_SOLVERS_LOCAL inline void check_kinetic_closures(
+    const Flow::Options& options, const Flow::Mesh& mesh, Cell& cell, Check check)
 {
-    const auto& closures = cell.qbmm_kinetic_closure;
+    auto& closures = cell.qbmm_kinetic_closure;
     const auto& families = options.qbmm_families;
     if (closures.size() != (uses_qbmm_kinetic_transport(options.qbmm_model) ? families.size() : 0) ||
         cell.qbmm_kinetic_eos_volumes.size() != closures.size())
@@ -370,9 +313,21 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void validate_kinetic_closure(
                 qbmm_detail::require_axial(node, "Cylindrical kinetic QBMM requires axial retained node slip.");
         const auto& family = *families[a];
         const auto quadrature = invert_qbmm_moments(qbmm_cell_moments(family, kinetic_cell_view(family, cell, a)));
-        if (kinetic_drift_momentum(family, quadrature, *closures[a]) != closures[a]->drift_momentum)
-            throw std::invalid_argument("Kinetic QBMM endpoint drift momentum disagrees with its retained node slip.");
+        check(family, quadrature, *closures[a]);
     }
+}
+
+/** Check a live endpoint using canonical moments and recorded velocities only. */
+SIMPLEFLUID_SOLVERS_LOCAL inline void validate_kinetic_closure(
+    const Flow::Options& options, const Flow::Mesh& mesh, const Flow::CellState& cell)
+{
+    check_kinetic_closures(options, mesh, cell,
+        [](const auto& family, const auto& quadrature, const auto& closure)
+        {
+            if (kinetic_drift_momentum(family, quadrature, closure) != closure.drift_momentum)
+                throw std::invalid_argument(
+                    "Kinetic QBMM endpoint drift momentum disagrees with its retained node slip.");
+        });
 }
 
 /** Recheck instantaneous hard gates using the archived physical traces and node velocities. */

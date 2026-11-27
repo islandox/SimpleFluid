@@ -226,17 +226,7 @@ double product_difference(double a, double b, double c, double d, double left, d
         return 0.;
     if (std::abs(difference) > std::max(std::abs(left), std::abs(right)) * (8 * eps))
         return difference;
-    return fused(a, b, -right) - fused(c, d, -right);
-}
-
-long double wide_product_difference(long double a, long double b, long double c, long double d)
-{
-    const auto left = a * b, right = c * d;
-    const auto difference = left - right;
-    if ((left == 0. && right == 0.) || (a == c && b == d) || (a == d && b == c) ||
-        std::abs(difference) > std::max(std::abs(left), std::abs(right)) * (8 * eps))
-        return difference;
-    return std::fma(a, b, -right) - std::fma(c, d, -right);
+    return fused(a, b, -right) + fused(-c, d, right);
 }
 
 double local_substep_limit(const std::vector<CellStencil>& stencils, double cap, const PlanarTransportGeometry* planar)
@@ -290,7 +280,7 @@ double local_cfl(const std::vector<CellStencil>& stencils, double h, double cap,
             const auto difference =
                 narrow_rate == rate && product_has_range(left, narrow_rate, h) && product_has_range(right, cap, volume)
                     ? product_difference(narrow_rate, h, cap, volume, left, right)
-                    : wide_product_difference(rate, h, cap, volume);
+                    : swept - allowed;
             // The rounded aggregate can hide positive outflow on another face.
             auto remainder = stencil.outgoing_rate;
             remainder += -rate;
@@ -357,22 +347,20 @@ void check_realizable(const QbmmPopulationSchema& family, Block& block, const ch
 long double stock_difference(const CellStencil& stencil, size_t neighbor, double center, double other, bool singleton)
 {
     const double other_volume = stencil.neighbors[neighbor].volume;
-    if (singleton)
-    {
-        if (stencil.volume == other_volume)
-            return static_cast<long double>(other) - center;
-        return wide_product_difference(stencil.volume, other, other_volume, center) / other_volume;
-    }
+    if (stencil.volume == other_volume)
+        return static_cast<long double>(other) - center;
 
     const double left = stencil.volume * other, right = other_volume * center;
     if (product_has_range(left, stencil.volume, other) && product_has_range(right, other_volume, center))
     {
         const double difference = product_difference(stencil.volume, other, other_volume, center, left, right);
         const double scaled = difference / other_volume;
-        if (std::isnormal(scaled) || difference == 0.)
+        if (!singleton && (std::isnormal(scaled) || difference == 0.))
             return scaled;
+        return static_cast<long double>(difference) / other_volume;
     }
-    return wide_product_difference(stencil.volume, other, other_volume, center) / other_volume;
+    return (static_cast<long double>(stencil.volume) * other - static_cast<long double>(other_volume) * center) /
+           other_volume;
 }
 
 long double density_jump(
@@ -398,10 +386,8 @@ long double density_jump(
                 return narrow_difference;
         }
     }
-    const auto magnitude =
-        static_cast<long double>(stencil.volume) * other + static_cast<long double>(other_volume) * center;
-    const auto cross = wide_product_difference(stencil.volume, other, other_volume, center);
-    return relative_difference(cross, magnitude) > 2 * eps ? difference : 0.;
+    const auto magnitude = static_cast<long double>(stencil.volume) * other / other_volume + center;
+    return relative_difference(difference, magnitude) > 2 * eps ? difference : 0.;
 }
 
 template<class Scalar> double unit_ratio(Scalar numerator, Scalar denominator)
@@ -506,7 +492,7 @@ struct DensityBounds
                     return left < right;
                 return product_difference(amount, other.volume, other.amount, volume, left, right) < 0.;
             }
-            return wide_product_difference(amount, other.volume, other.amount, volume) < 0.;
+            return static_cast<long double>(amount) * other.volume < static_cast<long double>(other.amount) * volume;
         }
     };
     struct Channel
@@ -543,14 +529,7 @@ struct DensityBounds
             {
                 const auto bound = volume * limit.amount;
                 const auto value = static_cast<long double>(stock[channel.column]) * limit.volume;
-                const auto scale = value + bound;
-                const auto threshold = (2 * eps) * scale;
-                const auto excess = sign * (value - bound);
-                constexpr auto roundoff = 4 * std::numeric_limits<long double>::epsilon();
-                if (std::abs(excess - threshold) > roundoff * scale)
-                    return excess <= threshold;
-                return sign * wide_product_difference(stock[channel.column], limit.volume, volume, limit.amount) <=
-                       threshold;
+                return sign * (value - bound) <= (2 * eps) * (value + bound);
             };
             require(bounded(channel.minimum, -1.) && bounded(channel.maximum, 1.),
                 "QBMM TVD-MC density exceeds the donor stencil bounds.");
@@ -576,7 +555,7 @@ struct EnergyBounds
             if (product_has_range(left, right_mass, lhs.energy) && product_has_range(right, left_mass, rhs.energy))
                 return product_difference(right_mass, lhs.energy, left_mass, rhs.energy, left, right);
         }
-        return wide_product_difference(rhs.mass, lhs.energy, lhs.mass, rhs.energy);
+        return rhs.mass * lhs.energy - lhs.mass * rhs.energy;
     }
 
     void include(const QbmmPopulationSchema& family, const Block& block)
@@ -612,6 +591,31 @@ struct EnergyBounds
         // The face and remainder energy certificates keep their own bounds.
         constexpr double slope_slack = 8 * eps;
         return at_most(lhs, rhs, slope_slack) && at_most(rhs, lhs, slope_slack);
+    }
+
+    double reflected_slope_factor(const Stock& center, double energy_slope, double mass_slope, double factor) const
+    {
+        const double mass = static_cast<double>(center.mass);
+        if (!std::isfinite(mass) || !std::isfinite(mass_slope) || !std::isfinite(energy_slope))
+            return factor;
+        // Keep both the trace and its reflection nonnegative in mass.
+        if (std::abs(mass_slope) > mass)
+            factor = std::min(factor, mass / std::abs(mass_slope));
+        const auto clip = [&](const Stock& bound, double sign)
+        {
+            const double bound_mass = static_cast<double>(bound.mass);
+            const double left = energy_slope * bound_mass, right = mass_slope * bound.energy;
+            const double room = static_cast<double>(sign * difference(center, bound));
+            if (!std::isfinite(left) || !std::isfinite(right) || !std::isfinite(room))
+                return;
+            const double debit =
+                std::abs(product_difference(energy_slope, bound_mass, mass_slope, bound.energy, left, right));
+            if (debit > 0.)
+                factor = std::min(factor, std::max(0., room) / debit);
+        };
+        clip(*minimum, 1.);
+        clip(*maximum, -1.);
+        return factor;
     }
 
     void check(const QbmmPopulationSchema& family, const Block& block) const
@@ -727,8 +731,8 @@ void tvd_factors(const QbmmPopulationSchema& family, const CellStencil& stencil,
             {
                 const auto diff = EnergyBounds::difference(energy[k], reference);
                 const auto other_volume = stencil.neighbors[k].volume;
-                slope += face.weights[k] *
-                         (wide_product_difference(diff, stencil.volume, base, other_volume) / other_volume);
+                const auto relative_volume = static_cast<long double>(stencil.volume) / other_volume;
+                slope += face.weights[k] * (diff * relative_volume - base);
             }
             return slope;
         };
@@ -1112,6 +1116,26 @@ void limit_traces(const QbmmPopulationSchema& family, const CellStencil& stencil
             if ((stencil.traces[f].outward > 0 || limiter == TraceLimiter::AllIncident) &&
                 (!tvd_mc || scratch.mc[f] > 0) && !preserves_singleton(center, slopes[f]))
                 initial = 0.;
+    if (initial > 0. && tvd_mc && limiter == TraceLimiter::AllIncident &&
+        !EnergyBounds::indistinguishable(*energy.minimum, *energy.maximum))
+    {
+        const EnergyBounds::Stock center_energy{center[U], material_mass(family, moles(center))};
+        const auto& species = family.catalog().species();
+        for (size_t f = 0; f < traces.size(); ++f)
+        {
+            auto& factor = scratch.mc[f];
+            if (factor == 0.)
+                continue;
+            detail::CompensatedSum<double> mass_slope;
+            for (size_t s = 0; s < species.size(); ++s)
+                mass_slope += static_cast<double>(slopes[f][FirstSpecies + s]) * species[s].molarMass;
+            // At most half the donor volume can leave. The retained stock is then
+            // a nonnegative combination of the center and the reflected face stocks
+            // for any subset of exporting faces. Certify the actual rounded packets below.
+            factor = energy.reflected_slope_factor(
+                center_energy, static_cast<double>(slopes[f][U]), mass_slope.value(), factor);
+        }
+    }
     const double factor = limit(certify_donor, initial);
     if (limiter == TraceLimiter::Outgoing)
         for (size_t f = 0; f < traces.size(); ++f)

@@ -2,6 +2,7 @@
 
 #include "FVM/details/OperatorDetails.hh"
 #include "equations/CollectiveValidation.hh"
+#include "geometry/mesh/PredicateSigns2D.hh"
 #include "solvers/details/LowMachQbmmLawInputs.hh"
 
 #include <algorithm>
@@ -49,7 +50,7 @@ struct CircularBoundary
 {
     std::vector<Vec3> corners;
     Vec3 center;
-    double scale, coordinate_roundoff;
+    double coordinate_roundoff;
     int orientation;
 };
 
@@ -101,7 +102,7 @@ CircularBoundary circular_boundary(const std::vector<Vec3>& points)
     const double radius = xy_length(first - center);
     const double radial_roundoff = 8 * roundoff;
     const int orientation = xy_cross(first - center, local[corners[1]] - center) > 0. ? 1 : -1;
-    CircularBoundary ring{{}, origin + center * scale, scale, radial_roundoff * scale, orientation};
+    CircularBoundary ring{{}, origin + center * scale, radial_roundoff * scale, orientation};
     ring.corners.reserve(corners.size());
     size_t positive_axis_crossings = 0;
     for (size_t k = 0; k < corners.size(); ++k)
@@ -134,20 +135,34 @@ void validate_annular_boundaries(const CircularBoundary& outer, const CircularBo
 {
     require(xy_length(outer.center - inner.center) <= outer.coordinate_roundoff + inner.coordinate_roundoff,
         "Cylindrical QBMM annular walls must be concentric.");
-    const auto angle = [&](const Vec3& point)
+    using Meshes::detail::orient2d_sign;
+    using Meshes::detail::PredicateSign;
+    const auto upper_half = [&](const Vec3& point)
     {
-        const auto offset = point - outer.center;
-        return std::atan2(offset.y, offset.x);
+        return point.y > outer.center.y || (point.y == outer.center.y && point.x >= outer.center.x);
     };
-    // In a convex outer cycle, only the edge crossed by the ray from the center can exclude the point.
+    const auto angle_less = [&](const Vec3& a, const Vec3& b)
+    {
+        const bool upper_a = upper_half(a), upper_b = upper_half(b);
+        return upper_a != upper_b ? upper_a : orient2d_sign(outer.center, a, b) == PredicateSign::Positive;
+    };
+    // Locate the crossed edge by exact ray order so a rounded angle cannot select a neighboring wall.
     auto corners = outer.corners;
-    std::ranges::rotate(corners, std::ranges::min_element(corners, {}, angle));
+    std::ranges::rotate(corners, std::ranges::min_element(corners, angle_less));
+    require(std::ranges::adjacent_find(corners, [&](const Vec3& a, const Vec3& b) { return !angle_less(a, b); }) ==
+                corners.end(),
+        "Cylindrical QBMM walls must follow ordered circular facets about their center.");
+    for (size_t k = 0; k < corners.size(); ++k)
+        require(orient2d_sign(outer.center, corners[k], corners[(k + 1) % corners.size()]) == PredicateSign::Positive,
+            "Cylindrical QBMM outer facets must enclose their common center.");
     for (const auto& point : inner.corners)
     {
-        const auto next = std::ranges::upper_bound(corners, angle(point), {}, angle);
+        if (point.x == outer.center.x && point.y == outer.center.y)
+            continue;
+        const auto next = std::ranges::upper_bound(corners, point, angle_less);
         const auto& b = next == corners.end() ? corners.front() : *next;
         const auto& a = next == corners.begin() ? corners.back() : *(next - 1);
-        require(xy_cross((b - a) / outer.scale, (point - a) / outer.scale) > 0.,
+        require(orient2d_sign(a, b, point) == PredicateSign::Positive,
             "Cylindrical QBMM annular inner walls must lie strictly inside the outer wall.");
     }
 }
@@ -335,29 +350,27 @@ double relative_difference(long double difference, long double magnitude)
     return relative <= std::numeric_limits<double>::max() ? static_cast<double>(relative) : infinity;
 }
 
-static double checked_rate(long double amount, long double duration, const char* message)
+static long double checked_rate(long double amount, long double duration, const char* message)
 {
     require(std::isfinite(duration) && duration > 0, "Invalid QBMM kinetic packet divisor.");
     const long double rate = amount / duration;
     require(std::isfinite(rate) && std::abs(rate) <= std::numeric_limits<double>::max(), message);
-    return static_cast<double>(rate);
+    return rate;
 }
 
 double represented(long double amount, long double divisor)
 {
-    const double value = checked_rate(amount, divisor, "QBMM kinetic transfer overflows binary64.");
+    const long double rate = checked_rate(amount, divisor, "QBMM kinetic transfer overflows binary64.");
+    const double value = static_cast<double>(rate);
     require(value != 0 || amount == 0, "QBMM kinetic transfer underflows binary64.");
     if (std::fpclassify(value) == FP_SUBNORMAL)
-    {
-        const long double error = std::fma(-static_cast<long double>(value), divisor, amount);
-        require(relative_difference(error, std::abs(amount)) <= eps, "QBMM kinetic transfer loses relative precision.");
-    }
+        require(relative_difference(value - rate, std::abs(rate)) <= eps, "QBMM kinetic transfer loses relative precision.");
     return value;
 }
 
 double rounded_rate(long double amount, long double duration)
 {
-    return checked_rate(amount, duration, "QBMM kinetic face receipt overflows binary64.");
+    return static_cast<double>(checked_rate(amount, duration, "QBMM kinetic face receipt overflows binary64."));
 }
 
 static double mass(const PhaseThermalState& phase)
@@ -500,11 +513,8 @@ Flow::QbmmFaceFlux face_receipt(const FaceInterval& interval, double dt, double 
     const auto imprecisely_rounded = [](double rounded, long double exact)
     { return std::fpclassify(rounded) == FP_SUBNORMAL || (rounded == 0 && exact != 0); };
     const long double pressure_carrier = static_cast<long double>(kinetic.theta) * carrier_flux;
-    long double pressure_volume_flux = pressure_carrier + kinetic.slip_volume_flux;
-    if (pressure_carrier != 0 && std::abs(pressure_volume_flux) <= eps * std::abs(pressure_carrier))
-        pressure_volume_flux =
-            std::fma(static_cast<long double>(kinetic.theta), carrier_flux, kinetic.slip_volume_flux);
-    const long double residual = result.material_volume_flux - pressure_volume_flux;
+    const double pressure_volume_flux = std::fma(kinetic.theta, carrier_flux, kinetic.slip_volume_flux);
+    const long double residual = static_cast<long double>(result.material_volume_flux) - pressure_volume_flux;
     const long double direct_magnitude =
         static_cast<long double>(kinetic.forward.material_volume_flux) - kinetic.backward.material_volume_flux;
     if (imprecisely_rounded(kinetic.theta, theta) || imprecisely_rounded(kinetic.slip_volume_flux, slip) ||
@@ -512,14 +522,17 @@ Flow::QbmmFaceFlux face_receipt(const FaceInterval& interval, double dt, double 
     {
         kinetic.pressure_rounding_flux = rounded_rate(residual);
 
-        const long double theta_error = std::fma(-static_cast<long double>(kinetic.theta), dt, theta);
-        const long double slip_error = std::fma(-static_cast<long double>(kinetic.slip_volume_flux), dt, slip);
+        const long double theta_error = theta - static_cast<long double>(kinetic.theta) * dt;
+        const long double slip_error = slip - static_cast<long double>(kinetic.slip_volume_flux) * dt;
         const long double packet_error =
-            std::fma(-static_cast<long double>(result.material_volume_flux), dt, packet.value());
+            packet.value() - static_cast<long double>(result.material_volume_flux) * dt;
+        // The published pressure expression also rounds its fused binary64 evaluation.
+        const long double evaluation_error = pressure_carrier + kinetic.slip_volume_flux - pressure_volume_flux;
         const long double half_minimum_packet =
             static_cast<long double>(std::numeric_limits<double>::denorm_min()) * dt * .5L;
         const long double rounding_bound = std::abs(theta_error * carrier_flux) + std::abs(slip_error) +
-                                           std::abs(packet_error) + std::abs(physical_defect) + half_minimum_packet;
+                                           std::abs(packet_error) + std::abs(evaluation_error) * dt +
+                                           std::abs(physical_defect) + half_minimum_packet;
         const long double correction =
             static_cast<long double>(std::abs(kinetic.pressure_rounding_flux)) * dt * (1.L - 2.L * eps);
         require(correction <= rounding_bound,

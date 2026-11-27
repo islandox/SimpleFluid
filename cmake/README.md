@@ -47,13 +47,23 @@ Run them locally with `python3 cmake/testing/ipo/run.py --compiler g++` (or
 `--compiler clang++`). They cover the default/off and opt-out policies, custom
 configurations, global LTO off, testing off, and the GNU compatibility exception.
 
-## Floating-point contraction
+## Native architecture and floating-point contraction
 
-`SIMPLEFLUID_ENABLE_FMA` defaults to `ON` on x86-64 when the compiler accepts
-`-mfma` and `-ffp-contract=off`. The C++ build uses the same settings for PCH
-providers and consumers. Ordinary expressions keep separate multiply and add
-rounding, and explicit `std::fma` can use the hardware instruction. Set
-`SIMPLEFLUID_ENABLE_FMA=OFF` when targeting x86-64 processors without FMA.
+`SIMPLEFLUID_ENABLE_NATIVE_ARCH` defaults to `ON` and applies `-march=native`
+when the C++ compiler accepts it. The resulting binaries can use instruction
+set features of the build host. Set `SIMPLEFLUID_ENABLE_NATIVE_ARCH=OFF` for
+binaries that need to run on a different processor.
+
+When native architecture targeting is inactive, `SIMPLEFLUID_ENABLE_FMA` adds
+`-mfma` on supported x86-64 compilers and defaults to `ON` there. Set it to
+`OFF` for a target without FMA. With native targeting active, the selected
+architecture determines FMA availability.
+
+Release and RelWithDebInfo use `-ffp-contract=fast` when supported. The
+compiler can fuse eligible multiply-add operations into one rounded result.
+Other configurations use `-ffp-contract=off` when supported. These defaults
+apply to C++ PCH providers and consumers. Source files with an explicit
+floating-point policy retain their source-specific options.
 
 ## Focused debug symbols
 

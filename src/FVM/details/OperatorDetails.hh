@@ -16,6 +16,7 @@
 #include "equations/BoundaryConditions.hh"
 #include "FVM/FaceCoefficientInterpolation.hh"
 #include "geometry/MeshUtils.hh"
+#include "utils/CompensatedSum.hh"
 
 #include <algorithm>
 #include <array>
@@ -621,17 +622,29 @@ inline auto boundary_diffusion_coefficient(
          : scalar_type{};
 }
 
-/**
- * @brief Pressure implicit coefficient for a positive face-area projection.
- *
- * Pair this coefficient with the explicit area vector S - alpha*d.
- * The caller must check that S dot d is positive.
- */
+/** @brief Pressure face-area projection with a cancellation-sensitive path near tangency. */
 template<class VectorType>
-inline auto over_relaxed_pressure_coefficient(
-    const VectorType& area_vector, const VectorType& center_delta)
+inline auto pressure_area_projection(const VectorType& area, const VectorType& delta)
 {
-    return area_vector.dot(area_vector) / area_vector.dot(center_delta);
+    using Scalar = decltype(area.dot(delta));
+    const auto projection = area.dot(delta);
+    const auto magnitude = std::abs(area.x * delta.x) + std::abs(area.y * delta.y) + std::abs(area.z * delta.z);
+    if (std::abs(projection) > 8 * std::numeric_limits<Scalar>::epsilon() * magnitude &&
+        std::isnormal(magnitude))
+        return projection;
+
+    // A partly contracted dot can report either sign at exact tangency.
+    // Retain all three rounded products and their errors before deciding the sign.
+    SimpleFluid::detail::CompensatedSum<long double> products, roundoff;
+    for (std::size_t axis = 0; axis < 3; ++axis)
+    {
+        const long double a = area.component(axis), d = delta.component(axis);
+        const long double product = a * d;
+        products += product;
+        roundoff += std::fma(a, d, -product);
+    }
+    products.append(roundoff);
+    return static_cast<Scalar>(products.value());
 }
 
 /** @brief Pressure implicit coefficient across an interior or periodic face. */
@@ -660,9 +673,9 @@ inline auto interior_pressure_coefficient(
     }
 
     const auto area_vector = mesh.face_area_vector_outward(face_id, cell_id);
-    if (area_vector.dot(d) > scalar_type{0})
+    if (const auto projection = pressure_area_projection(area_vector, d); projection > scalar_type{0})
     {
-        return over_relaxed_pressure_coefficient(area_vector, d);
+        return area_vector.dot(area_vector) / projection;
     }
 
     const auto stored_distance = mesh.face_cell_center_distance(face_id);
@@ -690,9 +703,9 @@ inline auto boundary_pressure_coefficient(
     }
 
     const auto area_vector = mesh.face_area_vector_outward(face_id, cell_id);
-    if (area_vector.dot(d) > scalar_type{0})
+    if (const auto projection = pressure_area_projection(area_vector, d); projection > scalar_type{0})
     {
-        return over_relaxed_pressure_coefficient(area_vector, d);
+        return area_vector.dot(area_vector) / projection;
     }
 
     const auto distance = mesh.cell_to_face_distance(face_id, cell_id);

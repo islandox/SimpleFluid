@@ -143,7 +143,7 @@ std::optional<Solver::Vector> acceleration_vector(const std::optional<std::array
     return Solver::Vector(*acceleration);
 }
 
-using NativeSum = detail::CompensatedSum<long double>;
+using NativeSum = detail::CompensatedSum<double>;
 
 double fused(double a, double b, double c)
 {
@@ -154,48 +154,12 @@ double fused(double a, double b, double c)
 #endif
 }
 
-void add_wide_product(NativeSum& sum, long double a, double b)
-{
-    const long double product = a * b;
-    sum += product;
-    if (product != 0 && std::isfinite(product))
-        sum += std::fma(a, b, -product);
-}
-
 void add_product(NativeSum& sum, double a, double b)
 {
     const double product = a * b;
-    if (std::isfinite(product) && std::abs(product) >= 0x1p-968)
-    {
-        sum += product;
+    sum += product;
+    if (std::isfinite(product))
         sum += fused(a, b, -product);
-    }
-    else
-        add_wide_product(sum, a, b);
-}
-
-double round_floor_packet(const NativeSum& mass_density, double weight, double density)
-{
-    NativeSum denominator;
-    denominator += density;
-    if (weight == 1.)
-        return qbmm_native_law_detail::rounded_kinetic_ratio(mass_density, denominator);
-    const long double mass = mass_density.value();
-    auto remainder = mass_density;
-    remainder += -mass;
-    NativeSum weighted;
-    add_wide_product(weighted, mass, weight);
-    weighted += remainder.value() * weight;
-    return qbmm_native_law_detail::rounded_kinetic_ratio(weighted, denominator);
-}
-
-double narrow_face_rate(const NativeSum& amount, double duration = 1.)
-{
-    const auto wide = amount.value();
-    const double rate = static_cast<double>(wide / duration);
-    if (wide != 0 && std::abs(rate) <= std::numeric_limits<double>::min())
-        return round_floor_packet(amount, 1., duration);
-    return rate;
 }
 
 std::optional<size_t> axial_column(const Solver::Mesh& mesh, const Solver::Vector& gravity)
@@ -230,84 +194,63 @@ std::optional<size_t> axial_column(const Solver::Mesh& mesh, const Solver::Vecto
     return axis;
 }
 
-int compare_pressure_sums(NativeSum lhs, NativeSum rhs)
-{
-    const auto left = lhs.value(), right = rhs.value();
-    if (left != right)
-        return (left > right) - (left < right);
-    // Equal rounded endpoints can still enclose a nonempty open interval.
-    lhs += -left;
-    rhs += -right;
-    return (lhs.value() > rhs.value()) - (lhs.value() < rhs.value());
-}
-
 // Columns contain triples of projected coordinate, density and absolute pressure, in native axial order.
-// A single unknown datum p* must satisfy RN(p*+H[j])=p[j] at every cell. Each cell constrains that
-// same datum using its asymmetric predecessor/successor midpoints. A midpoint is included only at an even mantissa.
+// Intersect the stored pressures' rounding bins in offsets from one pressure.
 bool common_column_pressure_datum(
     std::span<const double> minimum_column, double g, std::span<const double> maximum_column = {})
 {
     if (minimum_column.empty() && maximum_column.empty())
         return true;
     const double anchor = (minimum_column.empty() ? maximum_column : minimum_column)[2];
-    NativeSum lower, upper;
-    bool lower_closed = false, upper_closed = false, first = true;
+    constexpr double infinity = std::numeric_limits<double>::infinity();
+    double lower = -infinity, upper = infinity;
     for (const auto column : {minimum_column, maximum_column})
     {
         if (column.empty())
             continue;
         NativeSum center;
-        center += column[2];
-        center += -anchor;
+        center += column[2] - anchor;
         for (size_t j = 0; j < column.size(); j += 3)
         {
             const double pressure = column[j + 2];
             if (j)
             {
                 const double dx = column[j] - column[j - 3];
-                if (!(dx > 0.) || !std::isfinite(dx) || pressure == column[j - 1] ||
-                    (pressure > column[j - 1]) != (g > 0.))
+                const double prior_pressure = column[j - 1];
+                if (!(dx > 0.) || !std::isfinite(dx) ||
+                    (pressure != prior_pressure && (pressure > prior_pressure) != (g > 0.)))
                     return false;
+                // A rounded plateau can be hydrostatic. The common datum interval
+                // below still rejects any resolved head that a plateau would conceal.
                 // Work in pressure offsets so an absolute datum cannot swallow the midpoint width.
-                center += pressure;
-                center += -column[j - 1];
-                const long double acceleration = -.5L * g;
-                const long double path = acceleration * dx;
-                const long double path_residual = std::fma(acceleration, dx, -path);
-                for (const double rho : {column[j - 2], column[j + 1]})
+                center += pressure - prior_pressure;
+                const double half_acceleration = -.5 * g;
+                const double path = half_acceleration * dx;
+                const double path_roundoff = fused(half_acceleration, dx, -path);
+                for (double density : {column[j - 2], column[j + 1]})
                 {
-                    const long double increment = path * rho;
-                    center += increment;
-                    center += std::fma(path, rho, -increment) + path_residual * rho;
+                    add_product(center, path, density);
+                    center += path_roundoff * density;
                 }
             }
-            const double previous = std::nextafter(pressure, -std::numeric_limits<double>::infinity());
-            const double next = std::nextafter(pressure, std::numeric_limits<double>::infinity());
+            const double previous = std::nextafter(pressure, -infinity);
+            const double next = std::nextafter(pressure, infinity);
             if (!std::isfinite(previous) || !std::isfinite(next) || !std::isfinite(center.value()))
                 return false;
             auto lo = center, hi = center;
-            lo += .5L * (static_cast<long double>(previous) - pressure);
-            hi += .5L * (static_cast<long double>(next) - pressure);
-            const bool closed = !(std::bit_cast<std::uint64_t>(pressure) & 1u);
-            const int lo_order = !first ? compare_pressure_sums(lo, lower) : 1;
-            const int hi_order = !first ? compare_pressure_sums(hi, upper) : -1;
-            first = false;
-            if (lo_order > 0)
-            {
-                lower = std::move(lo);
-                lower_closed = closed;
-            }
-            else if (lo_order == 0)
-                lower_closed &= closed;
-            if (hi_order < 0)
-            {
-                upper = std::move(hi);
-                upper_closed = closed;
-            }
-            else if (hi_order == 0)
-                upper_closed &= closed;
-            const int overlap = compare_pressure_sums(upper, lower);
-            if (overlap < 0 || (!overlap && !(lower_closed && upper_closed)))
+            const double lo_offset = .5 * (previous - pressure), hi_offset = .5 * (next - pressure);
+            lo += lo_offset;
+            hi += hi_offset;
+            // At a tie, use native rounding to decide whether the stored pressure owns the endpoint.
+            if (pressure + lo_offset != pressure)
+                lower = std::max(lower, std::nextafter(lo.value(), infinity));
+            else
+                lower = std::max(lower, lo.value());
+            if (pressure + hi_offset != pressure)
+                upper = std::min(upper, std::nextafter(hi.value(), -infinity));
+            else
+                upper = std::min(upper, hi.value());
+            if (lower > upper)
                 return false;
         }
     }
@@ -2785,7 +2728,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             {
                                 x[s] = species_donor_concentration(a, s, donor);
                                 amount += x[s];
-                                transported_mass_density += static_cast<long double>(x[s]) * species[s].molarMass;
+                                transported_mass_density += x[s] * species[s].molarMass;
                             }
                             if (amount == 0)
                                 continue;
@@ -2800,23 +2743,11 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                 value /= amount;
                             const auto point = d->eos[a]->evaluate(
                                 phase_temperature.local_value(donor), phase_pressure.local_value(donor), x);
-                            const long double mass_density = transported_mass_density.value();
-                            double fraction = static_cast<double>(mass_density / point.density);
-                            // The stored coefficient determines the ordinary flux. At its subnormal floor, apply the
-                            // phase flux before narrowing so a representable material packet can still be transported.
-                            double volume_flux = phi * fraction;
-                            if (mass_density != 0 && std::abs(fraction) <= std::numeric_limits<double>::min())
-                            {
-                                // Only floor packets need product residuals to resolve a binary64 midpoint.
-                                NativeSum floor_mass;
-                                for (size_t s = 0; s < ns; ++s)
-                                    add_wide_product(floor_mass, species_donor_concentration(a, s, donor),
-                                        species[s].molarMass);
-                                fraction = round_floor_packet(floor_mass, 1., point.density);
-                                volume_flux = std::isnormal(fraction)
-                                                  ? phi * fraction
-                                                  : round_floor_packet(floor_mass, phi, point.density);
-                            }
+                            const double mass_density = transported_mass_density.value();
+                            const double fraction = mass_density / point.density;
+                            // The direct flux can be representable even when the fraction rounds to zero.
+                            const double volume_flux = std::isnormal(fraction) ? phi * fraction
+                                                                              : (phi * mass_density) / point.density;
                             check(std::isfinite(fraction) && fraction >= 0 && std::isfinite(volume_flux),
                                 "Phase material-volume packet is not representable.");
                             material_face_fraction[a]->set_owned_value(face, fraction);
@@ -3424,8 +3355,6 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             for (auto& field : drift_momentum)
                 field = std::make_unique<FaceField>(d->mesh, 0.0, "phase_slip_momentum_flux");
             const bool qbmm_enabled = !qbmm_families.empty();
-            const bool competing_streams = !qbmm_enabled ||
-                d->options.qbmm_model.velocity != QbmmModelOptions::Velocity::SharedCarrier;
             collective_detail::collective_local_validation(mesh, "Phase mass/material momentum packets",
                 [&]
                 {
@@ -3474,69 +3403,47 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             if (packet)
                             {
                                 for (size_t s = 0; s < ns; ++s)
-                                    add_product(phase_mass, packet->species_molar_flux[s], species[s].molarMass);
-                                packet->derived_mass_flux = narrow_face_rate(phase_mass);
+                                    phase_mass += packet->species_molar_flux[s] * species[s].molarMass;
+                                packet->derived_mass_flux = phase_mass.value();
                                 check(std::isfinite(packet->derived_mass_flux),
                                     "QBMM derived physical face packet overflow.");
                             }
                             else if (phi != 0)
                             {
-                                const long double transported_volume = static_cast<long double>(phi) * duration;
-                                const long double volume_error = competing_streams
-                                    ? std::fma(static_cast<long double>(phi), duration, -transported_volume) : 0.L;
+                                NativeSum mass_density;
                                 for (size_t s = 0; s < ns; ++s)
-                                {
-                                    const double concentration = species_donor_concentration(a, s, donor);
-                                    const long double moles = transported_volume * concentration;
-                                    const double molar_mass = species[s].molarMass;
-                                    if (competing_streams)
-                                    {
-                                        // Opposing streams can expose a residual below a wide product's spacing.
-                                        add_wide_product(phase_mass, moles, molar_mass);
-                                        const auto moles_error = std::fma(transported_volume, concentration, -moles);
-                                        phase_mass += (moles_error + volume_error * concentration) * molar_mass;
-                                    }
-                                    else
-                                        phase_mass += moles * molar_mass;
-                                }
+                                    mass_density +=
+                                        species_donor_concentration(a, s, donor) * species[s].molarMass;
+                                phase_mass += (phi * duration) * mass_density.value();
                             }
 
-                            // Retain the signed mass separately from the directional totals. Weight the wide
-                            // phase mass before narrowing so a subnormal phase receipt can still carry momentum.
+                            // Sum signed mass independently of the two published directional rates.
                             net_mass.append(phase_mass);
                             (phi >= 0 ? forward_mass : backward_mass).append(phase_mass);
                             if (donor_drift != Vector{})
                             {
-                                const long double mass = phase_mass.value();
-                                auto mass_remainder = phase_mass;
-                                mass_remainder += -mass;
+                                const double mass = phase_mass.value();
                                 for (size_t axis = 0; axis < 3; ++axis)
                                 {
                                     const double drift_component = donor_drift.component(axis);
                                     if (drift_component == 0)
                                         continue;
-                                    NativeSum momentum;
-                                    const double rounded_mass = static_cast<double>(mass);
-                                    if (rounded_mass == mass)
-                                        add_product(momentum, rounded_mass, drift_component);
-                                    else
-                                        add_wide_product(momentum, mass, drift_component);
-                                    momentum += mass_remainder.value() * drift_component;
-                                    drift_momentum_sum[axis].append(momentum);
+                                    const double momentum = mass * drift_component;
+                                    add_product(drift_momentum_sum[axis], mass, drift_component);
                                     if (packet)
                                     {
                                         auto& component = packet->derived_drift_momentum_flux.component(axis);
-                                        component = narrow_face_rate(momentum);
+                                        component = momentum;
                                         check(std::isfinite(component),
                                             "QBMM drift momentum packet is not representable.");
                                     }
                                 }
                             }
                             const double phase_fraction = material_face_fraction[a]->local_value(face);
-                            theta += static_cast<long double>(phase_fraction) * duration;
+                            theta += phase_fraction * duration;
                             const double phase_slip = phi - relative_carrier;
                             if (explicit_family)
-                                slip += static_cast<long double>(phase_slip) * phase_fraction * duration;
+                                slip += phase_slip * phase_fraction * duration;
                             else
                                 add_product(slip, phase_slip, phase_fraction);
                             double direct;
@@ -3548,14 +3455,12 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                 direct = rates.empty() ? 0. : rates[f];
                                 if (!explicit_family)
                                 {
-                                    add_product(pressure_rounding, -phi, phase_fraction);
-                                    pressure_rounding += direct;
+                                    pressure_rounding += fused(-phi, phase_fraction, direct);
                                 }
                             }
-                            material_volume += static_cast<long double>(direct) * duration;
+                            material_volume += direct * duration;
                         }
-                        const auto rate = [duration](const NativeSum& amount)
-                        { return narrow_face_rate(amount, duration); };
+                        const auto rate = [duration](const NativeSum& amount) { return amount.value() / duration; };
                         const double mass_flux = rate(net_mass);
                         receipt.theta = rate(theta);
                         receipt.slip_volume_flux = rate(slip);
@@ -3583,14 +3488,14 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             representation += receipt.material_volume_flux;
                             add_product(representation, -receipt.theta, relative_carrier);
                             representation += -receipt.slip_volume_flux;
-                            receipt.pressure_rounding_flux = narrow_face_rate(representation);
+                            receipt.pressure_rounding_flux = representation.value();
                             pressure_input = receipt.material_volume_flux;
                         }
                         else
                         {
-                            receipt.pressure_rounding_flux = narrow_face_rate(pressure_rounding);
+                            receipt.pressure_rounding_flux = pressure_rounding.value();
                             slip.append(pressure_rounding);
-                            pressure_input = narrow_face_rate(slip);
+                            pressure_input = slip.value();
                         }
                         check(std::isfinite(mass_flux) && std::isfinite(pressure_input) &&
                                   std::isfinite(receipt.theta) && std::isfinite(receipt.slip_volume_flux) &&
@@ -3774,7 +3679,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         }
                     }
                     const double volume = trial_volume(cell);
-                    const long double storage = static_cast<long double>(volume) * dt;
+                    const double storage = volume * dt;
                     Vector force_density{};
                     for (size_t axis = 0; axis < impulse.size(); ++axis)
                     {
@@ -3785,11 +3690,11 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         else if (!sources.empty())
                             impulse[axis] += sources[cell].momentum.component(axis);
                         const double gradient = d->pressure_gradient.local_value(cell).component(axis);
-                        impulse[axis] += -static_cast<long double>(gradient) * storage;
+                        add_product(impulse[axis], -gradient, storage);
                         for (const auto face : mesh.faces(cell))
                             add_product(impulse[axis], drift_momentum[axis]->local_value(face),
                                 mesh.owner_cell(face) == cell ? -dt : dt);
-                        force_density.component(axis) = static_cast<double>(impulse[axis].value() / storage);
+                        force_density.component(axis) = impulse[axis].value() / storage;
                     }
                     return force_density;
                 },
@@ -3819,8 +3724,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                     receipt.momentum_owner_velocity.component(axis));
                                 add_product(rate, -receipt.symmetric_mass_flux,
                                     receipt.momentum_neighbor_velocity.component(axis));
-                                receipt.implicit_carrier_momentum_flux.component(axis) =
-                                    static_cast<double>(rate.value());
+                                receipt.implicit_carrier_momentum_flux.component(axis) = rate.value();
                                 check(std::isfinite(receipt.implicit_carrier_momentum_flux.component(axis)),
                                     "Implicit directional momentum receipt overflows.");
                             }
@@ -3876,8 +3780,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         const double volume = trial_volume(cell);
                         for (size_t axis = 0; axis < pressure_debit.size(); ++axis)
                         {
-                            pressure_debit[axis] += static_cast<long double>(
-                                d->pressure_gradient.local_value(cell).component(axis)) * dt * volume;
+                            add_product(pressure_debit[axis], d->pressure_gradient.local_value(cell).component(axis),
+                                dt * volume);
                             if (reconstruct_residual)
                                 pressure_debit[axis] += sources[c].impulse_parts.value().body.component(axis);
                         }
@@ -3919,9 +3823,9 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         trial.cells[c].velocity = d->u.local_value(cell);
                         trial.cells[c].mechanical_pressure = d->mechanical_pressure.local_value(cell);
                         for (size_t axis = 0; axis < pressure_debit.size(); ++axis)
-                            pressure_debit[axis] += static_cast<long double>(
-                                (predicted_velocity[c] - d->u.local_value(cell)).component(axis)) *
-                                d->rho.local_value(cell) * trial_volume(cell);
+                            add_product(pressure_debit[axis],
+                                (predicted_velocity[c] - d->u.local_value(cell)).component(axis),
+                                d->rho.local_value(cell) * trial_volume(cell));
                         smallest_volume = std::min(smallest_volume, mesh.cell_volume(cell));
                     }
                     for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
@@ -4035,25 +3939,26 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         << result.maximum_occupancy_error << ", normalized flux change=" << flux_change;
                 throw std::runtime_error(message.str());
             }
-            // A late Fourier reversal can couple to the pressure and face-rate iterates. Relax their next
-            // private inputs together with the contact-temperature correction. Recompute every physical
-            // packet and every unrelaxed residual from the accepted predecessor on the next evaluation.
+            // Damp the coupled pressure and carrier guesses when a late Fourier residual dominates.
+            // TVD-MC keeps the full bounded thermal update. The realizability-only method also
+            // damps the thermal step to suppress a Fourier reversal.
             constexpr double relaxed_step = .25;
+            const bool tvd_mc =
+                d->options.qbmm_model.linear_slope_limiter == QbmmModelOptions::LinearSlopeLimiter::TvdMc;
             const bool relax_fourier = linear && forced_explicit_family && physical_convergence &&
                                        gross_residual_evaluations.back().winner &&
                                        gross_residual_evaluations.back().winner->fourier_stage.has_value();
             // Polygonal TVD-MC circulation can revisit the rounded Fourier
             // reversal when the grouped solve perturbs the transport iterate.
             // Retain coupled damping after entering the late Fourier correction.
-            relax_grouped_fourier_coupling |= relax_fourier && result.transport_multi_rhs.active_columns > 0 &&
-                d->options.qbmm_model.linear_slope_limiter == QbmmModelOptions::LinearSlopeLimiter::TvdMc &&
+            relax_grouped_fourier_coupling |= relax_fourier && result.transport_multi_rhs.active_columns > 0 && tvd_mc &&
                 std::holds_alternative<Mesh::SemiStructuredPtr>(mesh.variant());
             const bool relax_coupling = relax_fourier || relax_grouped_fourier_coupling;
             // This candidate was rejected. Exchange the two private buffers so the prior guess stays
             // available during interpolation without allocating another state before the Fourier collectives.
             std::swap(thermodynamic_guess, trial);
             fourier_thermal_detail::correct(mesh, dt, d->options.thermal_mode, fourier_thermal_stages,
-                thermodynamic_guess, relax_coupling ? relaxed_step : 1.);
+                thermodynamic_guess, relax_fourier && !tvd_mc ? relaxed_step : 1.);
             if (relax_coupling)
             {
                 collective_detail::collective_local_validation(mesh, "Relaxed forced linear corrector inputs",
@@ -4072,20 +3977,10 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             for (size_t axis = 0; axis < 3; ++axis)
                                 cell.velocity.component(axis) = std::lerp(previous.velocity.component(axis),
                                     cell.velocity.component(axis), relaxed_step);
-                            // Preserve a newly occupied phase's recovered equilibrium
-                            // temperature and its receiving EOS domain for the whole cell.
-                            const bool relax_temperature = relax_grouped_fourier_coupling &&
-                                std::ranges::equal(cell.phases, previous.phases,
-                                    [](const PhaseThermalState& current, const PhaseThermalState& prior)
-                                    { return current.temperature == 0 || prior.temperature > 0; });
                             for (size_t a = 0; a < np; ++a)
                             {
                                 auto& pressure = cell.phases[a].absolute_pressure;
                                 pressure = std::lerp(previous.phases[a].absolute_pressure, pressure, relaxed_step);
-                                auto& temperature = cell.phases[a].temperature;
-                                if (relax_temperature && temperature > 0)
-                                    temperature =
-                                        std::lerp(previous.phases[a].temperature, temperature, relaxed_step);
                             }
                         }
                         for (size_t f = 0; f < previous_flux.size(); ++f)

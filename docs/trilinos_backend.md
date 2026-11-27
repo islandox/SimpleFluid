@@ -24,6 +24,12 @@ libraries keep their SimpleFluid export boundary and the required dependency
 RTTI visibility. The backend boundary test checks the ownership marker and,
 with Ninja, verifies that only one link rule receives Trilinos archives.
 
+On Linux with libc++, custom FVM implementation providers compiled with hidden
+symbols still need default visibility for vendor declarations. The test
+providers compile the same header prelude as the shared PCH when they bypass
+PCH reuse. This lets Tpetra type information coalesce with the backend during
+field imports while the custom implementation symbols stay hidden.
+
 For libc++ builds using this backend, the FVM export audit checks the core
 Teuchos/Tpetra/string RTTI in the backend and requires FVM's direct dependency
 on that provider. FVM may omit unused RTTI, while any core RTTI it defines must

@@ -676,6 +676,9 @@ A fresh native flow can restore an image from a reacting controller and report i
 Attaching the matching controller restores its accepted diagnostics before the next preview.
 The archive binds the endpoint EOS volumes used for applicability and the corresponding
 retained velocities. Hard instantaneous ranges are checked on these operands during restore.
+Portable restore recomputes derived drift momentum from the retained nodes and accepts older
+rounding only within a componentwise bound from the absolute node momenta. Live closures require
+exact agreement with the canonical calculation.
 Earlier portable versions require their original model selections. The v7 kinetic image requires
 a fixed Cartesian mesh. Kinetic transport rejects moving meshes, SSPRK2, BDF2, separate temperatures, variable composition,
 bulk-gas conversion and capillarity.
@@ -720,8 +723,10 @@ roundoff introduced by thermal bisection.
 For a stationary one-dimensional Cartesian column with axial gravity, an absolute
 pressure rounded to binary64 can leave a small apparent edge imbalance. The column
 check integrates the trapezoidal head from actual densities and requires one common
-pressure datum consistent with every cell's asymmetric rounding interval, including
-ties-to-even. This applies only to mechanical pressures recovered from those same
+pressure datum inside every cell's asymmetric rounding interval. Native
+rounding determines which endpoints belong to the interval. Adjacent pressures can
+coincide when the integrated head fits those intervals. This applies only to
+mechanical pressures recovered from those same
 absolute pressures, with unchanged physical inventories, zero material transport,
 zero volume target, zero slip and no other impulse. Independent higher-precision
 mechanical data and resolvable column-head errors retain their driving residual.
@@ -962,6 +967,11 @@ supply. A small transverse rate can then reverse without adding or removing a co
 a large radial or axial packet. Only actual outflow contributes to the donor withdrawal or
 CFL. Both donors supply pressure derivatives at an exact tie. A nontransporting, unresolved
 offset uses its cell-center trace. The v8 method retains its outgoing-face limiter.
+For the forced TVD-MC method, the resolved stencil specific-energy envelope bounds
+each face trace and its reflection through the donor mean. With total outflow limited to half a cell volume,
+the retained stock is a nonnegative combination of the donor mean and reflected traces.
+The resulting specific-energy bound applies to any subset of outgoing faces. The method
+also certifies the actual rounded traces and retained inventory.
 Q8c covers the fixed geometry combination with shared carrier and disabled
 bulk-gas conversion. Q8f extends this combination to prescribed planar motion.
 Supplied-slip SSPRK2 rejects in both cases.
@@ -979,7 +989,9 @@ body impulse. An explicit zero acceleration selects the same pressure and therma
 
 If the unrelaxed occupancy, flux, continuity, thermal, source and transport checks pass but
 a Fourier contact dominates the failing gross residual, Q8c takes a quarter step in the next
-Fourier temperature correction and in the pressure, carrier-velocity and face-rate guesses.
+pressure, carrier-velocity and face-rate guesses. The Fourier block supplies the next
+temperature guess with its own bound-preserving step. The realizability-only method
+also limits that thermal step to a quarter to suppress a late Fourier reversal.
 The next corrector recomputes both RK stages, physical sources, EOS recovery and projection
 from the accepted predecessor. Every accepted heat packet uses the two temperatures actually
 supplied to its face law. The heated tests also measure the difference obtained by evaluating

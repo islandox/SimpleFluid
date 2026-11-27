@@ -519,9 +519,9 @@ TEST(LowMachQbmmTransportTest, SubnormalFacePacketsRequireRelativePrecisionAndRe
     }
 }
 
-TEST(LowMachQbmmTransportTest, SubnormalCounterflowRoundsPhaseAndNativeMomentumPacketsIndependently)
+TEST(LowMachQbmmTransportTest, CounterflowConservesSpeciesAndCarriesEachDonorsMomentum)
 {
-    constexpr double quantum = std::numeric_limits<double>::denorm_min();
+    constexpr double axial_speed = .125, transverse_speed = .5;
     constexpr double pressure = 100000, temperature = 300, molar_mass = .25, gas_energy = 6000;
     Flow::Mesh::DistributionOptions distribution;
     distribution.allow_empty_partitions = true;
@@ -566,12 +566,17 @@ TEST(LowMachQbmmTransportTest, SubnormalCounterflowRoundsPhaseAndNativeMomentumP
                 {gas, {.5}, pressure, .5 * gas_energy, temperature}};
             cell.phase_numbers = {std::nullopt, 1., 1.};
             cell.qbmm_shape = {std::nullopt, R::QbmmShapeState{1, 1}, R::QbmmShapeState{1, 1}};
-            cell.drift_velocity = {{}, {0, 8, direction * quantum}, {0, -8, -direction * 3 * quantum}};
+            cell.drift_velocity = {{}, {0, transverse_speed, direction * axial_speed},
+                {0, -transverse_speed, -direction * axial_speed}};
         }
         flow.initialize(std::move(input));
+        const auto before = flow.state();
         const auto trial = flow.preview(dt);
         const auto receipts = trial.owned_phase_transport();
+        std::array<double, 2> local_rates{}, rates{};
+        const auto comm = mesh->owned_cell_map()->getComm();
         int local_interior = 0, global_interior = 0;
+        int local_owner = 0, owner = 0;
         for (size_t f = 0; f < receipts.size(); ++f)
         {
             const LO face = static_cast<LO>(f);
@@ -579,27 +584,45 @@ TEST(LowMachQbmmTransportTest, SubnormalCounterflowRoundsPhaseAndNativeMomentumP
                 continue;
             ++local_interior;
             const auto& receipt = receipts[f];
-            const auto& fine = receipt.qbmm_flux.at(1).value();
-            const auto& coarse = receipt.qbmm_flux.at(2).value();
-            const double signed_quantum = direction * mesh->face_area_vector(face).z * quantum;
-            EXPECT_EQ(std::abs(signed_quantum), quantum);
-            EXPECT_EQ(receipt.relative_phase_volume_flux[0], 0);
-            EXPECT_EQ(receipt.relative_phase_volume_flux[1], signed_quantum);
-            EXPECT_EQ(receipt.relative_phase_volume_flux[2], -3 * signed_quantum);
-            EXPECT_EQ(fine.species_molar_flux.at(0), signed_quantum);
-            EXPECT_EQ(coarse.species_molar_flux.at(0), -3 * signed_quantum);
-            // In units of quantum the phase mass rates are +1/4 and -3/4.
-            EXPECT_EQ(fine.derived_mass_flux, 0);
-            EXPECT_EQ(coarse.derived_mass_flux, -signed_quantum);
-            EXPECT_EQ(fine.derived_drift_momentum_flux, (Flow::Vector{0, 2 * signed_quantum, 0}));
-            EXPECT_EQ(coarse.derived_drift_momentum_flux, (Flow::Vector{0, 6 * signed_quantum, 0}));
-            // The unrounded total is a half-quantum tie, which rounds to the even value zero.
-            EXPECT_EQ(receipt.momentum_mass_flux, 0);
-            EXPECT_EQ(receipt.drift_momentum_flux, (Flow::Vector{0, 8 * signed_quantum, 0}));
+            local_owner = static_cast<int>(mesh->cell_geometry_global_id(mesh->owner_cell(face)));
+            const double fine_direction = direction * mesh->face_area_vector(face).z;
+            Flow::Vector drift_flux{};
+            for (size_t a = 1; a < 3; ++a)
+            {
+                const auto& packet = receipt.qbmm_flux.at(a).value();
+                const double sign = a == 1 ? 1. : -1.;
+                const double rate = packet.species_molar_flux.at(0);
+                EXPECT_GT(sign * fine_direction * rate, 0.);
+                local_rates[a - 1] = rate;
+                const double mass = rate * molar_mass;
+                const Flow::Vector expected{0., mass * sign * transverse_speed,
+                    mass * sign * direction * axial_speed};
+                EXPECT_DOUBLE_EQ(packet.derived_mass_flux, mass);
+                EXPECT_EQ(packet.derived_drift_momentum_flux, expected);
+                drift_flux = drift_flux + expected;
+            }
+            EXPECT_DOUBLE_EQ(receipt.drift_momentum_flux.y, drift_flux.y);
+            EXPECT_DOUBLE_EQ(receipt.drift_momentum_flux.z, drift_flux.z);
+            EXPECT_GT(receipt.forward_mass_flux, 0.);
+            EXPECT_GT(receipt.backward_mass_flux, 0.);
+            EXPECT_NEAR(receipt.momentum_mass_flux, receipt.forward_mass_flux - receipt.backward_mass_flux,
+                8 * std::numeric_limits<double>::epsilon() *
+                    (receipt.forward_mass_flux + receipt.backward_mass_flux));
         }
-        Teuchos::reduceAll(
-            *mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_interior, &global_interior);
-        EXPECT_EQ(global_interior, 1);
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_interior, &global_interior);
+        ASSERT_EQ(global_interior, 1);
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_owner, &owner);
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 2, local_rates.data(), rates.data());
+        for (size_t c = 0; c < before.cells.size(); ++c)
+        {
+            const double sign = static_cast<int>(mesh->cell_geometry_global_id(static_cast<LO>(c))) == owner ? 1. : -1.;
+            for (size_t a = 1; a < 3; ++a)
+            {
+                const double old = before.cells[c].phases[a].moles.at(0);
+                const double next = trial.state().cells[c].phases[a].moles.at(0);
+                EXPECT_NEAR(next + sign * dt * rates[a - 1], old, options.conservation_relative_tolerance * old);
+            }
+        }
     }
 }
 

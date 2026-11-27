@@ -65,6 +65,11 @@ SIMPLEFLUID_SOLVERS_LOCAL inline double donor_packet(double phi, double trace, b
     return packet;
 }
 
+SIMPLEFLUID_SOLVERS_LOCAL inline bool zero_transport_row(const Flow::Mesh& mesh, const Face& phase_flux, LO cell)
+{
+    return std::ranges::all_of(mesh.faces(cell), [&](LO face) { return phase_flux.local_value(face) == 0.; });
+}
+
 SIMPLEFLUID_SOLVERS_LOCAL inline void set_owned_donor_packets(
     const Flow::Mesh& mesh, const Face& phase_flux, const Scalar& concentration, Face& packets)
 {
@@ -119,10 +124,15 @@ SIMPLEFLUID_SOLVERS_LOCAL inline Result enforce(const SP<const Flow::Mesh>& grid
                 // Krylov updates authoritative owned storage; its overlap still
                 // belongs to the preceding scalar call until the sync below.
                 const double value = concentration.value(static_cast<LO>(c));
-                amount[c] = value * volume(c);
-                if (!std::isfinite(value) || !std::isfinite(amount[c]) || (value != 0 && amount[c] == 0))
+                const double candidate = value * volume(c);
+                if (!std::isfinite(value) || !std::isfinite(candidate) || (value != 0 && candidate == 0))
                     throw std::invalid_argument("Krylov transport inventory is nonfinite or unrepresentable.");
-                local_restart |= nonnegative && amount[c] < 0;
+                // A row without relative flux conserves its extensive stock, including on ALE.
+                // The donor and stored-operator checks below still use the resulting concentration.
+                amount[c] = candidate != old_amount[c] && zero_transport_row(mesh, phase_flux, static_cast<LO>(c))
+                                ? old_amount[c]
+                                : candidate;
+                local_restart |= nonnegative && candidate < 0;
             }
         });
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_restart, &restart);
@@ -462,11 +472,14 @@ SIMPLEFLUID_SOLVERS_LOCAL inline BatchedResult enforce_batch(const SP<const Flow
                     }
                     const double value = conc_col[c];
                     const double amt = value * volume(c);
-                    new_amounts[k][c] = amt;
                     if (!std::isfinite(value) || !std::isfinite(amt) || (value != 0 && amt == 0))
                     {
                         throw std::invalid_argument("Krylov transport inventory is nonfinite or unrepresentable.");
                     }
+                    new_amounts[k][c] =
+                        amt != old_amounts[k][c] && zero_transport_row(mesh, phase_flux, static_cast<LO>(c))
+                            ? old_amounts[k][c]
+                            : amt;
                     local_restart[k] |= nonnegative && amt < 0;
                 }
             }

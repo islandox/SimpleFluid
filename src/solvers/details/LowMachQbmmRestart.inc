@@ -794,13 +794,13 @@ void validate_forced_family_impulses(const Solver::Vector& acceleration, const S
     // Reconstruct the local contribution independently from accepted species stocks. The source-stage
     // replay admits a relative endpoint discrepancy of 64 eps times the sum of both endpoint magnitudes.
     // Allow that discrepancy and the rounding of each cell impulse and the final local sum.
-    detail::CompensatedSum<long double> mass;
+    detail::CompensatedSum<double> mass;
     for (const auto& cell : state.cells)
         for (const auto& phase : cell.phases)
         {
             const auto& species = phase.thermodynamics->catalog().species();
             for (size_t s = 0; s < phase.moles.size(); ++s)
-                mass += static_cast<long double>(phase.moles[s]) * species[s].molarMass;
+                mass += phase.moles[s] * species[s].molarMass;
         }
     constexpr double eps = std::numeric_limits<double>::epsilon();
     constexpr double quantum = std::numeric_limits<double>::denorm_min();
@@ -826,18 +826,18 @@ void validate_forced_family_impulses(const Solver::Vector& acceleration, const S
                   (global_body == 0. || std::signbit(global_body) == std::signbit(g)),
             "Forced QBMM body impulse points against its acceleration.");
         const auto force = mass.value() * g;
-        const auto body_error = std::fma(force, static_cast<long double>(interval->time_step), -body);
+        const auto body_error = std::fma(force, interval->time_step, -body);
         const double body_bound = 256 * eps * std::abs(body) + quantum * (1. + static_cast<double>(state.cells.size()));
-        check(std::abs(static_cast<double>(body_error)) <= body_bound,
+        check(std::abs(body_error) <= body_bound,
             "Forced QBMM body impulse disagrees with the accepted material mass and interval.");
 
-        detail::CompensatedSum<long double> split_error;
+        detail::CompensatedSum<double> split_error;
         split_error += external;
         split_error += -body;
         split_error += -other;
         const double split_bound =
             eps * std::abs(body) + eps * std::abs(other) + eps * std::abs(external) + 3 * quantum;
-        check(std::abs(static_cast<double>(split_error.value())) <= split_bound,
+        check(std::abs(split_error.value()) <= split_bound,
             "Forced QBMM rank-local external impulse disagrees with its body and other operands.");
     }
 }
@@ -990,15 +990,15 @@ void restart_pool_diagnostics(Archive& io, Diagnostics& value, const QbmmBulkGas
         for (const double quantity : {totals.count, totals.mass_kg, totals.H2, totals.H3})
             check(std::isfinite(quantity) && quantity >= 0. && (allowed || quantity == 0.),
                 "QBMM pool restart contains an invalid directional total.");
-        detail::CompensatedSum<long double> mass;
+        detail::CompensatedSum<double> mass;
         for (size_t k = 0; k < species.size(); ++k)
         {
             const double moles = totals.species_moles[k];
             check(std::isfinite(moles) && moles >= 0. && ((allowed && pool.permits(species[k].id)) || moles == 0.),
                 "QBMM pool restart contains an invalid directional species total.");
-            mass += static_cast<long double>(moles) * species[k].molarMass;
+            mass += moles * species[k].molarMass;
         }
-        const auto expected_mass = static_cast<double>(mass.value());
+        const auto expected_mass = mass.value();
         const bool active = totals.count > 0;
         check(active == (expected_mass > 0) && active == (totals.mass_kg > 0) &&
                   active == (totals.H2 > 0) && active == (totals.H3 > 0) &&
@@ -1007,6 +1007,39 @@ void restart_pool_diagnostics(Archive& io, Diagnostics& value, const QbmmBulkGas
         qbmm_detail::validate_raw_value(totals.mass_kg, expected_mass,
             "QBMM pool restart mass disagrees with its catalogued species.");
     }
+}
+
+void canonicalize_restart_kinetic_closure(const Solver::Options& options, const Solver::Mesh& mesh,
+    Solver::CellState& cell)
+{
+    qbmm_native_law_detail::check_kinetic_closures(options, mesh, cell,
+        [](const QbmmPopulationSchema& family, const QbmmQuadrature& quadrature, Solver::QbmmKineticClosure& closure)
+        {
+            const auto canonical = qbmm_native_law_detail::kinetic_drift_momentum(family, quadrature, closure);
+            if (canonical == closure.drift_momentum)
+                return;
+
+            // Older writers accumulated these two three-product node terms in
+            // extended precision. Bound the difference by their absolute
+            // contributions, including cancellation between opposing slips.
+            constexpr double roundoff = 16 * std::numeric_limits<double>::epsilon();
+            std::array<double, 3> bound{};
+            for (std::size_t i = 0; i < quadrature.active_atoms; ++i)
+            {
+                const auto& atom = quadrature.atoms[i];
+                const double mass = atom.count * atom.mass_over_scale * family.mass_scale_kg();
+                for (std::size_t axis = 0; axis < bound.size(); ++axis)
+                    bound[axis] += roundoff * std::abs(mass * closure.node_velocities[i].component(axis));
+            }
+            for (std::size_t axis = 0; axis < bound.size(); ++axis)
+            {
+                const double archived = closure.drift_momentum.component(axis);
+                check(std::isfinite(archived) && std::isfinite(bound[axis]) &&
+                          std::abs(archived - canonical.component(axis)) <= bound[axis],
+                    "Kinetic QBMM archive drift momentum disagrees with its retained node slip.");
+            }
+            closure.drift_momentum = canonical;
+        });
 }
 
 void validate_restart_fourier_uncertainty(const Solver::Diagnostics& statistics)
@@ -1082,9 +1115,8 @@ void validate_restart_physics(const Solver::Mesh& mesh, const Solver::Options& o
         source_stage_detail::validate_phase_numbers(cell, options.phase_roles);
         check(!retained_kinetic || cell.qbmm_kinetic_eos_volumes.size() == cell.phases.size(),
             "Kinetic QBMM restart EOS traces differ from the physical phase layout.");
-        const long double absolute_pressure =
-            static_cast<long double>(state.thermodynamic_pressure) + cell.mechanical_pressure;
-        check(absolute_pressure > 0 && absolute_pressure <= std::numeric_limits<double>::max(),
+        const double absolute_pressure = state.thermodynamic_pressure + cell.mechanical_pressure;
+        check(std::isfinite(absolute_pressure) && absolute_pressure > 0,
             "QBMM restart absolute pressure is nonphysical.");
         double common_temperature = 0, total_volume = 0, total_mass = 0;
         for (size_t a = 0; a < cell.phases.size(); ++a)
@@ -1093,7 +1125,7 @@ void validate_restart_physics(const Solver::Mesh& mesh, const Solver::Options& o
             check(std::all_of(phase.moles.begin(), phase.moles.end(), [](double moles) { return moles >= 0; }),
                 "QBMM restart contains negative species moles.");
             check(phase.absolute_pressure > 0 &&
-                      std::abs(static_cast<long double>(phase.absolute_pressure) - absolute_pressure) <=
+                      std::abs(phase.absolute_pressure - absolute_pressure) <=
                           std::max(roundoff_factor, options.thermal_relative_tolerance) * absolute_pressure,
                 "QBMM restart phase pressure disagrees with accepted mechanical and thermodynamic pressure.");
             const double mass = phase_mass(phase);
@@ -1120,13 +1152,11 @@ void validate_restart_physics(const Solver::Mesh& mesh, const Solver::Options& o
                     "Kinetic QBMM restart retained volume is inconsistent with the occupied EOS state.");
             }
             const double energy = mass * point.internal_energy;
-            const long double caloric =
-                static_cast<long double>(mass) * phase.temperature * point.internal_energy_temperature;
-            const long double roundoff =
-                roundoff_factor * (std::abs(static_cast<long double>(energy)) + std::abs(phase.internal_energy) +
-                                      static_cast<long double>(phase.absolute_pressure) * volume);
+            const double caloric = mass * phase.temperature * point.internal_energy_temperature;
+            const double roundoff = roundoff_factor *
+                (std::abs(energy) + std::abs(phase.internal_energy) + phase.absolute_pressure * volume);
             check(std::isfinite(volume) && volume > 0 && std::isfinite(energy) && std::isfinite(caloric) &&
-                      std::abs(static_cast<long double>(energy) - phase.internal_energy) <=
+                      std::isfinite(roundoff) && std::abs(energy - phase.internal_energy) <=
                           std::min(roundoff, 0.25 * options.conservation_relative_tolerance * caloric),
                 "QBMM restart energy is inconsistent with the supplied caloric model.");
             if (options.thermal_mode == PhaseThermalMode::Equilibrium)
@@ -1946,8 +1976,8 @@ void LowMachMixtureSolver::restore_qbmm_restart_impl(std::span<const std::byte> 
             if (kinetic)
             {
                 validate_restart_kinetic_diagnostics(d->options, statistics);
-                for (const auto& cell : candidate.cells)
-                    qbmm_native_law_detail::validate_kinetic_closure(d->options, mesh, cell);
+                for (auto& cell : candidate.cells)
+                    canonicalize_restart_kinetic_closure(d->options, mesh, cell);
             }
             if (linear)
                 validate_restart_linear_diagnostics(d->options.qbmm_model, statistics);

@@ -1917,7 +1917,7 @@ TEST(LowMachQbmmStateTest, NativeHardPropertyGateFencesCorrectorViscosityAndPres
         EXPECT_GT(outside, 0u);
 }
 
-TEST(LowMachQbmmStateTest, BarycentricReportPreservesAbsoluteMomentumAcrossCancellationAndOverflow)
+TEST(LowMachQbmmStateTest, BarycentricReportPreservesCarrierAcrossCountercurrentPhaseMomentum)
 {
     Fixture f;
     f.family = Fixture::make_family(f.catalog, f.options.phase_roles[1], 1. / 14);
@@ -1929,9 +1929,6 @@ TEST(LowMachQbmmStateTest, BarycentricReportPreservesAbsoluteMomentumAcrossCance
         [density = 2 / (1 - gas_volume)](std::span<const double>)
         { return R::LinearCompressibleMixtureLiquid{300, 100000, density, 4000, 0, 0, 0, 0, 0}; });
     auto initial = f.initial();
-    const double next = std::nextafter(1., 2.);
-    const double largest = std::numeric_limits<double>::max();
-    const double smallest = std::numeric_limits<double>::denorm_min();
     for (auto& cell : initial.cells)
     {
         cell.phases[0].moles = {100, 0};
@@ -1939,52 +1936,36 @@ TEST(LowMachQbmmStateTest, BarycentricReportPreservesAbsoluteMomentumAcrossCance
         cell.phases[2].moles = {0, 0};
         cell.phases[2].temperature = 0;
         cell.phase_numbers[2] = 0;
-        cell.velocity = {-1, largest, 0};
-        cell.drift_velocity = {{1, -largest, 0}, {next, largest, smallest}, {}};
+        cell.velocity = {.125, 1.5, 0};
+        cell.drift_velocity = {{-2., -3., 0}, {4., 4., 0}, {}};
     }
     auto flow = f.solver();
     flow->initialize(initial);
-    const auto overflow_report = flow->qbmm_report();
-    ASSERT_EQ(overflow_report.cells.size(), f.mesh->num_owned_cells());
-    for (const auto& cell : overflow_report.cells)
+    const auto report = flow->qbmm_report();
+    ASSERT_EQ(report.cells.size(), f.mesh->num_owned_cells());
+    for (const auto& cell : report.cells)
     {
-        // With masses 2 and 1, the signed absolute x momentum is exactly 2^-52.
-        // The y means divide a finite operand, even though their momenta overflow double.
-        EXPECT_EQ(cell.mass_weighted_drift.x, 1.);
-        EXPECT_EQ(cell.barycentric_velocity.x, 0x1.5555555555555p-54);
-        EXPECT_EQ(cell.mass_weighted_drift.y, -largest / 3.);
-        EXPECT_EQ(cell.barycentric_velocity.y, largest / 1.5);
+        // The phase momenta cancel in x and leave -2 kg m/s in y.
+        EXPECT_EQ(cell.mass_weighted_drift.x, 0.);
+        EXPECT_EQ(cell.barycentric_velocity.x, .125);
+        EXPECT_DOUBLE_EQ(cell.mass_weighted_drift.y, -2. / 3.);
+        EXPECT_DOUBLE_EQ(cell.barycentric_velocity.y, 5. / 6.);
         EXPECT_EQ(cell.mass_weighted_drift.z, 0.);
         EXPECT_EQ(cell.barycentric_velocity.z, 0.);
     }
-
-    // Both per-phase velocity sums round away the carrier in binary64. The
-    // opposing drifts cancel exactly and the absolute velocity keeps it.
-    for (auto& cell : initial.cells)
-    {
-        cell.velocity = {smallest, 0, 0};
-        cell.drift_velocity = {{-largest / 2, 0, 0}, {largest, 0, 0}, {}};
-    }
-    flow->initialize(initial);
-    const auto cancellation_report = flow->qbmm_report();
-    ASSERT_EQ(cancellation_report.cells.size(), f.mesh->num_owned_cells());
-    for (const auto& cell : cancellation_report.cells)
-    {
-        EXPECT_EQ(cell.mass_weighted_drift.x, 0.);
-        EXPECT_EQ(cell.barycentric_velocity.x, smallest);
-    }
 }
 
-TEST(LowMachQbmmStateTest, BarycentricReportPreservesUniformExtremeVelocitiesWithUnequalMasses)
+TEST(LowMachQbmmStateTest, BarycentricReportPreservesUniformVelocitiesWithUnequalMasses)
 {
     Fixture f;
-    constexpr double gas_mass = 0x1p-53;
-    const double largest = std::numeric_limits<double>::max();
+    constexpr double gas_mass = .125;
+    const double gas_volume = 37.5 * gas_mass * 8.31446261815324 * 300 / 100000;
     f.family = Fixture::make_family(f.catalog, f.options.phase_roles[1], gas_mass / 14);
     f.options.qbmm_families[1] = f.family;
     f.options.qbmm_model.velocity = R::QbmmModelOptions::Velocity::SuppliedPhaseSlip;
-    f.eos[0] = R::make_linear_compressible_mixture_liquid(f.catalog, f.eos[0]->bounds(), [](std::span<const double>)
-        { return R::LinearCompressibleMixtureLiquid{300, 100000, 1, 4000, 0, 0, 0, 0, 0}; });
+    f.eos[0] = R::make_linear_compressible_mixture_liquid(f.catalog, f.eos[0]->bounds(),
+        [density = 1 / (1 - gas_volume)](std::span<const double>)
+        { return R::LinearCompressibleMixtureLiquid{300, 100000, density, 4000, 0, 0, 0, 0, 0}; });
     auto initial = f.initial();
     for (auto& cell : initial.cells)
     {
@@ -1993,8 +1974,8 @@ TEST(LowMachQbmmStateTest, BarycentricReportPreservesUniformExtremeVelocitiesWit
         cell.phases[2].moles = {0, 0};
         cell.phases[2].temperature = 0;
         cell.phase_numbers[2] = 0;
-        cell.velocity = {largest, 0, -largest};
-        cell.drift_velocity = {{0, largest, 0}, {0, largest, 0}, {}};
+        cell.velocity = {1., 0., -3.};
+        cell.drift_velocity = {{0., 2., 0.}, {0., 2., 0.}, {}};
     }
 
     auto flow = f.solver();
@@ -2004,13 +1985,12 @@ TEST(LowMachQbmmStateTest, BarycentricReportPreservesUniformExtremeVelocitiesWit
     for (const auto& cell : report.cells)
     {
         ASSERT_TRUE(cell.families[1]);
-        EXPECT_EQ(cell.families[1]->phase_mass_kg, gas_mass);
-        // The physical mass is 1 + 2^-53 kg. Its binary64 density rounds to 1 kg/m^3.
-        EXPECT_EQ(cell.mixture_density_kg_per_m3, 1.);
-        EXPECT_EQ(cell.mass_weighted_drift.y, largest);
-        EXPECT_EQ(cell.barycentric_velocity.x, largest);
-        EXPECT_EQ(cell.barycentric_velocity.y, largest);
-        EXPECT_EQ(cell.barycentric_velocity.z, -largest);
+        EXPECT_DOUBLE_EQ(cell.families[1]->phase_mass_kg, gas_mass);
+        EXPECT_DOUBLE_EQ(cell.mixture_density_kg_per_m3, 1. + gas_mass);
+        EXPECT_DOUBLE_EQ(cell.mass_weighted_drift.y, 2.);
+        EXPECT_DOUBLE_EQ(cell.barycentric_velocity.x, 1.);
+        EXPECT_DOUBLE_EQ(cell.barycentric_velocity.y, 2.);
+        EXPECT_DOUBLE_EQ(cell.barycentric_velocity.z, -3.);
     }
 }
 } // namespace

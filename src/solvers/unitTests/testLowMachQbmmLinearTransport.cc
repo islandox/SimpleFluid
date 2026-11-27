@@ -711,6 +711,57 @@ TEST(LowMachQbmmLinearTransportTest, TvdMcShapeOrSignedEnergyExtremumLimitsEvery
     }
 }
 
+TEST(LowMachQbmmLinearTransportTest, ForcedTvdMcRetainedEnergyMinimumDoesNotSpendRoundoffAsSlopeRoom)
+{
+    const auto native = std::make_shared<Flow::Mesh::Cartesian>(
+        Vec3D<ArrReal>{ArrReal{0., 1., 2.}, {0., 1., 2.}, {0., 1.}});
+    Problem op(std::make_shared<Flow::Mesh>(native, Flow::Mesh::DistributionOptions{.allow_empty_partitions = true}));
+    op.options.qbmm_model.linear_slope_limiter = Model::LinearSlopeLimiter::TvdMc;
+    const auto family = std::make_shared<const R::QbmmPopulationSchema>(op.species, op.species->fingerprint(),
+        "linear advection bubbles", op.options.phase_roles[0], 1.,
+        std::vector<R::QbmmMassFraction>{{47, 1. / 3.}, {48, 2. / 3.}});
+    op.options.qbmm_families = {family};
+    op.state.qbmm_families = {Flow::qbmm_family_stamp(*family)};
+    record_ownership(*op.grid, 4);
+    for (size_t row = 0; row < op.state.cells.size(); ++row)
+    {
+        const auto cell = static_cast<LO>(row);
+        const auto center = op.grid->cell_centroid(cell);
+        const double w = center.x > 1. ? 4.5 : center.y > 1. ? .25 : 1.;
+        const double u = w * (-2. + (center.x > 1. ? 0x1p-15 : 0.));
+        op.set(cell, {2. * w, 3. * w, 5. * w, 9. * w, w, w, u, (4. * w + .5 * u) / pressure});
+    }
+    constexpr double rate = 0x1p-20;
+    int local_contacts = 0;
+    for (const auto face : op.flux.owned_face_ids())
+        if (const auto center = op.grid->face_centroid(face);
+            op.grid->is_interior_face(face) && center.x == 1. && center.y < 1.)
+        {
+            op.flux.set_owned_value(face, rate * op.grid->face_normal(face).x);
+            ++local_contacts;
+        }
+    EXPECT_EQ(reduce(*op.grid, Teuchos::REDUCE_SUM, local_contacts), 1);
+    op.flux.sync_ghosts();
+    const auto before = op.totals();
+    const auto result = op.advance(1., Kernel::TraceLimiter::AllIncident);
+    EXPECT_EQ(result.substeps, 1);
+    EXPECT_EQ(result.upstream_returned_packets, 0u);
+    check_stock(op.totals(), before, 2e-14);
+
+    // The donor is interior in the mass ramp, so the mass bounds alone allow a positive slope.
+    // Exporting reconstructed higher specific energy would lower the donor below the stencil minimum.
+    // Both stages must therefore use the donor mean, with weights 1 and 1 - rate.
+    const double mean = 1. - .5 * rate;
+    for (const auto face : op.flux.owned_face_ids())
+        if (op.flux.owned_value(face) != 0.)
+        {
+            const auto& packet = result.owned_flux.at(0).at(op.flux.owned_row(face));
+            const double orientation = op.grid->face_normal(face).x;
+            EXPECT_NEAR(orientation * packet.derived_mass_flux / rate, 3. * mean, 2e-13);
+            EXPECT_NEAR(orientation * packet.internal_energy_flux / rate, -2. * mean, 2e-13);
+        }
+}
+
 TEST(LowMachQbmmLinearTransportTest, TvdMcBoundsTheReconstructedSpecificEnergyQuotient)
 {
     for (const double sign : {-1., 1.})

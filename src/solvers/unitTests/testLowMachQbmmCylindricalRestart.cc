@@ -183,6 +183,14 @@ void set_word(std::span<std::byte> bytes, size_t position, std::uint64_t value)
         bytes[position * 8 + b] = static_cast<std::byte>((value >> (8 * b)) & 0xff);
 }
 
+size_t first_axial_node(std::span<const std::byte> image)
+{
+    // Fixed tag header, optional impulse interval, then 23 binding words.
+    const size_t cell = 12 + (word(image, 11) ? 17 : 0) + 23;
+    // Carrier, liquid and gas records precede the first node velocity.
+    return cell + 4 + 10 + 14;
+}
+
 void expect_same_endpoint(const Flow& left, const Flow& right)
 {
     const auto& x = left.state();
@@ -278,12 +286,7 @@ void expect_rejected_stored_node(
     corrupted.resize(corrupted.size() - 16);
     if (comm->getRank() == changed_rank)
     {
-        // The fixed tag header contains an optional 17-word impulse interval, followed by
-        // 23 geometry, schema, controller, policy and family words before the first cell.
-        const size_t cell = 12 + (word(corrupted, 11) ? 17 : 0) + 23;
-        // Carrier state occupies four words, the unbound liquid phase ten, and the bound
-        // gas phase fourteen before the two retained node velocities and drift vector.
-        const size_t first_node = cell + 4 + 10 + 14;
+        const size_t first_node = first_axial_node(corrupted);
         EXPECT_EQ(word(corrupted, first_node - 1), 2u);
         EXPECT_EQ(word(corrupted, first_node), 0u);
         set_word(corrupted, first_node, std::bit_cast<std::uint64_t>(.25));
@@ -433,6 +436,54 @@ TEST(LowMachQbmmCylindricalRestartTest, LegacyFormats)
         EXPECT_EQ(word(axial_image, 2), 5u);
         EXPECT_THROW(old_receiver.flow->restore_qbmm_restart(axial_image), std::exception);
     }
+}
+
+TEST(LowMachQbmmCylindricalRestartTest, CanonicalizesRoundedArchiveDriftButRejectsInconsistentMomentum)
+{
+    Fixture original(Sector, true);
+    Coupler controller(original.flow, original.controller_options(std::nullopt));
+    controller.advance(dt);
+    const auto image = controller.serialize_qbmm_restart();
+    ASSERT_EQ(word(image, 1), 9u);
+    ASSERT_EQ(word(image, 2), 5u);
+    const auto comm = original.grid->owned_cell_map()->getComm();
+    const int changed_rank = reduce(*original.grid, Teuchos::REDUCE_MIN,
+        original.grid->num_owned_cells() ? comm->getRank() : comm->getSize());
+    const auto revise_drift = [&](auto revision)
+    {
+        auto copy = image;
+        copy.resize(copy.size() - 16);
+        if (comm->getRank() == changed_rank)
+        {
+            const size_t drift_z = first_axial_node(copy) + 8; // Two node vectors, then drift x, y, z.
+            const double drift = std::bit_cast<double>(word(copy, drift_z));
+            EXPECT_EQ(drift, original.flow->state().cells.front().qbmm_kinetic_closure[1]->drift_momentum.z);
+            EXPECT_GT(drift, 0.);
+            set_word(copy, drift_z, std::bit_cast<std::uint64_t>(revision(drift)));
+        }
+        Restart::append_restart_checksums(*comm, copy);
+        return copy;
+    };
+
+    Fixture receiver(Sector, false);
+    receiver.reject_law_calls = true;
+    const auto rounded = revise_drift([](double drift) { return std::nextafter(drift, 2 * drift); });
+    ASSERT_NO_THROW(receiver.flow->restore_qbmm_restart(rounded));
+    expect_same_endpoint(*receiver.flow, *original.flow);
+    const auto baseline = receiver.flow->serialize_qbmm_restart();
+    const auto inconsistent = revise_drift([](double drift) { return 2 * drift; });
+    try
+    {
+        receiver.flow->restore_qbmm_restart(inconsistent);
+        ADD_FAILURE() << "A retained drift mismatch outside node-momentum roundoff was accepted.";
+    }
+    catch (const std::exception& error)
+    {
+        if (comm->getRank() == changed_rank)
+            EXPECT_NE(std::string_view(error.what()).find("archive drift momentum"), std::string_view::npos);
+    }
+    EXPECT_EQ(receiver.flow->serialize_qbmm_restart(), baseline);
+    EXPECT_EQ(receiver.node_calls, 0);
 }
 
 TEST(LowMachQbmmCylindricalRestartTest, UnforcedCoupledHistoryRequiresTheMatchingController)

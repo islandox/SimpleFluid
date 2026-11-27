@@ -206,7 +206,8 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void correct_block(const Flow::Mesh& mesh, doub
 }
 
 SIMPLEFLUID_SOLVERS_LOCAL inline void correct(
-    const Flow::Mesh& mesh, double dt, PhaseThermalMode mode, std::span<const Stage> stages, Flow::State& guess, double maximum_step = 1.)
+    const Flow::Mesh& mesh, double dt, PhaseThermalMode mode, std::span<const Stage> stages, Flow::State& guess,
+    double maximum_step = 1.)
 {
     if (stages.empty())
         return;

@@ -18,6 +18,41 @@ using Gate = R::QbmmApplicabilityGate;
 using Status = R::QbmmRangeStatus;
 const auto environment = ::testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
+TEST(LowMachQbmmKineticTransportTest, RejectsAnInnerVertexExactlyOnTheOuterFacet)
+{
+    const auto annulus = [](double inner_scale)
+    {
+        using Semi = Flow::Mesh::SemiStructured;
+        const double sine = std::sqrt(3.) / 2.;
+        // The first inner vertex lies exactly on the midpoint of the first
+        // outer edge when inner_scale is one. Rotate it by ±120° for the
+        // other two vertices of the concentric inner cycle.
+        const Arr<Semi::Vec3> nodes{{3., 4., 0.}, {-4., 3., 0.}, {-3., -4., 0.}, {4., -3., 0.},
+            {-.5 * inner_scale, 3.5 * inner_scale, 0.},
+            {(.25 - 3.5 * sine) * inner_scale, (-1.75 - .5 * sine) * inner_scale, 0.},
+            {(.25 + 3.5 * sine) * inner_scale, (-1.75 + .5 * sine) * inner_scale, 0.}};
+        return Semi(nodes, {{0, 1, 5, 4}, {1, 2, 5}, {2, 3, 6, 5}, {3, 0, 4, 6}}, {0., 1.});
+    };
+
+    const auto inside = annulus(.99);
+    EXPECT_NO_THROW(R::qbmm_explicit_detail::validate_cylindrical_base(inside));
+    const auto touching = annulus(1.);
+    EXPECT_THROW(R::qbmm_explicit_detail::validate_cylindrical_base(touching), std::invalid_argument);
+
+    const auto near_corner = [](double x)
+    {
+        using Semi = Flow::Mesh::SemiStructured;
+        constexpr double t = 1. - 0x1p-47;
+        // For x=1, the inner corner is on the right wall just below its upper
+        // endpoint. The two rays have the same rounded atan2 on this host.
+        const Arr<Semi::Vec3> nodes{{1., 1., 0.}, {-1., 1., 0.}, {-1., -1., 0.}, {1., -1., 0.},
+            {x, std::nextafter(1., 0.), 0.}, {-t, t, 0.}, {-t, -t, 0.}, {t, -t, 0.}};
+        return Semi(nodes, {{0, 1, 5, 4}, {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}}, {0., 1.});
+    };
+    EXPECT_NO_THROW(R::qbmm_explicit_detail::validate_cylindrical_base(near_corner(std::nextafter(1., 0.))));
+    EXPECT_THROW(R::qbmm_explicit_detail::validate_cylindrical_base(near_corner(1.)), std::invalid_argument);
+}
+
 struct Operator
 {
     SP<Flow::Mesh> grid;

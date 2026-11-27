@@ -3,6 +3,7 @@
  */
 #include "geometry/MeshConcepts.hh"
 #include "FVM/MatrixOperators.hh"
+#include "FVM/details/OperatorDetails.hh"
 #include "geometry/MeshReorderingFactory.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/unitTests/region_mesh_helpers.hh"
@@ -26,6 +27,47 @@ using Handle = MeshHandle<Pack>;
 using Matrix = Pack::matrix_type;
 using Gauge = std::optional<Pack::global_ordinal_type>;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
+
+struct PressureFaceMetrics
+{
+    using scalar_type = double;
+    using local_ordinal_type = int;
+    MeshUtils::Vec3 area, offset;
+
+    auto cell_center_vector(int, int) const { return offset; }
+    auto face_area_vector_outward(int, int) const { return area; }
+    auto face_centroid(int) const { return offset; }
+    auto cell_centroid(int) const { return MeshUtils::Vec3{}; }
+    double face_cell_center_distance(int) const { return offset.norm(); }
+    double cell_to_face_distance(int, int) const { return offset.norm(); }
+    double face_area(int) const { return area.norm(); }
+};
+
+TEST(PressureGeometryAccessTest, TangentialFaceUsesTheDistanceFallbackWithContraction)
+{
+    const volatile double runtime_offset = 0x1p-27;
+    const double a = 1. + runtime_offset, b = 1. - runtime_offset;
+    for (const auto offset : {MeshUtils::Vec3{b, -a, 0.}, MeshUtils::Vec3{-b, a, 0.}})
+    {
+        const PressureFaceMetrics mesh{{a, b, 0.}, offset};
+        EXPECT_EQ(FVM::detail::interior_pressure_coefficient(mesh, 0, 0, 1), 1.);
+        EXPECT_EQ(FVM::detail::boundary_pressure_coefficient(mesh, 0, 0), 1.);
+    }
+
+    // The first two products cancel exactly. The third is smaller than the
+    // rounding error of either.
+    const PressureFaceMetrics mesh{{a, b, 1.}, {b, -a, 0x1p-55}};
+    EXPECT_EQ(FVM::detail::interior_pressure_coefficient(mesh, 0, 0, 1), 0x1.8p+56);
+    EXPECT_EQ(FVM::detail::boundary_pressure_coefficient(mesh, 0, 0), 0x1.8p+56);
+
+    // Product roundoff from the two opposing directions must cancel
+    // independently of the small, positive contribution between them.
+    const volatile double small_offset = 0x1p-40;
+    const double c = 1. + small_offset, d = 1. - small_offset;
+    EXPECT_EQ(FVM::detail::pressure_area_projection(
+                  MeshUtils::Vec3{c, 1., c}, MeshUtils::Vec3{d, 0x1p-150, -d}),
+        0x1p-150);
+}
 
 /** Hide the lease entry to exercise the legacy fallback and per-query validation. */
 class UnleasedHandle : public Handle

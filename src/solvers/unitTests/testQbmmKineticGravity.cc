@@ -40,6 +40,7 @@ struct Case
     size_t column_cells = 4;
     std::optional<C::Geometry> cylinder;
     double transverse_pressure_slope = 0.;
+    bool multi_rhs = true;
 };
 
 using Sizes = std::array<double, 2>;
@@ -120,6 +121,7 @@ struct Fixture
         opts.maximum_pressure = bounds.maximum_pressure;
         opts.linear.preconditioner = LinearPreconditioner::None;
         opts.linear.tolerance = 1e-12;
+        opts.use_multi_rhs_transport = spec.multi_rhs;
         opts.phase_roles = {
             {Flow::PhaseRole::BulkLiquid, "solvent"}, {Flow::PhaseRole::DispersedGas, "column bubbles"}};
         opts.qbmm_eos_law_identities = {
@@ -344,6 +346,30 @@ TEST(QbmmKineticGravity, StratifiedRestWithNonDyadicAcceleration)
             .force = Vector{0., 0., -.981},
             .equilibrium_head = true,
             .column_cells = cells});
+}
+
+TEST(QbmmKineticGravity, CommonDatumAdmitsAPlateauInRoundedHydrostaticHead)
+{
+    for (const double g : {-0x1p-49, 0x1p-49})
+    {
+        Fixture f({.force = Vector{0., 0., g}, .equilibrium_head = true});
+        // The continuous head is strictly monotone, but the two central
+        // pressures both round to 64 Pa. The endpoints still differ.
+        EXPECT_EQ(f.head({.5, .5, .375}), p0);
+        EXPECT_EQ(f.head({.5, .5, .625}), p0);
+        EXPECT_NE(f.head({.5, .5, .125}), f.head({.5, .5, .875}));
+        const auto old = f.flow->state();
+        const auto trial = f.controller->preview(dt);
+        for (size_t c = 0; c < old.cells.size(); ++c)
+        {
+            EXPECT_EQ(trial.state().thermodynamic_pressure + trial.state().cells[c].mechanical_pressure,
+                old.thermodynamic_pressure + old.cells[c].mechanical_pressure);
+            EXPECT_EQ(trial.state().cells[c].velocity, Vector{});
+        }
+        f.controller->commit(trial);
+        for (const auto face : f.flow->volume_flux().owned_face_ids())
+            EXPECT_EQ(f.flow->volume_flux().owned_value(face), 0.);
+    }
 }
 
 TEST(QbmmKineticGravity, ResolvedPerturbationOfNonDyadicHeadAccelerates)
@@ -793,6 +819,37 @@ TEST(QbmmCylindricalKinetic, HydrostaticRestAndFlatStart)
             EXPECT_GT(g * acceleration_response, 1e-8);
             f.metric(g < 0. ? "downward_flat_head_Pa" : "upward_flat_head_Pa", observed);
             f.metric(g < 0. ? "downward_flat_momentum_kg_m_s" : "upward_flat_momentum_kg_m_s", acceleration_response);
+        }
+    }
+}
+
+TEST(QbmmCylindricalKinetic, ZeroTransportPreservesAuthoritativeInternalEnergy)
+{
+    for (const bool multi_rhs : {false, true})
+    {
+        SCOPED_TRACE(multi_rhs);
+        Fixture f({.profile = Profile::Stratified, .force = Vector{0., 0., -1.},
+            .equilibrium_head = true, .cylinder = C::Geometry::NativeAnnulus, .multi_rhs = multi_rhs});
+        const auto old = f.flow->state();
+        int noninvertible = 0;
+        for (size_t c = 0; c < old.cells.size(); ++c)
+        {
+            const double volume = f.grid->cell_volume(static_cast<LO>(c));
+            const double energy = old.cells[c].phases[0].internal_energy;
+            noninvertible += (energy / volume) * volume != energy;
+        }
+        EXPECT_GT(f.sum(noninvertible), 0);
+        const auto trial = f.controller->preview(dt);
+        for (size_t c = 0; c < old.cells.size(); ++c)
+        {
+            EXPECT_EQ(trial.state().cells[c].velocity, Vector{});
+            for (size_t a = 0; a < old.cells[c].phases.size(); ++a)
+            {
+                const auto& before = old.cells[c].phases[a];
+                const auto& after = trial.state().cells[c].phases[a];
+                EXPECT_EQ(after.moles, before.moles);
+                EXPECT_EQ(after.internal_energy, before.internal_energy);
+            }
         }
     }
 }

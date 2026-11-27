@@ -204,14 +204,19 @@ void stage_speeds(const Mesh& mesh, const Flow::Traits::scalar_face_type& carrie
                         long double projected = phi;
                         for (size_t axis = 0; axis < dimensions; ++axis)
                         {
-                            const long double velocity = slip.component(axis);
-                            const long double measure = area.component(axis);
-                            const long double contribution = velocity * measure;
+                            const double velocity = slip.component(axis), measure = area.component(axis);
+                            const long double contribution = static_cast<long double>(velocity) * measure;
                             const long double sum = projected + contribution;
                             // Preserve the sign of a nearly cancelling carrier and slip contribution.
-                            projected = contribution != 0 && std::abs(sum) <= eps * std::abs(projected)
-                                            ? std::fma(velocity, measure, projected)
-                                            : sum;
+                            if (contribution != 0 && std::abs(sum) <= eps * std::abs(projected))
+                            {
+                                const double bias = static_cast<double>(projected);
+                                projected = std::isfinite(bias)
+                                                ? (projected - bias) + std::fma(velocity, measure, bias)
+                                                : sum;
+                            }
+                            else
+                                projected = sum;
                         }
                         speed = represented(projected);
                     }
@@ -289,21 +294,21 @@ double verify_reservations(
                 {
                     // On the cap, retain product roundoff to distinguish a small
                     // withdrawal excess from complete or almost complete evacuation.
-                    const long double cap_volume = static_cast<long double>(cap) * volume;
-                    Accumulator margin;
+                    const double cap_volume = cap * volume;
+                    SimpleFluid::detail::CompensatedSum<double> margin;
                     margin += cap_volume;
-                    margin += std::fma(static_cast<long double>(cap), volume, -cap_volume);
+                    margin += std::fma(cap, volume, -cap_volume);
                     for (const auto face : mesh.faces(cell))
                     {
                         const size_t direction = mesh.owner_cell(face) == cell ? 0 : 1;
                         const double speed = active_speed(speeds(face, outgoing_column(a, direction, i)), direction);
                         if (speed == 0)
                             continue;
-                        const long double swept_volume = static_cast<long double>(h) * speed;
+                        const double swept_volume = h * speed;
                         margin += -swept_volume;
-                        margin += -std::fma(static_cast<long double>(h), speed, -swept_volume);
+                        margin += -std::fma(h, speed, -swept_volume);
                     }
-                    const long double remaining_volume = margin.value();
+                    const double remaining_volume = margin.value();
                     exceeds_cap = remaining_volume < 0;
                     retained = (1.L - cap) + remaining_volume / volume;
                 }

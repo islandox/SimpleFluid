@@ -258,6 +258,12 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
     set_property(SOURCE ${_stored_transport_test_providers} APPEND PROPERTY
         COMPILE_OPTIONS -fvisibility=hidden -fvisibility-inlines-hidden)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND SIMPLEFLUID_CXX_USES_LIBCXX)
+        # Read the prelude as source so Trilinos still gets its default
+        # visibility. Hidden Tpetra RTTI cannot coalesce with the backend.
+        set_property(SOURCE ${_stored_transport_test_providers} APPEND PROPERTY
+            COMPILE_OPTIONS -include "${SIMPLEFLUID_PCH_HEADER}")
+    endif()
     unset(_stored_transport_test_providers)
 endif()
 
