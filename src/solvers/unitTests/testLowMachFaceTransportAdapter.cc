@@ -6,6 +6,7 @@
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/details/LowMachFaceSourceComposition.hh"
 #include "solvers/details/LowMachFaceTransportAdapter.hh"
+#include "solvers/details/LowMachFourierThermal.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
@@ -440,6 +441,80 @@ TEST(LowMachFaceTransportTest, IntegratedFaceFluxScalesWithTimeExactlyOnce)
             half.rounded.sources[c].internal_energy[0], .5 * first.rounded.sources[c].internal_energy[0], 1e-10);
     }
     EXPECT_ANY_THROW(adapter.validate_receipt(first, f.context()));
+}
+
+TEST(LowMachFaceTransportTest, FourierInversionResolutionDistinguishesJitterFromResolvedHeat)
+{
+    Fixture f;
+    auto controls = f.options();
+    controls.diffusion.reset();
+    F::LowMachFaceTransportAdapter adapter(f.mesh, f.catalog, std::move(controls), f.bindings());
+    const double ulp = std::nextafter(300., 301.) - 300.;
+    const double root_radius = .5 * std::numeric_limits<double>::epsilon() * 300.;
+    const std::vector<std::vector<double>> resolution(f.thermal.cells.size(), {root_radius});
+    const auto evaluate = [&](double difference, bool include_resolution)
+    {
+        for (std::size_t c = 0; c < f.thermal.cells.size(); ++c)
+        {
+            const bool lower = f.mesh->cell_centroid(static_cast<LO>(c)).z < .5;
+            f.thermal.cells[c].phases[0].temperature = 300. + (lower ? difference : 0.);
+        }
+        auto context = f.context();
+        if (include_resolution)
+            context.conditioned_temperature_resolution_K = resolution;
+        return adapter.preview(context, f.post_chemistry);
+    };
+    const auto compare = [&](const F::Receipt& now, const F::Receipt& previous)
+    {
+        return R::source_stage_detail::event_error(now.rounded.gross_events, previous.rounded.gross_events, 1e-8,
+            now.rounded.fourier_gross_resolution, previous.rounded.fourier_gross_resolution, *f.mesh, {});
+    };
+
+    const auto isothermal = evaluate(0., true);
+    const auto jitter = evaluate(3 * ulp, true);
+    const auto rounded_only = evaluate(3 * ulp, false);
+    EXPECT_EQ(jitter.rounded.gross_events, rounded_only.rounded.gross_events);
+    EXPECT_GT(f.sum(compare(rounded_only, evaluate(0., false)).residual), 1.);
+    const auto accepted = compare(jitter, isothermal);
+    EXPECT_EQ(f.sum(accepted.residual), 0.);
+    if (accepted.winner)
+        EXPECT_DOUBLE_EQ(accepted.fourier_uncertainty, 2 * .25 * (ulp + 2 * root_radius));
+    const auto resolved = evaluate(8 * ulp, true);
+    EXPECT_GT(f.sum(compare(resolved, isothermal).residual), 1.);
+}
+
+TEST(LowMachFaceTransportTest, FourierThermalCorrectionKeepsInversionResolutionInItsConnectedContacts)
+{
+    Fixture f(4);
+    auto controls = f.options();
+    controls.diffusion.reset();
+    controls.fourier->conductance = [](const F::FaceContext& face) { return face.center[2] == .5 ? 0. : 2.; };
+    F::LowMachFaceTransportAdapter adapter(
+        f.mesh, f.catalog, std::move(controls), f.bindings(), R::PhaseThermalMode::Equilibrium);
+    const std::array stages{std::make_shared<const F::Receipt>(adapter.preview(f.context(), f.post_chemistry))};
+    auto guess = f.thermal;
+    constexpr double recovered_radius = .5 * std::numeric_limits<double>::epsilon() * 301.;
+    std::vector<std::vector<double>> resolution(guess.cells.size(), {0.});
+    for (std::size_t c = 0; c < guess.cells.size(); ++c)
+    {
+        guess.cells[c].phases[0].temperature += 1.;
+        if (f.mesh->cell_centroid(static_cast<LO>(c)).z > .5)
+            resolution[c][0] = recovered_radius;
+    }
+    R::fourier_thermal_detail::correct(
+        *f.mesh, f.transport.time_step, R::PhaseThermalMode::Equilibrium, stages, guess, .5, resolution);
+    for (std::size_t c = 0; c < guess.cells.size(); ++c)
+    {
+        EXPECT_DOUBLE_EQ(guess.cells[c].phases[0].temperature, 300.5);
+        if (f.mesh->cell_centroid(static_cast<LO>(c)).z < .5)
+            EXPECT_EQ(resolution[c][0], 0.);
+        else
+        {
+            const double capacity = stages[0]->fourier_thermal->at(c).capacity;
+            const double local_response = capacity / (capacity + 2. * f.transport.time_step);
+            EXPECT_DOUBLE_EQ(resolution[c][0], .5 * local_response * recovered_radius);
+        }
+    }
 }
 
 TEST(LowMachFaceTransportTest, OrderedStagesConsumeActualPriorStateInsteadOfReservingOneSharedBase)

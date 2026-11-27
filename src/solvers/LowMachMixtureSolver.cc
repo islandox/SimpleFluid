@@ -9,6 +9,7 @@
 #include "equations/CollectiveValidation.hh"
 #include "equations/EquationValidation.hh"
 #include "equations/VariableDensityMomentumEquation.hh"
+#include "equations/details/PressureConditionedThermalResolution.hh"
 #include "equations/details/QbmmReportNumber.hh"
 #include "solvers/details/LowMachConditionedThermal.hh"
 #include "solvers/details/LowMachFourierThermal.hh"
@@ -459,7 +460,7 @@ struct CaloricCell
 // U_new+p_new*V_new = U_adv+source+p_new*V_adv owns actual phase-volume work once.
 CaloricCell recover_enthalpy(const Solver::CellState& transported, std::span<const double> advected_volumes, double p0,
     const Solver::Options& options, bool check_exact_enthalpy_seed, const FrozenInterphasePlan* conditioned_plan = nullptr,
-    std::span<const double> advected_energy = {})
+    std::span<const double> advected_energy = {}, std::span<double> temperature_resolution = {})
 {
     CaloricCell result{transported, std::vector<double>(transported.phases.size()), 0, 0, 0};
     if (conditioned_plan)
@@ -467,9 +468,10 @@ CaloricCell recover_enthalpy(const Solver::CellState& transported, std::span<con
         PressureConditionedThermalEvaluation evaluated;
         try
         {
-            evaluated = evaluate_pressure_conditioned_thermal(*conditioned_plan, transported.phases, advected_energy,
+            evaluated = conditioned_thermal_detail::evaluate_with_resolution(
+                *conditioned_plan, transported.phases, advected_energy,
                 advected_volumes, p0 + transported.mechanical_pressure, options.thermal_mode,
-                {options.conservation_relative_tolerance, options.thermal_relative_tolerance});
+                {options.conservation_relative_tolerance, options.thermal_relative_tolerance}, temperature_resolution);
         }
         catch (const ThermalCaloricRangeError& error)
         {
@@ -540,7 +542,7 @@ CaloricCell recover_enthalpy(const Solver::CellState& transported, std::span<con
         struct Sample
         {
             double enthalpy = 0;
-            long double derivative = 0;
+            long double derivative = 0, operand_scale = 0;
         };
         const auto evaluate = [&](double t, size_t slot)
         {
@@ -553,6 +555,7 @@ CaloricCell recover_enthalpy(const Solver::CellState& transported, std::span<con
                     auto& point = caloric.points[slot];
                     point = phase.thermodynamics->evaluate(t, phase.absolute_pressure, caloric.composition);
                     sample.enthalpy += caloric.mass * point.enthalpy;
+                    sample.operand_scale += std::abs(caloric.mass * point.enthalpy);
                     sample.derivative += heat_slope(point, phase.absolute_pressure, caloric.mass);
                 }
             return sample;
@@ -603,22 +606,27 @@ CaloricCell recover_enthalpy(const Solver::CellState& transported, std::span<con
             return {lo, lo_slot};
         if (target == maximum.enthalpy)
             return {hi, hi_slot};
-        // Resolve the monotone caloric law to its representable temperature bracket rather than stopping
-        // early on a reference-shifted energy roundoff band. An interior rounded enthalpy equal to the
-        // target tightens the upper side, preserving the original rule for a plateau.
+        const auto use_lower = [&]
+        { return target - static_cast<long double>(minimum.enthalpy) <=
+                 static_cast<long double>(maximum.enthalpy) - target; };
+        const double relative_tolerance = std::min(.5 * std::numeric_limits<double>::epsilon(),
+            .0625 * std::min(options.conservation_relative_tolerance, options.thermal_relative_tolerance));
         double trial = seed > lo && seed < hi ? seed : std::midpoint(lo, hi);
-        double checkpoint_width = hi - lo;
-        int accelerated = 0, window = 0;
-        bool neighbor_probe = false;
-        for (int midpoints = 0; midpoints < 180;)
+        for (int iteration = 0; iteration < 360; ++iteration)
         {
-            const double mid = std::midpoint(lo, hi);
-            if (mid == lo || mid == hi)
-                return {mid, mid == lo ? lo_slot : hi_slot};
+            if (!(trial > lo && trial < hi))
+                return use_lower() ? CaloricRoot{lo, lo_slot} : CaloricRoot{hi, hi_slot};
+
             const auto sample = seed_sample && trial == seed ? *seed_sample : evaluate(trial, trial_slot);
             seed_sample.reset();
             check(std::isfinite(sample.enthalpy), "Low-Mach enthalpy inversion returned nonfinite enthalpy.");
-            const bool below = sample.enthalpy < target;
+            const long double residual = static_cast<long double>(sample.enthalpy) - target;
+            const auto roundoff = .5 * std::numeric_limits<double>::epsilon() *
+                                  std::max(sample.operand_scale, std::abs(static_cast<long double>(target)));
+            if (residual == 0 || (std::isfinite(sample.derivative) && sample.derivative > 0 &&
+                    std::abs(residual) <= std::min(roundoff, (relative_tolerance * trial) * sample.derivative)))
+                return {trial, trial_slot};
+            const bool below = residual < 0;
             if (below)
             {
                 lo = trial;
@@ -631,45 +639,17 @@ CaloricCell recover_enthalpy(const Solver::CellState& transported, std::span<con
                 maximum = sample;
                 std::swap(hi_slot, trial_slot);
             }
-            bool require_midpoint = neighbor_probe;
-            if (trial == mid)
-            {
-                ++midpoints;
-                window = 0;
-                checkpoint_width = hi - lo;
-            }
-            else
-            {
-                ++accelerated;
-                if (++window == 2)
-                {
-                    require_midpoint = require_midpoint || hi - lo > .5 * checkpoint_width;
-                    window = 0;
-                    checkpoint_width = hi - lo;
-                }
-            }
+
             trial = std::midpoint(lo, hi);
-            neighbor_probe = false;
-            // Bisection can update the remote side without discarding a good Newton base.
-            const long double low_residual = static_cast<long double>(minimum.enthalpy) - target;
-            const long double high_residual = static_cast<long double>(maximum.enthalpy) - target;
-            const bool use_low = -low_residual < high_residual;
-            const double base = use_low ? lo : hi;
-            const long double slope = use_low ? minimum.derivative : maximum.derivative;
-            if (!require_midpoint && accelerated < 8 && std::isfinite(slope) && slope > 0)
+            const bool from_lower = use_lower();
+            const auto& base = from_lower ? minimum : maximum;
+            const double base_temperature = from_lower ? lo : hi;
+            const long double base_residual = static_cast<long double>(base.enthalpy) - target;
+            if (iteration % 2 == 0 && std::isfinite(base.derivative) && base.derivative > 0)
             {
-                const long double estimate = base - (use_low ? low_residual : high_residual) / slope;
-                if (estimate == base || (estimate > lo && estimate < hi))
-                {
-                    double next = static_cast<double>(estimate);
-                    if (next == base)
-                    {
-                        next = std::nextafter(base, use_low ? hi : lo);
-                        neighbor_probe = next > lo && next < hi;
-                    }
-                    if (next > lo && next < hi)
-                        trial = next;
-                }
+                const double next = static_cast<double>(base_temperature - base_residual / base.derivative);
+                if (next > lo && next < hi)
+                    trial = next;
             }
         }
         throw std::runtime_error("Low-Mach phase enthalpy inversion did not converge.");
@@ -2360,6 +2340,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
     std::optional<TransportSnapshot> previous_conditioned_transport;
     std::optional<std::string> conditioned_signature;
     std::vector<std::vector<double>> advected_energy;
+    std::vector<std::vector<double>> conditioned_temperature_resolution;
     d->publish_fields(accepted, false, ale ? ale->old_cell_volumes() : std::span<const double>{});
     d->old_rho.owned_data().update(1.0, d->rho.owned_data(), 0.0);
     d->old_rho.sync_ghosts();
@@ -2862,7 +2843,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 std::exception_ptr callback_error;
                 try
                 {
-                    evaluated = provider->evaluate(SourceStageContext{last_transport, thermodynamic_guess, mesh});
+                    evaluated = provider->evaluate(SourceStageContext{
+                        last_transport, thermodynamic_guess, mesh, conditioned_temperature_resolution});
                 }
                 catch (...)
                 {
@@ -3079,6 +3061,10 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             collective_detail::collective_local_validation(mesh, "Low-Mach pressure validity interval",
                 [&]
                 {
+                    if (!thermal_batch || fourier_thermal_stages.empty())
+                        conditioned_temperature_resolution.clear();
+                    else if (conditioned_temperature_resolution.empty() && nc != 0)
+                        conditioned_temperature_resolution.assign(nc, std::vector<double>(np));
                     for (size_t c = 0; c < nc; ++c)
                     {
                         local_domain_volume += mesh.cell_volume(static_cast<LO>(c));
@@ -3280,7 +3266,9 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             {
                                 thermal[c] =
                                     recover_enthalpy(trial.cells[c], adv_volumes[c], p0, d->options, forced_explicit_family,
-                                        thermal_batch ? &thermal_batch->cells[c] : nullptr, advected_energy[c]);
+                                        thermal_batch ? &thermal_batch->cells[c] : nullptr, advected_energy[c],
+                                        conditioned_temperature_resolution.empty() ? std::span<double>{}
+                                                                                    : conditioned_temperature_resolution[c]);
                                 local_volume += thermal[c].volume;
                                 local_derivative += thermal[c].derivative;
                             }
@@ -3958,7 +3946,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             // available during interpolation without allocating another state before the Fourier collectives.
             std::swap(thermodynamic_guess, trial);
             fourier_thermal_detail::correct(mesh, dt, d->options.thermal_mode, fourier_thermal_stages,
-                thermodynamic_guess, relax_fourier && !tvd_mc ? relaxed_step : 1.);
+                thermodynamic_guess, relax_fourier && !tvd_mc ? relaxed_step : 1., conditioned_temperature_resolution);
             if (relax_coupling)
             {
                 collective_detail::collective_local_validation(mesh, "Relaxed forced linear corrector inputs",

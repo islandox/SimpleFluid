@@ -153,7 +153,8 @@ SIMPLEFLUID_SOLVERS_LOCAL inline double outward_temperature_resolution(long doub
 }
 
 SIMPLEFLUID_SOLVERS_LOCAL inline std::array<double, 2> fourier_temperature_bounds(
-    double owner, double neighbor, long double integrated_conductance)
+    double owner, double neighbor, long double integrated_conductance,
+    double owner_resolution = 0., double neighbor_resolution = 0.)
 {
     const auto spacing = [](double temperature)
     {
@@ -164,9 +165,10 @@ SIMPLEFLUID_SOLVERS_LOCAL inline std::array<double, 2> fourier_temperature_bound
     const auto [owner_down, owner_up] = spacing(owner);
     const auto [neighbor_down, neighbor_up] = spacing(neighbor);
     // The faces use owner minus neighbor. Each binary64 operand extends to
-    // the midpoint toward its adjacent representable value in that direction.
-    return {outward_temperature_resolution(integrated_conductance * (owner_down + neighbor_up) * .5L),
-        outward_temperature_resolution(integrated_conductance * (owner_up + neighbor_down) * .5L)};
+    // the midpoint toward its adjacent value, plus its inversion resolution.
+    const long double inversion = static_cast<long double>(owner_resolution) + neighbor_resolution;
+    return {outward_temperature_resolution(integrated_conductance * ((owner_down + neighbor_up) * .5L + inversion)),
+        outward_temperature_resolution(integrated_conductance * ((owner_up + neighbor_down) * .5L + inversion))};
 }
 
 struct GrossComparison

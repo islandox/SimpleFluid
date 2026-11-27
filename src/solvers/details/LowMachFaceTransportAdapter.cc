@@ -322,9 +322,10 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
 {
     collective_detail::require_uniform_value(*mesh_, int(raw_authority), "Face raw predecessor authority");
     const auto ns = catalog_->species().size(), np = compartments_.size(), physical = options_.physical_phase;
-    const std::size_t sample_columns = 2 * ns + 6, packet_columns = 3 * ns + 4 + (options_.fourier ? 3 : 0);
+    const std::size_t sample_columns = 2 * ns + 6 + bool(options_.fourier);
+    const std::size_t packet_columns = 3 * ns + 4 + (options_.fourier ? 3 : 0);
     const std::size_t t = 2 * ns, p = t + 1, volume = t + 2, density = t + 3;
-    const std::size_t counter_amount = t + 4, bulk_volume = t + 5;
+    const std::size_t counter_amount = t + 4, bulk_volume = t + 5, temperature_resolution = t + 6;
     const std::size_t h_owner = 1 + ns, h_neighbor = 1 + 2 * ns;
     const std::size_t hc_owner = 1 + 3 * ns, hc_neighbor = hc_owner + 1, heat_column = hc_owner + 2,
                       heat_decrease = heat_column + 1, heat_increase = heat_column + 2, conductance = heat_column + 3;
@@ -347,6 +348,9 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
                     prepared_caloric_guesses.size() == mesh_->num_owned_cells() &&
                     post_chemistry.size() == mesh_->num_owned_cells(),
                 "Face stage is stale, foreign or malformed.");
+            const auto resolution = context.conditioned_temperature_resolution_K;
+            require(resolution.empty() || resolution.size() == post_chemistry.size(),
+                "Fourier temperature resolution must follow the owned cell layout.");
             if (raw_authority)
             {
                 require(owner_parts.size() == post_chemistry.size(), "Raw face predecessor owned rows differ.");
@@ -451,6 +455,15 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
                     owned_samples->replaceLocalValue(row, ns + s, concentration);
                 }
                 owned_samples->replaceLocalValue(row, t, temperature);
+                if (options_.fourier && !resolution.empty())
+                {
+                    require(resolution[c].size() == np, "Fourier temperature resolution phase layout differs.");
+                    const double radius = resolution[c][physical];
+                    require(std::isfinite(radius) && radius >= 0., "Invalid conditioned temperature radius.");
+                    // A newly prepared temperature has no previous conditioned-root provenance.
+                    if (temperature > 0. && temperature == original_phases[physical].temperature)
+                        owned_samples->replaceLocalValue(row, temperature_resolution, radius);
+                }
                 owned_samples->replaceLocalValue(row, p, pressure);
                 owned_samples->replaceLocalValue(row, volume, phase_volume);
                 owned_samples->replaceLocalValue(row, density, phase_density);
@@ -494,7 +507,8 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
                 side.density = local_samples->getData(density)[row];
                 side.counter_moles = local_samples->getData(counter_amount)[row];
                 side.bulk_volume = local_samples->getData(bulk_volume)[row];
-                return side;
+                const double radius = options_.fourier ? local_samples->getData(temperature_resolution)[row] : 0.;
+                return std::pair{std::move(side), radius};
             };
             for (std::size_t f = 0; f < mesh_->num_faces(); ++f)
             {
@@ -511,7 +525,8 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
                 }
                 require(neighbor != Mesh::invalid_local_id() && mesh_->is_owned_cell(owner),
                     "Canonical event owner must own the source-oriented owner cell.");
-                const auto a = sample(owner), b = sample(neighbor);
+                const auto [a, radius_a] = sample(owner);
+                const auto [b, radius_b] = sample(neighbor);
                 const auto center = mesh_->face_centroid(face), normal = mesh_->face_normal(face);
                 const FaceContext law{.algebraic_identity = mesh_->face_global_id(face),
                     .geometry_identity = mesh_->face_geometry_global_id(face),
@@ -586,7 +601,7 @@ Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext
                     if (g > 0)
                     {
                         const auto [decrease, increase] = source_stage_detail::fourier_temperature_bounds(
-                            a.temperature, b.temperature, integrated_conductance);
+                            a.temperature, b.temperature, integrated_conductance, radius_a, radius_b);
                         owned_packets->replaceLocalValue(row, heat_decrease, decrease);
                         owned_packets->replaceLocalValue(row, heat_increase, increase);
                     }

@@ -1,5 +1,5 @@
 /** Pressure-conditioned local interphase thermal recovery and conservative receipts. */
-#include "equations/PressureConditionedThermal.hh"
+#include "equations/details/PressureConditionedThermalResolution.hh"
 #include "utils/CompensatedSum.hh"
 #include <algorithm>
 #include <array>
@@ -100,7 +100,7 @@ struct Point
 struct EnthalpySample
 {
     double temperature;
-    long double enthalpy, slope, physical_scale, error, roundoff;
+    long double enthalpy, slope, physical_scale, operand_scale, error, roundoff;
     size_t slot;
 };
 Point point(const MixtureThermodynamics& eos, const PreparedStock& stock, double t, double p)
@@ -478,14 +478,16 @@ FrozenInterphasePlan compile_interphase_plan(std::shared_ptr<const InterphaseCon
     return result;
 }
 
-PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const FrozenInterphasePlan& plan,
-    std::span<const PhaseThermalState> final_templates, std::span<const double> advected_energy,
-    std::span<const double> advected_volumes, double pressure, PhaseThermalMode mode,
-    ThermalEvaluationControls controls)
+PressureConditionedThermalEvaluation conditioned_thermal_detail::evaluate_with_resolution(
+    const FrozenInterphasePlan& plan, std::span<const PhaseThermalState> final_templates,
+    std::span<const double> advected_energy, std::span<const double> advected_volumes, double pressure,
+    PhaseThermalMode mode, ThermalEvaluationControls controls, std::span<double> temperature_resolution)
 {
     require(plan.configuration != nullptr, "Missing frozen thermal plan.");
     validate_interphase_configuration(*plan.configuration, final_templates);
     const auto np = final_templates.size();
+    require(temperature_resolution.empty() || temperature_resolution.size() == np,
+        "Conditioned thermal resolution must follow the physical phase layout.");
     const auto& catalog = final_templates.front().thermodynamics->catalog();
     require(advected_energy.size() == np && advected_volumes.size() == np && plan.pre_moles.size() == np &&
                 plan.final_moles.size() == np && plan.raw_static_energy.size() == np &&
@@ -537,6 +539,7 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
     std::vector<int> occupied(np);
     auto recover = [&]()
     {
+        std::ranges::fill(temperature_resolution, 0.);
         double common_lower = 0, common_upper = std::numeric_limits<double>::infinity();
         size_t active = 0;
         for (size_t a = 0; a < np; ++a)
@@ -606,7 +609,8 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
                 residual.append(target, -1);
                 const auto roundoff = 32 * std::numeric_limits<double>::epsilon() * std::abs(enthalpy.value()) +
                                       enthalpy.error_bound() + target.error_bound() + residual.error_bound();
-                return EnthalpySample{t, enthalpy.value(), slope, physical_scale, residual.value(), roundoff, slot};
+                return EnthalpySample{t, enthalpy.value(), slope, physical_scale,
+                    std::max(enthalpy.magnitude, target.magnitude), residual.value(), roundoff, slot};
             };
             auto lower = evaluate(lo, 0);
             auto upper = lo == hi ? lower : evaluate(hi, 1);
@@ -620,12 +624,17 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
                                 sample.physical_scale,
                     "Caloric reference/operands cannot resolve requested conditioned temperature accuracy.");
             };
-            const auto finish = [&](const EnthalpySample& sample)
+            const auto finish = [&](const EnthalpySample& sample, long double radius = 0.)
             {
                 check_conditioning(sample);
+                const double resolved = temperature_resolution.empty() ? 0. : narrow_bound(radius);
                 for (size_t a = 0; a < np; ++a)
                     if (includes(a))
+                    {
                         points[a] = trial_points[a][sample.slot];
+                        if (!temperature_resolution.empty())
+                            temperature_resolution[a] = resolved;
+                    }
                 return sample.temperature;
             };
             if (lower.error == 0)
@@ -635,18 +644,20 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
 
             size_t trial_slot = 2;
             double trial = std::midpoint(lo, hi);
-            double checkpoint_width = hi - lo;
-            int accelerated = 0, window = 0;
-            bool neighbor_probe = false;
-            for (int midpoints = 0; midpoints < 180;)
+            for (int iteration = 0; iteration < 360; ++iteration)
             {
-                const double mid = std::midpoint(lo, hi);
-                if (mid == lo || mid == hi)
-                    return finish(mid == lo ? lower : upper);
+                if (!(trial > lo && trial < hi))
+                    return finish(trial == lo ? lower : upper, hi - lo); // Rounded midpoint of the final bracket.
                 const auto sample = evaluate(trial, trial_slot);
                 check_conditioning(sample);
-                if (sample.error == 0)
-                    return finish(sample);
+                // Use the sensible caloric scale rather than the magnitude of a formation-energy reference.
+                // A steep local tangent also needs an independent extensive energy residual bound.
+                const auto tolerance = std::min(
+                    .5 * std::numeric_limits<double>::epsilon() * std::min(sample.operand_scale, sample.physical_scale),
+                    .0625 * std::min(controls.physical_relative_tolerance, controls.caloric_relative_tolerance) *
+                        sample.physical_scale);
+                if (std::abs(sample.error) <= tolerance)
+                    return finish(sample, temperature_resolution.empty() ? 0. : tolerance / sample.slope);
                 if (sample.error < 0)
                 {
                     lo = trial;
@@ -659,40 +670,18 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
                     trial_slot = upper.slot;
                     upper = sample;
                 }
-                bool require_midpoint = neighbor_probe;
-                if (trial == mid)
-                {
-                    ++midpoints;
-                    window = 0;
-                    checkpoint_width = hi - lo;
-                }
-                else
-                {
-                    ++accelerated;
-                    if (++window == 2)
-                    {
-                        require_midpoint = require_midpoint || hi - lo > .5 * checkpoint_width;
-                        window = 0;
-                        checkpoint_width = hi - lo;
-                    }
-                }
+
                 trial = std::midpoint(lo, hi);
-                neighbor_probe = false;
+                // Interleave Newton and bisection so even an unfavorable derivative cannot stall the bracket.
                 const auto& base = std::abs(lower.error) <= std::abs(upper.error) ? lower : upper;
-                if (!require_midpoint && accelerated < 12 && std::isfinite(base.slope) && base.slope > 0)
+                if (iteration % 2 == 0 && std::isfinite(base.slope) && base.slope > 0)
                 {
-                    const auto estimate = base.temperature - base.error / base.slope;
-                    if (estimate == base.temperature || (estimate > lo && estimate < hi))
-                    {
-                        double next = static_cast<double>(estimate);
-                        if (next == base.temperature)
-                        {
-                            next = std::nextafter(base.temperature, base.temperature == lo ? hi : lo);
-                            neighbor_probe = next > lo && next < hi;
-                        }
-                        if (next > lo && next < hi)
-                            trial = next;
-                    }
+                    double next = static_cast<double>(base.temperature - base.error / base.slope);
+                    // If Newton rounds back to its base, try the nearest interior point in that direction.
+                    if (next == base.temperature)
+                        next = std::nextafter(base.temperature, base.temperature == lo ? hi : lo);
+                    if (next > lo && next < hi)
+                        trial = next;
                 }
             }
             throw std::runtime_error("Bounded conditioned enthalpy inversion did not converge.");
@@ -1007,6 +996,16 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
     result.raw_channel_roundoff_bound = narrow(raw_roundoff.value());
     return result;
 }
+
+PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const FrozenInterphasePlan& plan,
+    std::span<const PhaseThermalState> final_templates, std::span<const double> advected_energy,
+    std::span<const double> advected_volumes, double pressure, PhaseThermalMode mode,
+    ThermalEvaluationControls controls)
+{
+    return conditioned_thermal_detail::evaluate_with_resolution(
+        plan, final_templates, advected_energy, advected_volumes, pressure, mode, controls, {});
+}
+
 CaloricPressureInterval interphase_pressure_bounds(
     const FrozenInterphasePlan& plan, std::span<const PhaseThermalState> phases)
 {

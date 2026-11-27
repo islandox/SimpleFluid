@@ -112,43 +112,75 @@ void validate_phase(const PhaseThermalState& phase)
         "Phase pressure is outside its EOS range.");
 }
 
+struct CaloricSample
+{
+    double energy = 0;
+    double slope = 0;
+};
+
 // Monotone caloric law, guaranteed by every evaluated positive de/dT. No extrapolation or floors.
-template<class Energy> double invert_energy(double lower, double upper, double target, Energy energy)
+template<class Evaluate> double invert_energy(double lower, double upper, double target, Evaluate evaluate)
 {
     require(lower <= upper, "Occupied phases have no common temperature validity interval.");
-    const double low_energy = energy(lower), high_energy = energy(upper);
-    require(finite(low_energy) && finite(high_energy) && high_energy >= low_energy,
+    auto low = evaluate(lower), high = evaluate(upper);
+    require(finite(low.energy) && finite(high.energy) && high.energy >= low.energy,
         "Caloric inversion has invalid endpoint energies.");
     const double tolerance =
         32 * std::numeric_limits<double>::epsilon() *
-        std::max({std::numeric_limits<double>::min(), std::abs(target), std::abs(low_energy), std::abs(high_energy)});
-    if (target < low_energy || target > high_energy)
+        std::max({std::numeric_limits<double>::min(), std::abs(target), std::abs(low.energy), std::abs(high.energy)});
+    if (target < low.energy || target > high.energy)
     {
-        if (!(target >= low_energy - tolerance && target <= high_energy + tolerance))
+        if (!(target >= low.energy - tolerance && target <= high.energy + tolerance))
             throw CaloricRangeError("Requested phase energy is outside the declared temperature validity interval.");
-        return target < low_energy ? lower : upper;
+        return target < low.energy ? lower : upper;
     }
-    if (target == low_energy)
+    if (target == low.energy)
         return lower;
-    if (target == high_energy)
+    if (target == high.energy)
         return upper;
-    // Resolve the monotone caloric law to its representable temperature bracket rather than stopping
-    // early on a reference-shifted energy roundoff band.
-    for (int iteration = 0; iteration < 180; ++iteration)
+
+    const auto use_lower = [&] { return target - low.energy <= high.energy - target; };
+    double trial = std::midpoint(lower, upper);
+    for (int iteration = 0; iteration < 360; ++iteration)
     {
-        const double middle = std::midpoint(lower, upper);
-        if (middle == lower || middle == upper)
+        if (!(trial > lower && trial < upper))
             break;
-        const double value = energy(middle);
-        require(finite(value), "Caloric inversion returned nonfinite energy.");
-        if (value < target)
-            lower = middle;
+        const auto sample = evaluate(trial);
+        require(finite(sample.energy), "Caloric inversion returned nonfinite energy.");
+        const double residual = sample.energy - target;
+        constexpr double resolution = .5 * std::numeric_limits<double>::epsilon();
+        const double temperature_budget = resolution * trial;
+        // A steep tangent and a distant hot endpoint cannot justify a large local energy error.
+        const double energy_budget = resolution * std::max(std::abs(target), std::abs(sample.energy));
+        if (residual == 0 || (finite(sample.slope) && sample.slope > 0 &&
+                std::abs(residual) <= std::min(temperature_budget * sample.slope, energy_budget)))
+            return trial;
+        if (residual < 0)
+        {
+            lower = trial;
+            low = sample;
+        }
         else
-            upper = middle;
+        {
+            upper = trial;
+            high = sample;
+        }
+
+        trial = std::midpoint(lower, upper);
+        // Interleave Newton and bisection to guarantee progress inside the EOS domain.
+        const bool from_lower = use_lower();
+        const auto& base = from_lower ? low : high;
+        if (iteration % 2 == 0 && finite(base.slope) && base.slope > 0)
+        {
+            const double next = (from_lower ? lower : upper) - (base.energy - target) / base.slope;
+            if (next > lower && next < upper)
+                trial = next;
+        }
     }
-    const double result = std::midpoint(lower, upper);
-    require(std::abs(energy(result) - target) <= 8 * tolerance, "Caloric inversion did not converge.");
-    return result;
+    const bool from_lower = use_lower();
+    require(std::abs((from_lower ? low.energy : high.energy) - target) <= 8 * tolerance,
+        "Caloric inversion did not converge.");
+    return from_lower ? lower : upper;
 }
 } // namespace
 
@@ -422,6 +454,8 @@ struct AffineCaloricConstraint
 CaloricPressureDomain intersect_affine_caloric_constraints(
     CaloricPressureInterval supplied, std::span<const AffineCaloricConstraint> constraints)
 {
+    // The constraints carry wide endpoint energy margins. Keep their signs and the
+    // inward-rounded interval when thermal validity spans only adjacent pressures.
     long double lower = supplied.lower, upper = supplied.upper;
     for (const auto constraint : constraints)
     {
@@ -526,19 +560,23 @@ PhaseThermalRecovery recover_phase_temperatures(
     }
     auto phase_energy = [&](std::size_t i, double t)
     {
-        return mixtures[i].mass * phases[i]
-                                      .thermodynamics->evaluate(t, phases[i].absolute_pressure, mixtures[i].fractions)
-                                      .internal_energy;
+        const auto point = phases[i].thermodynamics->evaluate(t, phases[i].absolute_pressure, mixtures[i].fractions);
+        return CaloricSample{mixtures[i].mass * point.internal_energy,
+            mixtures[i].mass * point.internal_energy_temperature};
     };
     double common_t = 0;
     if (mode == PhaseThermalMode::Equilibrium)
         common_t = invert_energy(lower, upper, total_energy,
             [&](double t)
             {
-                double sum = 0;
+                CaloricSample sum;
                 for (std::size_t i = 0; i < phases.size(); ++i)
                     if (mixtures[i].amount > 0)
-                        sum += phase_energy(i, t);
+                    {
+                        const auto sample = phase_energy(i, t);
+                        sum.energy += sample.energy;
+                        sum.slope += sample.slope;
+                    }
                 return sum;
             });
     else

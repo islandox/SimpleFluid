@@ -570,4 +570,37 @@ TEST(ReactingThermodynamicsTest, ShiftedReferenceCaloricInversionResolvesBracket
         (void) R::recover_phase_temperatures(std::array{below}, below.internal_energy), std::invalid_argument);
 }
 
+TEST(ReactingThermodynamicsTest, SteepCaloricTangentAndRemoteEndpointDoNotHideLocalEnergyError)
+{
+    auto species = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
+        {1, "liquid", 1., {{"A", 1}}, {R::SpeciesPhase::Liquid}}});
+    const auto energy = [](double t)
+    {
+        const double hot = std::max(t - 300.5, 0.);
+        return t + .01 * std::atan((t - 300.) / 1e-16) + 1e17 * hot * hot * hot;
+    };
+    const auto liquid = std::make_shared<const R::MixtureThermodynamics>(
+        species, R::ThermodynamicBounds{299., 301., .5, 2.}, R::EOSKind::Liquid,
+        [energy](double t, double p, std::span<const double>)
+        {
+            const double x = (t - 300.) / 1e-16;
+            const double hot = std::max(t - 300.5, 0.);
+            const double e = energy(t);
+            return R::MixtureThermodynamicPoint{1., e, e + p, 1. + 1e14 / (1. + x * x) + 3e17 * hot * hot,
+                0., 0., 0., {}, {}};
+        });
+
+    // The first trial at 300 K has a steep tangent, but its energy is far from the target.
+    // The hot end also has a large energy and would make a bracket-wide tolerance misleading.
+    constexpr double expected_temperature = 300.25;
+    const double target = energy(expected_temperature);
+    const std::array phases{R::PhaseThermalState{liquid, {1.}, 1., target, 300.}};
+    for (const auto mode : {R::PhaseThermalMode::Equilibrium, R::PhaseThermalMode::SeparatePhaseTemperatures})
+    {
+        const auto result = R::recover_phase_temperatures(phases, target, mode);
+        EXPECT_NEAR(result.phases[0].temperature, expected_temperature, 1e-12);
+        EXPECT_NEAR(result.phases[0].internal_energy, target, 1e-12);
+    }
+}
+
 } // namespace

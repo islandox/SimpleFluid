@@ -22,16 +22,17 @@ struct Row
 {
     std::map<GO, double> conductances;
     low_mach_faces::FourierCellLinearization caloric;
-    double diagonal = 1, defect = 0;
+    double diagonal = 1, defect = 0, root_radius = 0;
 };
 
 SIMPLEFLUID_SOLVERS_LOCAL inline void correct_block(const Flow::Mesh& mesh, double dt, std::span<const Stage> stages,
-    std::optional<std::size_t> phase, Flow::State& guess, double maximum_step)
+    std::optional<std::size_t> phase, Flow::State& guess, double maximum_step,
+    std::span<std::vector<double>> temperature_resolution)
 {
     const auto map = mesh.owned_cell_map();
     const auto comm = map->getComm();
     std::vector<Row> rows;
-    // Unusable block, largest diagonal, largest temperature defect, negative smallest active diagonal.
+    // Unusable block, largest diagonal, largest defect, negative smallest active diagonal.
     std::array<double, 4> local{0, 0, 0, -std::numeric_limits<double>::infinity()}, global{};
     collective_detail::collective_local_validation(mesh, "Frozen Fourier thermal rows",
         [&]
@@ -79,6 +80,8 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void correct_block(const Flow::Mesh& mesh, doub
                     if ((phase && a != *phase) || current.temperature == 0)
                         continue;
                     recovered = current.temperature;
+                    if (!temperature_resolution.empty())
+                        row.root_radius = std::max(row.root_radius, temperature_resolution[c][a]);
                     const auto& bounds = current.thermodynamics->bounds();
                     caloric.minimum_temperature = std::max(caloric.minimum_temperature, bounds.minimum_temperature);
                     caloric.maximum_temperature = std::min(caloric.maximum_temperature, bounds.maximum_temperature);
@@ -200,25 +203,40 @@ SIMPLEFLUID_SOLVERS_LOCAL inline void correct_block(const Flow::Mesh& mesh, doub
         return;
     for (std::size_t c = 0; c < rows.size(); ++c)
         if (!rows[c].conductances.empty())
+        {
+            // Credit the direct local contribution to the thermal response.
+            // A Jacobi sweep from zero stays below the nonnegative exact
+            // response and needs no additional solve or unrelated radii.
+            const auto& row = rows[c];
+            const long double scaled_radius =
+                (static_cast<long double>(row.caloric.capacity) / row.diagonal) * step * row.root_radius;
+            double radius = static_cast<double>(scaled_radius);
+            if (radius > scaled_radius)
+                radius = std::nextafter(radius, 0.);
             for (std::size_t a = 0; a < guess.cells[c].phases.size(); ++a)
                 if ((!phase || a == *phase) && guess.cells[c].phases[a].temperature > 0)
+                {
                     guess.cells[c].phases[a].temperature = increments[c];
+                    if (!temperature_resolution.empty())
+                        temperature_resolution[c][a] = radius;
+                }
+        }
 }
 
 SIMPLEFLUID_SOLVERS_LOCAL inline void correct(
     const Flow::Mesh& mesh, double dt, PhaseThermalMode mode, std::span<const Stage> stages, Flow::State& guess,
-    double maximum_step = 1.)
+    double maximum_step = 1., std::span<std::vector<double>> temperature_resolution = {})
 {
     if (stages.empty())
         return;
     if (mode == PhaseThermalMode::Equilibrium)
-        return correct_block(mesh, dt, stages, std::nullopt, guess, maximum_step);
+        return correct_block(mesh, dt, stages, std::nullopt, guess, maximum_step, temperature_resolution);
     for (auto stage = stages.begin(); stage != stages.end(); ++stage)
     {
         const auto phase = (*stage)->physical_phase;
         if (std::none_of(
                 stages.begin(), stage, [=](const auto& previous) { return previous->physical_phase == phase; }))
-            correct_block(mesh, dt, stages, phase, guess, maximum_step);
+            correct_block(mesh, dt, stages, phase, guess, maximum_step, temperature_resolution);
     }
 }
 } // namespace SimpleFluid::Reacting::fourier_thermal_detail

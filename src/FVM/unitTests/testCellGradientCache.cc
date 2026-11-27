@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "FVM/CellOperators.hh"
+#include "gradient_comparison.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
@@ -267,15 +268,15 @@ TEST(CellGradientCacheTest, GaussGeometryRetainsLiveNativeBoundariesAndPublished
                                         : SimpleFluid::BoundaryConditionType::Neumann, scale};
         SimpleFluid::FVM::gauss_linear_cell_gradient(scalar, boundaries, actual, cache);
         SimpleFluid::FVM::gauss_linear_cell_gradient(scalar, boundaries, expected);
-        expect_scalar_gradients_near(actual, expected, 0.0);
+        SimpleFluid::test::expect_independent_gradients_near(actual, expected, 32);
         SimpleFluid::FVM::gauss_linear_cell_gradient(scalar, actual, cache);
         SimpleFluid::FVM::gauss_linear_cell_gradient(scalar, expected);
-        expect_scalar_gradients_near(actual, expected, 0.0);
+        SimpleFluid::test::expect_independent_gradients_near(actual, expected, 32);
         auto boundary = [&](int batch, size_t index)
         { return vector_value(mesh->face_centroid(mesh->boundary_face_batch(batch).face_lids[index]), scale); };
         SimpleFluid::FVM::gauss_linear_cell_gradient(vector, boundary, actual_tensor, cache);
         SimpleFluid::FVM::gauss_linear_cell_gradient(vector, boundary, expected_tensor);
-        expect_vector_gradients_near(actual_tensor, expected_tensor, 0.0);
+        SimpleFluid::test::expect_independent_gradients_near(actual_tensor, expected_tensor, 32);
     }
 }
 

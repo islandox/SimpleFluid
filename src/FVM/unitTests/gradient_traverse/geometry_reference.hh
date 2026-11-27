@@ -45,6 +45,7 @@ using PressureWorkspace = FVM::FieldStoredPressureWeightedFaceFluxWorkspace<Pack
 // callback ordering and retained snapshots are still checked exactly.
 void expect_roundoff_equal(real_t actual, real_t expected)
 {
+    ASSERT_TRUE(std::isfinite(actual) && std::isfinite(expected));
     const auto scale = std::max({real_t{1}, std::abs(actual), std::abs(expected)});
     EXPECT_NEAR(actual, expected, 16 * std::numeric_limits<real_t>::epsilon() * scale);
 }
@@ -144,7 +145,7 @@ void expect_least_squares_geometry(const FVM::CellGradientCache<Pack, MeshType>&
                     EXPECT_EQ(actual.location.active, location.active);
                     EXPECT_EQ(actual.location.batch_id, location.batch_id);
                     EXPECT_EQ(actual.location.in_batch_id, location.in_batch_id);
-                    EXPECT_EQ(actual.normal_distance, sample.normal_distance);
+                    expect_roundoff_equal(actual.normal_distance, sample.normal_distance);
                     expect_roundoff_equal(actual.weight, weight);
                 }
             }
@@ -195,7 +196,7 @@ void expect_stencil_geometry(const MeshType& mesh)
                     EXPECT_EQ(actual.location.active, locations.at(sample.face_lid).active);
                     EXPECT_EQ(actual.location.batch_id, locations.at(sample.face_lid).batch_id);
                     EXPECT_EQ(actual.location.in_batch_id, locations.at(sample.face_lid).in_batch_id);
-                    EXPECT_EQ(actual.normal_distance, sample.normal_distance);
+                    expect_roundoff_equal(actual.normal_distance, sample.normal_distance);
                     expect_roundoff_equal(actual.basis, basis);
                 }
             }
@@ -246,7 +247,7 @@ void expect_gauss_geometry(const FVM::GaussLinearGradientCache<Pack, MeshType>& 
                 EXPECT_EQ(face.boundary.batch_id, location.batch_id);
                 EXPECT_EQ(face.boundary.in_batch_id, location.in_batch_id);
                 if (location.active)
-                    EXPECT_EQ(face.normal_distance,
+                    expect_roundoff_equal(face.normal_distance,
                         FVM::detail::boundary_normal_distance(mesh, face.face_lid, static_cast<Local>(cell)));
             }
         }

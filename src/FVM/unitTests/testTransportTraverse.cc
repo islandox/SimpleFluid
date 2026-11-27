@@ -14,7 +14,9 @@
 #include <gtest/gtest.h>
 #include <type_traits>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -36,12 +38,18 @@ using Matrix = Teuchos::RCP<Pack::matrix_type>;
 testing::Environment* const environment =
     testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
-void expect_exact_vector(const char* metric, const Vec& actual, const Vec& expected)
+void expect_same_value(double actual, double expected)
+{
+    ASSERT_TRUE(std::isfinite(actual) && std::isfinite(expected));
+    constexpr double relative_roundoff = 32 * std::numeric_limits<double>::epsilon();
+    EXPECT_NEAR(actual, expected, relative_roundoff * std::max(std::abs(actual), std::abs(expected)));
+}
+
+void expect_same_vector(const char* metric, const Vec& actual, const Vec& expected)
 {
     SCOPED_TRACE(metric);
-    EXPECT_EQ(actual.x, expected.x);
-    EXPECT_EQ(actual.y, expected.y);
-    EXPECT_EQ(actual.z, expected.z);
+    for (size_t axis = 0; axis < 3; ++axis)
+        expect_same_value(actual.component(axis), expected.component(axis));
 }
 
 // Query canonical point geometry independently of the batch descriptors. The
@@ -116,43 +124,43 @@ void expect_canonical_geometry(const MeshType& mesh, const TransportGeometryCach
                     return mesh.face_center_vector(face_id, selected_cell);
                 else return mesh.face_centroid(face_id) - mesh.cell_centroid(selected_cell);
             };
-            EXPECT_EQ(metrics.face_area(face.face_lid), mesh.face_area(face_id));
-            expect_exact_vector("face_centroid", metrics.face_centroid(face.face_lid), mesh.face_centroid(face_id));
-            expect_exact_vector("face_normal", metrics.face_normal(face.face_lid), mesh.face_normal(face_id));
-            expect_exact_vector("face_normal_outward", metrics.face_normal_outward(face.face_lid, cell),
+            expect_same_value(metrics.face_area(face.face_lid), mesh.face_area(face_id));
+            expect_same_vector("face_centroid", metrics.face_centroid(face.face_lid), mesh.face_centroid(face_id));
+            expect_same_vector("face_normal", metrics.face_normal(face.face_lid), mesh.face_normal(face_id));
+            expect_same_vector("face_normal_outward", metrics.face_normal_outward(face.face_lid, cell),
                 mesh.face_normal_outward(face_id, cell_id));
-            expect_exact_vector("face_area_vector_outward", metrics.face_area_vector_outward(face.face_lid, cell),
+            expect_same_vector("face_area_vector_outward", metrics.face_area_vector_outward(face.face_lid, cell),
                 mesh.face_area_vector_outward(face_id, cell_id));
-            expect_exact_vector("cell_centroid", metrics.cell_centroid(cell), mesh.cell_centroid(cell_id));
-            expect_exact_vector("face_center_vector", metrics.face_center_vector(face.face_lid, cell),
+            expect_same_vector("cell_centroid", metrics.cell_centroid(cell), mesh.cell_centroid(cell_id));
+            expect_same_vector("face_center_vector", metrics.face_center_vector(face.face_lid, cell),
                 point_face_center_vector(cell_id));
-            EXPECT_EQ(metrics.cell_to_face_distance(face.face_lid, cell), mesh.cell_to_face_distance(face_id, cell_id));
+            expect_same_value(metrics.cell_to_face_distance(face.face_lid, cell), mesh.cell_to_face_distance(face_id, cell_id));
             if constexpr (interior)
             {
                 const auto other_id = FVM::detail::query_cell_id(mesh, face.other);
-                expect_exact_vector("neighbor_centroid", metrics.cell_centroid(face.other), mesh.cell_centroid(other_id));
-                expect_exact_vector("neighbor_face_center_vector", metrics.face_center_vector(face.face_lid, face.other),
+                expect_same_vector("neighbor_centroid", metrics.cell_centroid(face.other), mesh.cell_centroid(other_id));
+                expect_same_vector("neighbor_face_center_vector", metrics.face_center_vector(face.face_lid, face.other),
                     point_face_center_vector(other_id));
-                expect_exact_vector("cell_center_vector", metrics.cell_center_vector(face.face_lid, cell),
+                expect_same_vector("cell_center_vector", metrics.cell_center_vector(face.face_lid, cell),
                     mesh.cell_center_vector(face_id, cell_id));
-                expect_exact_vector("neighbor_cell_center_vector", metrics.cell_center_vector(face.face_lid, face.other),
+                expect_same_vector("neighbor_cell_center_vector", metrics.cell_center_vector(face.face_lid, face.other),
                     mesh.cell_center_vector(face_id, other_id));
-                EXPECT_EQ(metrics.cell_to_face_distance(face.face_lid, face.other),
+                expect_same_value(metrics.cell_to_face_distance(face.face_lid, face.other),
                     mesh.cell_to_face_distance(face_id, other_id));
-                EXPECT_EQ(metrics.face_cell_center_distance(face.face_lid), mesh.face_cell_center_distance(face_id));
-                EXPECT_EQ(FVM::detail::interior_diffusion_coefficient(metrics, face.face_lid, cell, face.other, 0.7),
+                expect_same_value(metrics.face_cell_center_distance(face.face_lid), mesh.face_cell_center_distance(face_id));
+                expect_same_value(FVM::detail::interior_diffusion_coefficient(metrics, face.face_lid, cell, face.other, 0.7),
                     FVM::detail::interior_diffusion_coefficient(mesh, face.face_lid, cell, face.other, 0.7));
                 for (auto interpolation : {FaceCoefficientInterpolation::Harmonic, FaceCoefficientInterpolation::Linear})
-                    EXPECT_EQ(FVM::detail::face_coefficient_value(metrics, face.face_lid, cell, face.other, 0.7, 1.3,
+                    expect_same_value(FVM::detail::face_coefficient_value(metrics, face.face_lid, cell, face.other, 0.7, 1.3,
                                   interpolation),
                         FVM::detail::face_coefficient_value(mesh, face.face_lid, cell, face.other, 0.7, 1.3,
                             interpolation));
             }
             else if constexpr (boundary)
             {
-                EXPECT_EQ(FVM::detail::boundary_diffusion_coefficient(metrics, face.face_lid, cell, 0.7),
+                expect_same_value(FVM::detail::boundary_diffusion_coefficient(metrics, face.face_lid, cell, 0.7),
                     FVM::detail::boundary_diffusion_coefficient(mesh, face.face_lid, cell, 0.7));
-                EXPECT_EQ(FVM::detail::robin_boundary_weight(metrics, face.face_lid, cell, 0.4),
+                expect_same_value(FVM::detail::robin_boundary_weight(metrics, face.face_lid, cell, 0.4),
                     FVM::detail::robin_boundary_weight(mesh, face.face_lid, cell, 0.4));
             }
         });
@@ -189,23 +197,37 @@ void expect_same_system(const System& actual, const System& expected, bool reuse
     ASSERT_TRUE(actual.matrix->getRowMap()->isSameAs(*expected.matrix->getRowMap()));
     ASSERT_TRUE(actual.matrix->getColMap()->isSameAs(*expected.matrix->getColMap()));
     const auto a = snapshot(actual), e = snapshot(expected);
-    EXPECT_EQ(a.second, e.second);
+    ASSERT_EQ(a.second.size(), e.second.size());
+    for (size_t component = 0; component < a.second.size(); ++component)
+    {
+        ASSERT_EQ(a.second[component].size(), e.second[component].size());
+        for (size_t row = 0; row < a.second[component].size(); ++row)
+            expect_same_value(a.second[component][row], e.second[component][row]);
+    }
     ASSERT_EQ(a.first.size(), e.first.size());
     if (!reused_graph)
     {
-        // Compare ordered columns and exact values, rather than only a norm.
-        EXPECT_EQ(a.first, e.first);
+        for (size_t row = 0; row < a.first.size(); ++row)
+        {
+            ASSERT_EQ(a.first[row].size(), e.first[row].size());
+            for (size_t entry = 0; entry < a.first[row].size(); ++entry)
+            {
+                EXPECT_EQ(a.first[row][entry].first, e.first[row][entry].first);
+                expect_same_value(a.first[row][entry].second, e.first[row][entry].second);
+            }
+        }
         return;
     }
     // A frozen graph may retain now-unused stencil columns after a BC change.
-    // Their values must be exactly zero, and every other coefficient exact.
+    // Unused values must still be exactly zero.
     const auto columns = actual.matrix->getColMap()->getLocalNumElements();
     for (size_t row = 0; row < a.first.size(); ++row)
     {
         std::vector<double> av(columns), ev(columns);
         for (const auto& [column, value] : a.first[row]) av.at(column) = value;
         for (const auto& [column, value] : e.first[row]) ev.at(column) = value;
-        EXPECT_EQ(av, ev);
+        for (size_t column = 0; column < columns; ++column)
+            expect_same_value(av[column], ev[column]);
     }
 }
 

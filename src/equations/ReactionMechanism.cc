@@ -17,27 +17,7 @@ namespace SimpleFluid::Reacting
 {
 namespace
 {
-/** Same Neumaier update order as the shared local accumulator, with endpoint
- * parts exposed privately for the next independently reserved material stage.
- */
-class Sum
-{
-public:
-    void operator+=(long double value)
-    {
-        const auto next = d_sum + value;
-        if (std::abs(d_sum) >= std::abs(value))
-            d_correction += (d_sum - next) + value;
-        else
-            d_correction += (value - next) + d_sum;
-        d_sum = next;
-    }
-    [[nodiscard]] long double value() const { return d_sum + d_correction; }
-    [[nodiscard]] std::array<long double, 2> parts() const { return {d_sum, d_correction}; }
-
-private:
-    long double d_sum{}, d_correction{};
-};
+using Sum = SimpleFluid::detail::CompensatedSum<long double>;
 using Amounts = std::vector<long double>;
 
 void require(bool condition, const char* message)
@@ -115,6 +95,8 @@ void add_product(Sum& sum, long double left, long double right)
 {
     const auto value = product(left, right);
     sum += value;
+    // Accepted heat is formed from raw extent or power components; rounding
+    // those operands to storage precision can erase heat when opposite events cancel.
     sum += std::fma(left, right, -value);
 }
 
@@ -592,7 +574,7 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
         require(std::isfinite(input.heat.rate->value), "External heat rate must be finite.");
         Sum power;
         add_product(power, input.heat.rate->value, volume(environment, input.heat.rate->basis));
-        for (const auto part : power.parts())
+        for (const auto part : power.components())
             add_product(externalHeat, part, duration);
     }
     if (input.heat.integratedEnergy)
@@ -693,7 +675,7 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
     local.postSourceAmounts.reserve(count);
     for (const auto& stock : current)
     {
-        const auto parts = stock.parts();
+        const auto parts = stock.components();
         require(std::isfinite(parts[0]) && std::isfinite(parts[1]),
             "Accepted raw source endpoint is nonfinite.");
         local.postSourceAmounts.push_back(parts);
@@ -717,7 +699,7 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
                 local.chemicalChanges.push_back(
                     {mechanism.catalog().species()[s].id, SpeciesPhase::Dispersed, population.id, value});
         }
-    local.externalHeat = externalHeat.parts();
+    local.externalHeat = externalHeat.components();
     local.reactionHeatContributions.reserve(extentSums.size());
 
     ledger.chemicalChange = store(zeros(initial), chemicalValues);
@@ -729,10 +711,10 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
         ledger.forwardReactionExtents.push_back(checked(forwardExtents[r].value()));
         ledger.reverseReactionExtents.push_back(checked(reverseExtents[r].value()));
         Sum contribution;
-        for (const auto part : extentSums[r].parts())
+        for (const auto part : extentSums[r].components())
             add_product(contribution, part, mechanism.reactions()[r].heatPerExtent);
-        local.reactionHeatContributions.push_back(contribution.parts());
-        for (const auto part : contribution.parts())
+        local.reactionHeatContributions.push_back(contribution.components());
+        for (const auto part : contribution.components())
             reactionHeat += part;
     }
     ledger.externalTransfers = input.externalTransfers;

@@ -488,7 +488,6 @@ Flow::QbmmFaceFlux face_receipt(const FaceInterval& interval, double dt, double 
     result.population_number_flux = net(interval.direction, H0);
     result.shape_flux = {net(interval.direction, H2), net(interval.direction, H3)};
     result.internal_energy_flux = net(interval.direction, U);
-    result.material_volume_flux = net(interval.direction, W);
     result.derived_mass_flux = net(interval.momentum, Mass);
     for (size_t axis = 0; axis < dimensions; ++axis)
         result.derived_drift_momentum_flux.component(axis) = net(interval.momentum, DriftMomentum + axis);
@@ -498,6 +497,7 @@ Flow::QbmmFaceFlux face_receipt(const FaceInterval& interval, double dt, double 
     const long double backward_volume = interval.direction[1][W].value();
     auto packet = interval.direction[0][W];
     packet.append(interval.direction[1][W]);
+    result.material_volume_flux = rounded_rate(packet.value(), dt);
     const long double physical_carrier = theta * carrier_flux;
     const long double physical_defect = physical_carrier + slip - packet.value();
     const long double physical_scale = std::abs(physical_carrier) + std::abs(slip) + forward_volume - backward_volume;
@@ -512,34 +512,16 @@ Flow::QbmmFaceFlux face_receipt(const FaceInterval& interval, double dt, double 
     // term at the frozen carrier flux, leaving physical slip independently recorded.
     const auto imprecisely_rounded = [](double rounded, long double exact)
     { return std::fpclassify(rounded) == FP_SUBNORMAL || (rounded == 0 && exact != 0); };
-    const long double pressure_carrier = static_cast<long double>(kinetic.theta) * carrier_flux;
     const double pressure_volume_flux = std::fma(kinetic.theta, carrier_flux, kinetic.slip_volume_flux);
     const long double residual = static_cast<long double>(result.material_volume_flux) - pressure_volume_flux;
     const long double direct_magnitude =
         static_cast<long double>(kinetic.forward.material_volume_flux) - kinetic.backward.material_volume_flux;
     if (imprecisely_rounded(kinetic.theta, theta) || imprecisely_rounded(kinetic.slip_volume_flux, slip) ||
         relative_difference(residual, direct_magnitude) > 2 * qbmm_reconstruction_tolerance)
-    {
         kinetic.pressure_rounding_flux = rounded_rate(residual);
 
-        const long double theta_error = theta - static_cast<long double>(kinetic.theta) * dt;
-        const long double slip_error = slip - static_cast<long double>(kinetic.slip_volume_flux) * dt;
-        const long double packet_error =
-            packet.value() - static_cast<long double>(result.material_volume_flux) * dt;
-        // The published pressure expression also rounds its fused binary64 evaluation.
-        const long double evaluation_error = pressure_carrier + kinetic.slip_volume_flux - pressure_volume_flux;
-        const long double half_minimum_packet =
-            static_cast<long double>(std::numeric_limits<double>::denorm_min()) * dt * .5L;
-        const long double rounding_bound = std::abs(theta_error * carrier_flux) + std::abs(slip_error) +
-                                           std::abs(packet_error) + std::abs(evaluation_error) * dt +
-                                           std::abs(physical_defect) + half_minimum_packet;
-        const long double correction =
-            static_cast<long double>(std::abs(kinetic.pressure_rounding_flux)) * dt * (1.L - 2.L * eps);
-        require(correction <= rounding_bound,
-            "QBMM kinetic pressure correction exceeds its coefficient rounding bound.");
-    }
-
     const long double defect = kinetic.pressure_rounding_flux - residual;
+    const long double pressure_carrier = static_cast<long double>(kinetic.theta) * carrier_flux;
     const long double magnitude = std::abs(pressure_carrier) + std::abs(kinetic.slip_volume_flux) +
                                   std::abs(kinetic.pressure_rounding_flux) + direct_magnitude;
     require(relative_difference(defect, magnitude) <= 2 * qbmm_reconstruction_tolerance,

@@ -375,7 +375,14 @@ The source corrector keeps positive and negative Fourier heat as separate gross
 channels. For `Q = dt*G*(T_owner - T_neighbor)`, two rounded absolute temperatures
 can be nearly equal. The canonical Fourier adapter uses the midpoint to the preceding
 and following representable value of each temperature, including their different
-distances at powers of two. The corrector matches signed heat packets by canonical
+distances at powers of two. The conditioned recovery also reports the local
+temperature stopping resolution. This is the enthalpy stopping tolerance divided
+by the caloric slope, or the width of the final bracket when no interior sample
+is representable. An exact validity endpoint contributes zero. The bounded
+Fourier update retains the direct local contribution to the Kelvin radius,
+`step*C/(C+sum(dt*G))*radius`. This is a conservative part of the
+nonnegative thermal response. Each Fourier face adds `dt*G*(radius_owner + radius_neighbor)` to
+its directional representation bounds. The corrector matches signed heat packets by canonical
 face before comparing their intervals. An unchanged face cannot lend its uncertainty
 to a neighbor. Any gap between successive intervals must pass the original relative
 tolerance at that face's own scale. The solver reports the maximum
@@ -644,8 +651,10 @@ volume packet. When the binary64 derivative loses precision at the subnormal sca
 `pressure_rounding_flux` records the coefficient representation correction at the frozen
 carrier flux. The receipt retains the independently accumulated physical slip coefficient.
 The pressure solve evaluates \(F^V(\phi)=F^V(\phi_0)+\bar\theta(\phi-\phi_0)\) using the
-direct all-phase rate at the frozen flux \(\phi_0\). This form preserves a small residual when
-normal carrier and slip terms nearly cancel. A zero represented derivative retains the
+direct all-phase rate at the frozen flux \(\phi_0\). Near cancellation it retains the
+binary64 subtraction residual so the carrier offset remains visible in the material rate.
+The receipt checks the physical split before rounding and records the remaining
+representation difference at the anchor. A zero represented derivative retains the
 prescribed rate and requires positive EOS susceptibility on every cell for pressure anchoring.
 
 ### Momentum, receipts and continuation
@@ -716,9 +725,10 @@ vanishes, and the final corrected physical material continuity.
 
 In the unconditioned caloric solve, a forced kinetic candidate retains the transported
 temperature when it exactly satisfies the recovered enthalpy equation at the current
-pressure. Otherwise the existing bracketed inversion and all physical gates apply.
-This preserves an exact stationary volume without charging a kinetic withdrawal for
-roundoff introduced by thermal bisection.
+pressure. Otherwise safeguarded Newton steps interleaved with bisection stay within
+the supplied EOS bounds and use the sensible caloric scale `T dH/dT` for convergence.
+The exact seed check preserves stationary volume without charging a kinetic withdrawal
+for inversion roundoff. The physical energy and conditioning gates still apply.
 
 For a stationary one-dimensional Cartesian column with axial gravity, an absolute
 pressure rounded to binary64 can leave a small apparent edge imbalance. The column
@@ -1471,6 +1481,10 @@ e=\frac{n_{\rm diss}-n_*+\sum_i\alpha_i(n_{{\rm eq},i}-n_*)}
 Equilibrium differences are formed before multiplication by the common
 volume. The adapter recenters the compensated solve at a node if subtracting
 its equilibrium offset would lose the driving difference to cancellation.
+The film solve uses extended inventory range and a homogeneous wide FMA for
+the product residual in \(V_l C_{\rm eq}\). A stiff film can amplify that residual
+into a representable material transfer. Reaction heat similarly multiplies
+the raw extent and power components before narrowing the accepted ledger.
 Each signed transfer becomes one
 count-preserving resize with a paired Dissolved exchange. The destination
 must reproduce the integrated mass within the existing reconstruction

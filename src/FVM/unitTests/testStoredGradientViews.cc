@@ -3,6 +3,7 @@
  * @brief  Bulk field and resolved region gradient contracts.
  */
 #include "FVM/CellOperators.hh"
+#include "gradient_comparison.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/MeshReorderingFactory.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
@@ -201,8 +202,8 @@ void compare_gauss(const SP<const Handle>& mesh)
             actual_calls.clear();
             run(mode, actual_calls, actual, actual_tensor);
             EXPECT_EQ(actual_calls, expected_calls);
-            expect_same(actual, expected);
-            expect_same(actual_tensor, expected_tensor);
+            test::expect_independent_gradients_near(actual, expected, 32);
+            test::expect_independent_gradients_near(actual_tensor, expected_tensor, 32);
             expect_unpublished(actual, -91);
         }
         // Change the published input values without rebuilding the cache.

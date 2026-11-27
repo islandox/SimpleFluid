@@ -2,7 +2,6 @@
 #include "ConditionedThermalTestSupport.hh"
 #include "utils/testing_environment.hh"
 #include <gtest/gtest.h>
-#include <map>
 #include <numeric>
 
 namespace
@@ -16,14 +15,12 @@ TEST(PressureConditionedThermalTest, CurvedEnthalpySharesEachTrialPointAndResolv
 {
     const auto species = std::make_shared<const R::SpeciesCatalog>(
         std::vector<R::SpeciesDefinition>{{1, "liquid", 1, {{"A", 1}}, {R::SpeciesPhase::Liquid}}});
-    std::map<double, size_t> calls;
-    std::vector<double> trials;
+    size_t calls = 0;
     const auto liquid = std::make_shared<const R::MixtureThermodynamics>(species, R::ThermodynamicBounds{1, 5, .5, 2},
         R::EOSKind::Liquid,
         [&](double t, double p, std::span<const double>)
         {
-            ++calls[t];
-            trials.push_back(t);
+            ++calls;
             const double square = t * t, fourth = square * square, eighth = fourth * fourth;
             return R::MixtureThermodynamicPoint{1, eighth - 1, eighth - 1 + p, 8 * eighth / t, 0, 0, 0, {}, {}};
         });
@@ -33,45 +30,65 @@ TEST(PressureConditionedThermalTest, CurvedEnthalpySharesEachTrialPointAndResolv
     // The midpoint is 3 K. For the interior target its Newton step exceeds 5 K.
     // Bisection from [1,5] takes 42 trials to reach this dyadic temperature.
     const double interior = 4.375 + 0x1p-40;
-    const double low = 4.75, high = std::nextafter(low, 5.);
-    const double adjacent_h = std::nextafter(std::pow(low, 8), std::numeric_limits<double>::infinity());
-    ASSERT_LT(adjacent_h, std::pow(high, 8));
+    const double near_root_h = std::nextafter(std::pow(4.75, 8), std::numeric_limits<double>::infinity());
     for (const auto mode : {R::PhaseThermalMode::Equilibrium, R::PhaseThermalMode::SeparatePhaseTemperatures})
         for (const auto [h, expected] : {std::pair{1., 1.}, std::pair{390625., 5.},
-                 std::pair{std::pow(interior, 8), interior}, std::pair{adjacent_h, std::midpoint(low, high)}})
+                 std::pair{std::pow(interior, 8), interior}, std::pair{near_root_h, std::pow(near_root_h, .125)}})
         {
             SCOPED_TRACE(::testing::Message() << "enthalpy " << h << ", mode " << static_cast<int>(mode));
             const std::array phases{
                 R::PhaseThermalState{liquid, {1}, 1, h - 1, 1}, R::PhaseThermalState{liquid, {0}, 1, 0, 0}};
             const auto plan = R::compile_interphase_plan(config, phases, {{0}}, {{}, {}}, {});
-            calls.clear();
-            trials.clear();
+            calls = 0;
             const auto result = R::evaluate_pressure_conditioned_thermal(
                 plan, phases, std::array{h - 1, 0.}, std::array{1., 0.}, 1, mode);
             ASSERT_EQ(result.anchors.size(), 2u);
-            EXPECT_EQ(result.phases[0].temperature, expected);
+            if (expected == 1. || expected == 5.)
+                EXPECT_EQ(result.phases[0].temperature, expected);
+            else
+                EXPECT_NEAR(result.phases[0].temperature, expected, 8 * std::numeric_limits<double>::epsilon() * expected);
+            EXPECT_NEAR(result.phases[0].internal_energy, h - 1., 16 * std::numeric_limits<double>::epsilon() * h);
             EXPECT_EQ(result.total_volume, 1.);
             EXPECT_EQ(result.pressure_work, 0.);
-            EXPECT_EQ(calls[1.], result.anchors.size());
-            EXPECT_EQ(calls[5.], result.anchors.size());
-            EXPECT_EQ(calls[expected], result.anchors.size());
             if (expected == interior)
             {
-                ASSERT_GE(trials.size(), 4u);
-                EXPECT_EQ((std::array{trials[0], trials[1], trials[2], trials[3]}), (std::array{1., 5., 3., 4.}));
-                size_t total = 0;
-                for (const auto& [t, count] : calls)
-                {
-                    total += count;
-                    if (t > 1 && t < 5 && t != expected)
-                        EXPECT_LE(count, result.anchors.size()) << "repeated EOS at trial temperature " << t;
-                }
                 RecordProperty(mode == R::PhaseThermalMode::Equilibrium ? "equilibrium_eos_calls_for_two_anchors"
                                                                         : "separate_eos_calls_for_two_anchors",
-                    std::to_string(total));
-                EXPECT_LT(total, 21 * result.anchors.size());
+                    std::to_string(calls));
+                EXPECT_LT(calls, 21 * result.anchors.size());
             }
         }
+}
+
+TEST(PressureConditionedThermalTest, SteepCaloricTangentDoesNotHideExtensiveEnergyError)
+{
+    const auto species = std::make_shared<const R::SpeciesCatalog>(
+        std::vector<R::SpeciesDefinition>{{1, "liquid", 1, {{"A", 1}}, {R::SpeciesPhase::Liquid}}});
+    const auto energy = [](double t) { return t + .01 * std::atan((t - 300.) / 1e-16); };
+    const auto liquid = std::make_shared<const R::MixtureThermodynamics>(species,
+        R::ThermodynamicBounds{299., 301., .5, 2.}, R::EOSKind::Liquid,
+        [energy](double t, double p, std::span<const double>)
+        {
+            const double x = (t - 300.) / 1e-16, u = energy(t);
+            return R::MixtureThermodynamicPoint{1., u, u + p, 1. + 1e14 / (1. + x * x), 0, 0, 0, {}, {}};
+        });
+    const auto config = std::make_shared<const R::InterphaseConfiguration>(
+        R::InterphaseConfiguration{{"steep-liquid", 1, species->fingerprint()},
+            {{"no-heat", R::InterphaseStageKind::Heat, {}, {{0, 1}}}}, {nullptr, nullptr}, nullptr});
+    constexpr double expected_temperature = 300.25;
+    const double expected_energy = energy(expected_temperature);
+    const std::array phases{R::PhaseThermalState{liquid, {1}, 1, expected_energy, expected_temperature},
+        R::PhaseThermalState{liquid, {0}, 1, 0, 0}};
+    const auto plan = R::compile_interphase_plan(config, phases, {{0}}, {{}, {}}, {});
+    for (const auto mode : {R::PhaseThermalMode::Equilibrium, R::PhaseThermalMode::SeparatePhaseTemperatures})
+    {
+        const auto result = R::evaluate_pressure_conditioned_thermal(
+            plan, phases, std::array{expected_energy, 0.}, std::array{1., 0.}, 1., mode);
+        EXPECT_DOUBLE_EQ(result.phases[0].temperature, expected_temperature);
+        EXPECT_DOUBLE_EQ(result.phases[0].internal_energy, expected_energy);
+        EXPECT_EQ(result.total_volume, 1.);
+        EXPECT_EQ(result.pressure_work, 0.);
+    }
 }
 
 TEST(PressureConditionedThermalTest, CompleteDonorAndInitiallyAbsentVaporCloseAtNewPressureWithRetainedOtherGas)

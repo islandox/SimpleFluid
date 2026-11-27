@@ -186,6 +186,7 @@ public:
         const TransportSnapshot& transport;
         const State& thermodynamic_trial; ///< Rates use this T/p together with actual stage composition.
         const Mesh& mesh; ///< Borrowed read-only mesh for collective halo/face stages; epochs are in transport.
+        std::span<const std::vector<double>> conditioned_temperature_resolution_K{}; ///< Owned phases for Fourier.
     };
     /** Accepted cell-local source stage. Its initial state is the preceding stage's endpoint, or the transport
      * snapshot at index zero. A repeated event_end retains a stage with no events for this family.

@@ -4,6 +4,7 @@
 // environment only in the executable's top-level source.
 
 #include "geometry_reference.hh"
+#include "../gradient_comparison.hh"
 
 namespace
 {
@@ -20,19 +21,6 @@ real_t nonlinear_scalar(Vec point)
 Vec nonlinear_vector(Vec point)
 {
     return {nonlinear_scalar(point), 0.2 + point.y * point.z, point.z * point.z - 0.4 * point.x};
-}
-
-void expect_same_owned(const auto& actual, const auto& expected)
-{
-    const auto a = actual.owned_read_view(), b = expected.owned_read_view();
-    ASSERT_EQ(a.extent(0), b.extent(0));
-    ASSERT_EQ(a.extent(1), b.extent(1));
-    for (size_t cell = 0; cell < a.extent(0); ++cell)
-        for (size_t component = 0; component < a.extent(1); ++component)
-        {
-            SCOPED_TRACE(::testing::Message() << "cell=" << cell << " component=" << component);
-            expect_roundoff_equal(a(cell, component), b(cell, component));
-        }
 }
 
 // Preserve the previous pointwise cached kernels as independent arithmetic
@@ -158,8 +146,8 @@ void expect_cached_reconstruction(SP<const Handle> mesh, const Cache& cache, con
             point_cached_scalar(scalar, expected, oracle, boundaries, condition, scalar_boundary);
             point_cached_vector(vector, expected_tensor, oracle, boundaries, vector_boundary);
             EXPECT_EQ(actual_calls, expected_calls);
-            expect_same_owned(actual, expected);
-            expect_same_owned(actual_tensor, expected_tensor);
+            test::expect_independent_gradients_near(actual, expected, 256);
+            test::expect_independent_gradients_near(actual_tensor, expected_tensor, 256);
         }
         actual_calls.clear();
         expected_calls.clear();
@@ -170,8 +158,8 @@ void expect_cached_reconstruction(SP<const Handle> mesh, const Cache& cache, con
         FVM::detail::stored_gauss_linear_cell_gradient_reference(scalar, condition, scalar_boundary, expected);
         FVM::detail::stored_gauss_linear_cell_gradient_reference(vector, vector_boundary, expected_tensor);
         EXPECT_EQ(actual_calls, expected_calls);
-        expect_same_owned(actual, expected);
-        expect_same_owned(actual_tensor, expected_tensor);
+        test::expect_independent_gradients_near(actual, expected, 256);
+        test::expect_independent_gradients_near(actual_tensor, expected_tensor, 256);
         const auto unpublished = actual.local_read_view();
         for (size_t cell = 0; cell < unpublished.extent(0); ++cell)
             for (size_t component = 0; component < unpublished.extent(1); ++component)

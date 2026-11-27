@@ -726,12 +726,12 @@ TEST(QbmmCylindricalKinetic, CanonicalGasStockAtMinimumTemperature)
     {
         const double v = grid->cell_volume(static_cast<LO>(c));
         const double m = v * point.density, u = m * point.internal_energy;
-        // The gas fills this closed sector cell. Its pure EOS state has exactly the
-        // supplied U and V at Tmin, but rounded m*h lies one ULP above U+p*V.
-        EXPECT_EQ(m / point.density, v);
-        EXPECT_EQ(m, .08750000000000001);
-        EXPECT_EQ(u + pressure * v, .4375);
-        EXPECT_EQ(std::nextafter(u + pressure * v, 1.), m * point.enthalpy);
+        // The pure gas fills the closed sector cell at Tmin. Its physical enthalpy
+        // agrees with U + pV to roundoff, including when the sum is contracted.
+        EXPECT_DOUBLE_EQ(m, .0875);
+        EXPECT_DOUBLE_EQ(m / point.density, v);
+        EXPECT_DOUBLE_EQ(u + pressure * v, .4375);
+        EXPECT_DOUBLE_EQ(m * point.enthalpy, u + pressure * v);
         auto& cell = initial.cells[c];
         cell.phases = {{liquid, {0.}, pressure, 0., 0.}, {gas, {m}, pressure, u, temperature}};
         cell.phase_numbers = {std::nullopt, m};

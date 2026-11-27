@@ -354,9 +354,9 @@ long double stock_difference(const CellStencil& stencil, size_t neighbor, double
     if (product_has_range(left, stencil.volume, other) && product_has_range(right, other_volume, center))
     {
         const double difference = product_difference(stencil.volume, other, other_volume, center, left, right);
-        const double scaled = difference / other_volume;
-        if (!singleton && (std::isnormal(scaled) || difference == 0.))
-            return scaled;
+        const double rounded = difference / other_volume;
+        if (!singleton && std::isnormal(rounded))
+            return rounded;
         return static_cast<long double>(difference) / other_volume;
     }
     return (static_cast<long double>(stencil.volume) * other - static_cast<long double>(other_volume) * center) /
@@ -367,30 +367,15 @@ long double density_jump(
     const CellStencil& stencil, size_t neighbor, double center, double other, long double difference)
 {
     const double other_volume = stencil.neighbors[neighbor].volume;
-    const double left = stencil.volume * other;
-    const double narrow_difference = static_cast<double>(difference);
     // A constant density can differ in its last bits when each cell stores
     // its own rounded extensive amount. A zero-to-positive jump stays active.
     if (difference == 0.)
         return 0.;
-    if (std::isnormal(left) && std::isnormal(narrow_difference))
-    {
-        const double weighted = left / other_volume;
-        const double magnitude = weighted + center;
-        if (std::isnormal(weighted) && std::isfinite(magnitude))
-        {
-            const auto size = std::abs(narrow_difference);
-            if (size < eps * magnitude)
-                return 0.;
-            if (size > (4 * eps) * magnitude)
-                return narrow_difference;
-        }
-    }
     const auto magnitude = static_cast<long double>(stencil.volume) * other / other_volume + center;
     return relative_difference(difference, magnitude) > 2 * eps ? difference : 0.;
 }
 
-template<class Scalar> double unit_ratio(Scalar numerator, Scalar denominator)
+double unit_ratio(long double numerator, long double denominator)
 {
     if (numerator == 0. || denominator == 0.)
         return numerator == denominator ? 1. : 0.;
@@ -400,58 +385,57 @@ template<class Scalar> double unit_ratio(Scalar numerator, Scalar denominator)
     return left >= right ? 1. : static_cast<double>(left / right);
 }
 
-template<class Scalar> double mc_factor(Scalar jump, Scalar projected)
+double mc_factor(long double jump, long double projected)
 {
     // r = upstream/jump, phi_MC = min(2r, (1+r)/2, 2).
     // Divide by the centered branch so the result scales the existing
     // physical face increment. This also avoids overflowing a large r.
-    const auto upstream = 2 * projected - jump;
-    if (upstream == 0. || std::signbit(upstream) != std::signbit(jump))
+    const auto magnitude = std::max(std::abs(jump), std::abs(projected));
+    if (magnitude == 0.)
         return 0.;
-    return std::min(unit_ratio(2 * upstream, projected), unit_ratio(2 * jump, projected));
-}
-
-double bounded_ratio(long double numerator, long double denominator)
-{
-    const double left = static_cast<double>(numerator), right = static_cast<double>(denominator);
-    if ((std::isnormal(left) || numerator == 0.) && (std::isnormal(right) || denominator == 0.))
-        return unit_ratio(left, right);
-    return unit_ratio(numerator, denominator);
-}
-
-double limited_mc_factor(long double jump, long double projected)
-{
-    const double left = static_cast<double>(jump), right = static_cast<double>(projected);
-    const double scale = std::max(std::abs(left), std::abs(right));
-    if ((std::isnormal(left) || jump == 0.) && (std::isnormal(right) || projected == 0.) &&
-        scale <= std::numeric_limits<double>::max() / 8.)
-        return mc_factor(left, right);
-    return mc_factor(jump, projected);
+    const auto minimum = std::numeric_limits<double>::min();
+    const auto small = [minimum](long double value) { return value != 0. && std::abs(value) < minimum; };
+    // Scale both operands when either lacks range or doubling can overflow.
+    const int shift = small(jump) || small(projected) || magnitude > std::numeric_limits<double>::max() / 8.
+                          ? -std::ilogb(magnitude)
+                          : 0;
+    const double j = shift == 0 ? static_cast<double>(jump) : static_cast<double>(std::scalbn(jump, shift));
+    const double p = shift == 0 ? static_cast<double>(projected) : static_cast<double>(std::scalbn(projected, shift));
+    // After rescaling, a still-tiny jump limits the MC factor by its ratio.
+    // Evaluate that ratio before rounding the jump to subnormal precision.
+    if (jump != 0. && !std::isnormal(j))
+        return unit_ratio(2 * jump, projected);
+    const double upstream = 2 * p - j;
+    if (upstream == 0. || std::signbit(upstream) != std::signbit(j) || p == 0.)
+        return 0.;
+    return std::min(unit_ratio(2 * upstream, p), unit_ratio(2 * j, p));
 }
 
 long double project_column(
     std::span<const WideBlock> increments, std::span<const double> weights, size_t column, bool singleton = false)
 {
-    double projection = 0., largest = 0.;
-    bool needs_wide = false;
-    for (size_t k = 0; !singleton && k < weights.size(); ++k)
+    if (!singleton)
     {
-        if (weights[k] == 0.)
-            continue;
-        const auto increment = increments[k][column];
-        const auto term = weights[k] * static_cast<double>(increment);
-        if (!std::isnormal(term) && increment != 0.)
+        detail::CompensatedSum<double> projection;
+        bool native = true;
+        for (size_t k = 0; k < weights.size(); ++k)
         {
-            needs_wide = true;
-            break;
+            if (weights[k] == 0. || increments[k][column] == 0.)
+                continue;
+            const double term = weights[k] * static_cast<double>(increments[k][column]);
+            if (!std::isnormal(term))
+            {
+                native = false;
+                break;
+            }
+            projection += term;
         }
-        projection += term;
-        largest = std::max(largest, std::abs(term));
+        if (native && std::isfinite(projection.value()))
+            return projection.value();
     }
-    if (!singleton && !needs_wide && std::isfinite(projection) &&
-        (largest == 0. || std::abs(projection) > (16 * eps) * largest))
-        return projection;
 
+    // Keep the moment-ray tangent or a packet that is outside binary64
+    // intermediate range until reconstruction reaches the packet boundary.
     long double wide = 0.;
     for (size_t k = 0; k < weights.size(); ++k)
         wide += weights[k] * increments[k][column];
@@ -686,11 +670,11 @@ void tvd_factors(const QbmmPopulationSchema& family, const CellStencil& stencil,
                 break;
             }
             const auto projected = project_column(jumps, face.center_weights, q);
-            factor = std::min(factor, limited_mc_factor(jump, projected));
+            factor = std::min(factor, mc_factor(jump, projected));
             if (slopes[f][q] != 0.)
-                factor = std::min(factor, bounded_ratio(jump, slopes[f][q]));
+                factor = std::min(factor, unit_ratio(jump, slopes[f][q]));
             if (factor > 0 && slopes[f][q] > 0.)
-                factor = std::min(factor, bounded_ratio(center[q], slopes[f][q]));
+                factor = std::min(factor, unit_ratio(center[q], slopes[f][q]));
         }
         const auto& downstream = energy[adjacent];
         if (factor == 0 || downstream.mass == 0. || EnergyBounds::indistinguishable(center_energy, downstream))
@@ -701,7 +685,7 @@ void tvd_factors(const QbmmPopulationSchema& family, const CellStencil& stencil,
         const auto projected = energy_fit.weights(stencil.neighbors[adjacent].displacement, energy_weights)
                                    ? project_energy()
                                    : local_jump;
-        const double energy_mc = limited_mc_factor(local_jump, projected);
+        const double energy_mc = mc_factor(local_jump, projected);
         factor = std::min(factor, energy_mc);
         if (factor == 0.)
             continue;
@@ -717,7 +701,7 @@ void tvd_factors(const QbmmPopulationSchema& family, const CellStencil& stencil,
             const double length = std::hypot(displacement.x, displacement.y, displacement.z);
             face_projection = projected * (face.offset / length).dot(displacement / length);
         }
-        const double interpolation = bounded_ratio(face_projection * energy_mc, local_jump);
+        const double interpolation = unit_ratio(face_projection * energy_mc, local_jump);
 
         // The trace transports energy and species mass, so its specific
         // energy is a quotient. Bound the quotient at the MC face value
@@ -747,7 +731,7 @@ void tvd_factors(const QbmmPopulationSchema& family, const CellStencil& stencil,
         const auto bound = jump * center[H1];
         const auto slope = (1. - interpolation) * against_center + interpolation * against_downstream;
         if (slope != 0. && std::signbit(slope) == std::signbit(jump))
-            factor = std::min(factor, bounded_ratio(bound * interpolation, slope));
+            factor = std::min(factor, unit_ratio(bound * interpolation, slope));
     }
 }
 
@@ -814,22 +798,12 @@ bool return_material_packet(const Block& trace, long double swept, double volume
 
 long double material_volume(long double mass, double density)
 {
-    const double reciprocal = 1. / density;
-    if (std::isnormal(reciprocal))
-        return mass * reciprocal;
     return mass / density;
 }
 
 long double pressure_theta(long double mass, double h, double stage_weight, double donor_volume, double density)
 {
-    // Use the binary64 pressure coefficient when its intermediate values
-    // have full relative precision.
-    const double duration = h * stage_weight;
-    const double volume_weight = duration / donor_volume;
-    const double mass_weight = volume_weight / density;
-    if (std::isnormal(duration) && std::isnormal(volume_weight) && std::isnormal(mass_weight))
-        return mass * mass_weight;
-    return (mass / density) * (static_cast<long double>(h) * stage_weight / donor_volume);
+    return material_volume(mass, density) * (static_cast<long double>(h) * stage_weight / donor_volume);
 }
 
 bool return_physical_packet(long double mass, long double half_stage_theta, const StageThermal& point,
